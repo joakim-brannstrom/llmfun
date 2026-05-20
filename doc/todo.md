@@ -1,5 +1,4 @@
 - FeedbackEngine should use an agent name when it request data
-- a agent should be able to whitelist/blacklist tools.
 - don't print the taskDone message to the user
 - integrate internet search, searchxng
 - change @Function to also take a descripton of parameters
@@ -10,7 +9,7 @@
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
-- paths used for config, sound etc must be relative executable.
+- make sound notification configurable in json via config.d
 
 FeedbackEngine. When it triggers, such as a tool reaching a high enough threshold it should trigger a self improvement loop in the AI where it is forced to study why the tool use failed, come up with how to improve and write down as a memory for the tool. If there already exist a memory for the tool then it should be read, inspected, see if it helps correct the tool use. If not, improve or rewrite the memory.
     - This should probably execute as a separate agent that inspect how the tool was used such that it do not interrupt the current agents work and pollute the context with reasoning about how to improve the tool use.
