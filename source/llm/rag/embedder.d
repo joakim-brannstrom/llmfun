@@ -34,17 +34,6 @@ interface Embedder {
     void destroy();
 }
 
-/// Configuration for a remote embedding backend.
-struct RemoteEmbedderConfig {
-    string baseUrl; // e.g. "http://localhost:8080/v1"
-    string modelName; // e.g. "text-embedding-3-small"
-    string apiKey; // optional, for authentication
-    int timeoutSeconds = 30; // HTTP timeout
-    int dimensions = 1536; // embedding vector dimension
-    int maxRetries = 3; // maximum number of retries for transient failures
-    long backoffMs = 500; // initial backoff in milliseconds (exponential)
-}
-
 /// Factory function to create an Embedder from an EmbedConfig sum type.
 Embedder createEmbedder(EmbedConfig config) {
     return config.match!((LocalEmbedConfig local) {
@@ -62,8 +51,7 @@ Embedder createEmbedder(EmbedConfig config) {
             return null;
         }
     }, (RemoteEmbedConfig remote) {
-        Embedder e = new RemoteEmbedder(RemoteEmbedderConfig(remote.baseUrl,
-            remote.modelName, remote.apiKey, remote.timeoutSeconds, remote.dimensions));
+        Embedder e = new RemoteEmbedder(remote);
         return e;
     });
 }

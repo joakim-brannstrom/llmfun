@@ -13,15 +13,16 @@ import requests;
 
 import llm.rag.embedder;
 import llm.query;
+import llm.config : RemoteEmbedConfig;
 
 /// HTTP-based embedding backend for OpenAI-compatible API endpoints.
 class RemoteEmbedder : Embedder {
     private {
-        RemoteEmbedderConfig cfg;
+        RemoteEmbedConfig cfg;
     }
 
     /// Create a RemoteEmbedder with the given configuration.
-    this(RemoteEmbedderConfig cfg) {
+    this(RemoteEmbedConfig cfg) {
         this.cfg = cfg;
     }
 
@@ -30,17 +31,15 @@ class RemoteEmbedder : Embedder {
 
     /// Produce an embedding vector via HTTP POST to /embeddings endpoint.
     override EmbedResult embed(string text) {
-        auto url = format!"%s/embeddings"(cfg.baseUrl);
-        auto body = "{\"model\": \"" ~ cfg.modelName ~ "\", \"input\": \"" ~ escapeJson(text)
-            ~ "\"}";
+        auto body = format!"{\"model\": \"%s\", \"input\": \"%s\"}"(cfg.name, escapeJson(text));
 
         auto headers = ["Content-Type": "application/json"];
-        if (cfg.apiKey != "") {
-            headers["Authorization"] = format!"Bearer %s"(cfg.apiKey);
+        if (!cfg.server.apiKey.empty) {
+            headers["Authorization"] = format!"Bearer %s"(cfg.server.apiKey);
         }
 
-        auto result = httpPostWithRetry(Request(), url, body, headers,
-                cfg.maxRetries, cfg.timeoutSeconds, cfg.backoffMs);
+        auto result = httpPostWithRetry(Request(), cfg.server.embedUrl, body, headers,
+                cfg.server.maxRetries, cfg.server.timeoutSeconds, cfg.server.backoffMs);
 
         return result.match!((HttpPostResult r) {
             logger.tracef("RemoteEmbedder: Response status %d", r.statusCode);

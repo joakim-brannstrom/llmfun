@@ -76,8 +76,11 @@ struct ServerConfig {
     string promptUrl;
     string chatUrl;
     string slotUrl;
+    string embedUrl;
     long timeoutSeconds;
     long httpVerbosity;
+    long maxRetries = 3; // maximum number of retries for transient failures
+    long backoffMs = 500; // initial backoff in milliseconds (exponential)
 
     /// API key for Bearer token authentication (e.g. OpenAI API key).
     /// If empty, the OPENAI_API_KEY environment variable is checked as fallback.
@@ -94,6 +97,10 @@ struct ServerConfig {
 
     string toSlotUrl() {
         return format!"%s/%s"(url, slotUrl);
+    }
+
+    string toEmbedUrl() {
+        return format!"%s/%s"(url, embedUrl);
     }
 }
 
@@ -128,10 +135,8 @@ struct LocalEmbedConfig {
 
 /// Configuration for a remote embedding backend (HTTP API).
 struct RemoteEmbedConfig {
-    string baseUrl;
-    string modelName;
-    string apiKey;
-    int timeoutSeconds;
+    ServerConfig server;
+    string name;
     int dimensions;
 }
 

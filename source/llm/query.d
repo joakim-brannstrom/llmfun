@@ -191,7 +191,7 @@ struct HttpPostResult {
 /// Execute an HTTP POST with retry and exponential backoff.
 /// Returns SumType: HttpPostResult on success, HttpPostError on failure.
 SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(Request rq, string url, string body,
-        string[string] headers, int maxRetries, int timeoutSeconds, long backoffBaseMs = 500) {
+        string[string] headers, long maxRetries, long timeoutSeconds, long backoffBaseMs = 500) {
     import std.algorithm : canFind;
     import std.conv : to;
 
