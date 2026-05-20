@@ -16,6 +16,7 @@ import std.regex : Regex, regex;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable, nullable;
 import my.path;
+import my.filter : ReFilter;
 
 import llm.chat;
 import llm.config;
@@ -53,17 +54,24 @@ class Agent : IBasicAgent {
         bool taskDone_;
         int lastToolCallWarning;
         immutable WarnEveryNthToolCall = 5;
+        ReFilter toolFilter;
     }
 
     this(string name, LlmConfig llmConf, MetricMonitor monitor, RAG rag = null) {
-        import llm.tool_call : descAllFunctions;
+        this(name, llmConf, monitor, rag, ReFilter.init);
+    }
+
+    this(string name, LlmConfig llmConf, MetricMonitor monitor, RAG rag, ReFilter filter) {
+        import llm.tool_call : descAllFunctions, filterToolDescriptions;
         import llm.utility : SystemPromptInit;
 
         this.name = name;
         this.monitor = monitor;
         this.rag = rag;
+        this.toolFilter = filter;
         this.toolCtx = new AgentContext(this, llmConf);
-        this.rq = LlmRequester(llmConf.codeModel.toRequestConfig, descAllFunctions.nullable);
+        auto tools = filterToolDescriptions(descAllFunctions(), toolFilter);
+        this.rq = LlmRequester(llmConf.codeModel.toRequestConfig, tools.nullable);
         this.contextSize = llmConf.codeModel.contextSize;
 
         this.summary = SummaryAgent(llmConf.summaryModel);
@@ -394,7 +402,7 @@ private:
             bool success;
             string result;
             try {
-                auto res = executeFunc(toolCtx, toolName, parseJSON(args));
+                auto res = executeFunc(toolCtx, toolName, parseJSON(args), toolFilter);
                 result = res.msg;
                 success = res.success;
             } catch (Exception e) {

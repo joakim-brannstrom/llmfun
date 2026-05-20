@@ -1,10 +1,12 @@
 module llm.tool_call;
 
 import logger = std.logger;
-import std.algorithm : filter, map;
+import std.algorithm : canFind, filter, map;
 import std.format : format;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.range : array;
+
+import my.filter : ReFilter;
 
 interface Context {
 }
@@ -58,11 +60,31 @@ ExecuteFuncResult executeFunc(Context ctx, string name, JSONValue args) nothrow 
     } catch (Exception e) {
         try {
             return ExecuteFuncResult(format!"error: executing tool '%s': %s"(name, e.msg), false);
-            ;
         } catch (Exception e) {
         }
     }
     return ExecuteFuncResult("error: should not happen", false);
+}
+
+/// Filter the JSON tool descriptions array using ReFilter.
+/// Only tools whose name matches the filter are returned.
+JSONValue filterToolDescriptions(JSONValue allTools, ReFilter filter_) {
+    import std.algorithm : filter;
+
+    return JSONValue(allTools.array.filter!(a => filter_.match(a["function"]["name"].str)).array);
+}
+
+/// Overload of executeFunc that filters tool execution via ReFilter.
+/// If the tool name does not match the filter, returns an error.
+ExecuteFuncResult executeFunc(Context ctx, string name, JSONValue args, ReFilter filter_) nothrow {
+    try {
+        if (!filter_.match(name))
+            return ExecuteFuncResult(
+                    "error: tool '" ~ name ~ "' is not available to this agent", false);
+    } catch (Exception e) {
+        return ExecuteFuncResult("error: tool '" ~ name ~ "' is not available to this agent", false);
+    }
+    return executeFunc(ctx, name, args);
 }
 
 // JSON following the OpenAI format
