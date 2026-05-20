@@ -270,8 +270,9 @@ struct Pipeline {
         string[] _executionOrder;
         string _lastOutput;
         bool _allSuccess = true;
-        bool delegate() _interrupt; /// interrupt check delegate, accessed under _mutex
-        bool _wasInterrupted; /// explicit flag set at the point of interrupt detection
+        bool delegate() _interrupt;
+        bool _wasInterrupted;
+        SysTime[string] _nodeStartTimes;
     }
 
     this(Graph graph) {
@@ -384,10 +385,17 @@ struct Pipeline {
             // Store last output
             _lastOutput = output;
 
+            // Compute duration for this node
+            long durationMs = 0;
+            if (node.id in _nodeStartTimes) {
+                Duration elapsed = Clock.currTime - _nodeStartTimes[node.id];
+                durationMs = elapsed.total!"msecs";
+                _nodeStartTimes.remove(node.id);
+            }
+
             // Store per-agent result
             _agentResults ~= PipelineAgentResult(agentName: node.id, output: output,
-                    success: success, durationMs: 0 // Duration tracked by pool timing hook
-                    );
+                    success: success, durationMs: durationMs);
 
             // Mark node as executed
             node.executed = true;
@@ -410,19 +418,34 @@ struct Pipeline {
                     continue;
                 }
 
-                // Clear output and accumulated inputs if this node is being re-executed (loop edge)
-                // to prevent stale output and duplicate inputs contaminating the new run
+                // Capture fresh input before clearing (completeNode just appended it)
+                auto inputs = graph.getNodeInputs(pn.id);
+
+                // Clear accumulated inputs if this node is being re-executed (loop edge)
+                // to prevent stale inputs contaminating the new run
                 if (pn.executed) {
                     graph.clearNodeInputs(pn.id);
                 }
 
-                // Get accumulated inputs for this node
-                auto inputs = graph.getNodeInputs(pn.id);
-                string query = inputs ? inputs.join("\n") : "";
+                // Build the query for this node
+                string query;
+                if (pn.executed) {
+                    // Re-execution: frame as a new turn so the agent knows it needs fresh output
+                    query = "=== NEW TURN ===\n"
+                        ~ "You are being re-invoked with new input data. This is a fresh execution turn.\n"
+                        ~ "Please analyze the new input below and produce a new output using pipelineOutput.\n"
+                        ~ "Your previous output is less relevant.\n\n" ~ "New input:\n" ~ inputs.join(
+                                "\n");
+                } else {
+                    // First execution: use all accumulated inputs
+                    query = inputs.join("\n");
+                }
 
                 // Prepare the agent with its inputs
                 pn.agent.addUserQuery(query);
 
+                // Record start time for duration tracking
+                _nodeStartTimes[pn.id] = Clock.currTime;
                 // Increment pending before submitting (so it doesn't hit zero prematurely)
                 _pending++;
 
@@ -561,6 +584,7 @@ struct Pipeline {
 
             _pending = 1;
             _pool = pool;
+            _nodeStartTimes[startNode.id] = Clock.currTime;
             logger.tracef("[pipeline] submit(nodeId='%s') pending=%s", startNode.id, _pending);
             auto wrappedAgent = new PipelineAgent(startNode.agent, startNode);
             _pool.submit(wrappedAgent, (IAgent _, ProcessResult r) {
