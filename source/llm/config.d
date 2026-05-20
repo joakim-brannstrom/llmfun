@@ -137,7 +137,7 @@ struct LocalEmbedConfig {
 struct RemoteEmbedConfig {
     ServerConfig server;
     string name;
-    int dimensions;
+    long dimensions;
 }
 
 /// Union type for embedding backend configuration.
@@ -179,6 +179,7 @@ private EmbedConfig jsonToEmbedConfig(JSONValue json) {
     }
 
     string type = json["type"].str;
+    json.object.remove("type");
     if (type == "remote") {
         return EmbedConfig(jsonToConfig!(RemoteEmbedConfig)(RemoteEmbedConfig.init, json));
     }
@@ -199,28 +200,32 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
             alias member = __traits(getMember, conf, llmMemberName);
             static if (!isType!member) {
                 if (llmMemberName in json) {
-                    used[llmMemberName] = true;
-                    alias Type = typeof(member);
-                    static if (is(Type : Path)) {
-                        __traits(getMember, conf, llmMemberName) = json[llmMemberName].str.Path;
-                    } else static if (is(Type : string)) {
-                        __traits(getMember, conf, llmMemberName) = json[llmMemberName].str;
-                    } else static if (is(Type : bool)) {
-                        __traits(getMember, conf, llmMemberName) = json[llmMemberName].boolean;
-                    } else static if (isFloatingPoint!Type) {
-                        __traits(getMember, conf, llmMemberName) = json[llmMemberName].floating;
-                    } else static if (isIntegral!Type) {
-                        __traits(getMember, conf, llmMemberName) = cast(Type) json[llmMemberName]
-                            .integer;
-                    } else static if (is(Type : string[])) {
-                        __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(a => a.str)
-                            .array;
-                    } else static if (is(Type : EmbedConfig)) {
-                        __traits(getMember, conf, llmMemberName) = jsonToEmbedConfig(
-                                json[llmMemberName]);
-                    } else static if (isAggregateType!Type) {
-                        __traits(getMember, conf, llmMemberName) = jsonToConfig(__traits(getMember,
-                                conf, llmMemberName), *(llmMemberName in json));
+                    try {
+                        used[llmMemberName] = true;
+                        alias Type = typeof(member);
+                        static if (is(Type : Path)) {
+                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].str.Path;
+                        } else static if (is(Type : string)) {
+                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].str;
+                        } else static if (is(Type : bool)) {
+                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].boolean;
+                        } else static if (isFloatingPoint!Type) {
+                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].floating;
+                        } else static if (isIntegral!Type) {
+                            __traits(getMember, conf, llmMemberName) = cast(Type) json[llmMemberName]
+                                .integer;
+                        } else static if (is(Type : string[])) {
+                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(a => a.str)
+                                .array;
+                        } else static if (is(Type : EmbedConfig)) {
+                            __traits(getMember, conf, llmMemberName) = jsonToEmbedConfig(
+                                    json[llmMemberName]);
+                        } else static if (isAggregateType!Type) {
+                            __traits(getMember, conf, llmMemberName) = jsonToConfig(__traits(getMember,
+                                    conf, llmMemberName), *(llmMemberName in json));
+                        }
+                    } catch (Exception e) {
+                        logger.warningf("unable to read '%s': %s", llmMemberName, e.msg);
                     }
                 } else {
                     logger.tracef("using default value for %s:%s", ConfigT.stringof, llmMemberName);
