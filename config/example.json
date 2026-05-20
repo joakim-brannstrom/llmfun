@@ -29,5 +29,16 @@
     "contextSize": 32768,
     "reasoningBudget": 0,
     "maxTokens": 4096
+  },
+  "embedConfig": {
+    "type": "remote",
+    "server": {
+      "url": "http://127.0.0.1:1234",
+      "embedUrl": "embeddings",
+      "timeoutSeconds": 60,
+      "httpVerbosity": 0
+    },
+    "name": "lfm2-2.6b",
+    "dimensions": 768
   }
 }
