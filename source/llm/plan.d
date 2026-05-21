@@ -2,6 +2,8 @@ module llm.plan;
 
 import logger = std.logger;
 
+import my.filter : ReFilter;
+
 import llm.agent : Agent;
 import llm.config : LlmConfig, promptToPath;
 import llm.pipeline : Pipeline, PipelineResult, pipelineBuilder;
@@ -20,7 +22,8 @@ import llm.utility : SystemPromptInit;
 ///     individual tasks, and saves it to plan/implementation_plan.md via writeFile.
 ///
 /// Both agents are transient and only exist for the duration of the pipeline.
-PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricMonitor monitor) {
+PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
+        MetricMonitor monitor, bool delegate() interrupt = null, ReFilter toolFilter) {
 
     // dfmt off
     // --- Agent 1: System Designer ---
@@ -61,17 +64,17 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
     // dfmt on
 
     // Create transient agents
-    auto designer = new Agent("system_designer", llmConf, monitor, rag);
+    auto designer = new Agent("system_designer", llmConf, monitor, rag, toolFilter);
     designer.setSystemPrompt(
             SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString);
     designer.addUserQuery(systemDesignerPrompt);
 
-    auto designReview = new Agent("system_design_review", llmConf, monitor, rag);
+    auto designReview = new Agent("system_design_review", llmConf, monitor, rag, toolFilter);
     designReview.setSystemPrompt(
             SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString);
     designReview.addUserQuery(systemDesignerFeedbackPrompt);
 
-    auto planner = new Agent("implementation_planner", llmConf, monitor, rag);
+    auto planner = new Agent("implementation_planner", llmConf, monitor, rag, toolFilter);
     planner.setSystemPrompt(
             SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString);
     planner.addUserQuery(implPlannerPrompt);
@@ -91,7 +94,7 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
 
     logger.trace(pipeline);
     logger.infof("[plan] Starting pipeline for query: %s", query);
-    auto result = pipeline.run(query);
+    auto result = pipeline.run(query, interrupt);
 
     logger.infof("[plan] Pipeline completed: allSuccess=%s, agents=%d",
             result.allSuccess, result.agentResults.length);

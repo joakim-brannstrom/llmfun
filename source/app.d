@@ -143,7 +143,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
 
     immutable agentHistory = llmConf.scratchArea;
     auto monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
-    auto agent = new Agent("main", llmConf, monitor, rag);
+    auto agent = new Agent("main", llmConf, monitor, rag, llmConf.toolFilter.to());
     scope (exit)
         agent.saveHistory(agentHistory);
     const systemPrompt = SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString;
@@ -192,6 +192,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         if (running) {
             playNotification;
             query = multiLineConsole(format!"[%s/%s]$ "(agent.contextUsed, agent.contextSize));
+            clearInterruptSignal();
             if (query.among("/quit", "/q", "/exit")) {
                 break;
             } else if (query == "/compact") {
@@ -204,21 +205,22 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             } else if (query.startsWith("/plan ")) {
                 auto q = query["/plan ".length .. $];
                 logger.infof("Running plan pipeline: %s", q);
-                auto planResult = runPlanPipeline(q, llmConf, rag, monitor);
-                writeln(prettyPrint(planResult));
+                auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
+                    return isInterruptTriggered;
+                }, llmConf.toolFilter.to());
+                writeln(prettyPrint(result));
                 continue;
             } else if (query.startsWith("/code ")) {
                 auto q = query["/code ".length .. $];
                 logger.infof("Running coder pipeline: %s", q);
-                clearInterruptSignal();
-                auto planResult = runCoderPipeline(q, llmConf, rag, monitor, () {
+                auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
                     return isInterruptTriggered;
-                });
-                if (planResult.wasInterrupted) {
+                }, llmConf.toolFilter.to());
+                if (result.wasInterrupted) {
                     writeln("\nPipeline interrupted by user.");
                     continue;
                 }
-                writeln(prettyPrint(planResult));
+                writeln(prettyPrint(result));
                 continue;
             } else if (query.empty) {
                 continue;
@@ -226,7 +228,6 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         }
         agent.addUserQuery(query);
         doCompress(agent, force: false);
-        clearInterruptSignal();
         auto result = agent.runToCompletion(&processResult, compressCallback: &progressCallback,
                 interrupt: () { return isInterruptTriggered; });
     }

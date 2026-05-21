@@ -2,6 +2,8 @@ module llm.coder;
 
 import logger = std.logger;
 
+import my.filter : ReFilter;
+
 import llm.agent : Agent;
 import llm.config : LlmConfig, promptToPath;
 import llm.metric.monitor : MetricMonitor;
@@ -26,7 +28,7 @@ import llm.utility : SystemPromptInit;
 ///
 /// Both agents are transient and only exist for the duration of the pipeline.
 PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
-        MetricMonitor monitor, bool delegate() interrupt = null) {
+        MetricMonitor monitor, bool delegate() interrupt = null, ReFilter toolFilter) {
 
     // dfmt off
     // --- Agent 1: Coder ---
@@ -56,12 +58,12 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
     // dfmt on
 
     // Create transient agents
-    auto coder = new Agent("coder", llmConf, monitor, rag);
+    auto coder = new Agent("coder", llmConf, monitor, rag, toolFilter);
     coder.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt))
             .toString);
     coder.addUserQuery(codeQuery);
 
-    auto reviewer = new Agent("code_reviewer", llmConf, monitor, rag);
+    auto reviewer = new Agent("code_reviewer", llmConf, monitor, rag, toolFilter);
     reviewer.setSystemPrompt(
             SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString);
     reviewer.addUserQuery(reviewerQuery);

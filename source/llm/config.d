@@ -56,6 +56,8 @@ struct LlmConfig {
 
     string containerCmd = "podman";
 
+    ToolFilter toolFilter;
+
     CodeModelConfig codeModel;
     SummaryModelConfig summaryModel;
     EmbedConfig embedConfig;
@@ -69,6 +71,17 @@ LlmConfig makeLlmConfig() {
     LlmConfig conf;
     conf.resolvePaths;
     return conf;
+}
+
+struct ToolFilter {
+    import my.filter : ReFilter;
+
+    string[] include;
+    string[] exclude;
+
+    ReFilter to() @safe {
+        return ReFilter(include, exclude);
+    }
 }
 
 struct ServerConfig {
