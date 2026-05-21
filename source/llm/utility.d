@@ -150,3 +150,11 @@ bool isInterruptTriggered() @safe nothrow @nogc {
 void clearInterruptSignal() @safe nothrow @nogc {
     .signalInterrupt = false;
 }
+
+T getValue(T)(JSONValue v, T delegate(JSONValue v) accessor, T default_) @trusted {
+    try {
+        return accessor(v);
+    } catch (Exception e) {
+        return default_;
+    }
+}

@@ -137,12 +137,16 @@ long currentTimestamp() {
 }
 
 ToolCallEvent jsonToEvent(JSONValue j) @safe {
-    string agentName;
-    if (auto a = "agentName" in j)
-        agentName = a.str;
-    return ToolCallEvent(agentName: agentName, toolName: j["toolName"].str,
-            arguments: j["arguments"].str, timestamp: j["timestamp"].integer, success: j["success"].boolean,
-            result: j["result"].str, responseTimeMs: j["responseTimeMs"].integer);
+    import llm.utility : getValue;
+
+    string agentName = getValue(j, (v) => v["agentName"].str, "");
+    return ToolCallEvent(agentName: agentName, toolName: getValue(j,
+            (v) => v["toolName"].str, ""), arguments: getValue(j,
+            (v) => v["arguments"].str, ""), timestamp: getValue(j,
+            (v) => v["timestamp"].integer, 0), success: getValue(j,
+            (v) => v["success"].boolean, false), result: getValue(j,
+            (v) => v["result"].str, ""), responseTimeMs: getValue(j,
+            (v) => v["responseTimeMs"].integer, 0));
 }
 
 JSONValue eventToJSON(ToolCallEvent event) @safe {

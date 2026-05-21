@@ -33,6 +33,7 @@ import llm.tool_call.metrics : MetricsContext;
 import llm.tool_call.pipeline : PipelineControlContext;
 import llm.tool_call.sandbox : SandboxContext;
 import llm.tool_call.think : ThinkingContext;
+import llm.utility : getValue;
 import llm.workarea;
 
 public import llm.types : IBasicAgent, IAgent, ProcessResult;
@@ -351,18 +352,19 @@ private:
             foreach (choice; resp["choices"].array) {
                 try {
                     auto msg = choice["message"];
-                    string content;
-                    if (auto c = "content" in msg)
-                        content = c.str;
+                    string content = getValue(msg, (v) => msg["content"].str, "");
                     if (!content.empty)
-                        chat.add(Message(Role.assistant, msg["content"].str));
-                    if (auto calls = "tool_calls" in msg) {
-                        auto toolResp = handleToolCalls(*calls);
+                        chat.add(Message(Role.assistant, content));
+                    if (auto calls = getValue(msg, (v) => v["tool_calls"].array, null)) {
+                        try {
+                            handleToolCalls(calls);
+                        } catch (Exception e) {
+                        }
                     }
-                    if (auto reason = "finish_reason" in choice) {
-                        if (reason.str == "length")
+                    if (auto reason = getValue(choice, (v) => v["finish_reason"].str, null)) {
+                        if (reason == "length")
                             return ProcessResult.Status.needCompression;
-                        if (reason.str == "stop" && content.empty)
+                        if (reason == "stop" && content.empty)
                             return ProcessResult.Status.needMoreThinking;
                     }
                 } catch (Exception e) {
@@ -376,11 +378,11 @@ private:
         return ProcessResult.Status.unknownFailure;
     }
 
-    JSONValue handleToolCalls(JSONValue calls) {
+    void handleToolCalls(JSONValue[] calls) {
         import llm.tool_call : executeFunc;
 
         JSONValue[] rval;
-        foreach (call; calls.array) {
+        foreach (call; calls) {
             // Check for warnings before processing each tool call
             try {
                 if (monitor !is null && lastToolCallWarning >= WarnEveryNthToolCall) {
@@ -419,7 +421,6 @@ private:
             chat.add(ToolMessage(JSONValue([call])));
             chat.add(ToolResponse(content: result, toolCallId: call["id"].str, toolName: toolName));
         }
-        return JSONValue(rval);
     }
 }
 
@@ -436,14 +437,6 @@ private bool checkResponse(JSONValue j) @trusted {
     if (j[key].array.empty)
         return false;
     return true;
-}
-
-private Message responseToMessage(JSONValue j) @trusted {
-    Message m;
-    foreach (a; j["choices"].array.retro.take(1)) {
-        m = Message(Role.assistant, a["message"]["content"].str);
-    }
-    return m;
 }
 
 class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryContext,

@@ -31,6 +31,8 @@ class RemoteEmbedder : Embedder {
 
     /// Produce an embedding vector via HTTP POST to /embeddings endpoint.
     override EmbedResult embed(string text) {
+        import llm.utility : getValue;
+
         auto body = format!"{\"model\": \"%s\", \"input\": \"%s\"}"(cfg.name, escapeJson(text));
 
         auto headers = ["Content-Type": "application/json"];
@@ -45,7 +47,8 @@ class RemoteEmbedder : Embedder {
             logger.tracef("RemoteEmbedder: Response status %d", r.statusCode);
 
             auto json = parseJSON(r.body);
-            auto embedding = json["data"][0]["embedding"].array;
+            auto embedding = getValue(json, (v) => v["data"][0]["embedding"].array,
+                JSONValue[].init);
             float[] resultVec;
             foreach (e; embedding) {
                 resultVec ~= cast(float) e.floating;

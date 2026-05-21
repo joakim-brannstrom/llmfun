@@ -148,6 +148,7 @@ void save(ref RAG rag, AbsolutePath filename) {
 void load(RAG rag, AbsolutePath filename) {
     import std.json : JSONValue, parseJSON;
     import std.file : exists;
+    import llm.utility : getValue;
 
     if (!filename.exists) {
         logger.tracef("Load RAG from %s failed. File do not exist", filename);
@@ -176,18 +177,19 @@ void load(RAG rag, AbsolutePath filename) {
         auto j = line.parseJSON;
         Document doc;
 
-        auto kind = j["origin"].object["kind"].str;
+        auto kind = getValue(j, (v) => v["origin"].object["kind"].str, "");
         if (kind == "unknown") {
             doc.origin = Unknown();
         } else if (kind == "url") {
-            doc.origin = Url(j["origin"].object["value"].str);
+            doc.origin = Url(getValue(j, (v) => v["origin"].object["value"].str, ""));
         } else if (kind == "path") {
-            doc.origin = j["origin"].object["value"].str.Path;
+            doc.origin = getValue(j, (v) => v["origin"].object["value"].str, "").Path;
         }
-        doc.data = j["data"].str;
+        doc.data = getValue(j, (v) => v["data"].str, "");
 
-        auto c = Chunk(doc: doc, hash: j["hash"].integer, embed: j["embed"].array.map!(
-                a => uintToFloat(cast(uint) a.integer)).array);
+        auto c = Chunk(doc: doc, hash: getValue(j, (v) => v["hash"].integer, 0),
+                embed: getValue(j, (v) => v["embed"].array, JSONValue[].init).map!(
+                    a => uintToFloat(cast(uint) a.integer)).array);
         rag.chunks ~= c;
     }
 }
