@@ -1,10 +1,10 @@
-PARALLEL_JOBS := $(shell echo $$(nproc))
+CC?=	/usr/bin/cc
 
 all: build/linenoise.o
 
-build/linenoise.o:
+build/linenoise.o: vendor/linenoise/linenoise.c vendor/linenoise/linenoise.h
 	mkdir -p build
-	gcc -c -O2 vendor/linenoise/linenoise.c -o build/linenoise.o
+	$(CC) -c -O2 vendor/linenoise/linenoise.c -o build/linenoise.o
 
 clean:
-	rm -rf build/linenoise.o
+	rm -f build/linenoise.o
