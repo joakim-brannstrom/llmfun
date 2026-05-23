@@ -30,7 +30,7 @@ int main(string[] args) {
 
 struct UserConfig {
     SubCommand!(Default!PrintOk, ChatTestConfig, SummaryTestConfig, FuncCallPrint,
-            TestSlotApiConfig, PrintToolMetricsConfig, TestPipelineConfig) cmd;
+            TestSlotApiConfig, PrintToolMetricsConfig, TestPipelineConfig, TestRagSqliteConfig) cmd;
 
     @(NamedArgument("v", "verbose").Description(format!"Log verbosity level"))
     VerboseMode verbosity;
@@ -64,6 +64,10 @@ struct UserConfig {
 
     @(Command("test_slot_api"))
     struct TestSlotApiConfig {
+    }
+
+    @(Command("test_rag_sqlite"))
+    struct TestRagSqliteConfig {
     }
 
     @(Command("print_tools"))
@@ -322,6 +326,51 @@ int appMain(UserConfig uconf, UserConfig.TestPipelineConfig conf) {
         writeln("  Agent: ", ar.agentName, " | success: ", ar.success, " | duration: ",
                 ar.durationMs, "ms", " | output length: ", ar.output.length);
     }
+
+    return 0;
+}
+
+int appMain(UserConfig uconf, UserConfig.TestRagSqliteConfig conf) {
+    import llm.rag.database;
+    import d2sqlite3 : ResultRange;
+
+    auto db = openDatabase("smurf.sqlite".Path, 4);
+
+    bool process(ResultRange result) {
+        foreach (a; result.enumerate) {
+            writefln("%s: %s", a.index, a.value);
+        }
+        return true;
+    }
+
+    db.run("SELECT vec_version()", &process);
+
+    // auto src = Source(Origin(Path("smurf.txt")), 4242.SourceChecksum);
+    // logger.info("Add source: ", src);
+    // auto srcId = db.addSource(src);
+    //
+    // logger.info("Add embeddings");
+    // float[] embed = [0.1, 0.2, 0.3, 0.4];
+    // db.addEmbedding(srcId, Embedding(Offset(42, 84), "here we are", embed));
+    //
+    // logger.info("Result");
+    db.run("SELECT * from SourceTbl", &process);
+    db.run("SELECT * from EmbeddingsTbl", &process);
+
+    // logger.info("Add same source, should ignore it");
+    // db.addSource(src);
+    // db.run("SELECT * from SourceTbl", &process);
+    // db.run("SELECT * from EmbeddingsTbl", &process);
+    //
+    // logger.info("Search");
+    // auto searchResult = db.getBestMatch(Search(embed), 3);
+    // logger.info(searchResult);
+    //
+    // logger.info("should now be deleted");
+    // logger.info(db.getSource(src.origin));
+    // db.removeSource(src.origin);
+    // db.run("SELECT * from EmbeddingsTbl", &process);
+    // db.run("SELECT * from EmbeddingsTbl_rowids", &process);
 
     return 0;
 }

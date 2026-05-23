@@ -3,6 +3,7 @@
 module llm.rag.embedder_http;
 
 import logger = std.logger;
+import std.algorithm : map, joiner;
 import std.array : appender, empty;
 import std.format : format;
 import std.json : JSONValue, parseJSON;
@@ -21,15 +22,14 @@ class RemoteEmbedder : Embedder {
         RemoteEmbedConfig cfg;
     }
 
-    /// Create a RemoteEmbedder with the given configuration.
     this(RemoteEmbedConfig cfg) {
+        logger.trace(cfg);
         this.cfg = cfg;
     }
 
     override void destroy() {
     }
 
-    /// Produce an embedding vector via HTTP POST to /embeddings endpoint.
     override EmbedResult embed(string text) {
         import llm.utility : getValue;
 
@@ -40,56 +40,32 @@ class RemoteEmbedder : Embedder {
             headers["Authorization"] = format!"Bearer %s"(cfg.server.apiKey);
         }
 
-        auto result = httpPostWithRetry(Request(), cfg.server.embedUrl, body, headers,
+        auto result = httpPostWithRetry(Request(), cfg.server.toEmbedUrl, body, headers,
                 cfg.server.maxRetries, cfg.server.timeoutSeconds, cfg.server.backoffMs);
 
         return result.match!((HttpPostResult r) {
             logger.tracef("RemoteEmbedder: Response status %d", r.statusCode);
 
             auto json = parseJSON(r.body);
-            auto embedding = getValue(json, (v) => v["data"][0]["embedding"].array,
-                JSONValue[].init);
+            // logger.trace(json);
+            auto embeddings = getValue(json, (v) => v.array[0]["embedding"].array, JSONValue[].init);
             float[] resultVec;
-            foreach (e; embedding) {
-                resultVec ~= cast(float) e.floating;
+            foreach (e; embeddings.map!((a => getValue(a, (v) => v.array, null))).joiner) {
+                try {
+                    resultVec ~= cast(float) e.floating;
+                } catch (Exception e) {
+                }
             }
-            logger.infof("RemoteEmbedder: Embedding dimensions: %d", resultVec.length);
+            logger.tracef("RemoteEmbedder: Embedding dimensions: %s", resultVec.length);
             return EmbedResult(resultVec);
         }, (HttpPostError e) {
-            logger.errorf("RemoteEmbedder: HTTP error %d: %s", e.statusCode, e.errorMsg);
+            logger.errorf("RemoteEmbedder: HTTP error %s: %s", e.statusCode, e.errorMsg);
             return EmbedResult(e.errorMsg);
         });
     }
 
-    /// Simple text-based tokenization (split on whitespace).
-    override int[] tokenize(string text) {
-        import std.digest.murmurhash : digest, MurmurHash3;
-
-        auto words = split(text);
-        int[] tokens;
-        foreach (w; words) {
-            if (!w.empty) {
-                auto h = digest!(MurmurHash3!32)(w);
-                tokens ~= cast(int) h[0];
-            }
-        }
-        return tokens;
-    }
-
-    /// Simple detokenization (join with spaces).
-    override string detokenize(int[] tokens) {
-        auto data = appender!string();
-        foreach (t; tokens) {
-            if (!data.empty)
-                data.put(" ");
-            data.put(format!"%s"(t));
-        }
-        return data[];
-    }
-
-    /// Return a default batch size for remote requests.
     override int batchSize() {
-        return 8192;
+        return cast(int) cfg.nBatch;
     }
 
     private string escapeJson(string s) {

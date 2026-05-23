@@ -1,12 +1,13 @@
 module llm.config;
 
 import logger = std.logger;
-import std.sumtype : SumType;
 import std.algorithm : filter, map;
 import std.array : array, empty;
 import std.file : readText, exists, mkdirRecurse;
 import std.format : format;
 import std.json : JSONValue, parseJSON;
+import std.sumtype : SumType;
+import std.sumtype : match;
 
 import my.path;
 
@@ -18,13 +19,13 @@ struct LlmConfig {
     // LLM save a memory to this file which is used between runs.
     Path memoryArea = ProgramName ~ "/data/memory";
 
-    Path rag = ProgramName ~ "/data/rag.json";
-
     Path scratchArea = ProgramName ~ "/data/scratch";
 
     Path thinkingTemplatesDir = ProgramName ~ "/config/thinking";
 
     Path promptDir = ProgramName ~ "/config/prompt";
+
+    Path rag = ProgramName ~ "/data/rag.sqlite3";
 
     void resolvePaths() {
         import my.resource;
@@ -38,7 +39,7 @@ struct LlmConfig {
         memoryArea = prioDataCwdDirs.resolve("memory".Path)
             .orElse(ResourceFile(memoryArea.AbsolutePath)).get.Path;
 
-        rag = prioDataCwdDirs.resolve("rag.json".Path)
+        rag = prioDataCwdDirs.resolve("rag.sqlite3".Path)
             .orElse(ResourceFile(rag.AbsolutePath)).get.Path;
 
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
@@ -60,7 +61,12 @@ struct LlmConfig {
 
     CodeModelConfig codeModel;
     SummaryModelConfig summaryModel;
+
     EmbedConfig embedConfig;
+    long embedDimensions() {
+        return embedConfig.match!((LocalEmbedConfig a) => a.dimensions,
+                (RemoteEmbedConfig a) => a.dimensions);
+    }
 }
 
 Path promptToPath(LlmConfig conf, string prompt) {
@@ -144,12 +150,14 @@ struct LocalEmbedConfig {
     Path modelPath;
     long context;
     long nBatch;
+    long dimensions;
 }
 
 /// Configuration for a remote embedding backend (HTTP API).
 struct RemoteEmbedConfig {
     ServerConfig server;
     string name;
+    long nBatch;
     long dimensions;
 }
 

@@ -5,11 +5,11 @@ module llm.rag.rag;
 
 import logger = std.logger;
 import std.algorithm;
-import std.sumtype;
-import std.digest;
+import std.array : array, empty, appender;
 import std.digest.murmurhash : MurmurHash3;
-import std.array : array, empty;
+import std.digest;
 import std.stdio : File;
+import std.sumtype;
 
 import my.path;
 public import my.path : Path;
@@ -32,164 +32,115 @@ struct Chunk {
     float[] embed;
 }
 
+struct Offset {
+    long begin;
+    long end;
+}
+
 struct Document {
     Origin origin;
     string data;
+    Offset offset;
 }
 
 class RAG {
-    Embedder embedder;
-    Chunk[] chunks;
+    import llm.rag.database;
 
-    /// Primary constructor using Embedder interface.
-    this(Embedder embedder) {
+    Embedder embedder;
+    Database db;
+    alias db this;
+
+    this(Embedder embedder, Database db) {
         this.embedder = embedder;
+        this.db = db;
+    }
+
+    this(Embedder embedder, Path dbFile, long dimensions) {
+        import llm.rag.database : openDatabase;
+
+        this.embedder = embedder;
+        this.db = openDatabase(dbFile, dimensions);
     }
 
     void destroy() {
         embedder.destroy();
+        db.destroy;
     }
 
     Document[] query(string query, int getTopK) {
-        import std.numeric : cosineSimilarity;
-        import std.typecons : tuple, Tuple;
-        import std.algorithm : schwartzSort;
-
-        auto queryEmbd = embedder.embed(query);
-        if (!queryEmbd.has!(float[]))
-            return null;
-        auto embed = queryEmbd.get!(float[]);
-        auto topK = new Tuple!(Chunk, float)[getTopK];
-        foreach (ref a; topK)
-            a[1] = 0.0;
-
-        foreach (a; chunks.map!(a => tuple(a, cosineSimilarity(embed, a.embed)))) {
-            if (a[1] > topK[$ - 1][1]) {
-                topK[$ - 1] = a;
-                schwartzSort!((a) => a[1], (a, b) => a > b)(topK);
-            }
+        Document[] runMatch(float[] embed) {
+            auto res = db.getBestMatch(Search(embed), getTopK);
+            return res.map!(a => Document(a.origin, a.text, a.offset)).array;
         }
-        return topK.map!(a => a[0].doc).array;
+
+        return embedder.embed(query).match!((float[] a) => runMatch(a), (string errMsg) {
+            logger.warning(errMsg);
+            return null;
+        });
     }
 }
 
 struct RagAddResult {
-    size_t tokens;
+    size_t length;
     size_t chunks;
 }
 
 // Add a document to the RAG.
 RagAddResult add(RAG rag, Document doc) {
-    uint toUint(ubyte[4] a) {
+    import std.utf;
+    import std.uni;
+    import llm.rag.database;
+
+    long toUint(ubyte[4] a) {
         return a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
     }
 
+    long dataHash = toUint(digest!(MurmurHash3!32)(doc.data));
+
+    if (rag.hasSource(Source(doc.origin, dataHash.SourceChecksum))) {
+        logger.trace("source already exist in database");
+        return RagAddResult(doc.data.length, 1);
+    }
+    // try to remove the source before adding to ensure old cruft isn't left
+    rag.removeSource(doc.origin);
+
+    auto trans = rag.db.transaction;
+
+    auto srcId = rag.db.addSource(Source(doc.origin, SourceChecksum(dataHash)));
     const nBatch = rag.embedder.batchSize();
-    auto tokens = rag.embedder.tokenize(doc.data);
 
-    size_t nChunks = 0;
-    for (size_t i = 0; i < tokens.length; i += nBatch / 2) {
-        auto part = tokens[i .. min(i + nBatch, tokens.length)];
-        auto data = rag.embedder.detokenize(part);
-        uint h = toUint(digest!(MurmurHash3!32)(data));
-        if (rag.chunks.any!((a => a.hash == h))) {
-            logger.tracef("Duplicate RAG chunk, skipping. length:%s hash:%s", part.length, h);
-        } else {
-            rag.embedder.embed(data).match!((float[] embed) {
-                rag.chunks ~= Chunk(doc: Document(origin: doc.origin, data: data),
-                    hash: h, embed: embed);
-            }, (string e) {
-                logger.tracef("Failed to generate embedding '%s': %s", e, data);
-            });
-            nChunks++;
+    size_t nChunks;
+    size_t startPos;
+    Grapheme[] graphemes;
+    void addChunk() {
+        auto data = graphemes.byCodePoint.toUTF8;
+
+        rag.embedder.embed(data).match!((float[] embed) {
+            rag.db.addEmbedding(srcId, Embedding(Offset(startPos,
+                startPos + graphemes.length), data, embed));
+        }, (string e) {
+            logger.tracef("Failed to generate embedding '%s': %s", e, data);
+        });
+        logger.tracef("add chunk length:%s offset(%s-%s)", data.length,
+                startPos, startPos + graphemes.length);
+
+        // 50% sliding window
+        startPos += graphemes.length;
+        graphemes = graphemes[$ / 2 .. $];
+        nChunks++;
+    }
+
+    foreach (graphem; doc.data.byGrapheme) {
+        graphemes ~= graphem;
+        if (graphemes.length >= nBatch) {
+            addChunk();
         }
     }
-
-    return RagAddResult(tokens.length, nChunks);
-}
-
-void save(ref RAG rag, AbsolutePath filename) {
-    import std.json;
-
-    // save embeddings as integers to avoid any loss when converting back and
-    // forth between a textual representation of a float.
-
-    uint floatToUint(float v) {
-        uint rval;
-        ubyte* a = cast(ubyte*)&rval;
-        ubyte* b = cast(ubyte*)&v;
-        static foreach (i; 0 .. 4) {
-            a[i] = b[i];
-        }
-        return rval;
+    if (!graphemes.empty) {
+        addChunk();
     }
 
-    logger.tracef("Save RAG to %s. Chunks %s", filename.toString, rag.chunks.length);
+    trans.commit;
 
-    auto f = File(filename, "w");
-    foreach (a; rag.chunks) {
-        JSONValue j;
-        JSONValue oKind;
-        JSONValue oValue;
-
-        a.doc.origin.match!((Unknown a) { oKind = "unknown"; }, (Url a) {
-            oKind = "url";
-            oValue = a.value;
-        }, (Path a) { oKind = "path"; oValue = a.toString; });
-        auto origin = JSONValue(["kind": oKind, "value": oValue]);
-        j["origin"] = origin;
-        j["data"] = a.doc.data;
-        j["hash"] = a.hash;
-        j["embed"] = a.embed.map!(a => floatToUint(a)).array;
-        f.writeln(j.toString);
-    }
-}
-
-void load(RAG rag, AbsolutePath filename) {
-    import std.json : JSONValue, parseJSON;
-    import std.file : exists;
-    import llm.utility : getValue;
-
-    if (!filename.exists) {
-        logger.tracef("Load RAG from %s failed. File do not exist", filename);
-        return;
-    }
-
-    float uintToFloat(uint v) {
-        float rval;
-        ubyte* a = cast(ubyte*)&rval;
-        ubyte* b = cast(ubyte*)&v;
-        static foreach (i; 0 .. 4) {
-            a[i] = b[i];
-        }
-        return rval;
-    }
-
-    logger.tracef("Load RAG from %s", filename.toString);
-
-    auto f = File(filename, "r");
-    string line;
-    while (!f.eof()) {
-        line = f.readln();
-        if (line.empty)
-            continue;
-
-        auto j = line.parseJSON;
-        Document doc;
-
-        auto kind = getValue(j, (v) => v["origin"].object["kind"].str, "");
-        if (kind == "unknown") {
-            doc.origin = Unknown();
-        } else if (kind == "url") {
-            doc.origin = Url(getValue(j, (v) => v["origin"].object["value"].str, ""));
-        } else if (kind == "path") {
-            doc.origin = getValue(j, (v) => v["origin"].object["value"].str, "").Path;
-        }
-        doc.data = getValue(j, (v) => v["data"].str, "");
-
-        auto c = Chunk(doc: doc, hash: getValue(j, (v) => v["hash"].integer, 0),
-                embed: getValue(j, (v) => v["embed"].array, JSONValue[].init).map!(
-                    a => uintToFloat(cast(uint) a.integer)).array);
-        rag.chunks ~= c;
-    }
+    return RagAddResult(doc.data.length, nChunks);
 }

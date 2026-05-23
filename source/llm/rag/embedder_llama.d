@@ -40,16 +40,16 @@ version (llm_fun_llama_backend) {
             return EmbedResult(getEmbedding(model, 0).value);
         }
 
-        /// Tokenize text using the model's vocabulary.
-        override int[] tokenize(string text) {
-            return cast(int[]) llm.llama.model.tokenize(model, text, add: false,
-                    tokensBuf: smallTokens);
-        }
-
-        /// Convert tokens back to text using the model's vocabulary.
-        override string detokenize(int[] tokens) {
-            return llm.llama.model.detokenize(model, cast(llama_token[]) tokens);
-        }
+        // /// Tokenize text using the model's vocabulary.
+        // override int[] tokenize(string text) {
+        //     return cast(int[]) llm.llama.model.tokenize(model, text, add: false,
+        //             tokensBuf: smallTokens);
+        // }
+        //
+        // /// Convert tokens back to text using the model's vocabulary.
+        // override string detokenize(int[] tokens) {
+        //     return llm.llama.model.detokenize(model, cast(llama_token[]) tokens);
+        // }
 
         /// Return the batch size configured on the llama context.
         override int batchSize() {

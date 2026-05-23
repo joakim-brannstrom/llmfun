@@ -1,0 +1,405 @@
+module llm.rag.database;
+
+import core.thread : Thread;
+import logger = std.experimental.logger;
+import std.array : appender;
+import std.conv : to;
+import std.datetime : dur, SysTime;
+import std.exception : collectException, ifThrown;
+import std.format : format;
+import std.meta : AliasSeq;
+import std.sumtype : match;
+import std.typecons : Tuple, tuple;
+
+static import miniorm;
+import miniorm : ColumnName, TablePrimaryKey, Miniorm, spinSql, toSqliteDateTime,
+    TableConstraint, TableForeignKey, KeyRef, KeyParam, ColumnParam;
+import my.path;
+import my.named_type;
+import my.optional;
+
+public import llm.rag.rag : Unknown, Url, Origin, Document, Offset;
+
+immutable timeout = 30.dur!"seconds";
+enum SchemaVersion = 1;
+
+private struct VersionTbl {
+    @ColumnName("version")
+    ulong version_;
+    long embedDimensions;
+}
+
+@TableConstraint("unique_ UNIQUE (urlType, checksum)")
+private struct SourceTbl {
+    long id;
+    long urlType;
+    long checksum;
+    SysTime added;
+
+    enum UrlType {
+        unknown,
+        url,
+        path
+    }
+}
+
+@TableForeignKey("sourceId", KeyRef("SourceTbl(id)"), KeyParam("ON DELETE CASCADE"))
+@TableConstraint("unique_ UNIQUE (sourceId, url)")
+private struct OriginUrlTbl {
+    long id;
+    long sourceId;
+    string url;
+}
+
+SourceTbl.UrlType convert(Origin x) {
+    return x.match!((Unknown _) => SourceTbl.UrlType.unknown,
+            (Path _) => SourceTbl.UrlType.path, (Url _) => SourceTbl.UrlType.url);
+}
+
+// I am not sure this is correct but the database has stopped being corrupted
+@TableForeignKey("embedId", KeyRef("EmbeddingsTbl_rowids(rowid)"), KeyParam("ON DELETE CASCADE"))
+@TableConstraint("unique_ UNIQUE (embedId, begin, end)")
+private struct TextChunkTbl {
+    long id;
+    long embedId;
+    string text;
+    long begin;
+    long end;
+}
+
+private immutable EmbeddingsTblSql = `
+CREATE VIRTUAL TABLE EmbeddingsTbl USING vec0(
+    id INTEGER PRIMARY KEY,
+    sourceId INTEGER NOT NULL,
+    embedding FLOAT[%s]
+);`;
+// FOREIGN KEY(source_id) REFERENCES SourceTbl(id) ON DELETE CASCADE
+// FOREIGN KEY(textChunkId) REFERENCES TextChunkTbl(id) ON DELETE CASCADE
+
+Database openDatabase(Path dbFile, long embedDimensions) nothrow {
+    import llm.rag.sqlite3_vec;
+
+    static void setPragmas(ref Miniorm db) {
+        // dfmt off
+        auto pragmas = [
+            // required for foreign keys with cascade to work
+            "PRAGMA foreign_keys=ON;",
+            // "PRAGMA journal_mode=WAL;",
+            // "PRAGMA synchronous=FULL;"
+        ];
+        // dfmt on
+
+        foreach (p; pragmas) {
+            db.run(p);
+        }
+    }
+
+    logger.trace("opening database ", dbFile).collectException;
+    int counter;
+    while (true) {
+        ++counter;
+        try {
+            auto db = Miniorm(dbFile, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
+            setPragmas(db);
+            sqlite3_vec_init(cast(sqlite3*) db.handle, null, null);
+            const versionData = () {
+                foreach (a; db.run(miniorm.select!VersionTbl))
+                    return a;
+                return VersionTbl(0);
+            }().ifThrown(VersionTbl(0));
+
+            alias Schema = AliasSeq!(VersionTbl, SourceTbl, OriginUrlTbl, TextChunkTbl);
+
+            if (versionData.version_ < SchemaVersion
+                    || versionData.embedDimensions != embedDimensions) {
+                db.begin;
+                static foreach (tbl; Schema)
+                    db.run("DROP TABLE " ~ tbl.stringof).collectException;
+                db.run("DROP TABLE EmbeddingsTbl").collectException;
+                db.run(miniorm.buildSchema!Schema);
+                db.run(format!EmbeddingsTblSql(embedDimensions));
+                db.run(miniorm.insert!VersionTbl, VersionTbl(SchemaVersion, embedDimensions));
+                db.commit;
+            }
+            return Database(db, embedDimensions);
+        } catch (Exception e) {
+            logger.trace(e).collectException;
+            logger.warningf("Trying to open/create database '%s' (%s): %s",
+                    dbFile, counter, e.msg).collectException;
+        }
+
+        Thread.sleep(50.dur!"msecs");
+    }
+}
+
+alias SourceId = NamedType!(long, Tag!"SourceId", 0, Comparable, TagStringable);
+alias SourceChecksum = NamedType!(long, Tag!"SourceChecksum", 0, Comparable, TagStringable);
+
+struct Source {
+    Origin origin;
+    SourceChecksum checksum;
+}
+
+struct Embedding {
+    Offset offset;
+    string text;
+    float[] embed;
+}
+
+struct TextChunk {
+    Offset offset;
+    string text;
+}
+
+struct Search {
+    float[] embed;
+}
+
+struct SourceMatch {
+    Origin origin;
+    Offset offset;
+    string text;
+}
+
+struct Database {
+    Miniorm db;
+    alias db this;
+
+    private {
+        long embedDimensions;
+    }
+
+    this(Miniorm db, long embedDimensions) {
+        this.db = db;
+        this.embedDimensions = embedDimensions;
+        this.db.log((string m) => logger.trace(m));
+    }
+
+    void destroy() {
+        db.close();
+    }
+
+    SourceId addSource(Source src) {
+        import std.datetime : Clock;
+
+        void addOrigin(long srcId, string url) {
+            static immutable sql = "INSERT OR IGNORE INTO OriginUrlTbl (sourceId, url) VALUES(:sourceId, :url)";
+            auto stmt = db.prepare(sql);
+            stmt.get.bind(":sourceId", srcId);
+            stmt.get.bind(":url", url);
+            stmt.get.execute;
+        }
+
+        static immutable sql = "INSERT OR IGNORE INTO SourceTbl (urlType, checksum, added) VALUES(:urlType, :checksum, :added)";
+
+        auto stmt = db.prepare(sql);
+        stmt.get.bind(":urlType", cast(long) convert(src.origin));
+        stmt.get.bind(":checksum", src.checksum.get);
+        stmt.get.bind(":added", Clock.currTime.toSqliteDateTime);
+        stmt.get.execute;
+
+        if (db.changes == 1) {
+            const id = db.lastInsertRowid;
+            src.origin.match!((Unknown _) {}, (Path a) => addOrigin(id,
+                    a.toString), (Url a) => addOrigin(id, a.value));
+            return SourceId(id);
+        }
+        return getSource(src.origin).match!((None _) => SourceId.init, a => a.id);
+    }
+
+    Optional!(Tuple!(Source, "src", SourceId, "id")) getSource(Origin origin) {
+        alias ReturnT = typeof(return);
+        ReturnT urlSource(string url) {
+            static immutable sql = "SELECT t0.id, t0.checksum FROM SourceTbl t0, OriginUrlTbl t1 WHERE "
+                ~ "t0.urlType=:urlType AND t0.id=t1.sourceId AND t1.url=:url";
+            auto stmt = db.prepare(sql);
+            stmt.get.bind(":urlType", cast(long) convert(origin));
+            stmt.get.bind(":url", url);
+            foreach (ref r; stmt.get.execute) {
+                auto src = Source(origin, r.peek!long(1).SourceChecksum);
+                auto srcId = r.peek!long(0).SourceId;
+                return ReturnT(tuple!("src", "id")(src, srcId).some);
+            }
+            return ReturnT(None.init);
+        }
+
+        return origin.match!((Unknown _) => ReturnT(None.init),
+                (Path a) => urlSource(a.toString), (Url a) => urlSource(a.value));
+    }
+
+    Tuple!(Source, "src", SourceId, "id")[] getUnknownSources() {
+        static immutable sql = "SELECT t0.id, t0.checksum FROM SourceTbl t0 WHERE " ~ "t0.urlType=" ~ (
+                cast(long) SourceTbl.UrlType.unknown).to!string;
+        auto stmt = db.prepare(sql);
+        typeof(return) rval;
+        foreach (ref r; stmt.get.execute) {
+            rval ~= tuple!("src", "id")(Source(Origin(Unknown.init),
+                    r.peek!long(1).SourceChecksum), r.peek!long(0).SourceId);
+        }
+        return rval;
+    }
+
+    Optional!Source getSource(SourceId id) {
+        Optional!Source getUnknown() {
+            static immutable sql = "SELECT checksum FROM SourceTbl WHERE id=:id";
+            auto stmt = db.prepare(sql);
+            stmt.get.bind(":id", id.get);
+            foreach (ref r; stmt.get.execute)
+                return some(Source(Origin(Unknown.init), r.peek!long(0).SourceChecksum));
+            return none!Source();
+        }
+
+        Optional!Source getUrl(SourceTbl.UrlType kind) {
+            static immutable sql = "SELECT t0.checksum,t1.url FROM SourceTbl t0, OriginUrlTbl t1 "
+                ~ "WHERE t0.id=:id AND t0.id=t1.sourceId";
+            auto stmt = db.prepare(sql);
+            stmt.get.bind(":id", id.get);
+            foreach (ref r; stmt.get.execute) {
+                if (kind == SourceTbl.UrlType.url)
+                    return some(Source(Origin(Url(r.peek!string(1))),
+                            r.peek!long(0).SourceChecksum));
+                if (kind == SourceTbl.UrlType.path)
+                    return some(Source(Origin(Path(r.peek!string(1))),
+                            r.peek!long(0).SourceChecksum));
+            }
+            return none!Source();
+        }
+
+        static immutable kindSql = "SELECT urlType FROM SourceTbl WHERE id=:id";
+        auto stmt = db.prepare(kindSql);
+        stmt.get.bind(":id", id.get);
+        foreach (ref r; stmt.get.execute) {
+            const kind = cast(SourceTbl.UrlType) r.peek!long(0);
+            final switch (kind) {
+            case SourceTbl.UrlType.unknown:
+                return getUnknown();
+            case SourceTbl.UrlType.url:
+            case SourceTbl.UrlType.path:
+                return getUrl(kind);
+            }
+        }
+        return some(Source.init);
+    }
+
+    Source[] getSources() {
+        static immutable sql = "SELECT id FROM SourceTbl";
+
+        auto rval = appender!(Source[])();
+        auto stmt = db.prepare(sql);
+        auto res = stmt.get.execute;
+        foreach (ref r; res) {
+            logger.trace(r.peek!long(0));
+            getSource(r.peek!long(0).SourceId).match!((None _) {}, (Source a) => rval.put(a));
+        }
+        return rval[];
+    }
+
+    long removeSource(Origin origin) {
+        return getSource(origin).match!((None _) => 0, a => removeSource(a.id));
+    }
+
+    bool hasSource(Source src) {
+        static immutable sql = "SELECT count(*) FROM SourceTbl WHERE urlType=:urlType AND checksum=:checksum";
+
+        auto stmt = db.prepare(sql);
+        stmt.get.bind(":urlType", cast(long) convert(src.origin));
+        stmt.get.bind(":checksum", src.checksum.get);
+        auto res = stmt.get.execute;
+        return res.oneValue!long != 0;
+    }
+
+    /// Return: embeddings removed
+    long removeSource(SourceId id) {
+        static immutable sql = "DELETE FROM SourceTbl WHERE id=:id";
+        static immutable embedSql = "DELETE FROM EmbeddingsTbl WHERE sourceId=:id";
+
+        auto stmt = db.prepare(sql);
+        stmt.get.bind(":id", id.get);
+        stmt.get.execute();
+
+        stmt = db.prepare(embedSql);
+        stmt.get.bind(":id", id.get);
+        stmt.get.execute();
+        auto entriesRemoved = db.changes;
+
+        cleanupEmbeddings();
+        entriesRemoved += db.changes;
+
+        return entriesRemoved;
+    }
+
+    void cleanupEmbeddings() {
+        static immutable sql = "DELETE FROM EmbeddingsTbl WHERE NOT EXISTS (SELECT id FROM SourceTbl)";
+        auto stmt = db.prepare(sql);
+        stmt.get.execute;
+    }
+
+    private float[] fixDimension(float[] embed) {
+        if (embed.length == embedDimensions)
+            return embed;
+        if (embed.length > embedDimensions)
+            return embed[0 .. embedDimensions];
+        auto r = embed;
+        r.length = embedDimensions;
+        r[embed.length .. $] = 0.0;
+        return r;
+    }
+
+    void addEmbedding(SourceId id, Embedding emb) {
+        static immutable embedSql = "INSERT INTO EmbeddingsTbl (sourceId, embedding) VALUES(:sourceId, :embedding)";
+        static immutable chunkSql = "INSERT INTO TextChunkTbl (embedId, text, begin, end) VALUES(:embedId, :text, :begin, :end)";
+
+        {
+            auto stmt = db.prepare(embedSql);
+            stmt.get.bind(":sourceId", id.get);
+            stmt.get.bind(":embedding", fixDimension(emb.embed));
+            stmt.get.execute;
+        }
+        auto embedId = db.lastInsertRowid;
+
+        {
+            auto stmt = db.prepare(chunkSql);
+            stmt.get.bind(":embedId", embedId);
+            stmt.get.bind(":text", emb.text);
+            stmt.get.bind(":begin", emb.offset.begin);
+            stmt.get.bind(":end", emb.offset.end);
+            stmt.get.execute;
+        }
+    }
+
+    private TextChunk getChunk(long embedId) {
+        static immutable sql = "SELECT text,begin,end FROM TextChunkTbl WHERE embedId=:id";
+        auto stmt = db.prepare(sql);
+        stmt.get.bind(":id", embedId);
+
+        foreach (ref r; stmt.get.execute) {
+            return TextChunk(offset: Offset(begin: r.peek!long(1), end: r.peek!long(2)),
+                    text: r.peek!string(0));
+        }
+        return TextChunk.init;
+    }
+
+    SourceMatch[] getBestMatch(Search search, long limit) {
+        static immutable embedSql = "SELECT id,sourceId FROM EmbeddingsTbl WHERE embedding MATCH :embedding ORDER BY distance LIMIT :limit";
+
+        auto stmt = db.prepare(embedSql);
+        stmt.get.bind(":embedding", fixDimension(search.embed));
+        stmt.get.bind(":limit", limit);
+        Tuple!(long, "embedId", long, "sourceId")[] ids;
+        foreach (ref r; stmt.get.execute) {
+            ids ~= tuple!("embedId", "sourceId")(r.peek!long(0), r.peek!long(1));
+        }
+
+        auto rval = appender!(SourceMatch[])();
+        foreach (id; ids) {
+            auto src = getSource(id.sourceId.SourceId);
+            logger.trace(src);
+            src.match!((Source src) {
+                auto chunk = getChunk(id.embedId);
+                rval.put(SourceMatch(src.origin, offset: chunk.offset, text: chunk.text));
+            }, (None _) {});
+        }
+
+        return rval[];
+    }
+}

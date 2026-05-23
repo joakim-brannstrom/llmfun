@@ -50,14 +50,23 @@ struct UserConfig {
 
     @(Command("rag"))
     struct Rag {
-        @MutuallyExclusive() {
-            @(NamedArgument().Description("Add files to the RAG"))
-            bool add;
-            @(NamedArgument().Description("Remove files to the RAG"))
-            bool rm;
+        @(NamedArgument("config", "c").Description("Configuration file to read"))
+        void config_(string v) {
+            config = Path(v);
         }
 
-        @(NamedArgument("path").Required.Description("Recursively add all text files"))
+        Path config;
+
+        @MutuallyExclusive() {
+            @(NamedArgument().Description("Add files"))
+            bool add;
+            @(NamedArgument().Description("Remove files"))
+            bool rm;
+            @(NamedArgument().Description("List all sources"))
+            bool list;
+        }
+
+        @(NamedArgument("path").Description("Recursively add all text files"))
         string path;
 
         @(NamedArgument("db").Description("RAG database"))
@@ -129,15 +138,14 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     auto rag = () {
         try {
             auto embed = createEmbedder(llmConf.embedConfig);
-            return new RAG(embed);
+            return new RAG(embed, llmConf.rag, llmConf.embedDimensions);
         } catch (Exception e) {
             logger.warning(e);
         }
-        return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)));
+        return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)),
+                Path(":memory:"), llmConf.embedDimensions);
     }();
-    // rag.load("scratch/rag.json".AbsolutePath);
     scope (exit) {
-        // rag.save(Path("scratch/rag.json").AbsolutePath);
         rag.destroy;
     }
 
@@ -240,27 +248,28 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     import llm.rag.rag;
     import llm.config;
     import llm.rag.embedder : createEmbedder;
-    import std.file : readText, exists;
+    import std.file : readText, exists, isFile, isDir, dirEntries, SpanMode;
     import std.path : extension;
 
-    auto llmConf = readConfig.userToLlmConfig(conf);
+    auto llmConf = readConfig(conf.config).userToLlmConfig(conf);
 
     auto rag = () {
         try {
             auto embed = createEmbedder(llmConf.embedConfig);
-            return new RAG(embed);
+            return new RAG(embed, llmConf.rag, llmConf.embedDimensions);
         } catch (Exception e) {
             logger.warning(e);
         }
-        return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)));
+        return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)),
+                Path(":memory:"), llmConf.embedDimensions);
     }();
-    rag.load(llmConf.rag.AbsolutePath);
     scope (exit) {
-        rag.save(llmConf.rag.AbsolutePath);
         rag.destroy;
     }
 
     void addFile(Path p) {
+        import llm.rag.database;
+
         logger.info("Add ", p);
         try {
             rag.add(Document(p.Origin, readText(p.toString)));
@@ -289,13 +298,39 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     }
 
     void removeData() {
-        logger.info("Remove files from ", conf.path);
+        long entries;
+        if (conf.path.isFile) {
+            logger.info("Remove embeddings from file", conf.path);
+            entries = rag.removeSource(Origin(conf.path.Path));
+        } else if (conf.path.isDir) {
+            logger.info("Remove embeddings from files in ", conf.path);
+            foreach (p; dirEntries(conf.path, SpanMode.depth).filter!(a => a.isFile)) {
+                entries += rag.removeSource(Origin(p.name.Path));
+            }
+        } else { // assuming it is a URL
+            logger.info("Removing URL ", conf.path);
+            entries = rag.removeSource(Origin(Url(conf.path)));
+        }
+        logger.infof("Removed %s embeddings", entries);
+    }
+
+    void listSources() {
+        logger.info("List all sources");
+        foreach (src; rag.getSources) {
+            src.origin.match!((Unknown _) {
+                logger.infof("unknown (%s)", src.checksum.get);
+            }, (Path a) { logger.infof("path:'%s' (%s)", a, src.checksum.get); }, (Url a) {
+                logger.infof("url:'%s' (%s)", a.value, src.checksum.get);
+            });
+        }
     }
 
     if (conf.add)
         addData();
     else if (conf.rm)
         removeData();
+    else if (conf.list)
+        listSources();
 
     return 0;
 }

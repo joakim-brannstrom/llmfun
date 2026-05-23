@@ -597,8 +597,14 @@ ExecuteFuncResult queryRAG(Context baseCtx, string query, long topK) {
     immutable maxTopK = 20;
     if (topK >= 1 && topK <= maxTopK) {
         auto docs = ctx.getRAG.query(query, cast(int) topK);
-        auto rval = docs.map!(doc => format!"[%s] %s"(doc.origin.match!((Unknown _) => "unknown",
-                (Url a) => a.value, (Path a) => a.toString), doc.data)).join("\n\n");
+        string location(Document doc) {
+            return doc.origin.match!((Unknown _) => "no source,",
+                    (Url a) => a.value, (Path a) => a.toString);
+        }
+
+        auto rval = docs.enumerate.map!(doc => format!"--- Result %s (%s chars %s-%s) ---\n%s"(doc.index + 1,
+                location(doc.value), doc.value.offset.begin, doc.value.offset.end, doc.value.data)).join(
+                "\n\n");
         return ExecuteFuncResult(rval, success: true);
     }
     return ExecuteFuncResult(format!"error: topK parameter must be in range [1, %s]"(maxTopK),
@@ -616,9 +622,23 @@ ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
 
     try {
         auto data = readText(path_.toString);
-        auto result = ctx.getRAG().add(Document(Origin(path_), data));
-        return ExecuteFuncResult(format!"File '%s' (%s tokens) added as %s chunks to the RAG"(path,
-                result.tokens, result.chunks), success: true);
+        auto result = ctx.getRAG().add(Document(Origin(path_), data, Offset.init));
+        return ExecuteFuncResult(format!"File '%s' (%s length) added as %s chunks to the RAG"(path,
+                result.length, result.chunks), success: true);
+    } catch (Exception e) {
+        return ExecuteFuncResult(format!"error: failed loading file into rag: %s"(e.msg),
+                success: false);
+    }
+}
+
+@Function("Load content into RAG index")
+ExecuteFuncResult loadContentToRAG(Context baseCtx, string content) {
+    mixin(baseContextToSpecific!RAGContext);
+
+    try {
+        auto result = ctx.getRAG().add(Document(Origin(Unknown.init), content, Offset.init));
+        return ExecuteFuncResult(format!"Content (%s length) added as %s chunks to the RAG"(result.length,
+                result.chunks), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: failed loading file into rag: %s"(e.msg),
                 success: false);

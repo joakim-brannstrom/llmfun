@@ -20,12 +20,6 @@ interface Embedder {
     /// Produce an embedding vector for the given text.
     EmbedResult embed(string text);
 
-    /// Tokenize text into token IDs for chunking purposes.
-    int[] tokenize(string text);
-
-    /// Convert token IDs back to text.
-    string detokenize(int[] tokens);
-
     /// Maximum number of tokens that can be processed in one batch.
     /// Used by RAG.add() to determine chunk size.
     int batchSize();
