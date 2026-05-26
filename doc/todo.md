@@ -6,6 +6,8 @@
 - add Z3 as a tool
 - add a simple expression execution so the llm can call a tool with e.g. `1+3*4` to calculate 
 - make ctrl+c able to interrupt a http request
+- must create the necessary directory structure in the current working directory so a scratch area etc exist
+- change name of the program (the immutable variable) from llm_fun to llmfun
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -25,6 +27,8 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - planner
     - Change chain to. First system_design -> criticies plan -> improve -> implementation_guide -> criticies plan -> improve -> done
     - an agent that compare the system design with implementation to find deviations/contradictions
+
+- planner: need a mode when I update the system design and/or implementation_plan. It should then use another type of prompt.
 
 # Prompt
 
