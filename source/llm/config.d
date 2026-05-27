@@ -149,16 +149,16 @@ struct SummaryModelConfig {
 struct LocalEmbedConfig {
     Path modelPath;
     long context;
-    long nBatch;
-    long dimensions;
+    long nBatch = 512;
+    long dimensions = 768;
 }
 
 /// Configuration for a remote embedding backend (HTTP API).
 struct RemoteEmbedConfig {
     ServerConfig server;
     string name;
-    long nBatch;
-    long dimensions;
+    long nBatch = 512;
+    long dimensions = 768;
 }
 
 /// Union type for embedding backend configuration.
