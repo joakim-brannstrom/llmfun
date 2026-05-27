@@ -71,6 +71,16 @@ struct UserConfig {
 
         @(NamedArgument("db").Description("RAG database"))
         string rag;
+
+        @(NamedArgument("include", "i")
+                .Description(
+                    "Include pattern for RAG files (can be repeated). Overrides config file."))
+        string[] ragInclude;
+
+        @(NamedArgument("exclude", "e")
+                .Description(
+                    "Exclude pattern for RAG files (can be repeated). Overrides config file."))
+        string[] ragExclude;
     }
 
     @(Command("tool_metrics"))
@@ -247,9 +257,11 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
 int appMain(UserConfig uconf, UserConfig.Rag conf) {
     import llm.rag.rag;
     import llm.config;
+    import my.filter : ReFilter;
     import llm.rag.embedder : createEmbedder;
     import std.file : readText, exists, isFile, isDir, dirEntries, SpanMode;
-    import std.path : extension;
+    import std.path : extension, baseName;
+    import std.array : appender;
 
     auto llmConf = readConfig(conf.config).userToLlmConfig(conf);
 
@@ -278,6 +290,31 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         }
     }
 
+    ReFilter buildRagFilter() {
+        auto filter = llmConf.ragFilter;
+
+        if (!conf.ragInclude.empty) {
+            filter.include = conf.ragInclude;
+        }
+        if (!conf.ragExclude.empty) {
+            filter.exclude = conf.ragExclude;
+        }
+
+        if (filter.include.empty) {
+            logger.warning("ragFilter include is empty - all file types will be indexed");
+        }
+
+        try {
+            return filter.to();
+        } catch (Exception e) {
+            logger.warningf("Invalid ragFilter regex pattern: %s - falling back to defaults",
+                    e.msg);
+            filter.include = [".*\\.txt", ".*\\.md"];
+            filter.exclude = [];
+            return filter.to();
+        }
+    }
+
     void addData() {
         import std.file : dirEntries, SpanMode, isFile;
 
@@ -285,33 +322,94 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
             logger.warningf("Path %s do not exist", conf.path);
         }
 
+        auto ragFilter = buildRagFilter();
+
         if (conf.path.isFile) {
-            addFile(conf.path.Path);
+            if (ragFilter.match(baseName(conf.path))) {
+                addFile(conf.path.Path);
+            } else {
+                logger.infof("File %s excluded by ragFilter", conf.path);
+            }
             return;
         }
 
         logger.info("Add files from ", conf.path);
         foreach (p; dirEntries(conf.path, SpanMode.depth).filter!(a => a.isFile)
-                .filter!(a => a.extension.among(".txt", ".md"))) {
+                .filter!(a => ragFilter.match(a.name))) {
             addFile(p.name.Path);
         }
     }
 
     void removeData() {
-        long entries;
-        if (conf.path.isFile) {
-            logger.info("Remove embeddings from file", conf.path);
-            entries = rag.removeSource(Origin(conf.path.Path));
-        } else if (conf.path.isDir) {
-            logger.info("Remove embeddings from files in ", conf.path);
-            foreach (p; dirEntries(conf.path, SpanMode.depth).filter!(a => a.isFile)) {
-                entries += rag.removeSource(Origin(p.name.Path));
+        auto ragFilter = buildRagFilter();
+
+        if (conf.path.empty) {
+            if (conf.ragInclude.empty && conf.ragExclude.empty
+                    && llmConf.ragFilter.include.empty && llmConf.ragFilter.exclude.empty) {
+                logger.warning("No --path provided and no --include/--exclude filters active (CLI or config). " ~ "Nothing to remove. Use --include <pattern> or --exclude <pattern> to select sources for removal, " ~ "or provide --path for a specific file/directory.");
+                return;
             }
-        } else { // assuming it is a URL
-            logger.info("Removing URL ", conf.path);
-            entries = rag.removeSource(Origin(Url(conf.path)));
         }
-        logger.infof("Removed %s embeddings", entries);
+
+        // path-based removal
+        if (!conf.path.empty) {
+            long entriesRemoved = 0; // Scoped to this branch
+
+            if (conf.path.isFile) {
+                logger.info("Remove embeddings from file", conf.path);
+                entriesRemoved = rag.removeSource(Origin(conf.path.Path));
+            } else if (conf.path.isDir) {
+                logger.info("Remove embeddings from files in ", conf.path);
+                foreach (p; dirEntries(conf.path, SpanMode.depth).filter!(a => a.isFile)
+                        .filter!(a => ragFilter.match(a.name))) {
+                    entriesRemoved += rag.removeSource(Origin(p.name.Path));
+                }
+            } else { // assuming it is a URL
+                logger.info("Removing URL ", conf.path);
+                entriesRemoved = rag.removeSource(Origin(Url(conf.path)));
+            }
+            logger.infof("Removed %s embeddings", entriesRemoved);
+            return;
+        }
+
+        // Filter-based source iteration and matching
+        struct RemoveCandidate {
+            Origin origin;
+            string matchStr;
+        }
+
+        long entriesRemoved = 0; // Scoped to filter-based branch
+        long entriesFailed = 0;
+        long unknownSkipped = 0;
+
+        auto candidates = appender!(RemoveCandidate[])();
+        foreach (src; rag.getSources) {
+            src.origin.match!((Unknown _) { unknownSkipped++; return; }, (Path a) {
+                if (ragFilter.match(a.toString))
+                    candidates.put(RemoveCandidate(src.origin, a.toString));
+            }, (Url a) {
+                if (ragFilter.match(a.value))
+                    candidates.put(RemoveCandidate(src.origin, a.value));
+            });
+        }
+
+        auto candidateArray = candidates.data;
+        logger.infof("Found %s source(s) matching filter for removal", candidateArray.length);
+        foreach (c; candidateArray) {
+            logger.infof("  Will remove: '%s'", c.matchStr);
+        }
+
+        foreach (c; candidateArray) {
+            try {
+                entriesRemoved += rag.removeSource(c.origin);
+            } catch (Exception e) {
+                entriesFailed++;
+                logger.warningf("Failed to remove '%s': %s", c.matchStr, e.msg);
+            }
+        }
+
+        logger.infof("Removed %s embeddings from %s source(s), %s failed, %s unknown skipped",
+                entriesRemoved, candidateArray.length, entriesFailed, unknownSkipped);
     }
 
     void listSources() {

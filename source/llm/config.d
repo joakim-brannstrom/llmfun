@@ -58,6 +58,7 @@ struct LlmConfig {
     string containerCmd = "podman";
 
     ToolFilter toolFilter;
+    RagFilter ragFilter;
 
     CodeModelConfig codeModel;
     SummaryModelConfig summaryModel;
@@ -83,6 +84,17 @@ struct ToolFilter {
     import my.filter : ReFilter;
 
     string[] include;
+    string[] exclude;
+
+    ReFilter to() @safe {
+        return ReFilter(include, exclude);
+    }
+}
+
+struct RagFilter {
+    import my.filter : ReFilter;
+
+    string[] include = [".*\\.txt", ".*\\.md"];
     string[] exclude;
 
     ReFilter to() @safe {
