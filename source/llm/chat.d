@@ -1,7 +1,7 @@
 module llm.chat;
 
 import logger = std.logger;
-import std.algorithm : filter, map, sum, min;
+import std.algorithm : filter, map, sum, min, canFind;
 import std.array : array, replace, appender;
 import std.conv : to;
 import std.exception : collectException;
@@ -324,7 +324,29 @@ enum Role {
     tool
 }
 
+// Check if a ToolMessage should be hidden from user output
+bool isHiddenToolCall(JSONValue toolCalls) {
+    if (toolCalls.type != JSONType.array || toolCalls.array.empty)
+        return false;
+    foreach (call; toolCalls.array) {
+        if ("function" !in call)
+            continue;
+        auto name = call["function"]["name"].str;
+        if (hiddenToolNames.canFind(name))
+            return true;
+    }
+    return false;
+}
+
+// Check if a ToolResponse should be hidden from user output
+bool isHiddenToolResponse(string toolName) {
+    return hiddenToolNames.canFind(toolName);
+}
+
 private:
+
+// Tools that should not be displayed to the user
+enum hiddenToolNames = ["taskDone"];
 
 size_t[Role] RoleLength;
 

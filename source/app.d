@@ -189,12 +189,16 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
                     writefln("[%s]: %s", a.role, a.content);
                 }
             }, (ToolMessage a) {
-                writefln("[%s %s/%s %s", a.role, agent.contextUsed,
-                    agent.contextSize, summarizeToolCalls(a.role, a.toolCalls));
+                if (!isHiddenToolCall(a.toolCalls)) {
+                    writefln("[%s %s/%s %s", a.role, agent.contextUsed,
+                        agent.contextSize, summarizeToolCalls(a.role, a.toolCalls));
+                }
             }, (ToolResponse a) {
-                writefln("[%s %s/%s tool:%-s]: %s", a.role, agent.contextUsed,
-                    agent.contextSize, a.toolName, a.content.length < 100
-                    ? a.content : a.content[0 .. 100]);
+                if (!isHiddenToolResponse(a.toolName)) {
+                    writefln("[%s %s/%s tool:%-s]: %s", a.role, agent.contextUsed,
+                        agent.contextSize, a.toolName, a.content.length < 100
+                        ? a.content : a.content[0 .. 100]);
+                }
             }, (VisionMessage a) {
                 writefln("[user]: %s (with image)", a.content);
             });
