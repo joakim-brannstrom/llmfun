@@ -37,10 +37,16 @@ struct Offset {
     long end;
 }
 
+struct Line {
+    long begin;
+    long end;
+}
+
 struct Document {
     Origin origin;
     string data;
     Offset offset;
+    Line line;
 }
 
 class RAG {
@@ -70,7 +76,7 @@ class RAG {
     Document[] query(string query, int getTopK) {
         Document[] runMatch(float[] embed) {
             auto res = db.getBestMatch(Search(embed), getTopK);
-            return res.map!(a => Document(a.origin, a.text, a.offset)).array;
+            return res.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
         return embedder.embed(query).match!((float[] a) => runMatch(a), (string errMsg) {
@@ -110,28 +116,33 @@ RagAddResult add(RAG rag, Document doc) {
     const nBatch = rag.embedder.batchSize();
 
     size_t nChunks;
-    size_t startPos;
+    size_t startCharPos;
+    size_t startLine, endLine;
     Grapheme[] graphemes;
     void addChunk() {
         auto data = graphemes.byCodePoint.toUTF8;
 
         rag.embedder.embed(data).match!((float[] embed) {
-            rag.db.addEmbedding(srcId, Embedding(Offset(startPos,
-                startPos + graphemes.length), data, embed));
+            rag.db.addEmbedding(srcId, Embedding(Offset(startCharPos,
+                startCharPos + graphemes.length), Line(startLine, endLine), data, embed));
         }, (string e) {
             logger.tracef("Failed to generate embedding '%s': %s", e, data);
         });
-        logger.tracef("add chunk length:%s offset(%s-%s)", data.length,
-                startPos, startPos + graphemes.length);
+        logger.tracef("add chunk length:%s line(%s-%s) offset(%s-%s)", data.length,
+                startLine, endLine, startCharPos, startCharPos + graphemes.length);
 
         // 50% sliding window
-        startPos += graphemes.length;
         graphemes = graphemes[$ / 2 .. $];
+        startCharPos += graphemes.length;
+        startLine = endLine;
         nChunks++;
     }
 
+    const newline = Grapheme('\n');
     foreach (graphem; doc.data.byGrapheme) {
         graphemes ~= graphem;
+        if (graphem == newline)
+            ++endLine;
         if (graphemes.length >= nBatch) {
             addChunk();
         }

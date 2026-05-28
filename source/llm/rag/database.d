@@ -18,10 +18,10 @@ import my.path;
 import my.named_type;
 import my.optional;
 
-public import llm.rag.rag : Unknown, Url, Origin, Document, Offset;
+public import llm.rag.rag : Unknown, Url, Origin, Document, Offset, Line;
 
 immutable timeout = 30.dur!"seconds";
-enum SchemaVersion = 1;
+enum SchemaVersion = 2;
 
 private struct VersionTbl {
     @ColumnName("version")
@@ -58,13 +58,15 @@ SourceTbl.UrlType convert(Origin x) {
 
 // I am not sure this is correct but the database has stopped being corrupted
 @TableForeignKey("embedId", KeyRef("EmbeddingsTbl_rowids(rowid)"), KeyParam("ON DELETE CASCADE"))
-@TableConstraint("unique_ UNIQUE (embedId, begin, end)")
+@TableConstraint("unique_ UNIQUE (embedId, charBeginPos, charEndPos)")
 private struct TextChunkTbl {
     long id;
     long embedId;
     string text;
-    long begin;
-    long end;
+    long charBeginPos;
+    long charEndPos;
+    long lineBegin;
+    long lineEnd;
 }
 
 private immutable EmbeddingsTblSql = `
@@ -142,12 +144,14 @@ struct Source {
 
 struct Embedding {
     Offset offset;
+    Line line;
     string text;
     float[] embed;
 }
 
 struct TextChunk {
     Offset offset;
+    Line line;
     string text;
 }
 
@@ -158,6 +162,7 @@ struct Search {
 struct SourceMatch {
     Origin origin;
     Offset offset;
+    Line line;
     string text;
 }
 
@@ -347,7 +352,7 @@ struct Database {
 
     void addEmbedding(SourceId id, Embedding emb) {
         static immutable embedSql = "INSERT INTO EmbeddingsTbl (sourceId, embedding) VALUES(:sourceId, :embedding)";
-        static immutable chunkSql = "INSERT INTO TextChunkTbl (embedId, text, begin, end) VALUES(:embedId, :text, :begin, :end)";
+        static immutable chunkSql = "INSERT INTO TextChunkTbl (embedId, text, charBeginPos, charEndPos, lineBegin, lineEnd) VALUES(:embedId, :text, :charBeginPos, :charEndPos, :lineBegin, :lineEnd)";
 
         {
             auto stmt = db.prepare(embedSql);
@@ -361,20 +366,22 @@ struct Database {
             auto stmt = db.prepare(chunkSql);
             stmt.get.bind(":embedId", embedId);
             stmt.get.bind(":text", emb.text);
-            stmt.get.bind(":begin", emb.offset.begin);
-            stmt.get.bind(":end", emb.offset.end);
+            stmt.get.bind(":charBeginPos", emb.offset.begin);
+            stmt.get.bind(":charEndPos", emb.offset.end);
+            stmt.get.bind(":lineBegin", emb.line.begin);
+            stmt.get.bind(":lineEnd", emb.line.end);
             stmt.get.execute;
         }
     }
 
     private TextChunk getChunk(long embedId) {
-        static immutable sql = "SELECT text,begin,end FROM TextChunkTbl WHERE embedId=:id";
+        static immutable sql = "SELECT text,charBeginPos,charEndPos,lineBegin,lineEnd FROM TextChunkTbl WHERE embedId=:id";
         auto stmt = db.prepare(sql);
         stmt.get.bind(":id", embedId);
 
         foreach (ref r; stmt.get.execute) {
             return TextChunk(offset: Offset(begin: r.peek!long(1), end: r.peek!long(2)),
-                    text: r.peek!string(0));
+                    Line(begin: r.peek!long(3), end: r.peek!long(4)), text: r.peek!string(0));
         }
         return TextChunk.init;
     }

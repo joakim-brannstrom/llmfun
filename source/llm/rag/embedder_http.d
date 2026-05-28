@@ -44,7 +44,7 @@ class RemoteEmbedder : Embedder {
                 cfg.server.maxRetries, cfg.server.timeoutSeconds, cfg.server.backoffMs);
 
         return result.match!((HttpPostResult r) {
-            logger.tracef("RemoteEmbedder: Response status %d", r.statusCode);
+            logger.tracef(r.statusCode != 200, "RemoteEmbedder: Response status %d", r.statusCode);
 
             JSONValue json;
             try {

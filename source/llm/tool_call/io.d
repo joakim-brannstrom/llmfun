@@ -602,9 +602,10 @@ ExecuteFuncResult queryRAG(Context baseCtx, string query, long topK) {
                     (Url a) => a.value, (Path a) => a.toString);
         }
 
-        auto rval = docs.enumerate.map!(doc => format!"--- Result %s (%s chars %s-%s) ---\n%s"(doc.index + 1,
-                location(doc.value), doc.value.offset.begin, doc.value.offset.end, doc.value.data)).join(
-                "\n\n");
+        auto rval = docs.enumerate.map!(
+                doc => format!"--- Result %s (%s line %s-%s chars %s-%s) ---\n%s"(doc.index + 1,
+                location(doc.value), doc.value.line.begin, doc.value.line.end,
+                doc.value.offset.begin, doc.value.offset.end, doc.value.data)).join("\n\n");
         return ExecuteFuncResult(rval, success: true);
     }
     return ExecuteFuncResult(format!"error: topK parameter must be in range [1, %s]"(maxTopK),
