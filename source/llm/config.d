@@ -166,6 +166,7 @@ struct SummaryModelConfig {
     string prompt = "SUMMARY.md";
     double temp;
     long contextSize;
+    long contextChunkSize = 32768;
     long reasoningBudget;
     bool preserveThinking;
     long maxTokens;

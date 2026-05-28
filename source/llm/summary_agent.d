@@ -52,9 +52,9 @@ struct SummaryAgent {
     this(SummaryModelConfig confSummary) {
         this.rqSummary = LlmRequester(confSummary.toRequestConfig);
 
-        auto slot = LlmSlotRequester(confSummary.server.toSlotUrl,
-                confSummary.server.apiKey.empty ? getEnvApiKey() : confSummary.server.apiKey);
-        this.contextSize = slot.request(confSummary.contextSize);
+        auto slot = LlmSlotRequester(confSummary.server.toSlotUrl, confSummary.server.apiKey.empty
+                ? getEnvApiKey() : confSummary.server.apiKey, confSummary.name);
+        this.contextSize = slot.request(min(confSummary.contextSize, confSummary.contextChunkSize));
     }
 
     void setSystemPrompt(string x) {

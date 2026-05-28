@@ -81,7 +81,7 @@ class Agent : IBasicAgent {
 
         auto slot = LlmSlotRequester(llmConf.codeModel.server.toSlotUrl,
                 llmConf.codeModel.server.apiKey.empty
-                ? getEnvApiKey() : llmConf.codeModel.server.apiKey);
+                ? getEnvApiKey() : llmConf.codeModel.server.apiKey, llmConf.codeModel.name);
         this.contextSize = slot.request(llmConf.codeModel.contextSize);
     }
 

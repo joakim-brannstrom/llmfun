@@ -108,6 +108,7 @@ struct LlmRequester {
 struct LlmSlotRequester {
     string slotUrl;
     string apiKey;
+    string model;
     RequestConfig.Chat chat;
 
     private {
@@ -119,6 +120,8 @@ struct LlmSlotRequester {
             auto headers = ["Content-Type": "application/json"];
             if (!apiKey.empty)
                 headers["Authorization"] = "Bearer " ~ apiKey;
+            if (!model.empty)
+                headers["model"] = model;
 
             auto result = httpGetWithRetry(rq, slotUrl, headers, 3, 60, 500);
 
