@@ -6,7 +6,7 @@ import logger = std.logger;
 import std.algorithm : map, joiner;
 import std.array : appender, empty;
 import std.format : format;
-import std.json : JSONValue, parseJSON;
+import std.json : JSONValue, parseJSON, JSONType;
 import std.string : split;
 import std.sumtype : SumType, match;
 
@@ -46,17 +46,35 @@ class RemoteEmbedder : Embedder {
         return result.match!((HttpPostResult r) {
             logger.tracef("RemoteEmbedder: Response status %d", r.statusCode);
 
-            auto json = parseJSON(r.body);
-            // logger.trace(json);
+            JSONValue json;
+            try {
+                json = parseJSON(r.body);
+            } catch (Exception e) {
+                logger.trace(r.body);
+                logger.trace(e.msg);
+            }
+
+            // some implementations of the REST endpoint return an object where
+            // the embedding is in the data field.
+            json = getValue(json, (v) => json["data"], json);
             auto embeddings = getValue(json, (v) => v.array[0]["embedding"].array, JSONValue[].init);
+            if (!embeddings.empty && embeddings[0].type == JSONType.array) {
+                embeddings = embeddings[0].array;
+            }
+
             float[] resultVec;
-            foreach (e; embeddings.map!((a => getValue(a, (v) => v.array, null))).joiner) {
+            foreach (e; embeddings) {
                 try {
                     resultVec ~= cast(float) e.floating;
                 } catch (Exception e) {
                 }
             }
-            logger.tracef("RemoteEmbedder: Embedding dimensions: %s", resultVec.length);
+            if (resultVec.empty) {
+                logger.trace(json);
+                logger.trace(embeddings);
+            } else {
+                logger.tracef("RemoteEmbedder: Embedding dimensions: %s", resultVec.length);
+            }
             return EmbedResult(resultVec);
         }, (HttpPostError e) {
             logger.errorf("RemoteEmbedder: HTTP error %s: %s", e.statusCode, e.errorMsg);
