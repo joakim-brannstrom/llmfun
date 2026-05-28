@@ -30,15 +30,15 @@ struct UserConfig {
     @(NamedArgument("v", "verbose").Description(format!"Log verbosity level"))
     VerboseMode verbosity;
 
+    @(NamedArgument("config", "c").Description("Configuration file to read"))
+    void config_(string v) {
+        config = Path(v);
+    }
+
+    Path config;
+
     @(Command("agent"))
     struct AgentChatConfig {
-        @(NamedArgument("config", "c").Description("Configuration file to read"))
-        void config_(string v) {
-            config = Path(v);
-        }
-
-        Path config;
-
         @(NamedArgument("workarea", "w")
                 .Description("Agent only allowed to read/write files in workarea"))
         void workarea_(string v) {
@@ -53,13 +53,6 @@ struct UserConfig {
 
     @(Command("rag"))
     struct Rag {
-        @(NamedArgument("config", "c").Description("Configuration file to read"))
-        void config_(string v) {
-            config = Path(v);
-        }
-
-        Path config;
-
         @MutuallyExclusive() {
             @(NamedArgument().Description("Add files"))
             bool add;
@@ -149,7 +142,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     import llm.coder;
     import llm.pipeline : prettyPrint;
 
-    auto llmConf = readConfig(conf.config).userToLlmConfig(conf);
+    auto llmConf = readConfig(uconf.config).userToLlmConfig(conf);
     if (conf.setupDirs)
         makeFileStructure(llmConf);
 
@@ -271,7 +264,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     import std.path : extension, baseName;
     import std.array : appender;
 
-    auto llmConf = readConfig(conf.config).userToLlmConfig(conf);
+    auto llmConf = readConfig(uconf.config).userToLlmConfig(conf);
     if (conf.setupDirs) {
         makeFileStructure(llmConf, rag: true);
     }
