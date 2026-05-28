@@ -1,4 +1,4 @@
-name "llm_fun"
+name "llmfun"
 description "LLM agent harness"
 authors "Joakim Brännström"
 copyright "Copyright © 2026, Joakim Brännström"
