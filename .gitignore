@@ -23,10 +23,7 @@ target/
 # python
 *.pyc
 
-llama_build/
-build_llama
-workarea
 dub.selections.json
-llm_fun/workarea
-llm_fun/data/rag.json
-llm_fun/data/scratch
+llmfun/workarea
+llmfun/data/scratch
+llmfun/data/rag.sqlite3

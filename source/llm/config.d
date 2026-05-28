@@ -13,7 +13,7 @@ import my.path;
 
 import llm.query : RequestConfig;
 
-immutable ProgramName = "llm_fun";
+immutable ProgramName = "llmfun";
 
 struct LlmConfig {
     // LLM save a memory to this file which is used between runs.
