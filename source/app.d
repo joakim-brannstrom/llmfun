@@ -46,6 +46,9 @@ struct UserConfig {
         }
 
         Path workArea;
+
+        @(NamedArgument("setup").Description("Create the directory structure 'llmfun'/..."))
+        bool setupDirs;
     }
 
     @(Command("rag"))
@@ -81,6 +84,9 @@ struct UserConfig {
                 .Description(
                     "Exclude pattern for RAG files (can be repeated). Overrides config file."))
         string[] ragExclude;
+
+        @(NamedArgument("setup").Description("Create the directory structure 'llmfun'/..."))
+        bool setupDirs;
     }
 
     @(Command("tool_metrics"))
@@ -144,6 +150,8 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     import llm.pipeline : prettyPrint;
 
     auto llmConf = readConfig(conf.config).userToLlmConfig(conf);
+    if (conf.setupDirs)
+        makeFileStructure(llmConf);
 
     auto rag = () {
         try {
@@ -264,6 +272,9 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     import std.array : appender;
 
     auto llmConf = readConfig(conf.config).userToLlmConfig(conf);
+    if (conf.setupDirs) {
+        makeFileStructure(llmConf, rag: true);
+    }
 
     auto rag = () {
         try {

@@ -16,6 +16,8 @@ import llm.query : RequestConfig;
 immutable ProgramName = "llmfun";
 
 struct LlmConfig {
+    Path dataDir = ProgramName ~ "/data";
+
     // LLM save a memory to this file which is used between runs.
     Path memoryArea = ProgramName ~ "/data/memory";
 
@@ -78,6 +80,18 @@ LlmConfig makeLlmConfig() {
     LlmConfig conf;
     conf.resolvePaths;
     return conf;
+}
+
+void makeFileStructure(LlmConfig conf, bool rag = false) {
+    import std.file : mkdirRecurse;
+
+    foreach (path; [conf.scratchArea, conf.workArea] ~ (rag ? [conf.dataDir] : null)) {
+        try {
+            mkdirRecurse(path);
+        } catch (Exception e) {
+            logger.warning(e);
+        }
+    }
 }
 
 struct ToolFilter {
