@@ -73,9 +73,9 @@ class RAG {
         db.destroy;
     }
 
-    Document[] query(string query, int getTopK) {
+    Document[] querySemantic(string query, long getTopK) {
         Document[] runMatch(float[] embed) {
-            auto res = db.getBestMatch(Search(embed), getTopK);
+            auto res = db.querySemantic(Search(embed), getTopK);
             return res.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
@@ -83,6 +83,19 @@ class RAG {
             logger.warning(errMsg);
             return null;
         });
+    }
+
+    Document[] queryTextSearch(string query, long getTopK) {
+        auto results = db.queryTextSearch(query, getTopK);
+        return results.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
+    }
+
+    Document[] queryBestMatch(string query, long getTopK) {
+        auto results = queryTextSearch(query, getTopK);
+        if (results.length < getTopK) {
+            results ~= querySemantic(query, getTopK - results.length);
+        }
+        return results;
     }
 }
 

@@ -19,7 +19,6 @@ import std.process : execute;
 import my.path : AbsolutePath;
 
 import llm.tool_call;
-import llm.rag.rag;
 import llm.tool_call.utility;
 
 mixin RegisterLlmFunctions!();
@@ -582,67 +581,6 @@ ExecuteFuncResult loadImageApi(Context baseCtx, string path) {
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: failed to load image '%s': %s"(path,
                 e.msg), success: false);
-    }
-}
-
-interface RAGContext : Context {
-    RAG getRAG();
-    bool isPathInsideWorkArea(AbsolutePath path);
-}
-
-@Function("Search RAG for topK relevant results by query text")
-ExecuteFuncResult queryRAG(Context baseCtx, string query, long topK) {
-    mixin(baseContextToSpecific!RAGContext);
-
-    immutable maxTopK = 20;
-    if (topK >= 1 && topK <= maxTopK) {
-        auto docs = ctx.getRAG.query(query, cast(int) topK);
-        string location(Document doc) {
-            return doc.origin.match!((Unknown _) => "no source,",
-                    (Url a) => a.value, (Path a) => a.toString);
-        }
-
-        auto rval = docs.enumerate.map!(
-                doc => format!"--- Result %s (%s line %s-%s chars %s-%s) ---\n%s"(doc.index + 1,
-                location(doc.value), doc.value.line.begin, doc.value.line.end,
-                doc.value.offset.begin, doc.value.offset.end, doc.value.data)).join("\n\n");
-        return ExecuteFuncResult(rval, success: true);
-    }
-    return ExecuteFuncResult(format!"error: topK parameter must be in range [1, %s]"(maxTopK),
-            success: false);
-}
-
-@Function("Load file content into RAG index")
-ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
-    mixin(baseContextToSpecific!RAGContext);
-    auto path_ = AbsolutePath(path);
-    if (!ctx.isPathInsideWorkArea(path_)) {
-        return ExecuteFuncResult(format!"error: path '%s' must be inside the allowed workarea"(path),
-                success: false);
-    }
-
-    try {
-        auto data = readText(path_.toString);
-        auto result = ctx.getRAG().add(Document(Origin(path_), data, Offset.init));
-        return ExecuteFuncResult(format!"File '%s' (%s length) added as %s chunks to the RAG"(path,
-                result.length, result.chunks), success: true);
-    } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed loading file into rag: %s"(e.msg),
-                success: false);
-    }
-}
-
-@Function("Load content into RAG index")
-ExecuteFuncResult loadContentToRAG(Context baseCtx, string content) {
-    mixin(baseContextToSpecific!RAGContext);
-
-    try {
-        auto result = ctx.getRAG().add(Document(Origin(Unknown.init), content, Offset.init));
-        return ExecuteFuncResult(format!"Content (%s length) added as %s chunks to the RAG"(result.length,
-                result.chunks), success: true);
-    } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed loading file into rag: %s"(e.msg),
-                success: false);
     }
 }
 
