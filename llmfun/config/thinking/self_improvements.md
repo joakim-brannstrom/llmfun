@@ -1,9 +1,9 @@
 Self Improvement Instructions for an LLM. How to explore the implementation of the agentic framework and explore improvements to it. **Use this when** looking to improve the agent's capabilities, fix issues, or enhance the framework.
 
 # File Structure
-The implementation is located in the directory `llm_fun/`.
+The implementation is located in the directory `llmfun/`.
 
-The directory structure in `llm_fun/`:
+The directory structure in `llmfun/`:
 
 - `source/`: The source of the agentic framework that drives the agent, tooling and utility.
 - `source/llm/`: Core LLM integration modules (agent, chat, tool_call, config, etc.)
@@ -17,27 +17,27 @@ The directory structure in `llm_fun/`:
 # Build System
 
 - The project uses **DUB** as the build system.
-- The `dub.sdl` file is in the project root (`llm_fun/dub.sdl`).
-- The `llama.mak` file is in the project root (`llm_fun/llama.mak`).
+- The `dub.sdl` file is in the project root (`llmfun/dub.sdl`).
+- The `llama.mak` file is in the project root (`llmfun/llama.mak`).
 - The preBuildCommands in `dub.sdl` reference `llama.mak` for building llama.cpp libraries.
 
 # Code Changes
 
-- Modify the source code in `llm_fun/source/`.
-- Build the changes with the tool `executeDCodeWithDub("llm_fun")`.
+- Modify the source code in `llmfun/source/`.
+- Build the changes with the tool `executeDCodeWithDub("llmfun")`.
 - If compilation fails, read the error output and fix the specific issue.
 - Use `executeCode` for simple single-file D compilation (no project dependencies).
 - Use `executeDCodeWithDub` for full project builds with all dependencies.
 
 # Verification
 
-- After making changes, always run `executeDCodeWithDub("llm_fun")` to verify compilation succeeds.
+- After making changes, always run `executeDCodeWithDub("llmfun")` to verify compilation succeeds.
 - Check the exit code: 0 means success, non-zero means errors.
 - If errors occur, read the error output, identify the problematic file and line, then fix.
 
 # Common Patterns
 
-- Source files are in `llm_fun/source/llm/` with module names like `llm.agent`, `llm.config`, etc.
+- Source files are in `llmfun/source/llm/` with module names like `llm.agent`, `llm.config`, etc.
 - Imports use the pattern `import llm.module_name;`.
 - The `my.path` module provides a custom `Path` type for file paths.
 - Logging uses `logger = std.logger` aliased import.
