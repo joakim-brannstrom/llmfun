@@ -185,8 +185,10 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     void processResult(ProcessResult result) {
         foreach (m; result.chat) {
             m.match!((Message a) {
-                if (a.role != Role.user) {
+                if (!a.role.among(Role.user, Role.system)) {
                     writefln("[%s]: %s", a.role, a.content);
+                } else {
+                    logger.tracef("[%s]: %s", a.role, a.content);
                 }
             }, (ToolMessage a) {
                 if (!isHiddenToolCall(a.toolCalls)) {
