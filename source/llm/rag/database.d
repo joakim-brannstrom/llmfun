@@ -403,7 +403,7 @@ struct Database {
             logger.trace(src);
             src.match!((Source src) {
                 auto chunk = getChunk(id.embedId);
-                rval.put(SourceMatch(src.origin, offset: chunk.offset, text: chunk.text));
+                rval.put(SourceMatch(src.origin, offset: chunk.offset, line: chunk.line, text: chunk.text));
             }, (None _) {});
         }
 

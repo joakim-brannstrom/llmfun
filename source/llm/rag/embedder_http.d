@@ -20,11 +20,14 @@ import llm.config : RemoteEmbedConfig;
 class RemoteEmbedder : Embedder {
     private {
         RemoteEmbedConfig cfg;
+        string apiKey;
     }
 
     this(RemoteEmbedConfig cfg) {
-        logger.trace(cfg);
+        import llm.config : getEnvApiKey;
+
         this.cfg = cfg;
+        this.apiKey = cfg.server.apiKey.empty ? getEnvApiKey() : cfg.server.apiKey;
     }
 
     override void destroy() {
@@ -36,8 +39,8 @@ class RemoteEmbedder : Embedder {
         auto body = format!"{\"model\": \"%s\", \"input\": \"%s\"}"(cfg.name, escapeJson(text));
 
         auto headers = ["Content-Type": "application/json"];
-        if (!cfg.server.apiKey.empty) {
-            headers["Authorization"] = format!"Bearer %s"(cfg.server.apiKey);
+        if (!apiKey.empty) {
+            headers["Authorization"] = format!"Bearer %s"(apiKey);
         }
 
         auto result = httpPostWithRetry(Request(), cfg.server.toEmbedUrl, body, headers,
