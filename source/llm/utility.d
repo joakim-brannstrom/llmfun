@@ -98,22 +98,20 @@ void configCatchCtrlC() {
 }
 
 void playNotification() {
-    import std.process : execute;
-    import std.file : exists;
-    import std.parallelism : task;
-    import std.sumtype : match;
-    import my.resource;
-    import my.optional;
     import llm.config : ProgramName;
-
-    static void sound(string path) {
-        execute(["cvlc", "--play-and-exit", path]);
-    }
+    import my.optional;
+    import my.resource;
+    import std.file : exists;
+    import std.process : spawnProcess, Config;
+    import std.stdio : File;
+    import std.sumtype : match;
 
     auto path = dataSearch(ProgramName).resolve(Path("notification.mp3"));
     path.match!((Some!ResourceFile p) {
         if (p.get.exists) {
-            task!sound(p.get.toString).executeInNewThread;
+            auto f = File("/dev/null");
+            spawnProcess(["cvlc", "--play-and-exit", p.get.toString], f, f, f,
+                null, Config.detached);
         }
     }, (None _) {});
 
