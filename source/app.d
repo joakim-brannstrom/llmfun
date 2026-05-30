@@ -269,6 +269,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     import std.file : readText, exists, isFile, isDir, dirEntries, SpanMode;
     import std.path : extension, baseName;
     import std.array : appender;
+    import miniorm : spinSql;
 
     auto llmConf = readConfig(uconf.config).userToLlmConfig(conf);
     if (conf.setupDirs) {
@@ -433,12 +434,15 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         }
     }
 
-    if (conf.add)
+    if (conf.add) {
         addData();
-    else if (conf.rm)
+        spinSql!(() => rag.vacuum());
+    } else if (conf.rm) {
         removeData();
-    else if (conf.list)
+        spinSql!(() => rag.vacuum());
+    } else if (conf.list) {
         listSources();
+    }
 
     return 0;
 }

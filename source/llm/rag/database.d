@@ -539,4 +539,8 @@ ORDER BY fusion_score DESC;
         return none!Source();
     }
 
+    /// Compact the database by running a VACUUM operation
+    void vacuum() {
+        db.run("VACUUM");
+    }
 }
