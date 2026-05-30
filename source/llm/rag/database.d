@@ -88,8 +88,12 @@ CREATE VIRTUAL TABLE FtsChunksTbl USING fts5(
     tokenize='unicode61'
 )`;
 
-Database openDatabase(Path dbFile, long embedDimensions) nothrow {
+Database openDatabase(Path dbFile_, long embedDimensions) nothrow {
+    import std.file : exists;
+    import std.path : dirName;
     import llm.rag.sqlite3_vec;
+
+    string dbFile = dbFile_.toString;
 
     static void setPragmas(ref Miniorm db) {
         // dfmt off
@@ -107,6 +111,11 @@ Database openDatabase(Path dbFile, long embedDimensions) nothrow {
     }
 
     logger.trace("opening database ", dbFile).collectException;
+    if (!dbFile.dirName.exists) {
+        logger.trace("No RAG database opened. Using only in-memory database").collectException;
+        dbFile = ":memory:";
+    }
+
     int counter;
     while (true) {
         ++counter;
