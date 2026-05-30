@@ -142,6 +142,26 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     import llm.coder;
     import llm.pipeline : prettyPrint;
 
+    /// TODO: If help text ever needs externalization (config file, i18n),
+    ///       the function signature should accept a content parameter.
+    void printHelp() {
+        import std.process : environment;
+
+        if (environment.get("LLMFUN_NO_SPLASH"))
+            return;
+
+        writeln("llmfun agent mode — type a query and press Enter to start.");
+        writeln(" Use /commands for special actions:");
+        writeln("");
+        writeln("   (bare query)         Send a message to the agent");
+        writeln("   /help              Show this help message");
+        writeln("   /quit, /q, /exit   Exit the agent");
+        writeln("   /compact           Force compress the chat history");
+        writeln("   /new               Clear history and start a new conversation");
+        writeln("   /plan <query>      Run the plan pipeline");
+        writeln("   /code <query>      Run the coder pipeline");
+    }
+
     auto llmConf = readConfig(uconf.config).userToLlmConfig(conf);
     if (conf.setupDirs)
         makeFileStructure(llmConf);
@@ -209,6 +229,8 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         logger.trace(result.status != ProcessResult.Status.ok, result.status);
     }
 
+    printHelp();
+
     configCatchCtrlC();
     bool running = true;
     configLinenoise();
@@ -226,6 +248,9 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             } else if (query == "/new") {
                 agent.clearHistory;
                 logger.info("context cleared");
+                continue;
+            } else if (query == "/help") {
+                printHelp();
                 continue;
             } else if (query.startsWith("/plan ")) {
                 auto q = query["/plan ".length .. $];
