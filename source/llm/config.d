@@ -41,8 +41,10 @@ struct LlmConfig {
         memoryArea = prioDataCwdDirs.resolve("memory".Path)
             .orElse(ResourceFile(memoryArea.AbsolutePath)).get.Path;
 
-        // TODO: resolve rag paths per-element when multi-DB search is implemented
-        // For now, paths are used as-is from config
+        if (rag.length >= 1) {
+            rag[0] = prioDataCwdDirs.resolve("rag.sqlite3".Path)
+                .orElse(ResourceFile(rag[0].AbsolutePath)).get.Path;
+        }
 
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
             .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;

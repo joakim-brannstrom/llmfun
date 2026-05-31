@@ -50,7 +50,9 @@ struct UserConfig {
         @(NamedArgument("setup").Description("Create the directory structure 'llmfun'/..."))
         bool setupDirs;
 
-        @(NamedArgument("db").Description("RAG database"))
+        @(NamedArgument("db")
+                .Description(
+                    "RAG database. First DB is the primary (read/write) and the rest is read only"))
         string[] rag;
 
         @(NamedArgument("prompt", "p").Description("One shot prompt for the agent"))
