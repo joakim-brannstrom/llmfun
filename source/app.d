@@ -52,6 +52,9 @@ struct UserConfig {
 
         @(NamedArgument("db").Description("RAG database"))
         string[] rag;
+
+        @(NamedArgument("prompt", "p").Description("One shot prompt for the agent"))
+        string prompt;
     }
 
     @(Command("rag"))
@@ -169,7 +172,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     void printHelp() {
         import std.process : environment;
 
-        if (environment.get("LLMFUN_NO_SPLASH"))
+        if (environment.get("LLMFUN_NO_SPLASH") || !conf.prompt.empty)
             return;
 
         writeln("llmfun agent mode — type a query and press Enter to start.");
@@ -184,7 +187,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         writeln("   /code <query>      Run the coder pipeline");
     }
 
-    auto llmConf = readConfig(uconf.config).userToLlmConfig(conf);
+    auto llmConf = readConfig(uconf.config, !conf.prompt.empty).userToLlmConfig(conf);
     if (conf.setupDirs)
         makeFileStructure(llmConf);
 
@@ -254,10 +257,10 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     printHelp();
 
     configCatchCtrlC();
-    bool running = true;
+    bool running = conf.prompt.empty;
+    string query = conf.prompt;
     configLinenoise();
     do {
-        string query;
         if (running) {
             playNotification;
             query = multiLineConsole(format!"[%s/%s]$ "(agent.contextUsed, agent.contextSize));

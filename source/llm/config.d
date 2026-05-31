@@ -208,11 +208,11 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
     // dfmt on
 }
 
-LlmConfig readConfig(Path path = Path("config/default.json")) {
+LlmConfig readConfig(Path path = Path("config/default.json"), bool silent = false) {
     auto conf = makeLlmConfig();
 
     if (path.exists) {
-        logger.infof("Reading configuration from %s", path);
+        logger.infof(!silent, "Reading configuration from %s", path);
         return jsonToLlmConfig(conf, readText(path.toString).parseJSON);
     }
     logger.infof("No configuration at %s. Using default values", path);
