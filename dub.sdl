@@ -26,8 +26,8 @@ configuration "default" {
     excludeSourceFiles "source/utility_app.d"
 }
 
-configuration "test_app" {
-    targetName "llm_fun_test"
+configuration "llmfun_test" {
+    targetName "llmfun_test"
 
     preBuildCommands "make -C $PACKAGE_DIR -f sqlite3.mak" platform="posix"
     dflags "-P-I./vendor/sqlite3" "-P-I./vendor/sqlite3-vec"
