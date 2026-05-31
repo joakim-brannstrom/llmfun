@@ -199,8 +199,8 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
          slotUrl: conf.server.toSlotUrl,
          timeoutS: cast(int) conf.server.timeoutSeconds,
          verbosity: cast(int) conf.server.httpVerbosity,
-        apiKey: conf.server.apiKey.empty ? getEnvApiKey() : conf.server.apiKey,
-          chat: RequestConfig.Chat(model: conf.name,
+         apiKey: conf.server.apiKey.empty ? getEnvApiKey() : conf.server.apiKey,
+         chat: RequestConfig.Chat(model: conf.name,
                                   max_tokens: conf.maxTokens,
                                   temperature: conf.temp,
                                   reasoning_budget: conf.reasoningBudget,
@@ -249,6 +249,9 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
             static if (!isType!member) {
                 if (llmMemberName in json) {
                     try {
+                        logger.tracef("using config value for %s:%s - %s",
+                                ConfigT.stringof, llmMemberName, json[llmMemberName]);
+
                         used[llmMemberName] = true;
                         alias Type = typeof(member);
                         static if (is(Type : Path)) {
