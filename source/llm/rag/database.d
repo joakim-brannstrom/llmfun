@@ -425,14 +425,15 @@ struct Database {
         auto stmt = db.prepare(embedSql);
         stmt.get.bind(":embedding", fixDimension(search.embed));
         stmt.get.bind(":limit", limit);
-        Tuple!(long, "embedId", long, "sourceId", double, "rank")[] ids;
+        auto ids = appender!(Tuple!(long, "embedId", long, "sourceId", double, "rank")[])();
         foreach (ref r; stmt.get.execute) {
-            ids ~= tuple!("embedId", "sourceId", "rank")(r.peek!long(0),
-                    r.peek!long(1), r.peek!double(2));
+            ids.put(tuple!("embedId", "sourceId", "rank")(r.peek!long(0),
+                    r.peek!long(1), r.peek!double(2)));
         }
+        logger.trace("Hits ", ids.length);
 
         auto rval = appender!(SourceMatch[])();
-        foreach (id; ids) {
+        foreach (id; ids[]) {
             auto src = getSource(id.sourceId.SourceId);
             src.match!((Source src) {
                 auto chunk = getChunk(id.embedId);
