@@ -47,7 +47,8 @@ struct UserConfig {
 
         Path workArea;
 
-        @(NamedArgument("setup").Description("Create the directory structure 'llmfun'/..."))
+        @(NamedArgument("local-setup")
+                .Description("Create the directory structure 'llmfun'/... in current directory"))
         bool setupDirs;
 
         @(NamedArgument("db")
@@ -86,7 +87,8 @@ struct UserConfig {
                     "Exclude pattern for RAG files (can be repeated). Overrides config file."))
         string[] ragExclude;
 
-        @(NamedArgument("setup").Description("Create the directory structure 'llmfun'/..."))
+        @(NamedArgument("local-setup")
+                .Description("Create the directory structure 'llmfun'/... in current directory"))
         bool setupDirs;
     }
 
@@ -189,9 +191,9 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         writeln("   /code <query>      Run the coder pipeline");
     }
 
-    auto llmConf = readConfig(uconf.config, !conf.prompt.empty).userToLlmConfig(conf);
     if (conf.setupDirs)
-        makeFileStructure(llmConf);
+        makeFileStructure(LlmConfig.init);
+    auto llmConf = readConfig(uconf.config, !conf.prompt.empty).userToLlmConfig(conf);
 
     auto rag = () {
         try {
@@ -323,10 +325,10 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     import std.array : appender;
     import miniorm : spinSql;
 
-    auto llmConf = readConfig(uconf.config).userToLlmConfig(conf);
     if (conf.setupDirs) {
-        makeFileStructure(llmConf, rag: true);
+        makeFileStructure(LlmConfig.init, rag: true);
     }
+    auto llmConf = readConfig(uconf.config).userToLlmConfig(conf);
 
     auto rag = () {
         try {

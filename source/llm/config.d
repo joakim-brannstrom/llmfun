@@ -87,8 +87,10 @@ LlmConfig makeLlmConfig() {
 void makeFileStructure(LlmConfig conf, bool rag = false) {
     import std.file : mkdirRecurse;
 
-    foreach (path; [conf.scratchArea, conf.workArea] ~ (rag ? [conf.dataDir] : null)) {
+    foreach (path; ([conf.scratchArea, conf.workArea] ~ (rag ? [conf.dataDir] : null)).filter!(
+            a => !a.exists)) {
         try {
+            logger.info("Creating directory ", path);
             mkdirRecurse(path);
         } catch (Exception e) {
             logger.warning(e);
