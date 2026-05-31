@@ -88,7 +88,7 @@ CREATE VIRTUAL TABLE FtsChunksTbl USING fts5(
     tokenize='unicode61'
 )`;
 
-Database openDatabase(Path dbFile_, long embedDimensions) nothrow {
+Optional!Database openDatabase(Path dbFile_, long embedDimensions, bool readOnly = false) nothrow {
     import std.file : exists;
     import std.path : dirName;
     import llm.rag.sqlite3_vec;
@@ -116,11 +116,11 @@ Database openDatabase(Path dbFile_, long embedDimensions) nothrow {
         dbFile = ":memory:";
     }
 
-    int counter;
-    while (true) {
+    for (int counter; counter < 100; ++counter) {
         ++counter;
         try {
-            auto db = Miniorm(dbFile, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
+            auto db = Miniorm(dbFile, readOnly ? SQLITE_OPEN_READONLY
+                    : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE));
             setPragmas(db);
             sqlite3_vec_init(cast(sqlite3*) db.handle, null, null);
             const versionData = () {
@@ -133,7 +133,9 @@ Database openDatabase(Path dbFile_, long embedDimensions) nothrow {
 
             if (versionData.version_ < SchemaVersion
                     || versionData.embedDimensions != embedDimensions) {
-                db.begin;
+                logger.tracef("Updating database to schema version %s with %s dimensions",
+                        versionData.version_, versionData.embedDimensions);
+                auto trans = db.transaction;
                 static foreach (tbl; Schema)
                     db.run("DROP TABLE " ~ tbl.stringof).collectException;
                 db.run("DROP TABLE EmbeddingsTbl").collectException;
@@ -142,9 +144,9 @@ Database openDatabase(Path dbFile_, long embedDimensions) nothrow {
                 db.run(format!EmbeddingsTblSql(embedDimensions));
                 db.run(FTSChunksSql);
                 db.run(miniorm.insert!VersionTbl, VersionTbl(SchemaVersion, embedDimensions));
-                db.commit;
+                trans.commit;
             }
-            return Database(db, embedDimensions);
+            return Database(db, embedDimensions).some;
         } catch (Exception e) {
             logger.trace(e).collectException;
             logger.warningf("Trying to open/create database '%s' (%s): %s",
@@ -153,6 +155,8 @@ Database openDatabase(Path dbFile_, long embedDimensions) nothrow {
 
         Thread.sleep(50.dur!"msecs");
     }
+    logger.warningf("Failed to open database '%s'", dbFile).collectException;
+    return none!Database();
 }
 
 alias SourceId = NamedType!(long, Tag!"SourceId", 0, Comparable, TagStringable);
@@ -193,6 +197,7 @@ struct SourceMatch {
     Offset offset;
     Line line;
     string text;
+    double rank;
 }
 
 struct Database {
@@ -322,7 +327,6 @@ struct Database {
         auto stmt = db.prepare(sql);
         auto res = stmt.get.execute;
         foreach (ref r; res) {
-            logger.trace(r.peek!long(0));
             getSource(r.peek!long(0).SourceId).match!((None _) {}, (Source a) => rval.put(a));
         }
         return rval[];
@@ -416,24 +420,24 @@ struct Database {
     }
 
     SourceMatch[] querySemantic(Search search, long limit) {
-        static immutable embedSql = "SELECT id,sourceId FROM EmbeddingsTbl WHERE embedding MATCH :embedding ORDER BY distance LIMIT :limit";
+        static immutable embedSql = "SELECT id,sourceId," ~ "row_number() OVER (ORDER BY distance) as rank FROM EmbeddingsTbl WHERE embedding MATCH :embedding AND k = :limit ORDER BY distance";
 
         auto stmt = db.prepare(embedSql);
         stmt.get.bind(":embedding", fixDimension(search.embed));
         stmt.get.bind(":limit", limit);
-        Tuple!(long, "embedId", long, "sourceId")[] ids;
+        Tuple!(long, "embedId", long, "sourceId", double, "rank")[] ids;
         foreach (ref r; stmt.get.execute) {
-            ids ~= tuple!("embedId", "sourceId")(r.peek!long(0), r.peek!long(1));
+            ids ~= tuple!("embedId", "sourceId", "rank")(r.peek!long(0),
+                    r.peek!long(1), r.peek!double(2));
         }
 
         auto rval = appender!(SourceMatch[])();
         foreach (id; ids) {
             auto src = getSource(id.sourceId.SourceId);
-            logger.trace(src);
             src.match!((Source src) {
                 auto chunk = getChunk(id.embedId);
                 rval.put(SourceMatch(src.origin, offset: chunk.offset, line: chunk.line,
-                    text: chunk.text));
+                    text: chunk.text, rank: id.rank));
             }, (None _) {});
         }
 
@@ -441,17 +445,16 @@ struct Database {
     }
 
     SourceMatch[] queryTextSearch(string query, long limit) {
-        static immutable ftsSql = "SELECT rowid, rank, snippet(FtsChunksTbl, '<<', '>>') AS snippet_text "
+        static immutable ftsSql = "SELECT rowid, rank "
             ~ "FROM FtsChunksTbl WHERE FtsChunksTbl MATCH :query ORDER BY rank LIMIT :limit";
 
         auto stmt = db.prepare(ftsSql);
         stmt.get.bind(":query", query);
         stmt.get.bind(":limit", limit);
 
-        Tuple!(long, "rowid", double, "rank", string, "snippet")[] results;
+        auto results = appender!(Tuple!(long, "rowid", double, "rank")[])();
         foreach (ref r; stmt.get.execute) {
-            results ~= tuple!("rowid", "rank", "snippet")(r.peek!long(0),
-                    r.peek!double(1), r.peek!string(2));
+            results.put(tuple!("rowid", "rank")(r.peek!long(0), r.peek!double(1)));
         }
 
         auto rval = appender!(SourceMatch[])();
@@ -462,7 +465,7 @@ struct Database {
                 auto src = getSourceByEmbedId(chunk.embedId);
                 src.match!((Source src) {
                     rval.put(SourceMatch(src.origin, offset: chunk.offset,
-                        line: chunk.line, text: res.snippet));
+                        line: chunk.line, text: chunk.text, rank: res.rank));
                 }, (None _) {});
             }
         }
@@ -474,7 +477,7 @@ struct Database {
         static immutable sql = `
 WITH vec_matches AS (
   SELECT
-    rowid,                            -- EmbeddingsTbl.id
+    id AS rowid,                      -- EmbeddingsTbl.id
     row_number() OVER (ORDER BY distance) AS rank_number
   FROM EmbeddingsTbl
   WHERE embedding MATCH :embedding
@@ -485,11 +488,11 @@ fts_matches AS (
     rowid,                            -- TextChunkTbl.id
     row_number() OVER (ORDER BY rank) AS rank_number
   FROM FtsChunksTbl
-  WHERE FtsChunksTbl MATCH :text_query
+  WHERE text MATCH :text_query
   LIMIT :limit
 )
 SELECT
-  TextChunk.id,TextChunk.text,
+  id,
   (
     1.0 / (60 + coalesce(vec_matches.rank_number, 1000))
     + 1.0 / (60 + coalesce(fts_matches.rank_number, 1000))
@@ -499,24 +502,43 @@ LEFT JOIN vec_matches ON TextChunkTbl.embedId = vec_matches.rowid
 LEFT JOIN fts_matches ON TextChunkTbl.id = fts_matches.rowid
 ORDER BY fusion_score DESC;
 `;
+
+        double countTextChunks() {
+            static immutable sql = "SELECT count(*) FROM TextChunkTbl";
+
+            double count = 0.0;
+            auto stmt = db.prepare(sql);
+            foreach (ref r; stmt.get.execute)
+                count = cast(double) r.peek!long(0);
+            return count;
+        }
+
+        double reduceRankBias(double chunkCount, double rank) {
+            import std.math : log;
+
+            immutable k = 60;
+            return 1.0 / (k + rank) * log(chunkCount);
+        }
+
+        const chunkCount = countTextChunks();
         auto stmt = db.prepare(sql);
         stmt.get.bind(":embedding", embedding.embed);
         stmt.get.bind(":text_query", query);
         stmt.get.bind(":limit", limit);
 
-        Tuple!(long, "id", double, "rank", string, "text")[] results;
+        auto results = appender!(Tuple!(long, "id", double, "rank")[])();
         foreach (ref r; stmt.get.execute) {
-            results ~= tuple!("id", "rank", "text")(r.peek!long(0),
-                    r.peek!double(2), r.peek!string(1));
+            results.put(tuple!("id", "rank")(r.peek!long(0),
+                    reduceRankBias(chunkCount, r.peek!double(1))));
         }
 
         auto rval = appender!(SourceMatch[])();
-        foreach (res; results.map!(a => tuple(a.text, getChunkByRowid(a.id)))
-                .filter!(a => !a[1].text.empty)) {
-            auto src = getSourceByEmbedId(res[1].embedId);
+        foreach (res; results[].map!(a => tuple(getChunkByRowid(a.id), a.rank))
+                .filter!(a => !a[0].text.empty)) {
+            auto src = getSourceByEmbedId(res[0].embedId);
             src.match!((Source src) {
-                rval.put(SourceMatch(src.origin, offset: res[1].offset, line: res[1].line,
-                    text: res[0]));
+                rval.put(SourceMatch(src.origin, offset: res[0].offset, line: res[0].line,
+                    text: res[0].text, rank: res[1]));
             }, (None _) {});
         }
 
@@ -538,7 +560,7 @@ ORDER BY fusion_score DESC;
     }
 
     Optional!Source getSourceByEmbedId(long embedId) {
-        static immutable sql = "SELECT sourceId FROM EmbeddingsTbl WHERE rowid=:embedId";
+        static immutable sql = "SELECT sourceId FROM EmbeddingsTbl WHERE id=:embedId";
         auto stmt = db.prepare(sql);
         stmt.get.bind(":embedId", embedId);
 
@@ -551,5 +573,10 @@ ORDER BY fusion_score DESC;
     /// Compact the database by running a VACUUM operation
     void vacuum() {
         db.run("VACUUM");
+    }
+
+    /// Must be called for the index to reflect the changes to TextChunkTbl
+    void fts5Rebuild() {
+        db.run("INSERT INTO FtsChunksTbl(FtsChunksTbl) VALUES('rebuild')");
     }
 }

@@ -4,10 +4,11 @@
 module llm.rag.rag;
 
 import logger = std.logger;
-import std.algorithm;
+import std.algorithm : map, filter, joiner, sort, cache;
 import std.array : array, empty, appender;
 import std.digest.murmurhash : MurmurHash3;
 import std.digest;
+import std.range : take, enumerate, iota;
 import std.stdio : File;
 import std.sumtype;
 
@@ -53,30 +54,47 @@ class RAG {
     import llm.rag.database;
 
     Embedder embedder;
-    Database db;
-    alias db this;
+    Database[] dbs;
+    Path[] dbFiles;
 
-    this(Embedder embedder, Database db) {
-        this.embedder = embedder;
-        this.db = db;
+    ref Database db() {
+        return dbs[0];
     }
 
-    this(Embedder embedder, Path dbFile, long dimensions) {
+    alias db this;
+
+    this(Embedder embedder, Path[] dbFiles, long dimensions) {
+        import my.optional;
         import llm.rag.database : openDatabase;
 
         this.embedder = embedder;
-        this.db = openDatabase(dbFile, dimensions);
+        if (dbFiles.empty)
+            dbFiles ~= Path(":memory:");
+        bool isReadOnly = false;
+        foreach (dbFile; dbFiles) {
+            openDatabase(dbFile, dimensions, isReadOnly).match!((Database db) {
+                this.dbs ~= db;
+                this.dbFiles ~= dbFile;
+            }, (None _) {});
+            isReadOnly = true;
+        }
     }
 
     void destroy() {
         embedder.destroy();
-        db.destroy;
+        foreach (ref a; dbs)
+            a.destroy;
+        dbs = null;
     }
 
     Document[] querySemantic(string query, long getTopK) {
         Document[] runMatch(float[] embed) {
-            auto res = db.querySemantic(Search(embed), getTopK);
-            return res.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
+            return iota(dbs.length).map!(i => dbs[i].querySemantic(Search(embed), getTopK))
+                .cache
+                .joiner
+                .array
+                .sort!((a, b) => a.rank > b.rank)
+                .take(getTopK).array.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
         return embedder.embed(query).match!((float[] a) => runMatch(a), (string errMsg) {
@@ -86,16 +104,42 @@ class RAG {
     }
 
     Document[] queryTextSearch(string query, long getTopK) {
-        auto results = db.queryTextSearch(query, getTopK);
-        return results.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
+        return iota(dbs.length).map!(i => dbs[i].queryTextSearch(query, getTopK))
+            .cache
+            .joiner
+            .array
+            .sort!((a, b) => a.rank < b.rank)
+            .take(getTopK).map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
     }
 
     Document[] queryBestMatch(string query, long getTopK) {
-        auto results = queryTextSearch(query, getTopK);
-        if (results.length < getTopK) {
-            results ~= querySemantic(query, getTopK - results.length);
+        Document[] runMatch(float[] embed) {
+            return iota(dbs.length).map!(i => dbs[i].queryCombineSemanticText(Search(embed),
+                    query, getTopK))
+                .cache
+                .joiner
+                .array
+                .sort!((a, b) => a.rank > b.rank)
+                .take(getTopK).map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
-        return results;
+
+        return embedder.embed(query).match!((float[] a) => runMatch(a), (string errMsg) {
+            logger.tracef(errMsg);
+            return queryTextSearch(query, getTopK);
+        });
+    }
+
+    struct DbSource {
+        Path name;
+        Source[] sources;
+    }
+
+    DbSource[] getSources() {
+        auto rval = appender!(DbSource[])();
+        foreach (idx; 0 .. dbs.length) {
+            rval.put(DbSource(dbFiles[idx], dbs[idx].getSources));
+        }
+        return rval[];
     }
 }
 

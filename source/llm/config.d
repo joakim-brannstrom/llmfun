@@ -5,7 +5,7 @@ import std.algorithm : filter, map;
 import std.array : array, empty;
 import std.file : readText, exists, mkdirRecurse;
 import std.format : format;
-import std.json : JSONValue, parseJSON;
+import std.json : JSONValue, JSONType, parseJSON;
 import std.sumtype : SumType;
 import std.sumtype : match;
 
@@ -27,7 +27,7 @@ struct LlmConfig {
 
     Path promptDir = ProgramName ~ "/config/prompt";
 
-    Path rag = ProgramName ~ "/data/rag.sqlite3";
+    Path[] rag = [ProgramName ~ "/data/rag.sqlite3"];
 
     void resolvePaths() {
         import my.resource;
@@ -41,8 +41,8 @@ struct LlmConfig {
         memoryArea = prioDataCwdDirs.resolve("memory".Path)
             .orElse(ResourceFile(memoryArea.AbsolutePath)).get.Path;
 
-        rag = prioDataCwdDirs.resolve("rag.sqlite3".Path)
-            .orElse(ResourceFile(rag.AbsolutePath)).get.Path;
+        // TODO: resolve rag paths per-element when multi-DB search is implemented
+        // For now, paths are used as-is from config
 
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
             .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;
@@ -253,6 +253,16 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                         alias Type = typeof(member);
                         static if (is(Type : Path)) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].str.Path;
+                        } else static if (is(Type == Path[])) {
+                            auto val = json[llmMemberName];
+                            if (val.type == JSONType.STRING) {
+                                __traits(getMember, conf, llmMemberName) = [
+                                    val.str.Path
+                                ];
+                            } else {
+                                __traits(getMember, conf, llmMemberName) = val.array.map!(a => a.str.Path)
+                                    .array;
+                            }
                         } else static if (is(Type : string)) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].str;
                         } else static if (is(Type : bool)) {

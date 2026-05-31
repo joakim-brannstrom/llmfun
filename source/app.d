@@ -49,6 +49,9 @@ struct UserConfig {
 
         @(NamedArgument("setup").Description("Create the directory structure 'llmfun'/..."))
         bool setupDirs;
+
+        @(NamedArgument("db").Description("RAG database"))
+        string[] rag;
     }
 
     @(Command("rag"))
@@ -66,7 +69,7 @@ struct UserConfig {
         string path;
 
         @(NamedArgument("db").Description("RAG database"))
-        string rag;
+        string[] rag;
 
         @(NamedArgument("include", "i")
                 .Description(
@@ -106,6 +109,25 @@ LlmConfigT userToLlmConfig(LlmConfigT, ConfigT)(LlmConfigT llm, ConfigT conf) {
                         if (!__traits(getMember, conf, confMemberName).empty) {
                             __traits(getMember, llm, llmMemberName) = __traits(getMember,
                                     conf, confMemberName).Path;
+                        }
+                    } else static if (is(Type == Path[])) {
+                        alias ConfType = typeof(__traits(getMember, conf, confMemberName));
+                        static if (is(ConfType == string)) {
+                            auto cv = __traits(getMember, conf, confMemberName);
+                            if (!cv.empty) {
+                                __traits(getMember, llm, llmMemberName) = [
+                                    cv.Path
+                                ];
+                            }
+                        } else static if (is(ConfType == string[])) {
+                            auto cv = __traits(getMember, conf, confMemberName);
+                            if (!cv.empty) {
+                                Path[] result;
+                                foreach (s; cv) {
+                                    result ~= s.Path;
+                                }
+                                __traits(getMember, llm, llmMemberName) = result;
+                            }
                         }
                     } else static if (is(Type : string)) {
                         if (!__traits(getMember, conf, confMemberName).empty) {
@@ -174,7 +196,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             logger.warning(e);
         }
         return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)),
-                Path(":memory:"), llmConf.embedDimensions);
+                null, llmConf.embedDimensions);
     }();
     scope (exit) {
         rag.destroy;
@@ -309,7 +331,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
             logger.warning(e);
         }
         return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)),
-                Path(":memory:"), llmConf.embedDimensions);
+                null, llmConf.embedDimensions);
     }();
     scope (exit) {
         rag.destroy;
@@ -419,7 +441,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         long unknownSkipped = 0;
 
         auto candidates = appender!(RemoveCandidate[])();
-        foreach (src; rag.getSources) {
+        foreach (src; rag.db.getSources) {
             src.origin.match!((Unknown _) { unknownSkipped++; return; }, (Path a) {
                 if (ragFilter.match(a.toString))
                     candidates.put(RemoveCandidate(src.origin, a.toString));
@@ -450,21 +472,26 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 
     void listSources() {
         logger.info("List all sources");
-        foreach (src; rag.getSources) {
-            src.origin.match!((Unknown _) {
-                logger.infof("unknown (%s)", src.checksum.get);
-            }, (Path a) { logger.infof("path:'%s' (%s)", a, src.checksum.get); }, (Url a) {
-                logger.infof("url:'%s' (%s)", a.value, src.checksum.get);
-            });
+        foreach (dbSrc; rag.getSources) {
+            logger.infof("Database '%s'", dbSrc.name);
+            foreach (src; dbSrc.sources) {
+                src.origin.match!((Unknown _) {
+                    logger.infof("unknown (%s)", src.checksum.get);
+                }, (Path a) {
+                    logger.infof("path:'%s' (%s)", a, src.checksum.get);
+                }, (Url a) {
+                    logger.infof("url:'%s' (%s)", a.value, src.checksum.get);
+                });
+            }
         }
     }
 
     if (conf.add) {
         addData();
-        spinSql!(() => rag.vacuum());
+        spinSql!(() { rag.vacuum; rag.fts5Rebuild; });
     } else if (conf.rm) {
         removeData();
-        spinSql!(() => rag.vacuum());
+        spinSql!(() { rag.vacuum; rag.fts5Rebuild; });
     } else if (conf.list) {
         listSources();
     }

@@ -68,6 +68,8 @@ struct UserConfig {
 
     @(Command("test_rag_sqlite"))
     struct TestRagSqliteConfig {
+        @(NamedArgument("config").Required().Description("configuration file to read"))
+        string config;
     }
 
     @(Command("print_tools"))
@@ -332,9 +334,33 @@ int appMain(UserConfig uconf, UserConfig.TestPipelineConfig conf) {
 
 int appMain(UserConfig uconf, UserConfig.TestRagSqliteConfig conf) {
     import llm.rag.database;
+    import llm.config;
+    import llm.rag.embedder : createEmbedder;
+    import llm.rag.rag;
     import d2sqlite3 : ResultRange;
 
-    auto db = openDatabase("smurf.sqlite".Path, 4);
+    auto llmConf = readConfig(conf.config.Path).userToLlmConfig(conf);
+    auto embedder = createEmbedder(llmConf.embedConfig);
+
+    // auto db = openDatabase("smurf.sqlite3".Path, 768);
+    auto rag = new RAG(embedder, [
+        "smurf.sqlite3".Path, "llmfun/data/rag.sqlite3".Path
+    ], llmConf.embedConfig.match!((RemoteEmbedConfig a) => a.dimensions,
+            (LocalEmbedConfig a) => a.dimensions));
+    // logger.warning(llmConf);
+    scope (exit)
+        rag.destroy;
+
+    auto query = "planner";
+
+    auto result = rag.queryBestMatch(query, 10);
+    logger.info("best match: ", result);
+
+    // result = rag.querySemantic(query, 10);
+    // logger.info("semantic: ", result);
+
+    // result = rag.queryTextSearch(query, 10);
+    // logger.info("text: ", result);
 
     bool process(ResultRange result) {
         foreach (a; result.enumerate) {
@@ -342,35 +368,46 @@ int appMain(UserConfig uconf, UserConfig.TestRagSqliteConfig conf) {
         }
         return true;
     }
+    // rag.db.fts5Rebuild;
+    rag.dbs[0].run("SELECT count(*) FROM TextChunkTbl", &process);
 
-    db.run("SELECT vec_version()", &process);
+    // rag.run("SELECT vec_version()", &process);
 
     // auto src = Source(Origin(Path("smurf.txt")), 4242.SourceChecksum);
     // logger.info("Add source: ", src);
-    // auto srcId = db.addSource(src);
+    // auto srcId = rag.addSource(src);
     //
     // logger.info("Add embeddings");
     // float[] embed = [0.1, 0.2, 0.3, 0.4];
-    // db.addEmbedding(srcId, Embedding(Offset(42, 84), "here we are", embed));
+    // rag.addEmbedding(srcId, Embedding(Offset(42, 84), "here we are", embed));
     //
-    // logger.info("Result");
-    db.run("SELECT * from SourceTbl", &process);
-    db.run("SELECT * from EmbeddingsTbl", &process);
+    logger.info("Result");
+    // rag.run("SELECT rowid,rank, snippet(FtsChunksTbl, '<<', '>>') AS snippet_text FROM FtsChunksTbl WHERE text MATCH 'dlang' LIMIT 5",
+    //         &process);
+    rag.db.run("SELECT * from SourceTbl", &process);
+    // db.run("SELECT * from EmbeddingsTbl", &process);
+    {
+        // auto stmt = rag.prepare("SELECT * from EmbeddingsTbl");
+    }
 
     // logger.info("Add same source, should ignore it");
-    // db.addSource(src);
-    // db.run("SELECT * from SourceTbl", &process);
-    // db.run("SELECT * from EmbeddingsTbl", &process);
+    // rag.addSource(src);
+    // rag.run("SELECT * from SourceTbl", &process);
+    // rag.run("SELECT * from EmbeddingsTbl", &process);
     //
     // logger.info("Search");
-    // auto searchResult = db.getBestMatch(Search(embed), 3);
+    // auto searchResult = rag.getBestMatch(Search(embed), 3);
     // logger.info(searchResult);
     //
     // logger.info("should now be deleted");
-    // logger.info(db.getSource(src.origin));
-    // db.removeSource(src.origin);
-    // db.run("SELECT * from EmbeddingsTbl", &process);
-    // db.run("SELECT * from EmbeddingsTbl_rowids", &process);
+    // logger.info(rag.getSource(src.origin));
+    // rag.removeSource(src.origin);
+    // rag.run("SELECT * from EmbeddingsTbl", &process);
+    // rag.run("SELECT * from EmbeddingsTbl_rowids", &process);
+
+    logger.info("Sources");
+    foreach (a; rag.getSources)
+        logger.info(a);
 
     return 0;
 }
