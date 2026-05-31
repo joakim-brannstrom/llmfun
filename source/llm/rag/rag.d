@@ -12,6 +12,7 @@ import std.range : take, enumerate, iota;
 import std.stdio : File;
 import std.sumtype;
 
+import miniorm : spinSql;
 import my.path;
 public import my.path : Path;
 
@@ -160,18 +161,14 @@ RagAddResult add(RAG rag, Document doc) {
 
     long dataHash = toUint(digest!(MurmurHash3!32)(doc.data));
 
-    if (rag.hasSource(Source(doc.origin, dataHash.SourceChecksum))) {
+    if (spinSql!(() => rag.hasSource(Source(doc.origin, dataHash.SourceChecksum)))) {
         logger.trace("source already exist in database");
         return RagAddResult(doc.data.length, 1);
     }
-    // try to remove the source before adding to ensure old cruft isn't left
-    rag.removeSource(doc.origin);
 
-    auto trans = rag.db.transaction;
-
-    auto srcId = rag.db.addSource(Source(doc.origin, SourceChecksum(dataHash)));
     const nBatch = rag.embedder.batchSize();
 
+    auto embeddings = appender!(Embedding[])();
     size_t nChunks;
     size_t startCharPos;
     size_t startLine, endLine;
@@ -180,7 +177,7 @@ RagAddResult add(RAG rag, Document doc) {
         auto data = graphemes.byCodePoint.toUTF8;
 
         rag.embedder.embed(data).match!((float[] embed) {
-            rag.db.addEmbedding(srcId, Embedding(Offset(startCharPos,
+            embeddings.put(Embedding(Offset(startCharPos,
                 startCharPos + graphemes.length), Line(startLine, endLine), data, embed));
         }, (string e) {
             logger.tracef("Failed to generate embedding '%s': %s", e, data);
@@ -208,7 +205,16 @@ RagAddResult add(RAG rag, Document doc) {
         addChunk();
     }
 
-    trans.commit;
+    spinSql!(() {
+        auto trans = rag.db.transaction;
+        // try to remove the source before adding to ensure old cruft isn't left
+        rag.removeSource(doc.origin);
+        auto srcId = rag.db.addSource(Source(doc.origin, SourceChecksum(dataHash)));
+        foreach (ref e; embeddings[]) {
+            rag.db.addEmbedding(srcId, e);
+        }
+        trans.commit;
+    });
 
     return RagAddResult(doc.data.length, nChunks);
 }
