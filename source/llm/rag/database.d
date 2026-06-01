@@ -88,7 +88,7 @@ CREATE VIRTUAL TABLE FtsChunksTbl USING fts5(
     tokenize='unicode61'
 )`;
 
-Optional!Database openDatabase(Path dbFile_, long embedDimensions, bool readOnly = false) nothrow {
+Optional!Database openDatabase(AbsolutePath dbFile_, long embedDimensions, bool readOnly = false) nothrow {
     import std.file : exists;
     import std.path : dirName;
     import llm.rag.sqlite3_vec;
@@ -130,6 +130,16 @@ Optional!Database openDatabase(Path dbFile_, long embedDimensions, bool readOnly
             }().ifThrown(VersionTbl(0));
 
             alias Schema = AliasSeq!(VersionTbl, SourceTbl, OriginUrlTbl, TextChunkTbl);
+
+            bool mismatch = versionData.version_ < SchemaVersion
+                || versionData.embedDimensions != embedDimensions;
+
+            if (mismatch && readOnly) {
+                logger.warningf("Unable to open '%s' because there is a mismatch between either db schema or embedding dimensions. Expect schema %s, db has schema %s. Expected dimensions %s, db has %s dimensions",
+                        dbFile, SchemaVersion, versionData.version_,
+                        embedDimensions, versionData.embedDimensions);
+                return none!Database();
+            }
 
             if (versionData.version_ < SchemaVersion
                     || versionData.embedDimensions != embedDimensions) {

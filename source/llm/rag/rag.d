@@ -74,7 +74,7 @@ class RAG {
             dbFiles ~= Path(":memory:");
         bool isReadOnly = false;
         foreach (dbFile; dbFiles) {
-            openDatabase(dbFile, dimensions, isReadOnly).match!((Database db) {
+            openDatabase(dbFile.AbsolutePath, dimensions, isReadOnly).match!((Database db) {
                 this.dbs.insertBack(db);
                 this.dbFiles ~= dbFile;
             }, (None _) {});
