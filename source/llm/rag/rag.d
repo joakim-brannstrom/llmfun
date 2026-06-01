@@ -1,11 +1,23 @@
-// RAG implementation using Embedder abstraction.
-// Decoupled from specific model implementations via the Embedder interface.
+/// RAG implementation using Embedder abstraction.
+/// Decoupled from specific model implementations via the Embedder interface.
+///
+/// Shuffle-based Rank Randomization
+/// --------------------------------
+/// Query functions (`querySemantic`, `queryTextSearch`, `queryBestMatch`) apply
+/// `randomizeRanks()` to the collected result array before sorting by rank. This
+/// eliminates database-order bias: without shuffling, results with identical ranks
+/// would always be taken from whichever database returned them first.
+///
+/// How it works: a Fisher-Yates shuffle is applied to a copy of the `SourceMatch[]`
+/// array, then the shuffled copy is sorted by rank and truncated to top-K. The
+/// original array is never mutated.
 
 module llm.rag.rag;
 
 import logger = std.logger;
-import std.algorithm : map, filter, joiner, sort, cache;
+import std.algorithm : map, filter, joiner, sort, cache, swap;
 import std.array : array, empty, appender;
+import std.random : uniform;
 import std.digest.murmurhash : MurmurHash3;
 import std.digest;
 import std.range : take, enumerate, iota;
@@ -18,6 +30,7 @@ public import my.path : Path;
 
 import llm.rag.embedder;
 import llm.rag.embedder_llama;
+import llm.rag.database : SourceMatch;
 
 struct Unknown {
 }
@@ -91,12 +104,10 @@ class RAG {
 
     Document[] querySemantic(string query, long getTopK) {
         Document[] runMatch(float[] embed) {
-            return iota(dbs.length).map!(i => dbs[i].querySemantic(Search(embed), getTopK))
-                .cache
-                .joiner
-                .array
-                .sort!((a, b) => a.rank > b.rank)
-                .take(getTopK).array.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
+            return iota(dbs.length).map!(i => dbs[i].querySemantic(Search(embed),
+                    getTopK)).cache.joiner.array.randomizeRanks().sort!((a,
+                    b) => a.rank > b.rank).take(getTopK)
+                .array.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
         return embedder.embed(query).match!((float[] a) => runMatch(a), (string errMsg) {
@@ -106,23 +117,18 @@ class RAG {
     }
 
     Document[] queryTextSearch(string query, long getTopK) {
-        return iota(dbs.length).map!(i => dbs[i].queryTextSearch(query, getTopK))
-            .cache
-            .joiner
-            .array
-            .sort!((a, b) => a.rank < b.rank)
-            .take(getTopK).map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
+        return iota(dbs.length).map!(i => dbs[i].queryTextSearch(query,
+                getTopK)).cache.joiner.array.randomizeRanks().sort!((a,
+                b) => a.rank < b.rank).take(getTopK)
+            .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
     }
 
     Document[] queryBestMatch(string query, long getTopK) {
         Document[] runMatch(float[] embed) {
             return iota(dbs.length).map!(i => dbs[i].queryCombineSemanticText(Search(embed),
-                    query, getTopK))
-                .cache
-                .joiner
-                .array
-                .sort!((a, b) => a.rank > b.rank)
-                .take(getTopK).map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
+                    query, getTopK)).cache.joiner.array.randomizeRanks()
+                .sort!((a, b) => a.rank > b.rank).take(getTopK)
+                .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
         return embedder.embed(query).match!((float[] a) => runMatch(a), (string errMsg) {
@@ -218,4 +224,68 @@ RagAddResult add(RAG rag, Document doc) {
     });
 
     return RagAddResult(doc.data.length, nChunks);
+}
+
+private:
+
+/// Fisher-Yates shuffle on a copy of the result array, before sorting by rank.
+/// Eliminates database-order bias among results with identical ranks.
+/// Returns a new array; does not mutate the input.
+SourceMatch[] randomizeRanks(SourceMatch[] results) {
+    import std.random : randomShuffle, rndGen;
+
+    return results.randomShuffle(rndGen);
+}
+
+// Helper to create a SourceMatch with a given rank
+SourceMatch makeMatch(double rank) {
+    return SourceMatch(Origin(Unknown()), Offset(0, 0), Line(0, 0), "", rank);
+}
+
+unittest {
+    // Test 4: Shuffle produces different orderings
+    // Probabilistic: 5-element array has 120 permutations;
+    // chance of false failure is ~ (1/120)^99 ≈ 0
+    {
+        SourceMatch[] input = [
+            makeMatch(1.0), makeMatch(2.0), makeMatch(3.0), makeMatch(4.0),
+            makeMatch(5.0)
+        ];
+        bool gotDifferent = false;
+        auto first = randomizeRanks(input.dup);
+        foreach (_; 0 .. 100) {
+            auto current = randomizeRanks(input);
+            if (current != first) {
+                gotDifferent = true;
+                break;
+            }
+        }
+        assert(gotDifferent, "Shuffle should produce different orderings");
+    }
+
+    // Test 5: Uniform distribution check
+    {
+        SourceMatch[] input = [
+            makeMatch(10.0), makeMatch(20.0), makeMatch(30.0), makeMatch(40.0)
+        ];
+        long[4] counts;
+        foreach (_; 0 .. 10_000) {
+            auto result = randomizeRanks(input.dup);
+            double rank = result[0].rank;
+            if (rank == 10.0)
+                counts[0]++;
+            else if (rank == 20.0)
+                counts[1]++;
+            else if (rank == 30.0)
+                counts[2]++;
+            else if (rank == 40.0)
+                counts[3]++;
+        }
+        foreach (count; counts) {
+            import std.math : abs;
+
+            assert(abs(cast(long)(count - 2500)) < 500,
+                    "Distribution should be roughly uniform, got count: " ~ count.stringof);
+        }
+    }
 }
