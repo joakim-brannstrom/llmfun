@@ -385,6 +385,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 
         if (!conf.path.exists) {
             logger.warningf("Path %s do not exist", conf.path);
+            return;
         }
 
         auto ragFilter = buildRagFilter();
