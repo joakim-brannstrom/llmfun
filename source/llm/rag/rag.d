@@ -52,10 +52,11 @@ struct Document {
 }
 
 class RAG {
+    import std.container : Array;
     import llm.rag.database;
 
     Embedder embedder;
-    Database[] dbs;
+    Array!Database dbs;
     Path[] dbFiles;
 
     ref Database db() {
@@ -74,7 +75,7 @@ class RAG {
         bool isReadOnly = false;
         foreach (dbFile; dbFiles) {
             openDatabase(dbFile, dimensions, isReadOnly).match!((Database db) {
-                this.dbs ~= db;
+                this.dbs.insertBack(db);
                 this.dbFiles ~= dbFile;
             }, (None _) {});
             isReadOnly = true;
@@ -85,7 +86,7 @@ class RAG {
         embedder.destroy();
         foreach (ref a; dbs)
             a.destroy;
-        dbs = null;
+        dbs.clear;
     }
 
     Document[] querySemantic(string query, long getTopK) {
