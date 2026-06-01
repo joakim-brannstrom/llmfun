@@ -212,9 +212,14 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
     // dfmt on
 }
 
-LlmConfig readConfig(Path path = Path("config/default.json"), bool silent = false) {
+LlmConfig readConfig(Path path, bool silent = false) {
+    import std.process : environment;
+
     auto conf = makeLlmConfig();
 
+    if (path.empty) {
+        path = environment.get("LLMFUN_DEFAULT_CONFIG", "").Path;
+    }
     if (path.exists) {
         logger.infof(!silent, "Reading configuration from %s", path);
         return jsonToLlmConfig(conf, readText(path.toString).parseJSON);

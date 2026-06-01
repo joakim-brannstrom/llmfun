@@ -21,6 +21,7 @@ class RemoteEmbedder : Embedder {
     private {
         RemoteEmbedConfig cfg;
         string apiKey;
+        Request rq;
     }
 
     this(RemoteEmbedConfig cfg) {
@@ -36,14 +37,16 @@ class RemoteEmbedder : Embedder {
     override EmbedResult embed(string text) {
         import llm.utility : getValue;
 
-        auto body = format!"{\"model\": \"%s\", \"input\": \"%s\"}"(cfg.name, escapeJson(text));
+        JSONValue jsonReq;
+        jsonReq["model"] = cfg.name;
+        jsonReq["input"] = text;
 
         auto headers = ["Content-Type": "application/json"];
         if (!apiKey.empty) {
             headers["Authorization"] = format!"Bearer %s"(apiKey);
         }
 
-        auto result = httpPostWithRetry(Request(), cfg.server.toEmbedUrl, body, headers,
+        auto result = httpPostWithRetry(Request(), cfg.server.toEmbedUrl, jsonReq.toString, headers,
                 cfg.server.maxRetries, cfg.server.timeoutSeconds, cfg.server.backoffMs);
 
         return result.match!((HttpPostResult r) {
@@ -87,32 +90,5 @@ class RemoteEmbedder : Embedder {
 
     override int batchSize() {
         return cast(int) cfg.nBatch;
-    }
-
-    private string escapeJson(string s) {
-        auto data = appender!string();
-        foreach (c; s) {
-            switch (c) {
-            case '"':
-                data.put("\\\"");
-                break;
-            case '\\':
-                data.put("\\\\");
-                break;
-            case '\n':
-                data.put("\\n");
-                break;
-            case '\r':
-                data.put("\\r");
-                break;
-            case '\t':
-                data.put("\\t");
-                break;
-            default:
-                data.put(c);
-                break;
-            }
-        }
-        return data[];
     }
 }

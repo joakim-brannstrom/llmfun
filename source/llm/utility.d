@@ -106,12 +106,22 @@ void playNotification() {
     import std.stdio : File;
     import std.sumtype : match;
 
+    static bool hasPlayer = true;
+
+    if (!hasPlayer)
+        return;
+
     auto path = dataSearch(ProgramName).resolve(Path("notification.mp3"));
     path.match!((Some!ResourceFile p) {
-        if (p.get.exists) {
-            auto f = File("/dev/null");
-            spawnProcess(["cvlc", "--play-and-exit", p.get.toString], f, f, f,
-                null, Config.detached);
+        try {
+            if (p.get.exists) {
+                auto f = File("/dev/null");
+                spawnProcess(["cvlc", "--play-and-exit", p.get.toString], f, f, f,
+                    null, Config.detached);
+            }
+        } catch (Exception e) {
+            logger.trace(e.msg);
+            hasPlayer = false;
         }
     }, (None _) {});
 
