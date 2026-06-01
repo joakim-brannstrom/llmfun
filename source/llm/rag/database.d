@@ -143,8 +143,9 @@ Optional!Database openDatabase(AbsolutePath dbFile_, long embedDimensions, bool 
 
             if (versionData.version_ < SchemaVersion
                     || versionData.embedDimensions != embedDimensions) {
-                logger.tracef("Updating database to schema version %s with %s dimensions",
-                        versionData.version_, versionData.embedDimensions);
+                logger.tracef("Updating database to schema version %s->%s with %s->%s dimensions",
+                        versionData.version_,
+                        SchemaVersion, versionData.embedDimensions, embedDimensions);
                 auto trans = db.transaction;
                 static foreach (tbl; Schema)
                     db.run("DROP TABLE " ~ tbl.stringof).collectException;
