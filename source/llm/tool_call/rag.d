@@ -45,7 +45,8 @@ private string toResult(Document[] docs) {
             "\n\n");
 }
 
-ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query, long topK) {
+ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query,
+        long topK, string database) {
     mixin(baseContextToSpecific!RAGContext);
 
     if (topK < 1 || topK > maxTopK) {
@@ -57,9 +58,9 @@ ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query, lon
     }
 
     try {
-        auto docs = searchFunc(ctx.getRAG, query, topK);
+        auto docs = searchFunc(ctx.getRAG, query, topK, database);
         if (docs.length == 0) {
-            return ExecuteFuncResult(format!"No results found for query: '%s'"(query),
+            return ExecuteFuncResult(format!"Search completed but no results found for query: '%s'"(query),
                     success: false);
         }
         return ExecuteFuncResult(toResult(docs), success: true);
@@ -69,28 +70,50 @@ ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query, lon
     }
 }
 
-@Function("Search RAG for topK relevant results by query text")
-ExecuteFuncResult querySemantic(Context baseCtx, string query, long topK) {
-    return queryFunc!((RAG rag, string query, long topK) => rag.querySemantic(query, topK))(baseCtx,
-            query, topK);
+@Function("Search RAG for topK relevant results by query text. If 'database' is empty string, all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
+ExecuteFuncResult querySemantic(Context baseCtx, string query, long topK, string database) {
+    return queryFunc!((RAG rag, string query, long topK,
+            string database) => rag.querySemantic(query, topK, database))(baseCtx,
+            query, topK, database);
 }
 
-@Function("Search RAG using FTS5 full-text search for topK relevant results by query text")
-ExecuteFuncResult queryTextSearch(Context baseCtx, string query, long topK) {
-    auto res = queryFunc!((RAG rag, string query, long topK) => rag.queryTextSearch(query, topK))(baseCtx,
-            query, topK);
-    if (!res.success) {
-        return queryFunc!((RAG rag, string query, long topK) => rag.querySemantic(query, topK))(baseCtx,
-                query, topK);
+@Function("Search RAG using FTS5 full-text search for topK relevant results by query text. If 'database' is empty string, all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
+ExecuteFuncResult queryTextSearch(Context baseCtx, string query, long topK, string database) {
+    return queryFunc!((RAG rag, string query, long topK,
+            string database) => rag.queryTextSearch(query, topK, database))(baseCtx,
+            query, topK, database);
+}
+
+@Function("Search RAG using semantic and FTS5 full-text search for topK relevant results by query text. If 'database' is empty string, all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
+ExecuteFuncResult queryBestMatch(Context baseCtx, string query, long topK, string database) {
+    return queryFunc!((RAG rag, string query, long topK,
+            string database) => rag.queryBestMatch(query, topK, database))(baseCtx,
+            query, topK, database);
+}
+
+@Function("List all available RAG databases with their names and file paths. Use this to discover database names for filtering queries.")
+ExecuteFuncResult listRAGDatabases(Context baseCtx) {
+    mixin(baseContextToSpecific!RAGContext);
+
+    try {
+        import std.range : iota;
+
+        auto rag = ctx.getRAG();
+        auto names = rag.getDatabaseNames();
+        auto files = rag.dbFiles;
+
+        if (names.empty) {
+            return ExecuteFuncResult("No RAG databases loaded", success: true);
+        }
+
+        auto lines = iota(names.length).map!(i => format("  - %-15s -> %s",
+                names[i], files[i].toString)).array;
+
+        return ExecuteFuncResult("Available RAG databases:\n" ~ lines.join("\n"), success: true);
+    } catch (Exception e) {
+        return ExecuteFuncResult(format!"error: failed to list RAG databases: %s"(e.msg),
+                success: false);
     }
-    return res;
-}
-
-@Function(
-        "Search RAG using semantic and FTS5 full-text search for topK relevant results by query text")
-ExecuteFuncResult queryBestMatch(Context baseCtx, string query, long topK) {
-    return queryFunc!((RAG rag, string query, long topK) => rag.queryBestMatch(query, topK))(baseCtx,
-            query, topK);
 }
 
 @Function("Load file content into RAG index")

@@ -15,6 +15,7 @@
 module llm.rag.rag;
 
 import logger = std.logger;
+import std.path : baseName, stripExtension;
 import std.algorithm : map, filter, joiner, sort, cache, swap;
 import std.array : array, empty, appender;
 import std.random : uniform;
@@ -71,6 +72,7 @@ class RAG {
     Embedder embedder;
     Array!Database dbs;
     Path[] dbFiles;
+    string[] dbNames;
 
     ref Database db() {
         return dbs[0];
@@ -90,6 +92,7 @@ class RAG {
             openDatabase(dbFile.AbsolutePath, dimensions, isReadOnly).match!((Database db) {
                 this.dbs.insertBack(db);
                 this.dbFiles ~= dbFile;
+                this.dbNames ~= dbFile.baseName.stripExtension;
             }, (None _) {});
             isReadOnly = true;
         }
@@ -100,11 +103,57 @@ class RAG {
         foreach (ref a; dbs)
             a.destroy;
         dbs.clear;
+        dbFiles.length = 0;
+        dbNames.length = 0;
+    }
+
+    size_t[] resolveDatabaseIndices(string databaseName) {
+        if (databaseName.empty) {
+            return iota(dbs.length).array;
+        }
+        return dbNames.enumerate
+            .filter!(a => a.value == databaseName)
+            .map!(a => a.index)
+            .array;
+    }
+
+    string[] getDatabaseNames() {
+        return dbNames.dup;
+    }
+
+    bool validateDatabase(string databaseName, ref size_t[] indices) {
+        indices = resolveDatabaseIndices(databaseName);
+        if (indices.empty && !databaseName.empty) {
+            logger.tracef("no database found with name '%s'. Available: [%s]",
+                    databaseName, getDatabaseNames().joiner(", "));
+            return false;
+        }
+        if (!databaseName.empty) {
+            logger.tracef("query with database filter: '%s' (%d databases)",
+                    databaseName, indices.length);
+        }
+        return true;
     }
 
     Document[] querySemantic(string query, long getTopK) {
+        return querySemantic(query, getTopK, "");
+    }
+
+    Document[] queryTextSearch(string query, long getTopK) {
+        return queryTextSearch(query, getTopK, "");
+    }
+
+    Document[] queryBestMatch(string query, long getTopK) {
+        return queryBestMatch(query, getTopK, "");
+    }
+
+    Document[] querySemantic(string query, long getTopK, string database) {
+        size_t[] indices;
+        if (!validateDatabase(database, indices))
+            return null;
+
         Document[] runMatch(float[] embed) {
-            return iota(dbs.length).map!(i => dbs[i].querySemantic(Search(embed),
+            return indices.map!(i => dbs[i].querySemantic(Search(embed),
                     getTopK)).cache.joiner.array.randomizeRanks().sort!((a,
                     b) => a.rank > b.rank).take(getTopK)
                 .array.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
@@ -116,16 +165,24 @@ class RAG {
         });
     }
 
-    Document[] queryTextSearch(string query, long getTopK) {
-        return iota(dbs.length).map!(i => dbs[i].queryTextSearch(query,
-                getTopK)).cache.joiner.array.randomizeRanks().sort!((a,
+    Document[] queryTextSearch(string query, long getTopK, string database) {
+        size_t[] indices;
+        if (!validateDatabase(database, indices))
+            return null;
+
+        return indices.map!(i => dbs[i].queryTextSearch(query, getTopK))
+            .cache.joiner.array.randomizeRanks().sort!((a,
                 b) => a.rank < b.rank).take(getTopK)
             .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
     }
 
-    Document[] queryBestMatch(string query, long getTopK) {
+    Document[] queryBestMatch(string query, long getTopK, string database) {
+        size_t[] indices;
+        if (!validateDatabase(database, indices))
+            return null;
+
         Document[] runMatch(float[] embed) {
-            return iota(dbs.length).map!(i => dbs[i].queryCombineSemanticText(Search(embed),
+            return indices.map!(i => dbs[i].queryCombineSemanticText(Search(embed),
                     query, getTopK)).cache.joiner.array.randomizeRanks()
                 .sort!((a, b) => a.rank > b.rank).take(getTopK)
                 .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
@@ -133,7 +190,7 @@ class RAG {
 
         return embedder.embed(query).match!((float[] a) => runMatch(a), (string errMsg) {
             logger.tracef(errMsg);
-            return queryTextSearch(query, getTopK);
+            return queryTextSearch(query, getTopK, database);
         });
     }
 

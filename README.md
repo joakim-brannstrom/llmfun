@@ -252,9 +252,10 @@ The agent has access to the following tools:
 
 | Tool | Description |
 |------|-------------|
-| `querySemantic` | Semantic vector search for relevant results |
-| `queryTextSearch` | Full-text search (FTS5) for keyword matching |
-| `queryBestMatch` | Combined semantic and full-text search |
+| `querySemantic` | Semantic vector search for relevant results (supports `database` parameter for scoping) |
+| `queryTextSearch` | Full-text search (FTS5) for keyword matching (supports `database` parameter for scoping) |
+| `queryBestMatch` | Combined semantic and full-text search (supports `database` parameter for scoping) |
+| `listRAGDatabases` | List all available RAG databases with names and file paths |
 | `loadFileToRAG` | Index a file into the RAG database |
 | `loadContentToRAG` | Index raw content into the RAG database |
 
