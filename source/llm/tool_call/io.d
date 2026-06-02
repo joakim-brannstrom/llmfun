@@ -526,56 +526,22 @@ ExecuteFuncResult countLinesInFile(Context baseCtx, string path) {
 interface VisionContext : Context {
     bool isPathInsideWorkArea(AbsolutePath path);
     AbsolutePath workArea();
-    bool hasVision() nothrow;
-    bool addVisionImage(AbsolutePath path) nothrow;
+    bool addVisionImage(AbsolutePath path, string query) nothrow;
 }
 
 // TODO: update supported formats by checking what stb_image supports.
-@Function("Load an image from path into the vision context. Supported formats are jpg, png, bmp, gif. Returned marker embeds the image in the response or an error.")
-ExecuteFuncResult loadImage(Context baseCtx, string path) {
+@Function("Load an image from path into the API vision context for sending to the OpenAI API. Supported formats are jpg, png, bmp, gif. The image will be attached to the next user message. The query will be part of the image message.")
+ExecuteFuncResult loadImageApi(Context baseCtx, string path, string query) {
     mixin(baseContextToSpecific!VisionContext);
 
     auto path_ = pathToWorkarea(ctx, path, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
-    if (!ctx.hasVision) {
-        return ExecuteFuncResult("error: no vision context", success: false);
-    }
 
     try {
-        if (ctx.addVisionImage(path_)) {
-            return ExecuteFuncResult(format!"image loaded from '%s': <__media__>"(path),
-                    success: true);
-        }
-        return ExecuteFuncResult(format!"error: failed to load image '%s'"(path), success: false);
-    } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed to load image '%s': %s"(path,
-                e.msg), success: false);
-    }
-}
-
-interface ApiVisionContext : Context {
-    bool isPathInsideWorkArea(AbsolutePath path);
-    AbsolutePath workArea();
-    bool addVisionImage(AbsolutePath path) nothrow;
-    string drainVisionImage() nothrow;
-}
-
-// TODO: update supported formats by checking what stb_image supports.
-@Function("Load an image from path into the API vision context for sending to the OpenAI API. Supported formats are jpg, png, bmp, gif. The image will be attached to the next user message.")
-ExecuteFuncResult loadImageApi(Context baseCtx, string path) {
-    mixin(baseContextToSpecific!ApiVisionContext);
-
-    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
-    if (!path_.valid) {
-        return ExecuteFuncResult(path_.errorMsg, success: false);
-    }
-
-    try {
-        if (ctx.addVisionImage(path_)) {
-            return ExecuteFuncResult(format!"image loaded from '%s': <__media__>"(path),
-                    success: true);
+        if (ctx.addVisionImage(path_, query)) {
+            return ExecuteFuncResult(format!"image loaded from '%s'"(path), success: true);
         }
         return ExecuteFuncResult(format!"error: failed to load image '%s'"(path), success: false);
     } catch (Exception e) {

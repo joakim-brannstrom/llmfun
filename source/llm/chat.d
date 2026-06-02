@@ -123,7 +123,11 @@ struct Chat {
                             if (item["type"].str == "text") {
                                 text = item["text"].str;
                             } else if (item["type"].str == "image_url") {
-                                imageDataUrl = item["image_url"]["url"].str;
+                                if (item["image_url"].type == JSONType.object) {
+                                    imageDataUrl = item["image_url"]["url"].str;
+                                } else {
+                                    imageDataUrl = item["image_url"].str;
+                                }
                             }
                         }
                         if (imageDataUrl) {
@@ -186,14 +190,19 @@ struct VisionMessage {
     }
 
     JSONValue toJson() @safe {
-        auto imageUrlObj = JSONValue(["url": JSONValue(imageDataUrl)]);
         auto contentArr = [
             JSONValue(["type": JSONValue("text"), "text": JSONValue(content)]),
-            JSONValue(["type": JSONValue("image_url"), "image_url": imageUrlObj])
+            JSONValue([
+                "type": JSONValue("image_url"),
+                "image_url": JSONValue.emptyObject
+            ])
         ];
+        contentArr[1]["image_url"] = JSONValue(["url": JSONValue(imageDataUrl)]);
+
         auto root = JSONValue();
         root["role"] = JSONValue("user");
         root["content"] = contentArr;
+
         return root;
     }
 

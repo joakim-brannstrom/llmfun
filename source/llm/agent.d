@@ -27,7 +27,7 @@ import llm.query;
 import llm.rag.rag : RAG;
 import llm.summary_agent;
 import llm.tool_call : FunctionCall, Context;
-import llm.tool_call.io : FileContext, VisionContext, ApiVisionContext;
+import llm.tool_call.io : FileContext, VisionContext;
 import llm.tool_call.memory : MemoryContext;
 import llm.tool_call.metrics : MetricsContext;
 import llm.tool_call.pipeline : PipelineControlContext;
@@ -57,6 +57,7 @@ class Agent : IBasicAgent {
         int lastToolCallWarning;
         immutable WarnEveryNthToolCall = 5;
         ReFilter toolFilter;
+        bool waitingForVisionResponse;
     }
 
     this(string name, LlmConfig llmConf, MetricMonitor monitor, RAG rag = null) {
@@ -100,11 +101,7 @@ class Agent : IBasicAgent {
     }
 
     void addUserQuery(string query) nothrow {
-        if (auto image = toolCtx.drainVisionImage()) {
-            chat.add(VisionMessage(query, image));
-        } else {
-            chat.add(Message(Role.user, query));
-        }
+        chat.add(Message(Role.user, query));
     }
 
     void addKeepReasoning() @safe nothrow {
@@ -229,7 +226,10 @@ class Agent : IBasicAgent {
 
             final switch (result.status) with (ProcessResult.Status) {
             case ok:
-                if (!result.hasToolCall) {
+                if (!result.hasToolCall && waitingForVisionResponse) {
+                    waitingForVisionResponse = false;
+                    keepRunning = true;
+                } else if (!result.hasToolCall) {
                     addContinue;
                     keepRunning = true;
                 }
@@ -417,8 +417,13 @@ private:
             } catch (Exception e) {
                 logger.tracef("monitor record failed: %s", e.msg);
             }
+
             chat.add(ToolMessage(JSONValue([call])));
             chat.add(ToolResponse(content: result, toolCallId: call["id"].str, toolName: toolName));
+            if (auto image = toolCtx.drainVisionImage) {
+                chat.add(VisionMessage(image.query, image.data));
+                waitingForVisionResponse = true;
+            }
         }
     }
 }
@@ -438,8 +443,16 @@ private bool checkResponse(JSONValue j) @trusted {
     return true;
 }
 
+struct VisionImage {
+    string data; // base64 data URL
+    string query;
+    bool opCast(T)() if (is(T : bool)) {
+        return !data.empty;
+    }
+}
+
 class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryContext,
-    ThinkingContext, MetricsContext, PipelineControlContext, ApiVisionContext {
+    ThinkingContext, MetricsContext, PipelineControlContext, VisionContext {
         private {
             LlmConfig conf;
             AbsolutePath workArea_;
@@ -449,8 +462,7 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
 
             SysTime nextMetricCalculation;
 
-            // TODO: add a specific type for this instead of string.
-            string pendingVisionImage; // base64 data URL
+            VisionImage pendingVisionImage;
         }
 
         this(Agent agent, LlmConfig conf) {
@@ -463,13 +475,13 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
         ~this() {
         }
 
-        override string drainVisionImage() nothrow {
+        VisionImage drainVisionImage() nothrow {
             auto result = pendingVisionImage;
-            pendingVisionImage = null;
+            pendingVisionImage = VisionImage.init;
             return result;
         }
 
-        override bool addVisionImage(AbsolutePath path) nothrow {
+        override bool addVisionImage(AbsolutePath path, string query) nothrow {
             try {
                 import std.path : extension;
                 import std.string : toLower;
@@ -503,7 +515,7 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
                 auto data = read(path);
                 string encoded = Base64.encode(cast(const(ubyte)[]) data);
                 string dataUrl = "data:" ~ mimeType ~ ";base64," ~ encoded;
-                pendingVisionImage = dataUrl;
+                pendingVisionImage = VisionImage(dataUrl, query);
                 return true;
             } catch (Exception e) {
                 return false;
