@@ -468,6 +468,7 @@ struct Database {
         foreach (ref r; stmt.get.execute) {
             results.put(tuple!("rowid", "rank")(r.peek!long(0), r.peek!double(1)));
         }
+        logger.trace("Hits ", results.length);
 
         auto rval = appender!(SourceMatch[])();
         foreach (res; results) {
