@@ -80,9 +80,7 @@ class Agent : IBasicAgent {
         this.summary.setSystemPrompt(SystemPromptInit(
                 llmConf.promptToPath(llmConf.summaryModel.prompt)).toString);
 
-        auto slot = LlmSlotRequester(llmConf.codeModel.server.toSlotUrl,
-                llmConf.codeModel.server.apiKey.empty
-                ? getEnvApiKey() : llmConf.codeModel.server.apiKey, llmConf.codeModel.name);
+        auto slot = LlmSlotRequester(llmConf.codeModel.toRequestConfig);
         this.contextSize = slot.request(llmConf.codeModel.contextSize);
     }
 

@@ -6,7 +6,8 @@ import logger = std.logger;
 import std.array : empty;
 import std.conv : to, text;
 import std.exception : collectException;
-import std.json : JSONValue, parseJSON;
+import std.format : format;
+import std.json : JSONValue, parseJSON, JSONType;
 import std.stdio : writeln;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable;
@@ -81,8 +82,8 @@ struct LlmRequester {
 
             rq.verbosity(cfg.verbosity);
 
-            auto result = httpPostWithRetry(rq, cfg.chatUrl, jsonReq.toString,
-                    headers, cfg.maxRetries, cfg.timeoutS, verifySslCert: cfg.verifySslCert, cfg.backoffBaseMs);
+            auto result = httpPostWithRetry(rq, cfg.chatUrl, jsonReq.toString, headers, cfg.maxRetries,
+                    cfg.timeoutS, verifySslCert: cfg.verifySslCert, cfg.backoffBaseMs);
 
             return result.match!((HttpPostResult r) {
                 if (replyLog)
@@ -107,9 +108,6 @@ struct LlmRequester {
 }
 
 struct LlmSlotRequester {
-    string slotUrl;
-    string apiKey;
-    string model;
     RequestConfig cfg;
 
     private {
@@ -119,12 +117,15 @@ struct LlmSlotRequester {
     SumType!(JSONValue, LlamaRequestError) request() nothrow {
         try {
             auto headers = ["Content-Type": "application/json"];
-            if (!apiKey.empty)
-                headers["Authorization"] = "Bearer " ~ apiKey;
-            if (!model.empty)
-                headers["model"] = model;
+            if (!cfg.apiKey.empty)
+                headers["Authorization"] = "Bearer " ~ cfg.apiKey;
 
-            auto result = httpGetWithRetry(rq, slotUrl, headers, 3, 60, verifySslCert: cfg.verifySslCert, 500);
+            auto url = cfg.slotUrl;
+            if (!cfg.chat.model.empty)
+                url ~= format!"?model=%s"(cfg.chat.model);
+
+            auto result = httpGetWithRetry(rq, url, headers, 3, 60,
+                    verifySslCert: cfg.verifySslCert, 500);
 
             return result.match!((HttpPostResult r) {
                 if (r.statusCode == 200) {
@@ -134,7 +135,7 @@ struct LlmSlotRequester {
                     r.body));
             }, (HttpPostError e) {
                 if (e.statusCode == 0) {
-                    logger.tracef("http error: url:'%s' msg:'%s'", slotUrl, e.errorMsg);
+                    logger.tracef("http error: url:'%s' msg:'%s'", cfg.slotUrl, e.errorMsg);
                 }
                 return SumType!(JSONValue, LlamaRequestError)(LlamaRequestError(e.statusCode,
                     e.body));
@@ -148,9 +149,13 @@ struct LlmSlotRequester {
     long request(long fallbackContext) nothrow {
         try {
             return request().match!((JSONValue j) {
-                logger.trace(j.toPrettyString);
-                if (auto ctx = "n_ctx" in j)
-                    return ctx.integer;
+                if (cfg.verbosity >= 2)
+                    logger.trace(j.toPrettyString);
+                if (j.type == JSONType.array) {
+                    j[0]["n_ctx"].integer;
+                } else if ("n_ctx" in j) {
+                    return j["n_ctx"].integer;
+                }
                 return fallbackContext;
             }, (LlamaRequestError e) {
                 logger.tracef("unable to get the context size. Using fallback value %s: %s",
@@ -205,8 +210,8 @@ private string getProxy(string url) {
 
 /// Execute an HTTP POST with retry and exponential backoff.
 /// Returns SumType: HttpPostResult on success, HttpPostError on failure.
-SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(ref Request rq, string url, string body,
-        string[string] headers, long maxRetries, long timeoutSeconds, bool verifySslCert, long backoffBaseMs = 500) {
+SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(ref Request rq, string url, string body, string[string] headers,
+        long maxRetries, long timeoutSeconds, bool verifySslCert, long backoffBaseMs = 500) {
     import std.algorithm : canFind;
     import std.conv : to;
 
@@ -267,7 +272,8 @@ SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(ref Request rq, string
 /// Execute an HTTP GET with retry and exponential backoff.
 /// Returns SumType: HttpPostResult on success, HttpPostError on failure.
 SumType!(HttpPostResult, HttpPostError) httpGetWithRetry(ref Request rq, string url,
-        string[string] headers, int maxRetries, int timeoutSeconds, bool verifySslCert, long backoffBaseMs = 500) {
+        string[string] headers, int maxRetries, int timeoutSeconds,
+        bool verifySslCert, long backoffBaseMs = 500) {
     import std.algorithm : canFind;
     import std.conv : to;
 
