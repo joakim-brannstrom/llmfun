@@ -201,10 +201,10 @@ private string getProxy(string url) {
     import std.string : startsWith;
     import std.process : environment;
 
-    if (url.startsWith("http"))
-        return environment.get("HTTP_PROXY", null);
     if (url.startsWith("https"))
         return environment.get("HTTPS_PROXY", null);
+    if (url.startsWith("http"))
+        return environment.get("HTTP_PROXY", null);
     return null;
 }
 
