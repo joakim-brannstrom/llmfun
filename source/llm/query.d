@@ -133,7 +133,7 @@ struct LlmSlotRequester {
                     r.body));
             }, (HttpPostError e) {
                 if (e.statusCode == 0) {
-                    logger.trace(e.errorMsg);
+                    logger.tracef("http error: url:'%s' msg:'%s'", slotUrl, e.errorMsg);
                 }
                 return SumType!(JSONValue, LlamaRequestError)(LlamaRequestError(e.statusCode,
                     e.body));
@@ -191,15 +191,29 @@ struct HttpPostResult {
     string body;
 }
 
+private string getProxy(string url) {
+    import std.string : startsWith;
+    import std.process : environment;
+
+    if (url.startsWith("http"))
+        return environment.get("HTTP_PROXY", null);
+    if (url.startsWith("https"))
+        return environment.get("HTTPS_PROXY", null);
+    return null;
+}
+
 /// Execute an HTTP POST with retry and exponential backoff.
 /// Returns SumType: HttpPostResult on success, HttpPostError on failure.
-SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(Request rq, string url, string body,
+SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(ref Request rq, string url, string body,
         string[string] headers, long maxRetries, long timeoutSeconds, long backoffBaseMs = 500) {
     import std.algorithm : canFind;
     import std.conv : to;
 
     rq.addHeaders(headers);
     rq.timeout = timeoutSeconds.dur!"seconds";
+    if (auto proxy = getProxy(url)) {
+        rq.proxy = proxy;
+    }
 
     int attempt = 0;
     HttpPostError lastError;
@@ -250,13 +264,16 @@ SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(Request rq, string url
 
 /// Execute an HTTP GET with retry and exponential backoff.
 /// Returns SumType: HttpPostResult on success, HttpPostError on failure.
-SumType!(HttpPostResult, HttpPostError) httpGetWithRetry(Request rq, string url,
+SumType!(HttpPostResult, HttpPostError) httpGetWithRetry(ref Request rq, string url,
         string[string] headers, int maxRetries, int timeoutSeconds, long backoffBaseMs = 500) {
     import std.algorithm : canFind;
     import std.conv : to;
 
     rq.addHeaders(headers);
     rq.timeout = timeoutSeconds.dur!"seconds";
+    if (auto proxy = getProxy(url)) {
+        rq.proxy = proxy;
+    }
 
     int attempt = 0;
     HttpPostError lastError;

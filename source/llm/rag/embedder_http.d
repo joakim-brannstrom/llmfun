@@ -46,7 +46,7 @@ class RemoteEmbedder : Embedder {
             headers["Authorization"] = format!"Bearer %s"(apiKey);
         }
 
-        auto result = httpPostWithRetry(Request(), cfg.server.toEmbedUrl, jsonReq.toString, headers,
+        auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, headers,
                 cfg.server.maxRetries, cfg.server.timeoutSeconds, cfg.server.backoffMs);
 
         return result.match!((HttpPostResult r) {
