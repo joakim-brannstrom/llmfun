@@ -1,17 +1,14 @@
 - FeedbackEngine should use an agent name when it request data
-- don't print the taskDone message to the user
 - integrate internet search, searchxng
 - change @Function to also take a descripton of parameters
 - change tools so not all are listed via "tool_calls" but rather that there is one basic tool to ask for available tools
 - add Z3 as a tool
 - add a simple expression execution so the llm can call a tool with e.g. `1+3*4` to calculate 
 - make ctrl+c able to interrupt a http request
-- need a /help and a splash logo when starting that display all slash-commands such as /plan
 - add trace logging support to file
 - models should be possible to have multiple of
 - Max timeout when using -p
 - readLines number of lines should be configurable
-- add proxy support
 - add support in config file to configure keepalive for a server
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
@@ -44,6 +41,4 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 
 # Prompt
 
-The query tools currently only have access to queries but sometimes the LLM wants to read specific lines from a file in the RAG.
-Add a query tool that take a filename and line. It then returns the text chunk that is the best match (which contains the line).
-There should be an optional parameter for this queryReadFile-tool which works the same as readFile, appendLoc.
+

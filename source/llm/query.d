@@ -23,6 +23,7 @@ struct RequestConfig {
     string slotUrl;
     int verbosity;
     int timeoutS;
+    bool keepAlive = true;
     bool verifySslCert = true;
     string apiKey;
 
@@ -81,6 +82,7 @@ struct LlmRequester {
                 logger.trace(jsonReq.toPrettyString);
 
             rq.verbosity(cfg.verbosity);
+            rq.keepAlive(cfg.keepAlive);
 
             auto result = httpPostWithRetry(rq, cfg.chatUrl, jsonReq.toString, headers, cfg.maxRetries,
                     cfg.timeoutS, verifySslCert: cfg.verifySslCert, cfg.backoffBaseMs);
@@ -191,7 +193,6 @@ JSONValue addConfig(JSONValue j, RequestConfig.Chat cfg) {
     return j;
 }
 
-/// Result from an HTTP POST request.
 struct HttpPostResult {
     int statusCode;
     string body;

@@ -116,8 +116,8 @@ void playNotification() {
         try {
             if (p.get.exists) {
                 auto f = File("/dev/null");
-                spawnProcess(["cvlc", "--play-and-exit", p.get.toString], f, f, f,
-                    null, Config.detached);
+                spawnProcess(["cvlc", "--play-and-exit", p.get.toString], f, f,
+                    f, null, Config.detached);
             }
         } catch (Exception e) {
             logger.trace(e.msg);
