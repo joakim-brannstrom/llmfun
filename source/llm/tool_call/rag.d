@@ -149,3 +149,72 @@ ExecuteFuncResult loadContentToRAG(Context baseCtx, string content) {
                 success: false);
     }
 }
+
+/**
+ * Private helper: prefix each line of text with its absolute line number.
+ * When appendLoc is non-zero, splits text into lines and prefixes each with
+ * "LINE_NUM→ " starting from startLineNumber.
+ */
+private string applyAppendLoc(string text, long startLineNumber, long appendLoc) {
+    if (!appendLoc)
+        return text;
+
+    auto buf = appender!(string)();
+    auto lines = text.splitLines();
+    long lineNum = startLineNumber;
+    foreach (i, l; lines) {
+        if (i > 0)
+            buf.put('\n');
+        formattedWrite(buf, "%s→ %s", lineNum++, l);
+    }
+    buf.put('\n');
+    return buf[];
+}
+
+@Function("Read a specific line from a file in the RAG index. Returns the text chunk(s) containing the given line number. If 'database' is empty string, all databases are searched. The 'appendLoc' parameter (non-zero = true) prefixes each line with its line number, matching readFile behavior.")
+ExecuteFuncResult queryReadFile(Context baseCtx, string filePath, long lineNumber,
+        string database, long appendLoc) {
+    mixin(baseContextToSpecific!RAGContext);
+
+    if (filePath.empty) {
+        return ExecuteFuncResult("error: filePath must not be empty", success: false);
+    }
+    if (lineNumber < 1) {
+        return ExecuteFuncResult(format!"error: lineNumber must be >= 1, got: %s"(lineNumber),
+                success: false);
+    }
+    if (!database.empty && !ctx.getRAG().databaseExists(database)) {
+        return ExecuteFuncResult(format!"Database '%s' not found"(database), success: false);
+    }
+
+    auto normalizedPath = AbsolutePath(filePath);
+
+    try {
+        auto matches = ctx.getRAG().queryReadFile(normalizedPath, lineNumber, database);
+
+        if (matches.length == 0) {
+            if (!ctx.getRAG().hasFile(normalizedPath, database)) {
+                return ExecuteFuncResult(format!"File '%s' not found in RAG index"(filePath),
+                        success: false);
+            }
+            return ExecuteFuncResult(format!"File '%s' exists in RAG but no chunk contains line %s"(filePath,
+                    lineNumber), success: false);
+        }
+
+        string[] resultBlocks;
+        foreach (i, match; matches) {
+            string originStr = match.origin.match!((Unknown _) => "no source",
+                    (Url a) => a.value, (Path a) => a.toString);
+
+            string text = applyAppendLoc(match.text, match.line.begin, appendLoc);
+
+            resultBlocks ~= format("--- Result %d (%s line %s-%s chars %s-%s) ---\n%s", i + 1, originStr,
+                    match.line.begin, match.line.end, match.offset.begin, match.offset.end, text);
+        }
+
+        return ExecuteFuncResult(resultBlocks.join("\n\n"), success: true);
+    } catch (Exception e) {
+        return ExecuteFuncResult(format!"error: database error during query: %s"(e.msg),
+                success: false);
+    }
+}

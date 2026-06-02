@@ -16,7 +16,7 @@ module llm.rag.rag;
 
 import logger = std.logger;
 import std.path : baseName, stripExtension;
-import std.algorithm : map, filter, joiner, sort, cache, swap;
+import std.algorithm : map, filter, joiner, sort, cache, swap, count;
 import std.array : array, empty, appender;
 import std.random : uniform;
 import std.digest.murmurhash : MurmurHash3;
@@ -118,7 +118,13 @@ class RAG {
     }
 
     string[] getDatabaseNames() {
-        return dbNames.dup;
+        return dbNames;
+    }
+
+    bool databaseExists(string databaseName) {
+        if (databaseName.empty)
+            return true;
+        return resolveDatabaseIndices(databaseName).length > 0;
     }
 
     bool validateDatabase(string databaseName, ref size_t[] indices) {
@@ -192,6 +198,32 @@ class RAG {
             logger.tracef(errMsg);
             return queryTextSearch(query, getTopK, database);
         });
+    }
+
+    SourceMatch[] queryReadFile(AbsolutePath filePath, long lineNumber) {
+        return queryReadFile(filePath, lineNumber, "");
+    }
+
+    SourceMatch[] queryReadFile(AbsolutePath filePath, long lineNumber, string database) {
+        size_t[] indices;
+        if (!validateDatabase(database, indices))
+            return null;
+
+        auto results = indices.map!(i => dbs[i].queryByPathAndLine(filePath,
+                lineNumber)).cache.joiner.array;
+
+        logger.tracef("Hits %s for %s line %s", results.length, filePath, lineNumber);
+        return results;
+    }
+
+    bool hasFile(AbsolutePath filePath, string database) {
+        size_t[] indices;
+        if (!validateDatabase(database, indices))
+            return false;
+        return indices.map!(i => dbs[i].hasFile(filePath))
+            .cache
+            .filter!(a => a)
+            .count >= 1;
     }
 
     struct DbSource {

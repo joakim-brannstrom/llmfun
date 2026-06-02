@@ -39,7 +39,9 @@ You have four search/discovery tools for the external knowledge base. Choose bas
 
 - **`listRAGDatabases`** (Discovery): Lists all available RAG databases with their names and file paths. Use this to discover database names for filtering queries with the `database` parameter.
 
-**Database Parameter**: All three query tools (`querySemantic`, `queryTextSearch`, `queryBestMatch`) accept a `database` parameter that restricts the search to a specific database by name. Pass an empty string (`""`) to search all databases (default behavior). Use `listRAGDatabases` to discover available database names before filtering.
+- **`queryReadFile`** (Exact Line Lookup): Retrieves the exact text chunk(s) containing a specific line number from a file in the RAG index. Use when you need to read precise content from a known file at a known line. Supports `database` parameter for scoping and `appendLoc` for line number prefixes.
+
+**Database Parameter**: All query tools that accept a database parameter (`querySemantic`, `queryTextSearch`, `queryBestMatch`, `queryReadFile`) restrict the search to the database with that name. Pass an empty string (`""`) to search all databases (default behavior). Use `listRAGDatabases` to discover available database names before filtering.
 
 **Default Strategy**:
 1. If your query contains specific keywords, names, or exact terms → start with `queryTextSearch`.

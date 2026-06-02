@@ -8,6 +8,11 @@
 - make ctrl+c able to interrupt a http request
 - need a /help and a splash logo when starting that display all slash-commands such as /plan
 - add trace logging support to file
+- models should be possible to have multiple of
+- Max timeout when using -p
+- readLines number of lines should be configurable
+- add proxy support
+- add support in config file to configure keepalive for a server
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -31,9 +36,14 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - planner: need a mode when I update the system design and/or implementation_plan. It should then use another type of prompt.
 
 # rag
-- Multiple sqlite databases.
 - Add option to drop all unknown
 - Add a warning when the DB is wiped. Need to add migration in the future.
+- Add option to drop all files that aren't found
+- queryBestMatch fungerar inte när sökordet innehåller "smurf-bar"
+- Add a function so the LLM can request a file+line from the database and get the text chunk.
 
 # Prompt
 
+The query tools currently only have access to queries but sometimes the LLM wants to read specific lines from a file in the RAG.
+Add a query tool that take a filename and line. It then returns the text chunk that is the best match (which contains the line).
+There should be an optional parameter for this queryReadFile-tool which works the same as readFile, appendLoc.

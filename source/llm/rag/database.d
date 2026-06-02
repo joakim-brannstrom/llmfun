@@ -357,6 +357,19 @@ struct Database {
         return res.oneValue!long != 0;
     }
 
+    bool hasFile(AbsolutePath path) {
+        static immutable sql = "SELECT t1.url FROM SourceTbl as t0, OriginUrlTbl as t1 WHERE t0.urlType=:urlType AND t0.id=t1.sourceId AND t1.url=:url";
+
+        auto stmt = db.prepare(sql);
+        stmt.get.bind(":urlType", cast(long) SourceTbl.UrlType.path);
+        stmt.get.bind(":url", path.toString);
+
+        foreach (ref r; stmt.get.execute) {
+            return true;
+        }
+        return false;
+    }
+
     /// Return: embeddings removed
     long removeSource(SourceId id) {
         static immutable sql = "DELETE FROM SourceTbl WHERE id=:id";
@@ -483,6 +496,33 @@ struct Database {
             }
         }
 
+        return rval[];
+    }
+
+    SourceMatch[] queryByPathAndLine(AbsolutePath filePath, long lineNumber) {
+        // INNER JOIN on OriginUrlTbl is correct: every path-type source always has
+        // a corresponding OriginUrlTbl entry (see addSource line 253-254).
+        // This is consistent with hasFile() which uses the same JOIN pattern.
+        static immutable sql = "SELECT t0.text, t0.charBeginPos, t0.charEndPos, t0.lineBegin, t0.lineEnd, t3.url "
+            ~ "FROM TextChunkTbl t0 " ~ "JOIN EmbeddingsTbl t1 ON t0.embedId = t1.id "
+            ~ "JOIN SourceTbl t2 ON t1.sourceId = t2.id " ~ "JOIN OriginUrlTbl t3 ON t2.id = t3.sourceId "
+            ~ "WHERE t2.urlType = :urlType AND t3.url = :url "
+            ~ "AND t0.lineBegin <= :lineNumber AND t0.lineEnd >= :lineNumber";
+
+        auto stmt = db.prepare(sql);
+        stmt.get.bind(":urlType", cast(long) SourceTbl.UrlType.path);
+        stmt.get.bind(":url", filePath.toString);
+        stmt.get.bind(":lineNumber", lineNumber);
+
+        auto rval = appender!(SourceMatch[])();
+        foreach (ref r; stmt.get.execute) {
+            rval.put(SourceMatch(Origin(Path(r.peek!string(5))), offset: Offset(begin: r.peek!long(1),
+                    end: r.peek!long(2)), line: Line(begin: r.peek!long(3),
+                    end: r.peek!long(4)), text: r.peek!string(0), rank: 0));
+        }
+
+        logger.tracef("queryByPathAndLine hits %d for %s line %d", rval.length,
+                filePath, lineNumber);
         return rval[];
     }
 
