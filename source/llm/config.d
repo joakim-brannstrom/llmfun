@@ -128,6 +128,7 @@ struct ServerConfig {
     string embedUrl;
     long timeoutSeconds;
     long httpVerbosity;
+    bool verifySslCert = true;
     long maxRetries = 3; // maximum number of retries for transient failures
     long backoffMs = 500; // initial backoff in milliseconds (exponential)
 
@@ -202,6 +203,7 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
          promptUrl: conf.server.toPromptUrl,
          slotUrl: conf.server.toSlotUrl,
          timeoutS: cast(int) conf.server.timeoutSeconds,
+         verifySslCert: conf.server.verifySslCert,
          verbosity: cast(int) conf.server.httpVerbosity,
          apiKey: conf.server.apiKey.empty ? getEnvApiKey() : conf.server.apiKey,
          chat: RequestConfig.Chat(model: conf.name,
