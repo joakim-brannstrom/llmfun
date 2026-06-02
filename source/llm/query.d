@@ -197,17 +197,6 @@ struct HttpPostResult {
     string body;
 }
 
-private string getProxy(string url) {
-    import std.string : startsWith;
-    import std.process : environment;
-
-    if (url.startsWith("https"))
-        return environment.get("HTTPS_PROXY", null);
-    if (url.startsWith("http"))
-        return environment.get("HTTP_PROXY", null);
-    return null;
-}
-
 /// Execute an HTTP POST with retry and exponential backoff.
 /// Returns SumType: HttpPostResult on success, HttpPostError on failure.
 SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(ref Request rq, string url, string body, string[string] headers,
@@ -217,9 +206,6 @@ SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(ref Request rq, string
 
     rq.addHeaders(headers);
     rq.timeout = timeoutSeconds.dur!"seconds";
-    if (auto proxy = getProxy(url)) {
-        rq.proxy = proxy;
-    }
     rq.sslSetVerifyPeer(verifySslCert);
 
     int attempt = 0;
@@ -279,9 +265,6 @@ SumType!(HttpPostResult, HttpPostError) httpGetWithRetry(ref Request rq, string 
 
     rq.addHeaders(headers);
     rq.timeout = timeoutSeconds.dur!"seconds";
-    if (auto proxy = getProxy(url)) {
-        rq.proxy = proxy;
-    }
     rq.sslSetVerifyPeer(verifySslCert);
 
     int attempt = 0;
