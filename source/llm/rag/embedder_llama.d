@@ -7,7 +7,7 @@ import std.string : toStringz;
 
 import llm.rag.embedder;
 
-version (llm_fun_llama_backend) {
+version (llmfun_llama_backend) {
     import llm.llama.llama_import;
     import llm.llama.model;
     import llm.llama.util;

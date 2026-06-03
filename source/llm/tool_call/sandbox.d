@@ -37,7 +37,7 @@ ExecuteFuncResult executeCode(Context baseCtx, string path, string language) {
             switch (language.toLower) {
             case "d":
                 cmd = "ldmd2 -run /source";
-                return "dlang/llm_fun:1.0";
+                return "dlang/llmfun:1.0";
                 // case "python":
                 //     cmd = "python3 /source";
                 //     return "python3";
@@ -88,7 +88,7 @@ ExecuteFuncResult executeDCodeWithDub(Context baseCtx, string path, string comma
                     "error: supported commands are 'build', 'test'. Unsupported command argument: "
                     ~ command);
         }
-        const imageName = "dlang/llm_fun:1.0";
+        const imageName = "dlang/llmfun:1.0";
 
         auto status = execute([
             ctx.getContainerCmd, "run", "--rm", "--cpus", "2", "--ulimit",
@@ -114,7 +114,7 @@ ExecuteFuncResult executeGit(Context baseCtx, string repo, string command) {
     auto path_ = pathRes.path;
 
     try {
-        const imageName = "llm_fun/git:1.0";
+        const imageName = "llmfun/git:1.0";
         auto status = execute([
             ctx.getContainerCmd, "run", "--rm", "--cpus", "2", "--ulimit",
             "nofile=1024:1024", "--stop-timeout", "60", "--memory", "8g",
