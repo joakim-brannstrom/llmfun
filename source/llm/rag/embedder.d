@@ -31,7 +31,7 @@ interface Embedder {
 /// Factory function to create an Embedder from an EmbedConfig sum type.
 Embedder createEmbedder(EmbedConfig config) {
     return config.match!((LocalEmbedConfig local) {
-        version (llm_fun_llama_backend) {
+version (llmfun_llama_backend) {
             import llm.llama.model : Model, LlamaParams, contextEmbedding;
 
             auto params = LlamaParams.make();
@@ -41,7 +41,7 @@ Embedder createEmbedder(EmbedConfig config) {
             Embedder e = new LlamaEmbedder(model);
             return e;
         } else {
-            throw new Exception("llm_fun_llama_backend not compiled");
+throw new Exception("llmfun_llama_backend not compiled");
             return null;
         }
     }, (RemoteEmbedConfig remote) {

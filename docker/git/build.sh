@@ -1,3 +1,3 @@
 #!/bin/bash
 
-podman build -t llm_fun/git:1.0 .
+podman build -t llmfun/git:1.0 .
