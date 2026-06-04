@@ -314,7 +314,7 @@ class Agent : IBasicAgent {
 
         try {
             auto historyPath = dir ~ (this.name ~ "_history.json");
-            File(historyPath.toString, "w").write(chat.toJson.toPrettyString);
+            File(historyPath.toString, "w").write(chat.toSaveJson.toPrettyString);
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }

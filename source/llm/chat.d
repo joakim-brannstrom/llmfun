@@ -100,19 +100,25 @@ struct Chat {
             const startLen = history.length;
             foreach (entry; json["messages"].array) {
                 const role = entry["role"].str.to!Role;
+                JSONValue metadata;
+                if (auto m = "metadata" in entry) {
+                    metadata = *m;
+                }
+
                 final switch (role) {
                 case Role.system:
                     break;
                 case Role.assistant:
                     if ("tool_calls" in entry) {
-                        history ~= MessageT(ToolMessage(entry["tool_calls"]));
+                        history ~= MessageT(ToolMessage(entry["tool_calls"], metadata));
                     } else {
-                        history ~= MessageT(Message(role, entry["content"].str));
+                        history ~= MessageT(Message(role, entry["content"].str, metadata));
                     }
                     break;
                 case Role.tool:
                     history ~= MessageT(ToolResponse(content: entry["content"].str,
-                            toolCallId: entry["tool_call_id"].str, toolName: entry["name"].str));
+                            toolCallId: entry["tool_call_id"].str, toolName: entry["name"].str,
+                            metadata));
                     break;
                 case Role.user:
                     if (entry["content"].type == JSONType.array) {
@@ -131,12 +137,12 @@ struct Chat {
                             }
                         }
                         if (imageDataUrl) {
-                            history ~= MessageT(VisionMessage(text, imageDataUrl));
+                            history ~= MessageT(VisionMessage(text, imageDataUrl, metadata));
                         } else {
-                            history ~= MessageT(Message(role, text));
+                            history ~= MessageT(Message(role, text, metadata));
                         }
                     } else {
-                        history ~= MessageT(Message(role, entry["content"].str));
+                        history ~= MessageT(Message(role, entry["content"].str, metadata));
                     }
                     break;
                 }
@@ -151,6 +157,12 @@ struct Chat {
     JSONValue toJson() @safe {
         JSONValue root;
         root["messages"] = history.map!(a => a.match!((a) => a.toJson)).array;
+        return root;
+    }
+
+    JSONValue toSaveJson() @safe {
+        JSONValue root;
+        root["messages"] = history.map!(a => a.match!((a) => a.toSaveJson)).array;
         return root;
     }
 
@@ -183,10 +195,12 @@ struct Chat {
 struct VisionMessage {
     string content;
     string imageDataUrl;
+    JSONValue metadata;
 
-    this(string content, string imageDataUrl) @safe nothrow {
+    this(string content, string imageDataUrl, JSONValue metadata = JSONValue.init) @safe nothrow {
         this.content = content;
         this.imageDataUrl = imageDataUrl;
+        this.metadata = metadata;
     }
 
     JSONValue toJson() @safe {
@@ -206,6 +220,12 @@ struct VisionMessage {
         return root;
     }
 
+    JSONValue toSaveJson() @safe {
+        auto j = toJson();
+        j["metadata"] = metadata;
+        return j;
+    }
+
     string toString() @safe const {
         string imgPreview;
         if (imageDataUrl.length > 60) {
@@ -221,10 +241,12 @@ struct Message {
 @safe:
     Role role;
     string content;
+    JSONValue metadata;
 
-    this(Role role, string content) @safe nothrow {
+    this(Role role, string content, JSONValue metadata = JSONValue.init) @safe nothrow {
         this.role = role;
         this.content = content;
+        this.metadata = metadata;
     }
 
     size_t length() @safe const nothrow {
@@ -237,6 +259,12 @@ struct Message {
 
     JSONValue toJson() @safe {
         return JSONValue(["role": role.to!string, "content": content]);
+    }
+
+    JSONValue toSaveJson() @safe {
+        auto j = toJson();
+        j["metadata"] = metadata;
+        return j;
     }
 
     void fromJson(JSONValue j) @trusted nothrow {
@@ -253,10 +281,12 @@ struct ToolMessage {
 @safe:
     Role role;
     JSONValue toolCalls;
+    JSONValue metadata;
 
-    this(JSONValue toolCalls) @safe nothrow {
+    this(JSONValue toolCalls, JSONValue metadata = JSONValue.init) @safe nothrow {
         this.role = Role.assistant;
         this.toolCalls = toolCalls;
+        this.metadata = metadata;
     }
 
     size_t length() @safe const {
@@ -275,6 +305,12 @@ struct ToolMessage {
         ]);
     }
 
+    JSONValue toSaveJson() @safe {
+        auto j = toJson();
+        j["metadata"] = metadata;
+        return j;
+    }
+
     void fromJson(JSONValue j) @trusted nothrow {
         try {
             this.role = j["role"].str.to!Role;
@@ -291,12 +327,14 @@ struct ToolResponse {
     string content;
     string toolCallId;
     string toolName;
+    JSONValue metadata;
 
-    this(string content, string toolCallId, string toolName) @safe nothrow {
+    this(string content, string toolCallId, string toolName, JSONValue metadata = JSONValue.init) @safe nothrow {
         this.role = Role.tool;
         this.content = content;
         this.toolCallId = toolCallId;
         this.toolName = toolName;
+        this.metadata = metadata;
     }
 
     size_t length() @safe const nothrow {
@@ -314,6 +352,12 @@ struct ToolResponse {
             "tool_call_id": toolCallId,
             "name": toolName
         ]);
+    }
+
+    JSONValue toSaveJson() @safe {
+        auto j = toJson();
+        j["metadata"] = metadata;
+        return j;
     }
 
     void fromJson(JSONValue j) @trusted nothrow {
