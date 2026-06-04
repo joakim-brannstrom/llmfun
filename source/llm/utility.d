@@ -55,7 +55,7 @@ string summarizeToolCalls(Role role, JSONValue calls) {
 
     auto buf = appender!string();
 
-    formattedWrite(buf, "%s: Wants to run: %s(", role, call["name"]);
+    formattedWrite(buf, "%s: run: %s(", role, call["name"]);
 
     // Extract only key arguments, NOT full content
     try {
@@ -69,22 +69,16 @@ string summarizeToolCalls(Role role, JSONValue calls) {
                 } else {
                     params ~= format("content='%s'", contentStr);
                 }
-            } else if (key.among("path", "filePath")) {
-                params ~= format("%s='%s'", key, value);
-            } else if (key.among("start", "end", "limit", "startLine",
-                    "lineEnd", "count", "appendLoc", "topK")) {
+            } else {
                 params ~= format("%s=%s", key, value);
-            } else if (key.among("mode", "command")) {
-                params ~= format("%s='%s'", key, value);
-            } else if (key.among("topic", "query", "repo")) {
-                params ~= format("%s='%s'", key, value);
             }
         }
 
         // Sort parameters by length so shortest (most visible) come first
         sort!("a.length < b.length")(params);
         buf.put(params.join(", "));
-    } catch (Exception) {
+    } catch (Exception e) {
+        logger.trace("summary failed, should not happen: ", e.msg);
         return format!"%s: Wants to run: %s"(role, call["name"]);
     }
     buf.put(")");
