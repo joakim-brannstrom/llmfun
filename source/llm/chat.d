@@ -222,7 +222,9 @@ struct VisionMessage {
 
     JSONValue toSaveJson() @safe {
         auto j = toJson();
-        j["metadata"] = metadata;
+        if (metadata != JSONValue.init) {
+            j["metadata"] = metadata;
+        }
         return j;
     }
 
@@ -263,7 +265,9 @@ struct Message {
 
     JSONValue toSaveJson() @safe {
         auto j = toJson();
-        j["metadata"] = metadata;
+        if (metadata != JSONValue.init) {
+            j["metadata"] = metadata;
+        }
         return j;
     }
 
@@ -307,7 +311,9 @@ struct ToolMessage {
 
     JSONValue toSaveJson() @safe {
         auto j = toJson();
-        j["metadata"] = metadata;
+        if (metadata != JSONValue.init) {
+            j["metadata"] = metadata;
+        }
         return j;
     }
 
@@ -356,7 +362,9 @@ struct ToolResponse {
 
     JSONValue toSaveJson() @safe {
         auto j = toJson();
-        j["metadata"] = metadata;
+        if (metadata != JSONValue.init) {
+            j["metadata"] = metadata;
+        }
         return j;
     }
 
