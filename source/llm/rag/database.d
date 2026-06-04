@@ -357,7 +357,7 @@ struct Database {
         return res.oneValue!long != 0;
     }
 
-    bool hasFile(AbsolutePath path) {
+    bool hasFile(Path path) {
         static immutable sql = "SELECT t1.url FROM SourceTbl as t0, OriginUrlTbl as t1 WHERE t0.urlType=:urlType AND t0.id=t1.sourceId AND t1.url=:url";
 
         auto stmt = db.prepare(sql);
@@ -499,7 +499,7 @@ struct Database {
         return rval[];
     }
 
-    SourceMatch[] queryByPathAndLine(AbsolutePath filePath, long lineNumber) {
+    SourceMatch[] queryByPathAndLine(Path filePath, long lineNumber) {
         // INNER JOIN on OriginUrlTbl is correct: every path-type source always has
         // a corresponding OriginUrlTbl entry (see addSource line 253-254).
         // This is consistent with hasFile() which uses the same JOIN pattern.

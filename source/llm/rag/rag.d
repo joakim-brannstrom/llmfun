@@ -200,11 +200,11 @@ class RAG {
         });
     }
 
-    SourceMatch[] queryReadFile(AbsolutePath filePath, long lineNumber) {
+    SourceMatch[] queryReadFile(Path filePath, long lineNumber) {
         return queryReadFile(filePath, lineNumber, "");
     }
 
-    SourceMatch[] queryReadFile(AbsolutePath filePath, long lineNumber, string database) {
+    SourceMatch[] queryReadFile(Path filePath, long lineNumber, string database) {
         size_t[] indices;
         if (!validateDatabase(database, indices))
             return null;
@@ -216,7 +216,7 @@ class RAG {
         return results;
     }
 
-    bool hasFile(AbsolutePath filePath, string database) {
+    bool hasFile(Path filePath, string database) {
         size_t[] indices;
         if (!validateDatabase(database, indices))
             return false;

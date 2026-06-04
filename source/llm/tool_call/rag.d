@@ -13,10 +13,10 @@ import std.stdio : File;
 import std.string : join, splitLines, indexOf, strip, split, replace;
 import std.sumtype : match;
 import std.exception : enforce;
-import std.path : relativePath;
+import std.path : relativePath, buildNormalizedPath;
 import std.process : execute;
 
-import my.path : AbsolutePath;
+import my.path : Path, AbsolutePath;
 
 import llm.tool_call;
 import llm.rag.rag;
@@ -27,6 +27,7 @@ mixin RegisterLlmFunctions!();
 interface RAGContext : Context {
     RAG getRAG();
     bool isPathInsideWorkArea(AbsolutePath path);
+    AbsolutePath workArea();
 }
 
 private immutable maxTopK = 20;
@@ -119,15 +120,17 @@ ExecuteFuncResult listRAGDatabases(Context baseCtx) {
 @Function("Load file content into RAG index")
 ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
     mixin(baseContextToSpecific!RAGContext);
-    auto path_ = AbsolutePath(path);
-    if (!ctx.isPathInsideWorkArea(path_)) {
+    auto absPath = AbsolutePath(path);
+    if (!ctx.isPathInsideWorkArea(absPath)) {
         return ExecuteFuncResult(format!"error: path '%s' must be inside the allowed workarea"(path),
                 success: false);
     }
 
     try {
-        auto data = readText(path_.toString);
-        auto result = ctx.getRAG().add(Document(Origin(path_), data, Offset.init));
+        auto data = readText(absPath.toString);
+        auto relPath = relativePath(absPath.toString, ctx.workArea.toString);
+        auto normalizedPath = buildNormalizedPath(relPath);
+        auto result = ctx.getRAG().add(Document(Origin(Path(normalizedPath)), data, Offset.init));
         return ExecuteFuncResult(format!"File '%s' (%s length) added as %s chunks to the RAG"(path,
                 result.length, result.chunks), success: true);
     } catch (Exception e) {
@@ -187,13 +190,13 @@ ExecuteFuncResult queryReadFile(Context baseCtx, string filePath, long lineNumbe
         return ExecuteFuncResult(format!"Database '%s' not found"(database), success: false);
     }
 
-    auto normalizedPath = AbsolutePath(filePath);
+    auto fileAsPath = Path(filePath);
 
     try {
-        auto matches = ctx.getRAG().queryReadFile(normalizedPath, lineNumber, database);
+        auto matches = ctx.getRAG().queryReadFile(fileAsPath, lineNumber, database);
 
         if (matches.length == 0) {
-            if (!ctx.getRAG().hasFile(normalizedPath, database)) {
+            if (!ctx.getRAG().hasFile(fileAsPath, database)) {
                 return ExecuteFuncResult(format!"File '%s' not found in RAG index"(filePath),
                         success: false);
             }
