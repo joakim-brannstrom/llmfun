@@ -9,6 +9,7 @@ import std.format : format;
 import std.json : JSONValue, parseJSON, JSONType;
 import std.string : split;
 import std.sumtype : SumType, match;
+import core.time : dur;
 
 import requests;
 
@@ -20,15 +21,23 @@ import llm.config : RemoteEmbedConfig;
 class RemoteEmbedder : Embedder {
     private {
         RemoteEmbedConfig cfg;
-        string apiKey;
         Request rq;
+        LibRequestConfig rqCfg;
     }
 
     this(RemoteEmbedConfig cfg) {
         import llm.config : getEnvApiKey;
 
         this.cfg = cfg;
-        this.apiKey = cfg.server.apiKey.empty ? getEnvApiKey() : cfg.server.apiKey;
+
+        auto apiKey = cfg.server.apiKey.empty ? getEnvApiKey() : cfg.server.apiKey;
+        auto headers = ["Content-Type": "application/json"];
+        if (!apiKey.empty)
+            headers["Authorization"] = "Bearer " ~ apiKey;
+        this.rqCfg = LibRequestConfig(headers: headers, maxRetries: cfg.server.maxRetries,
+                timeout: cfg.server.timeoutSeconds.dur!"seconds", sslSetVerifyPeer: cfg.server.verifySslCert,
+                backoffBaseMs: cfg.server.backoffMs, verbosity: cfg.server.httpVerbosity,
+                keepAlive: cfg.server.keepAlive);
     }
 
     override void destroy() {
@@ -41,14 +50,7 @@ class RemoteEmbedder : Embedder {
         jsonReq["model"] = cfg.name;
         jsonReq["input"] = text;
 
-        auto headers = ["Content-Type": "application/json"];
-        if (!apiKey.empty) {
-            headers["Authorization"] = format!"Bearer %s"(apiKey);
-        }
-
-        auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, headers,
-                cfg.server.maxRetries, cfg.server.timeoutSeconds, verifySslCert: cfg.server.verifySslCert,
-                cfg.server.backoffMs);
+        auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, rqCfg);
 
         return result.match!((HttpPostResult r) {
             logger.tracef(r.statusCode != 200, "RemoteEmbedder: Response status %d", r.statusCode);
