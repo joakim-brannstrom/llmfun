@@ -307,11 +307,6 @@ Now summarize the next %s messages, noting any changes, reversals, or continuati
         foreach (conversation; chunks) {
             chunkCount++;
 
-            if (callback) {
-                callback(chunkCount, chunks.length,
-                        format("Processing chunk %s of %s", chunkCount, chunks.length));
-            }
-
             auto query = Query.replace("{conversation}", conversation[0]);
             if (summaries.empty) {
                 query = query.replace("{previous}", "");
