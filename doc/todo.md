@@ -9,8 +9,6 @@
 - models should be possible to have multiple of
 - Max timeout when using -p
 - readLines number of lines should be configurable
-- add support in config file to configure keepalive for a server
-- bad LLM's are unable to correctly call taskDone. detect when there are 5 such queries about calling it after each other and it follows a simple pattern. Then stop if the pattern detects it.
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -38,6 +36,5 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - Add a warning when the DB is wiped. Need to add migration in the future.
 - Add option to drop all files that aren't found
 - queryBestMatch fungerar inte när sökordet innehåller "smurf-bar"
-- Add a function so the LLM can request a file+line from the database and get the text chunk.
 
 # Prompt
