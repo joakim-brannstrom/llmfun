@@ -189,7 +189,7 @@ class Agent : IBasicAgent {
         auto result = summary.compress(chat, callback, ExcludedTools.dup);
         contextUsed = result.newContextSize;
         if (force) {
-            logger.infof("Forced compression: context %ld -> %ld tokens (saved %ld)",
+            logger.infof("Forced compression: context %s -> %s tokens (saved %s)",
                     oldContextSize, contextUsed, oldContextSize - contextUsed);
         }
         return result;
