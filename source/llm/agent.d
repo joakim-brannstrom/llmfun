@@ -217,6 +217,8 @@ class Agent : IBasicAgent {
         ProcessResult.Status lastStatus = ProcessResult.Status.unknownFailure;
         size_t consecutiveSameStatus;
         immutable MaxConsecutiveSameStatus = 3;
+        size_t consecutiveNoToolCallOk;
+        immutable MaxConsecutiveNoToolCallOk = 5;
         do {
             result = this.process();
             if (step)
@@ -263,6 +265,17 @@ class Agent : IBasicAgent {
             } else {
                 lastStatus = result.status;
                 consecutiveSameStatus = 1;
+            }
+            // Safety check: detect LLM failing to call tools (continue spam loop)
+            if (result.status == ProcessResult.Status.ok && !result.hasToolCall) {
+                consecutiveNoToolCallOk++;
+                if (consecutiveNoToolCallOk > MaxConsecutiveNoToolCallOk) {
+                    logger.warningf("Agent stuck in continue loop without tool calls after %s iterations, breaking",
+                            consecutiveNoToolCallOk);
+                    keepRunning = false;
+                }
+            } else {
+                consecutiveNoToolCallOk = 0;
             }
 
             // compress at the end because it could be filled with junk
