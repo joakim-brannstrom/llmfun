@@ -26,14 +26,14 @@ class AgentExecutionPool {
     TaskPool pool;
 
     private {
-        bool running;
-        bool stopped;
+        shared bool running;
+        shared bool stopped;
         shared size_t queuedAgents;
     }
 
     this(size_t workerThreads = 1) {
         pool = new TaskPool(workerThreads);
-        running = true;
+        running.atomicStore(true);
     }
 
     /**
@@ -49,10 +49,10 @@ class AgentExecutionPool {
      * Throws Exception if pool was never started, is stopped, or is stopping.
      */
     void submit(IAgent agent, void delegate(IAgent, ProcessResult) callback) {
-        if (stopped) {
+        if (stopped.atomicLoad()) {
             throw new Exception("Pool is stopped");
         }
-        if (!running) {
+        if (!running.atomicLoad()) {
             throw new Exception("Pool not started");
         }
 
@@ -79,13 +79,13 @@ class AgentExecutionPool {
      * Idempotent: calling twice is safe.
      */
     void stop() {
-        if (stopped) {
+        if (stopped.atomicLoad()) {
             logger.tracef("[pool] Already stopped, no-op");
             return; // Idempotent no-op
         }
-        stopped = true; // Set IMMEDIATELY to prevent double-stop race
+        stopped.atomicStore(true); // Set IMMEDIATELY to prevent double-stop race
         pool.finish(blocking: true);
-        running = false;
+        running.atomicStore(false);
         logger.tracef("[pool] Worker thread stopped");
     }
 
@@ -93,7 +93,7 @@ class AgentExecutionPool {
      * Returns true if the pool is currently running (accepting and processing tasks).
      */
     bool isRunning() {
-        return running;
+        return running.atomicLoad();
     }
 
     /**
@@ -117,6 +117,13 @@ class AgentExecutionPool {
         } catch (Exception e) {
             logger.errorf("[pool] Callback threw for agent '%s': %s", task.agent.id, e.msg);
         }
+    }
+
+    /**
+     * Returns the approximate number of agents currently queued for execution.
+     */
+    size_t pending() {
+        return queuedAgents.atomicLoad;
     }
 }
 
