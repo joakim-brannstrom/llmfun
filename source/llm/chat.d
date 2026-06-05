@@ -7,9 +7,10 @@ import std.conv : to;
 import std.exception : collectException;
 import std.format : format;
 import std.json : JSONValue, JSONOptions, parseJSON, JSONType;
+import std.typecons : Tuple, tuple;
 import std.range : enumerate, isOutputRange, empty;
 import std.sumtype : SumType, match;
-import llm.utility : ApproxTokenSize;
+import llm.utility : ApproxTokenSize, getValue;
 
 struct Chat {
     alias MessageT = SumType!(Message, ToolMessage, ToolResponse, VisionMessage);
@@ -325,6 +326,50 @@ struct ToolMessage {
             logger.trace(e.msg).collectException;
         }
     }
+
+    /// Returns all tool call names and call IDs in this message
+    Tuple!(string, "name", string, "callId")[] getFunctions() @system {
+        if (toolCalls.type != JSONType.array)
+            return [];
+        auto arr = toolCalls.array;
+        Tuple!(string, "name", string, "callId")[] result;
+        result.length = arr.length;
+        size_t idx = 0;
+        foreach (call; arr) {
+            auto name = "";
+            auto callId = "";
+            if ("function" in call && "name" in call["function"])
+                name = call["function"]["name"].str;
+            if ("id" in call)
+                callId = call["id"].str;
+            result[idx++] = tuple!("name", "callId")(name, callId);
+        }
+        return result;
+    }
+
+    /// Removes all tool calls matching the given name. Returns count removed.
+    size_t removeTool(string toolName) @system {
+        if (toolCalls.type != JSONType.array)
+            return 0;
+
+        const len = toolCalls.array.length;
+        auto tools = toolCalls.array.filter!(a => getValue(a,
+                (a) => a["function"]["name"].str, null) != toolName).array;
+        toolCalls = JSONValue(tools);
+        return len - tools.length;
+    }
+
+    /// Returns true if any tool call matches the given name.
+    bool hasTool(string toolName) @system const {
+        if (toolCalls.type != JSONType.array)
+            return false;
+        foreach (call; toolCalls.array
+                .map!(a => getValue(a, (a) => a["function"]["name"].str, null))
+                .filter!(a => a == toolName)) {
+            return true;
+        }
+        return false;
+    }
 }
 
 struct ToolResponse {
@@ -375,6 +420,11 @@ struct ToolResponse {
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
+    }
+
+    /// Returns tool name and call ID as a Tuple
+    Tuple!(string, "name", string, "callId") getFunction() @safe const {
+        return tuple!("name", "callId")(toolName, toolCallId);
     }
 }
 

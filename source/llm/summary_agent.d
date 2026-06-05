@@ -15,6 +15,7 @@ import std.sumtype : SumType, match;
 import std.typecons : Tuple, tuple;
 
 import my.path;
+import my.set;
 
 import llm.chat;
 import llm.config : SummaryModelConfig, toRequestConfig, getEnvApiKey;
@@ -71,6 +72,7 @@ struct SummaryAgent {
         size_t chunkCount;
         size_t successfulChunks;
         size_t failedChunks;
+        size_t purgedCount;
     }
 
     /// Result of requestSummary containing summaries and chunk statistics
@@ -87,24 +89,87 @@ struct SummaryAgent {
     /// @param status        human-readable status message
     alias ProgressCallback = void delegate(size_t currentChunk, size_t totalChunks, string status);
 
+    /// Filter out ToolMessage and ToolResponse entries matching an exclusion list.
+    /// Returns a new array with excluded tool calls removed.
+    /// Tracks the number of messages purged in purgedCount.
+    private Tuple!(Chat.MessageT[], size_t) purgeTools(Chat.MessageT[] history,
+            string[] excludedTools_) {
+        if (excludedTools_.empty)
+            return typeof(return)(history, 0);
+
+        Chat.MessageT[] result;
+        size_t purgedCount = 0;
+        Set!string removedCallIds;
+        Set!string excludedTools = excludedTools_.toSet;
+
+        // System prompt (index 0) is always preserved
+        result ~= history[0];
+
+        foreach (msg; history[1 .. $]) {
+            msg.match!((Message m) {
+                // Regular messages always kept
+                result ~= msg;
+            }, (ToolMessage m) {
+                foreach (call; m.getFunctions.filter!(a => excludedTools.contains(a.name))) {
+                    removedCallIds.add(call.callId);
+                }
+                foreach (toolName; excludedTools_) {
+                    m.removeTool(toolName);
+                }
+
+                if (m.getFunctions.empty) {
+                    purgedCount++;
+                } else {
+                    result ~= Chat.MessageT(m);
+                }
+            }, (ToolResponse m) {
+                // Skip only if the specific call ID was removed (not just by name)
+                if (removedCallIds.contains(m.toolCallId)) {
+                    purgedCount++;
+                } else {
+                    result ~= msg;
+                }
+            }, (VisionMessage m) {
+                // Vision messages always kept
+                result ~= msg;
+            });
+        }
+
+        return typeof(return)(result, purgedCount);
+    }
+
     /// Compress the chat history using a token-budget approach.
     /// Keeps last KeepLast messages (Y), fills X from newest backwards up to TokenBudget,
     /// and summarizes remaining messages.
     /// Returns result with details about the compression.
-    CompressResult compress(ref Chat chat, ProgressCallback callback = null) {
-        const historyLen = chat.length;
+    CompressResult compress(ref Chat chat, ProgressCallback callback = null,
+            string[] excludedTools_ = null) {
+        size_t purgedCount = 0;
+
+        // Purge excluded tools before compression
+        auto allMessages = chat.getMessages;
+        const historyLen = allMessages.length;
+        if (!excludedTools_.empty) {
+            auto history = chat.getMessages;
+            auto result = purgeTools(history, excludedTools_);
+            if (result[1] != 0) {
+                purgedCount = result[1];
+                allMessages = result[0];
+            }
+        }
+
         size_t chunkCount;
         size_t successfulChunks;
         size_t failedChunks;
 
-        if (historyLen <= 1 + KeepLast) {
+        if (allMessages.length <= 1 + KeepLast) {
             logger.tracef("Chat too short to compress (length: %s, need at least %s)",
-                    historyLen, 1 + KeepLast);
-            return CompressResult(compressed: false);
+                    allMessages.length, 1 + KeepLast);
+            return CompressResult(compressed: false, purgedCount: purgedCount);
         }
 
         // Step 1: Identify Y — last KeepLast messages
-        auto Y = chat.getMessages[$ - KeepLast .. $];
+        auto Y = allMessages[$ - KeepLast .. $];
 
         // Enforce token budget on verbatim Y messages
         for (size_t i = 0; i < Y.length; i++) {
@@ -117,10 +182,10 @@ struct SummaryAgent {
         }
 
         // Step 2: Identify candidate pool — messages [1 .. $ - KeepLast] (skip system prompt)
-        auto candidates = chat.getMessages[1 .. $ - KeepLast];
+        auto candidates = allMessages[1 .. $ - KeepLast];
         if (candidates.empty) {
             logger.trace("No candidate messages to compress");
-            return CompressResult(compressed: false);
+            return CompressResult(compressed: false, purgedCount: purgedCount);
         }
 
         // Step 3: Build X — iterate candidates newest to oldest, prepend until TokenBudget
@@ -151,7 +216,7 @@ struct SummaryAgent {
         auto keptXTokens = tokensUsed;
 
         // Step 4: Summarize remaining messages
-        auto newHistory = [chat.getMessages[0]]; // system prompt
+        auto newHistory = [allMessages[0]]; // system prompt
 
         if (!remaining.empty) {
             auto result = requestSummary(remaining, callback);
@@ -182,8 +247,8 @@ struct SummaryAgent {
         return CompressResult(compressed: true, originalLength: historyLen,
                 newLength: newHistory.length, keptXCount: keptXCount,
                 keptXTokens: keptXTokens, summarizedCount: remaining.length,
-                newContextSize: chat.approxContextSize, chunkCount: chunkCount,
-                successfulChunks: successfulChunks, failedChunks: failedChunks);
+                newContextSize: chat.approxContextSize, chunkCount: chunkCount, successfulChunks: successfulChunks,
+                failedChunks: failedChunks, purgedCount: purgedCount);
     }
 
     /// Estimate token count of a message (role + content)

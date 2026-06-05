@@ -55,7 +55,8 @@ class Agent : IBasicAgent {
         FeedbackEngine feedbackEngine;
         bool taskDone_;
         int lastToolCallWarning;
-        immutable WarnEveryNthToolCall = 5;
+        static immutable WarnEveryNthToolCall = 5;
+        static immutable string[] ExcludedTools = ["taskDone"];
         ReFilter toolFilter;
         bool waitingForVisionResponse;
     }
@@ -185,7 +186,7 @@ class Agent : IBasicAgent {
         if (contextUsed < contextSize * threshold && !force)
             return typeof(return)(compressed: true);
         long oldContextSize = contextUsed;
-        auto result = summary.compress(chat, callback);
+        auto result = summary.compress(chat, callback, ExcludedTools.dup);
         contextUsed = result.newContextSize;
         if (force) {
             logger.infof("Forced compression: context %ld -> %ld tokens (saved %ld)",
