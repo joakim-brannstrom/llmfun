@@ -45,10 +45,15 @@ struct RequestConfig {
 }
 
 /// Error representation for HTTP POST failures (non-throwing).
-struct HttpPostError {
+struct HttpError {
     int statusCode; // HTTP status code (0 if no response / network error)
     string body; // Response body or error message
     string errorMsg; // Human-readable error description
+}
+
+struct HttpResult {
+    int statusCode;
+    string body;
 }
 
 struct LlamaRequestError {
@@ -94,12 +99,12 @@ struct LlmRequester {
 
             auto result = httpPostWithRetry(rq, cfg.chatUrl, jsonReq.toString, rqCfg);
 
-            return result.match!((HttpPostResult r) {
+            return result.match!((HttpResult r) {
                 if (r.statusCode == 200) {
                     return ReturnT(parseJSON(r.body));
                 }
                 return ReturnT(LlamaRequestError(r.statusCode, r.body));
-            }, (HttpPostError e) {
+            }, (HttpError e) {
                 if (e.statusCode == 0) {
                     logger.trace(e.errorMsg);
                 }
@@ -141,12 +146,12 @@ struct LlmSlotRequester {
 
             auto result = httpGetWithRetry(rq, url, rqCfg);
 
-            return result.match!((HttpPostResult r) {
+            return result.match!((HttpResult r) {
                 if (r.statusCode == 200) {
                     return ReturnT(parseJSON(r.body));
                 }
                 return ReturnT(LlamaRequestError(r.statusCode, r.body));
-            }, (HttpPostError e) {
+            }, (HttpError e) {
                 if (e.statusCode == 0) {
                     logger.tracef("http error: url:'%s' msg:'%s'", cfg.slotUrl, e.errorMsg);
                 }
@@ -217,24 +222,22 @@ struct LibRequestConfig {
     void conf(ref Request rq) {
         if (isConfigured)
             return;
+        isConfigured = true;
+        reconfigure(rq);
+    }
 
+    void reconfigure(ref Request rq) {
         rq.addHeaders(headers);
         rq.timeout = timeout;
         rq.sslSetVerifyPeer = sslSetVerifyPeer;
         rq.verbosity = cast(uint) verbosity;
         rq.keepAlive = keepAlive;
-        isConfigured = true;
     }
 }
 
-struct HttpPostResult {
-    int statusCode;
-    string body;
-}
-
 /// Execute an HTTP request with retry and exponential backoff.
-SumType!(HttpPostResult, HttpPostError) httpWithRetry(string HttpReqType)(
-        ref Request rq, string url, string body, ref LibRequestConfig cfg) {
+SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(ref Request rq,
+        string url, string body, ref LibRequestConfig cfg) {
     import std.algorithm : canFind;
     import std.conv : to;
 
@@ -243,7 +246,7 @@ SumType!(HttpPostResult, HttpPostError) httpWithRetry(string HttpReqType)(
     cfg.conf(rq);
 
     int attempt = 0;
-    HttpPostError lastError;
+    HttpError lastError;
 
     while (attempt <= cfg.maxRetries) {
         if (attempt > 0) {
@@ -263,48 +266,32 @@ SumType!(HttpPostResult, HttpPostError) httpWithRetry(string HttpReqType)(
             int code = rs.code;
 
             if (code >= 500) {
-                lastError = HttpPostError(code, response,
-                        "HTTP " ~ code.to!string ~ " (server error, retryable): " ~ response);
+                lastError = HttpError(code, response,
+                        format!"HTTP %s (server error, retryable): %s"(code, response));
                 continue;
             }
             if (code >= 400) {
-                return ReturnT(HttpPostError(code, response,
-                        "HTTP " ~ code.to!string ~ " (client error, not retryable): " ~ response));
+                return ReturnT(HttpError(code, response,
+                        format!"HTTP %s (client error, not retryable): %s"(code, response)));
             }
-            return ReturnT(HttpPostResult(code, response));
+            return ReturnT(HttpResult(code, response));
         } catch (Exception e) {
-            // TODO: bad design because it relies on the error messages from
-            // the requests library. If it is changed to e.g. curl the messages
-            // will look differently or even be non-english
-            lastError = HttpPostError(0, "", e.msg);
-            bool isRetryable = false;
-            if (canFind("HTTP 5", lastError.errorMsg))
-                isRetryable = true;
-            if (canFind("timeout", lastError.errorMsg))
-                isRetryable = true;
-            if (canFind("connection", lastError.errorMsg))
-                isRetryable = true;
-            if (canFind("refused", lastError.errorMsg))
-                isRetryable = true;
-
-            if (!isRetryable) {
-                rq = Request();
-                cfg.isConfigured = false;
-                cfg.conf(rq);
-            }
+            lastError = HttpError(0, "", e.msg);
+            rq = Request();
+            cfg.reconfigure(rq);
         }
     }
     return ReturnT(lastError);
 }
 
 /// Execute an HTTP POST with retry and exponential backoff.
-SumType!(HttpPostResult, HttpPostError) httpPostWithRetry(ref Request rq,
-        string url, string body, ref LibRequestConfig cfg) {
+SumType!(HttpResult, HttpError) httpPostWithRetry(ref Request rq, string url,
+        string body, ref LibRequestConfig cfg) {
     return httpWithRetry!"POST"(rq, url, body, cfg);
 }
 
 /// Execute an HTTP POST with retry and exponential backoff.
-SumType!(HttpPostResult, HttpPostError) httpGetWithRetry(ref Request rq,
-        string url, ref LibRequestConfig cfg) {
+SumType!(HttpResult, HttpError) httpGetWithRetry(ref Request rq, string url,
+        ref LibRequestConfig cfg) {
     return httpWithRetry!"GET"(rq, url, "", cfg);
 }

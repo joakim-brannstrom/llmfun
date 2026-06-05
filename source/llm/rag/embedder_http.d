@@ -52,7 +52,7 @@ class RemoteEmbedder : Embedder {
 
         auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, rqCfg);
 
-        return result.match!((HttpPostResult r) {
+        return result.match!((HttpResult r) {
             logger.tracef(r.statusCode != 200, "RemoteEmbedder: Response status %d", r.statusCode);
 
             JSONValue json;
@@ -85,7 +85,7 @@ class RemoteEmbedder : Embedder {
                 logger.tracef("RemoteEmbedder: Embedding dimensions: %s", resultVec.length);
             }
             return EmbedResult(resultVec);
-        }, (HttpPostError e) {
+        }, (HttpError e) {
             logger.errorf("RemoteEmbedder: HTTP error %s: %s", e.statusCode, e.errorMsg);
             return EmbedResult(e.errorMsg);
         });
