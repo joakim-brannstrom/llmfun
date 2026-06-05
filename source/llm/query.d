@@ -24,6 +24,7 @@ struct RequestConfig {
     int verbosity;
     int timeoutS;
     bool keepAlive = true;
+    bool reuseConnection = false;
     bool verifySslCert = true;
     string apiKey;
 
@@ -90,6 +91,11 @@ struct LlmRequester {
         alias ReturnT = typeof(return);
 
         try {
+            if (!cfg.reuseConnection) {
+                rq = Request();
+                rqCfg.isConfigured = false;
+            }
+
             auto jsonReq = chat.toJson.addConfig(cfg.chat);
             if (!tools.isNull) {
                 jsonReq["tools"] = tools.get;
