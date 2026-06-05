@@ -11,7 +11,6 @@
 - readLines number of lines should be configurable
 - add support in config file to configure keepalive for a server
 - bad LLM's are unable to correctly call taskDone. detect when there are 5 such queries about calling it after each other and it follows a simple pattern. Then stop if the pattern detects it.
-- the summary should start by removing all taskDone tool calls
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
