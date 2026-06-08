@@ -32,17 +32,17 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 
 - planner: need a mode when I update the system design and/or implementation_plan. It should then use another type of prompt.
 
+- planner need to be restructured. First it should analyze the source code to understand the project. This should be written to a file in plan/. Then that is used by the system design step.
+- planner, there should be a plan execute
+
 # rag
-- Add option to drop all unknown
 - Add a warning when the DB is wiped. Need to add migration in the future.
 - Add option to drop all files that aren't found
 - queryBestMatch fungerar inte när sökordet innehåller "smurf-bar"
-- remove unknown, change it to "topic" instead
 
 - must check the write permissions of the directory before trying to create the database.
 
+- memories should automatically be added to the RAG so they are always searchable
+
 # Prompt
 
-In llmfun/source/llm/plan.d there is an implementation of a pipeline. The problem with it is that it is only two stages. I want you to suggest how it can be improved. Maybe a study step first? That the LLM should study the source code and write a memory about it. But first look if there is a memory for this source code.
-
-In the rag implementation in llmfun/source/llm/rag.d and database.d there is a category called unknown. I want that change to being a topic instead. A topic is not related to a file but rather just that, a topic about something. A topic is then related to a "Document" which is indexed, in the same way that Unknown is indexed. So the change is basically changing unknown to a Topic, changing the database to be able to accomodate a topic and the tool call in tool_call/rag.d
