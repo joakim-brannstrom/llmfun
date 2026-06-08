@@ -71,10 +71,10 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
     // dfmt on
 
     // Create transient agents
-    auto codeAnalyser = new Agent("code_analyser", llmConf, monitor, rag, toolFilter);
-    codeAnalyser.setSystemPrompt(
-            SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString);
-    codeAnalyser.addUserQuery(codeAnalyserPrompt);
+    // auto codeAnalyser = new Agent("code_analyser", llmConf, monitor, rag, toolFilter);
+    // codeAnalyser.setSystemPrompt(
+    //         SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString);
+    // codeAnalyser.addUserQuery(codeAnalyserPrompt);
 
     auto coder = new Agent("coder", llmConf, monitor, rag, toolFilter);
     coder.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt))
@@ -91,14 +91,14 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
     // at most 2 times, resulting in 3 total coder executions.
     // dfmt off
     auto pipeline = pipelineBuilder
-        .addNode("code_analyser", codeAnalyser)
+        // .addNode("code_analyser", codeAnalyser)
         .addNode("coder", coder)
         .addNode("reviewer", reviewer)
-        .addEdge("code_analyser", "coder")
+        // .addEdge("code_analyser", "coder")
         .addEdge("coder", "reviewer")
         .addEdge("reviewer", "coder", 1u)
         .addEdge("reviewer", "done", 0)
-        .startNode("code_analyser")
+        .startNode("coder")
         .stopNode("done").build;
     // dfmt on
 
