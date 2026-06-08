@@ -22,7 +22,7 @@ interface SandboxContext : Context {
     string getContainerCmd();
 }
 
-@Function("Execute d code in sandbox. Returns JSON with exit_code and output")
+@Function("Execute d/python code in sandbox. Returns JSON with exit_code and output")
 ExecuteFuncResult executeCode(Context baseCtx, string path, string language) {
     mixin(baseContextToSpecific!SandboxContext);
 
@@ -38,12 +38,9 @@ ExecuteFuncResult executeCode(Context baseCtx, string path, string language) {
             case "d":
                 cmd = "ldmd2 -run /source";
                 return "dlang/llmfun:1.0";
-                // case "python":
-                //     cmd = "python3 /source";
-                //     return "python3";
-                // case "bash":
-                //     cmd = "bash /source";
-                //     return "alpine";
+            case "python":
+                cmd = "python3 /source";
+                return "llmfun/python3:1.0";
             default:
                 throw new Exception("unsupported language " ~ language);
             }
