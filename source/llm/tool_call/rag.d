@@ -17,6 +17,7 @@ import std.path : relativePath, buildNormalizedPath;
 import std.process : execute;
 
 import my.path : Path, AbsolutePath;
+import miniorm : spinSql;
 
 import llm.tool_call;
 import llm.rag.rag;
@@ -169,6 +170,30 @@ ExecuteFuncResult loadContentToRAG(Context baseCtx, string topic, string content
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: failed loading topic into rag: %s"(e.msg),
                 success: false);
+    }
+}
+
+@Function("Remove topic from RAG index. Topic must be alphanumeric + underscore, max 100 chars.")
+ExecuteFuncResult removeTopicFromRAG(Context baseCtx, string topic) {
+    mixin(baseContextToSpecific!RAGContext);
+
+    if (topic.empty) {
+        return ExecuteFuncResult("error: topic must not be empty", success: false);
+    }
+    if (topic.length > 100) {
+        return ExecuteFuncResult("error: topic too long. Max 100 characters", success: false);
+    }
+    if (auto err = checkAlphaNumUnderscore(topic)) {
+        return ExecuteFuncResult(err, success: false);
+    }
+
+    try {
+        const chunks = spinSql!(() => ctx.getRAG().removeSource(Origin(Topic(topic))));
+        return ExecuteFuncResult(format!"Removed topic '%s' with %s chunks from RAG"(topic,
+                chunks), success: true);
+    } catch (Exception e) {
+        return ExecuteFuncResult(format!"error: failed to remove topic '%s' from RAG: %s"(topic,
+                e.msg), success: false);
     }
 }
 
