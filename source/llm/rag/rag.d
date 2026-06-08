@@ -283,9 +283,10 @@ RagAddResult add(RAG rag, Document doc) {
                 startLine, endLine, startCharPos, startCharPos + graphemes.length);
 
         // 50% sliding window
-        graphemes = graphemes[$ / 2 .. $];
-        startCharPos += graphemes.length;
-        startLine = endLine;
+        const size_t half = graphemes.length / 2;
+        startCharPos += half;
+        startLine += graphemes[0 .. half].count(Grapheme('\n'));
+        graphemes = graphemes[half .. $];
         nChunks++;
     }
 
