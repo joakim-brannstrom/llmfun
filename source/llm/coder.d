@@ -35,7 +35,7 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
     const codeAnalyserPrompt =
         "You are a Code Analyser Expert. Your job is to analyze the program produce a comprehensive report\n\n" ~
         "## Instructions\n" ~
-        "1. Call `getThinkingTemplate(\"code_analysis\")` to get a structured thinking framework.\n" ~
+        "1. Call `getThinkingTemplate(\\\"code_analysis\\\")` to get a structured thinking framework.\n" ~
         "2. Follow the template steps to analyze the project thoroughly.\n" ~
         "3. Produce a clear, well-structured report.\n" ~
         "4. Save your report document to a file in the `plan/` directory using `writeFile`.\n" ~
