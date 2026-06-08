@@ -20,9 +20,6 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
     - Important that it do not trigger often. There must be a memory between sessions. Maybe a simple one such as keeping track of how many failed tool calls there where. If it was 20, and the improvered executed then it shouldn't execute again until 25 and 30min have elapsed. If it instead goes down to 0 the count is reset. The count has a min threshold of 10.
 
 # pipeline
-- planner: system design and implementation agents should use the standard system prompt. The "task to execute" should be injected in the chat as a user query.
-    - when it is restructured to a graph then change 
-
 - must support resuming where a pipeline was last interrupted
 - loading prompts from files
     - with fallback to the general agent prompt.
