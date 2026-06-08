@@ -540,7 +540,7 @@ ExecuteFuncResult md5HashFile(Context baseCtx, string path) {
     }
 
     try {
-        auto content = readText(path);
+        auto content = readText(path_.toString);
         return ExecuteFuncResult(content.representation.md5Of.toHexString.idup, success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
