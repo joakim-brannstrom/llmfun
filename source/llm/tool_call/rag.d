@@ -35,8 +35,8 @@ private immutable maxTopK = 20;
 private string location(Document doc) {
     import std.sumtype : match;
 
-    return doc.origin.match!((Unknown _) => "no source,", (Url a) => a.value, (Path a) => a
-            .toString);
+    return doc.origin.match!((Topic a) => "topic: " ~ a.name, (Url a) => a.value,
+            (Path a) => a.toString);
 }
 
 private string toResult(Document[] docs) {
@@ -139,16 +139,35 @@ ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
     }
 }
 
-@Function("Load content into RAG index")
-ExecuteFuncResult loadContentToRAG(Context baseCtx, string content) {
+@Function(
+        "Load content into RAG index with a topic name. Topic must be alphanumeric + underscore, max 100 chars.")
+ExecuteFuncResult loadContentToRAG(Context baseCtx, string topic, string content) {
     mixin(baseContextToSpecific!RAGContext);
 
+    if (topic.empty) {
+        return ExecuteFuncResult("error: topic must not be empty", success: false);
+    }
+    if (topic.length > 100) {
+        return ExecuteFuncResult("error: topic too long. Max 100 characters", success: false);
+    }
+    if (auto err = checkAlphaNumUnderscore(topic)) {
+        return ExecuteFuncResult(err, success: false);
+    }
+    if (content.empty) {
+        return ExecuteFuncResult("error: content must not be empty", success: false);
+    }
+    const ulong maxContentSize = 1024 * 1024; // 1MB
+    if (content.length > maxContentSize) {
+        return ExecuteFuncResult(format!"error: content too large. Max %s bytes"(maxContentSize),
+                success: false);
+    }
+
     try {
-        auto result = ctx.getRAG().add(Document(Origin(Unknown.init), content, Offset.init));
-        return ExecuteFuncResult(format!"Content (%s length) added as %s chunks to the RAG"(result.length,
-                result.chunks), success: true);
+        auto result = ctx.getRAG().add(Document(Origin(Topic(topic)), content, Offset.init));
+        return ExecuteFuncResult(format!"Content (%s length) added to '%s' as %s chunks to the RAG"(result.length,
+                topic, result.chunks), success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed loading file into rag: %s"(e.msg),
+        return ExecuteFuncResult(format!"error: failed loading topic into rag: %s"(e.msg),
                 success: false);
     }
 }
@@ -206,7 +225,7 @@ ExecuteFuncResult queryReadFile(Context baseCtx, string filePath, long lineNumbe
 
         string[] resultBlocks;
         foreach (i, match; matches) {
-            string originStr = match.origin.match!((Unknown _) => "no source",
+            string originStr = match.origin.match!((Topic a) => format!"topic: '%s'"(a.name),
                     (Url a) => a.value, (Path a) => a.toString);
 
             string text = applyAppendLoc(match.text, match.line.begin, appendLoc);

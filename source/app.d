@@ -446,11 +446,11 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 
         long entriesRemoved = 0; // Scoped to filter-based branch
         long entriesFailed = 0;
-        long unknownSkipped = 0;
 
         auto candidates = appender!(RemoveCandidate[])();
+        long topicSkipped = 0;
         foreach (src; rag.db.getSources) {
-            src.origin.match!((Unknown _) { unknownSkipped++; return; }, (Path a) {
+            src.origin.match!((Topic a) { ++topicSkipped; return; }, (Path a) {
                 if (ragFilter.match(a.toString))
                     candidates.put(RemoveCandidate(src.origin, a.toString));
             }, (Url a) {
@@ -458,8 +458,13 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
                     candidates.put(RemoveCandidate(src.origin, a.value));
             });
         }
+        if (topicSkipped > 0) {
+            logger.infof("Skipped %s topic source(s) — topics have no file paths to filter",
+                    topicSkipped);
+        }
 
         auto candidateArray = candidates.data;
+
         logger.infof("Found %s source(s) matching filter for removal", candidateArray.length);
         foreach (c; candidateArray) {
             logger.infof("  Will remove: '%s'", c.matchStr);
@@ -474,8 +479,8 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
             }
         }
 
-        logger.infof("Removed %s embeddings from %s source(s), %s failed, %s unknown skipped",
-                entriesRemoved, candidateArray.length, entriesFailed, unknownSkipped);
+        logger.infof("Removed %s embeddings from %s source(s), %s failed",
+                entriesRemoved, candidateArray.length, entriesFailed);
     }
 
     void listSources() {
@@ -483,12 +488,11 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         foreach (dbSrc; rag.getSources) {
             logger.infof("Database '%s'", dbSrc.name);
             foreach (src; dbSrc.sources) {
-                src.origin.match!((Unknown _) {
-                    logger.infof("unknown (%s)", src.checksum.get);
-                }, (Path a) {
-                    logger.infof("path:'%s' (%s)", a, src.checksum.get);
-                }, (Url a) {
-                    logger.infof("url:'%s' (%s)", a.value, src.checksum.get);
+                auto cs = src.checksum.get;
+                src.origin.match!((Topic a) {
+                    logger.infof("topic:'%s' (%s)", a.name, cs);
+                }, (Path a) { logger.infof("path:'%s' (%s)", a, cs); }, (Url a) {
+                    logger.infof("url:'%s' (%s)", a.value, cs);
                 });
             }
         }

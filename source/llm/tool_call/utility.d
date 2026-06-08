@@ -17,7 +17,7 @@ Path tempPath() @safe {
 
 string checkAlphaNumUnderscore(string s) {
     if (s.filter!(a => (!a.isAlphaNum && a != '_')).count != 0)
-        return format!"error: topic may only contain characters [_,0-9,a-z,A-Z]";
+        return format!"error: topic may only contain alphanumeric characters and underscores [0-9,a-z,A-Z,_]";
     return null;
 }
 

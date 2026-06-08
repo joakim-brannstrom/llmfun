@@ -19,10 +19,10 @@ import my.path;
 import my.named_type;
 import my.optional;
 
-public import llm.rag.rag : Unknown, Url, Origin, Document, Offset, Line;
+public import llm.rag.rag : Topic, Url, Origin, Document, Offset, Line;
 
 immutable timeout = 30.dur!"seconds";
-enum SchemaVersion = 4;
+enum SchemaVersion = 5;
 
 private struct VersionTbl {
     @ColumnName("version")
@@ -38,7 +38,7 @@ private struct SourceTbl {
     SysTime added;
 
     enum UrlType {
-        unknown,
+        topic,
         url,
         path
     }
@@ -53,7 +53,7 @@ private struct OriginUrlTbl {
 }
 
 SourceTbl.UrlType convert(Origin x) {
-    return x.match!((Unknown _) => SourceTbl.UrlType.unknown,
+    return x.match!((Topic _) => SourceTbl.UrlType.topic,
             (Path _) => SourceTbl.UrlType.path, (Url _) => SourceTbl.UrlType.url);
 }
 
@@ -250,8 +250,8 @@ struct Database {
 
         if (db.changes == 1) {
             const id = db.lastInsertRowid;
-            src.origin.match!((Unknown _) {}, (Path a) => addOrigin(id,
-                    a.toString), (Url a) => addOrigin(id, a.value));
+            src.origin.match!((Topic a) => addOrigin(id, a.name),
+                    (Path a) => addOrigin(id, a.toString), (Url a) => addOrigin(id, a.value));
             return SourceId(id);
         }
         return getSource(src.origin).match!((None _) => SourceId.init, a => a.id);
@@ -273,32 +273,11 @@ struct Database {
             return ReturnT(None.init);
         }
 
-        return origin.match!((Unknown _) => ReturnT(None.init),
+        return origin.match!((Topic a) => urlSource(a.name),
                 (Path a) => urlSource(a.toString), (Url a) => urlSource(a.value));
     }
 
-    Tuple!(Source, "src", SourceId, "id")[] getUnknownSources() {
-        static immutable sql = "SELECT t0.id, t0.checksum FROM SourceTbl t0 WHERE " ~ "t0.urlType=" ~ (
-                cast(long) SourceTbl.UrlType.unknown).to!string;
-        auto stmt = db.prepare(sql);
-        typeof(return) rval;
-        foreach (ref r; stmt.get.execute) {
-            rval ~= tuple!("src", "id")(Source(Origin(Unknown.init),
-                    r.peek!long(1).SourceChecksum), r.peek!long(0).SourceId);
-        }
-        return rval;
-    }
-
     Optional!Source getSource(SourceId id) {
-        Optional!Source getUnknown() {
-            static immutable sql = "SELECT checksum FROM SourceTbl WHERE id=:id";
-            auto stmt = db.prepare(sql);
-            stmt.get.bind(":id", id.get);
-            foreach (ref r; stmt.get.execute)
-                return some(Source(Origin(Unknown.init), r.peek!long(0).SourceChecksum));
-            return none!Source();
-        }
-
         Optional!Source getUrl(SourceTbl.UrlType kind) {
             static immutable sql = "SELECT t0.checksum,t1.url FROM SourceTbl t0, OriginUrlTbl t1 "
                 ~ "WHERE t0.id=:id AND t0.id=t1.sourceId";
@@ -311,6 +290,9 @@ struct Database {
                 if (kind == SourceTbl.UrlType.path)
                     return some(Source(Origin(Path(r.peek!string(1))),
                             r.peek!long(0).SourceChecksum));
+                if (kind == SourceTbl.UrlType.topic)
+                    return some(Source(Origin(Topic(r.peek!string(1))),
+                            r.peek!long(0).SourceChecksum));
             }
             return none!Source();
         }
@@ -320,15 +302,9 @@ struct Database {
         stmt.get.bind(":id", id.get);
         foreach (ref r; stmt.get.execute) {
             const kind = cast(SourceTbl.UrlType) r.peek!long(0);
-            final switch (kind) {
-            case SourceTbl.UrlType.unknown:
-                return getUnknown();
-            case SourceTbl.UrlType.url:
-            case SourceTbl.UrlType.path:
-                return getUrl(kind);
-            }
+            return getUrl(kind);
         }
-        return some(Source.init);
+        return none!Source();
     }
 
     Source[] getSources() {
@@ -382,12 +358,12 @@ struct Database {
         stmt = db.prepare(embedSql);
         stmt.get.bind(":id", id.get);
         stmt.get.execute();
-        auto entriesRemoved = db.changes;
+        auto embedRemoved = db.changes; // from embedSql DELETE
 
         cleanupEmbeddings();
-        entriesRemoved += db.changes;
+        auto cleanupRemoved = db.changes; // from cleanup
 
-        return entriesRemoved;
+        return embedRemoved + cleanupRemoved;
     }
 
     void cleanupEmbeddings() {

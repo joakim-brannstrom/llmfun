@@ -33,14 +33,15 @@ import llm.rag.embedder;
 import llm.rag.embedder_llama;
 import llm.rag.database : SourceMatch;
 
-struct Unknown {
+struct Topic {
+    string name;
 }
 
 struct Url {
     string value;
 }
 
-alias Origin = SumType!(Unknown, Url, Path);
+alias Origin = SumType!(Topic, Url, Path);
 
 struct Chunk {
     Document doc;
@@ -328,7 +329,7 @@ SourceMatch[] randomizeRanks(SourceMatch[] results) {
 
 // Helper to create a SourceMatch with a given rank
 SourceMatch makeMatch(double rank) {
-    return SourceMatch(Origin(Unknown()), Offset(0, 0), Line(0, 0), "", rank);
+    return SourceMatch(Origin(Topic("")), Offset(0, 0), Line(0, 0), "", rank);
 }
 
 unittest {
