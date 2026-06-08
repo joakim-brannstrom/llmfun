@@ -26,44 +26,63 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
         MetricMonitor monitor, bool delegate() interrupt = null, ReFilter toolFilter) {
 
     // dfmt off
-    // --- Agent 1: System Designer ---
+    // Agent 1: Code Analyser
+    const codeAnalyserPrompt =
+        "You are a Code Analyser Expert. Your job is to analyze the program produce a comprehensive report\n\n" ~
+        "## Instructions\n" ~
+        "1. Call `getThinkingTemplate(\"code_analysis\")` to get a structured thinking framework.\n" ~
+        "2. Follow the template steps to analyze the project thoroughly.\n" ~
+        "3. Produce a clear, well-structured report.\n" ~
+        "4. Save your report document to a file in the `plan/` directory using `writeFile`.\n" ~
+        "   Use the filename format: `plan/code_analysis.md`.\n" ~
+        "5. After saving, call 'setPipelineOutput' with 'done' and call `taskDone` to complete your task.\n";
+
+    // Agent 2: System Designer
     const systemDesignerPrompt =
         "You are a System Designer. Your job is to analyze a user's request and produce a\n" ~
         "comprehensive system design document.\n\n" ~
         "## Instructions\n" ~
-        "1. Call `getThinkingTemplate(\"system_design\")` to get a structured thinking framework.\n" ~
-        "2. Follow the template steps to analyze the user's request thoroughly.\n" ~
-        "3. Produce a clear, well-structured system design document.\n" ~
-        "4. Save your design document to a file in the `plan/` directory using `writeFile`.\n" ~
+        "1. Read the code analysis report from the file \"plan/code_analysis.md\" with readFile.\n" ~
+        "2. Call `getThinkingTemplate(\"system_design\")` to get a structured thinking framework.\n" ~
+        "3. Follow the template steps to analyze the user's request thoroughly.\n" ~
+        "4. Produce a clear, well-structured system design document.\n" ~
+        "5. Save your design document to a file in the `plan/` directory using `writeFile`.\n" ~
         "   Use the filename format: `plan/system_design.md`.\n" ~
-        "5. After saving, call 'setPipelineOutput' with 'done' and call `taskDone` to complete your task.\n";
+        "6. After saving, call 'setPipelineOutput' with 'done' and call `taskDone` to complete your task.\n";
 
     const systemDesignerFeedbackPrompt =
         "You are a System Design Reviewer. Your job is to review a system design plan, critique it, and provide actionable feedback for improvement.\n\n" ~
         "## Instructions\n" ~
-        "1. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
-        "2. Call `getThinkingTemplate(\"system_design\")` to get a structured framework for reviewing designs.\n" ~
-        "3. Follow the template to thoroughly analyze the design across dimensions such as requirements clarity, architecture, scalability, reliability, security, cost-efficiency, maintainability, and documentation quality.\n" ~
-        "4. Produce a detailed review document that:\n" ~
+        "1. Read the code analysis report from the file \"plan/code_analysis.md\" with readFile.\n" ~
+        "2. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
+        "3. Call `getThinkingTemplate(\"system_design\")` to get a structured framework for reviewing designs.\n" ~
+        "4. Follow the template to thoroughly analyze the design across dimensions such as requirements clarity, architecture, scalability, reliability, security, cost-efficiency, maintainability, and documentation quality.\n" ~
+        "5. Produce a detailed review document that:\n" ~
         "   - Summarizes strengths.\n" ~
         "   - Identifies specific weaknesses, risks, or missing elements.\n" ~
         "   - Provides concrete, actionable suggestions for improvement.\n" ~
-        "5. Call 'pipelineOutput' with your review as argument.\n" ~
-        "6. After call to 'pipelineOutput', call `taskDone` to complete your task.\n";
+        "6. Call 'pipelineOutput' with your review as argument.\n" ~
+        "7. After call to 'pipelineOutput', call `taskDone` to complete your task.\n";
 
-    // --- Agent 2: Implementation Planner ---
+    // Agent 3: Implementation Planner
     const implPlannerPrompt =
         "You are an Implementation Planner. Your job is to convert a system design into a\n" ~
         "detailed, actionable implementation plan with individual tasks.\n\n" ~
         "## Instructions\n" ~
-        "1. Call `getThinkingTemplate(\"implementation_plan\")` to get a structured thinking framework.\n" ~
-        "2. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
-        "3. Follow the template steps to break the design into concrete implementation tasks.\n" ~
-        "4. Save your implementation plan to `plan/implementation_plan.md` using `writeFile`.\n" ~
-        "5. After saving, call 'setPipelineOutput' with 'done' and call `taskDone` to complete your task.\n";
+        "1. Read the code analysis report from the file \"plan/code_analysis.md\" with readFile.\n" ~
+        "2. Call `getThinkingTemplate(\"implementation_plan\")` to get a structured thinking framework.\n" ~
+        "3. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
+        "4. Follow the template steps to break the design into concrete implementation tasks.\n" ~
+        "5. Save your implementation plan to `plan/implementation_plan.md` using `writeFile`.\n" ~
+        "6. After saving, call 'setPipelineOutput' with 'done' and call `taskDone` to complete your task.\n";
     // dfmt on
 
     // Create transient agents
+    auto codeAnalyser = new Agent("code_analyser", llmConf, monitor, rag, toolFilter);
+    codeAnalyser.setSystemPrompt(
+            SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString);
+    codeAnalyser.addUserQuery(codeAnalyserPrompt);
+
     auto designer = new Agent("system_designer", llmConf, monitor, rag, toolFilter);
     designer.setSystemPrompt(
             SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString);
@@ -82,13 +101,15 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
     // Wire into a linear pipeline (no loops)
     // dfmt off
     auto pipeline = pipelineBuilder
+        .addNode("code_analyser", codeAnalyser)
         .addNode("system_design", designer)
         .addNode("system_design_review", designReview)
         .addNode("impl_planner", planner)
+        .addEdge("code_analyser", "system_design")
         .addEdge("system_design", "system_design_review", null, 1)
         .addEdge("system_design_review", "system_design", null, 0)
         .addEdge("system_design", "impl_planner")
-        .startNode("system_design")
+        .startNode("code_analyser")
         .stopNode("impl_planner").build;
     // dfmt on
 
