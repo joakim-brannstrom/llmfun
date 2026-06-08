@@ -4,6 +4,7 @@ A structured protocol for an LLM agent to analyze existing source code and docum
 
 # Code Analysis Strategy (LLM Agent)
 **Important**: The output must be a structured analysis document, not code or tasks. Code and tasks are produced by downstream pipeline stages.
+**Important**: Continuously write your findings to `plan/code_analysis.md` while you are analysing.
 **Important**: Write the analysis to `plan/code_analysis.md` and load it into RAG for downstream retrieval.
 **Important**: After saving, call `loadFileToRAG("plan/code_analysis.md")` so system_design can query it.
 
