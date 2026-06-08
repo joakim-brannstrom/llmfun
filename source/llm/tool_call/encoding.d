@@ -34,6 +34,6 @@ ExecuteFuncResult md5Hash(Context ctx, string data) @safe {
     try {
         return ExecuteFuncResult(data.representation.md5Of.toHexString.idup, success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"Error: %s"(e.msg), success: false);
+        return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
 }

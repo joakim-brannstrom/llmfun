@@ -455,8 +455,9 @@ ExecuteFuncResult replaceAll(Context baseCtx, string text, string from, string t
     return ExecuteFuncResult(res, success: true);
 }
 
-@Function("List files in directory as JSON array of paths, types and sizes")
-ExecuteFuncResult listFilesInDirectory(Context baseCtx, string path) {
+@Function(
+        "List files in directory as JSON array of paths, types and sizes. recursive=1 for recursive scan")
+ExecuteFuncResult listFilesInDirectory(Context baseCtx, string path, long recursive) {
     mixin(baseContextToSpecific!FileContext);
 
     auto path_ = pathToWorkarea(ctx, path, checkExist: true);
@@ -466,7 +467,7 @@ ExecuteFuncResult listFilesInDirectory(Context baseCtx, string path) {
 
     try {
         JSONValue[] rval;
-        foreach (a; dirEntries(path_.toString, SpanMode.shallow)) {
+        foreach (a; dirEntries(path_.toString, recursive == 1 ? SpanMode.depth : SpanMode.shallow)) {
             auto e = JSONValue.emptyObject;
             e["path"] = a.name.relativePath(ctx.workArea.toString).JSONValue;
             e["type"] = (a.isDir ? "dir" : "file").JSONValue;
@@ -518,6 +519,29 @@ ExecuteFuncResult countLinesInFile(Context baseCtx, string path) {
 
     try {
         return ExecuteFuncResult(File(path_).byLineCopy.count.to!string, success: true);
+    } catch (Exception e) {
+        return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
+    }
+}
+
+@Function("Calculate the MD5 hash of a file. Returns a hexadecimal string.")
+ExecuteFuncResult md5HashFile(Context baseCtx, string path) {
+    import std.base64 : Base64;
+    import std.digest : toHexString;
+    import std.digest.md : md5Of;
+    import std.format : format;
+    import std.string : representation;
+
+    mixin(baseContextToSpecific!FileContext);
+
+    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
+    if (!path_.valid) {
+        return ExecuteFuncResult(path_.errorMsg, success: false);
+    }
+
+    try {
+        auto content = readText(path);
+        return ExecuteFuncResult(content.representation.md5Of.toHexString.idup, success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
