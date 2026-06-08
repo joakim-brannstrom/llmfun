@@ -2,12 +2,14 @@ module llm.config;
 
 import logger = std.logger;
 import std.algorithm : filter, map;
-import std.array : array, empty;
+import std.array : array, empty, appender;
+import std.conv : to;
 import std.file : readText, exists, mkdirRecurse;
 import std.format : format;
 import std.json : JSONValue, JSONType, parseJSON;
 import std.sumtype : SumType;
 import std.sumtype : match;
+import std.string : toLower, startsWith;
 
 import my.path;
 
@@ -64,14 +66,135 @@ struct LlmConfig {
     ToolFilter toolFilter;
     RagFilter ragFilter;
 
-    CodeModelConfig codeModel;
+    // Searched for in promptDir
+    string prompt = "AGENT.md";
+
+    CodeModelConfig[] codeModels;
+    long activeCodeModelIndex = 0;
     SummaryModelConfig summaryModel;
 
     EmbedConfig embedConfig;
-    long embedDimensions() {
+    long embedDimensions() const @safe {
         return embedConfig.match!((LocalEmbedConfig a) => a.dimensions,
                 (RemoteEmbedConfig a) => a.dimensions);
     }
+
+    // --- Multi-model methods ---
+
+    /// Return the currently active code model config (value copy, no mutex needed).
+    CodeModelConfig activeCodeModel() const @safe {
+        if (codeModels.length == 0)
+            throw new Exception("No code models configured");
+        if (activeCodeModelIndex < 0 || activeCodeModelIndex >= codeModels.length)
+            throw new Exception(format!"Active code model index %s is out of bounds (count: %s)"(
+                    activeCodeModelIndex, codeModels.length));
+        return codeModels[activeCodeModelIndex];
+    }
+
+    /// Return the name of the active model.
+    string activeModelName() @safe const {
+        return activeCodeModel().name;
+    }
+
+    /// Select model by index. Returns true on success, false if index out of bounds.
+    bool selectModelByIndex(long index) @safe {
+        if (index >= codeModels.length) {
+            logger.warningf("Invalid model index %s. Available models: 0-%s",
+                    index, codeModels.length - 1);
+            return false;
+        }
+        activeCodeModelIndex = index;
+        saveState();
+        return true;
+    }
+
+    /// Select model by name (case-insensitive partial match). Returns empty string on success, error message on failure.
+    string selectModelByName(string name) @safe {
+        import std.algorithm : count;
+
+        if (name.empty) {
+            return "Model name cannot be empty";
+        }
+
+        auto lowerName = name.toLower;
+        size_t matchCount = 0;
+        size_t matchIndex = size_t.max;
+
+        foreach (i, model; codeModels) {
+            if (model.name.toLower == lowerName) {
+                matchCount++;
+                matchIndex = i;
+            }
+        }
+
+        if (matchCount == 0) {
+            return format!"No model matches '%s'. Available models: %s"(name,
+                    codeModels.map!(m => m.name));
+        }
+        if (matchCount > 1) {
+            return format!"Ambiguous model name '%s'. Matches: %s"(name,
+                    codeModels.filter!(m => m.name.toLower == lowerName)
+                        .map!(m => m.name));
+        }
+
+        activeCodeModelIndex = matchIndex;
+        saveState();
+        return "";
+    }
+
+    /// List all configured model names with index and active indicator.
+    string[] listModels() const @safe {
+        auto app = appender!(string[])();
+        foreach (i, model; codeModels) {
+            app.put(format!"%s (index: %s)%s"(model.name, i,
+                    (i == activeCodeModelIndex ? " [active]" : "")));
+        }
+        return app.data;
+    }
+
+    /// Load state from llmfun/data/state.json. Silently ignores errors.
+    void loadState() @safe {
+        Path stateFile = dataDir ~ "state.json";
+        if (!stateFile.exists) {
+            return;
+        }
+
+        try {
+            auto json = stateFile.readText.parseJSON;
+            if ("activeCodeModelIndex" in json) {
+                auto idxVal = json["activeCodeModelIndex"].integer;
+                if (idxVal < 0) {
+                    logger.tracef("Invalid negative activeCodeModelIndex: %s", idxVal);
+                } else {
+                    auto idx = cast(size_t) idxVal;
+                    if (idx < codeModels.length) {
+                        activeCodeModelIndex = idx;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.tracef("Failed to load state: %s", e.msg);
+        }
+    }
+
+    /// Save state to llmfun/data/state.json. Only saves if directory exists.
+    void saveState() const @safe {
+        import std.stdio : File;
+
+        if (!dataDir.exists) {
+            return;
+        }
+
+        try {
+            auto stateFile = dataDir ~ "state.json";
+            JSONValue stateObj;
+            stateObj["activeCodeModelIndex"] = activeCodeModelIndex;
+            File(stateFile.toString, "w").writeln(stateObj.toString);
+        } catch (Exception e) {
+            logger.tracef("Failed to save state: %s", e.msg);
+        }
+    }
+
 }
 
 Path promptToPath(LlmConfig conf, string prompt) {
@@ -122,10 +245,10 @@ struct RagFilter {
 
 struct ServerConfig {
     string url;
-    string promptUrl;
-    string chatUrl;
-    string slotUrl;
-    string embedUrl;
+    string promptUrl = "v1/completion";
+    string chatUrl = "v1/chat/completions";
+    string slotUrl = "slots";
+    string embedUrl = "embeddings";
     long timeoutSeconds;
     long httpVerbosity;
     bool verifySslCert = true;
@@ -159,7 +282,6 @@ struct ServerConfig {
 struct CodeModelConfig {
     ServerConfig server;
     string name;
-    string prompt = "AGENT.md";
     double temp;
     long contextSize;
     long maxTokens;
@@ -228,9 +350,12 @@ LlmConfig readConfig(Path path, bool silent = false) {
     }
     if (path.exists) {
         logger.infof(!silent, "Reading configuration from %s", path);
-        return jsonToLlmConfig(conf, readText(path.toString).parseJSON);
+        conf = jsonToLlmConfig(conf, readText(path.toString).parseJSON);
+        validateConfig(conf);
+    } else {
+        logger.infof("No configuration at %s. Using default values", path);
     }
-    logger.infof("No configuration at %s. Using default values", path);
+    conf.loadState();
     return conf;
 }
 
@@ -262,13 +387,13 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
         {
             alias member = __traits(getMember, conf, llmMemberName);
             static if (!isType!member) {
+                alias Type = typeof(member);
                 if (llmMemberName in json) {
                     try {
                         logger.tracef("using config value for %s:%s - %s",
                                 ConfigT.stringof, llmMemberName, json[llmMemberName]);
 
                         used[llmMemberName] = true;
-                        alias Type = typeof(member);
                         static if (is(Type : Path)) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].str.Path;
                         } else static if (is(Type == Path[])) {
@@ -281,6 +406,9 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                                 __traits(getMember, conf, llmMemberName) = val.array.map!(a => a.str.Path)
                                     .array;
                             }
+                        } else static if (is(Type == CodeModelConfig[])) {
+                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(
+                                    a => jsonToConfig(CodeModelConfig.init, a)).array;
                         } else static if (is(Type : string)) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].str;
                         } else static if (is(Type : bool)) {
@@ -316,6 +444,26 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
 
     logger.trace("read json config done: " ~ ConfigT.stringof);
     return conf;
+}
+
+/// Validate LlmConfig after JSON parsing. Throws on validation failure.
+void validateConfig(LlmConfig conf) {
+    if (conf.codeModels.length <= 0)
+        throw new Exception(
+                "No code models configured. 'codeModels' array or 'codeModel' object is required in configuration.");
+
+    // Validate activeCodeModelIndex is within bounds
+    if (conf.activeCodeModelIndex < 0 || conf.activeCodeModelIndex >= conf.codeModels.length)
+        throw new Exception(format!"activeCodeModelIndex %s is out of bounds (codeModels count: %s)"(
+                conf.activeCodeModelIndex, conf.codeModels.length));
+
+    // Validate each CodeModelConfig has required fields
+    foreach (i, model; conf.codeModels) {
+        if (model.name.empty)
+            throw new Exception(format!"codeModels[%s].name must not be empty"(i));
+        if (model.server.url.empty)
+            throw new Exception(format!"codeModels[%s].server.url must not be empty"(i));
+    }
 }
 
 alias jsonToLlmConfig = jsonToConfig!LlmConfig;

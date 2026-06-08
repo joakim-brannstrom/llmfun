@@ -48,6 +48,7 @@ class Agent : IBasicAgent {
 
     private {
         LlmRequester rq;
+        string modelName_;
         AgentContext toolCtx;
         RAG rag;
         SummaryAgent summary;
@@ -74,16 +75,12 @@ class Agent : IBasicAgent {
         this.rag = rag;
         this.toolFilter = filter;
         this.toolCtx = new AgentContext(this, llmConf);
-        auto tools = filterToolDescriptions(descAllFunctions(), toolFilter);
-        this.rq = LlmRequester(llmConf.codeModel.toRequestConfig, tools.nullable);
-        this.contextSize = llmConf.codeModel.contextSize;
+
+        resetModel(llmConf.activeCodeModel);
 
         this.summary = SummaryAgent(llmConf.summaryModel);
         this.summary.setSystemPrompt(SystemPromptInit(
                 llmConf.promptToPath(llmConf.summaryModel.prompt)).toString);
-
-        auto slot = LlmSlotRequester(llmConf.codeModel.toRequestConfig);
-        this.contextSize = slot.request(llmConf.codeModel.contextSize);
     }
 
     ~this() @safe {
@@ -91,6 +88,37 @@ class Agent : IBasicAgent {
 
     override string id() {
         return name;
+    }
+
+    string modelName() const {
+        return modelName_;
+    }
+
+    long modelContextSize() const {
+        return contextSize;
+    }
+
+    /// Reset the agent's model to a new configuration.
+    /// Does NOT modify chat history or SummaryAgent.
+    void resetModel(CodeModelConfig modelConfig) {
+        import llm.tool_call : descAllFunctions, filterToolDescriptions;
+
+        if (modelConfig.name == "") {
+            throw new Exception("Cannot reset to empty model config");
+        }
+
+        auto oldModel = modelName_;
+
+        auto tools = filterToolDescriptions(descAllFunctions(), toolFilter);
+        this.rq = LlmRequester(modelConfig.toRequestConfig, tools.nullable);
+
+        auto slot = LlmSlotRequester(modelConfig.toRequestConfig);
+        this.contextSize = slot.request(modelConfig.contextSize);
+
+        this.modelName_ = modelConfig.name;
+
+        logger.tracef("Agent model reset: %s -> %s, context: %s", oldModel,
+                modelConfig.name, this.contextSize);
     }
 
     void setSystemPrompt(string x) {

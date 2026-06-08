@@ -3,6 +3,8 @@ module app;
 import logger = std.logger;
 import std.algorithm;
 import std.array : empty;
+import std.conv : to;
+import std.exception : ifThrown;
 import std.format : format;
 import std.stdio : writeln, writefln;
 import std.sumtype : match;
@@ -182,11 +184,14 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         writeln("llmfun agent mode — type a query and press Enter to start.");
         writeln(" Use /commands for special actions:");
         writeln("");
-        writeln("   (bare query)         Send a message to the agent");
+        writeln("   (bare query)       Send a message to the agent");
         writeln("   /help              Show this help message");
         writeln("   /quit, /q, /exit   Exit the agent");
         writeln("   /compact           Force compress the chat history");
         writeln("   /new               Clear history and start a new conversation");
+        writeln("   /model             List available models");
+        writeln("   /model <index>     Select model by index");
+        writeln("   /model <name>      Select model by exact name (case-insensitive)");
         writeln("   /plan <query>      Run the plan pipeline");
         writeln("   /code <query>      Run the coder pipeline");
     }
@@ -194,7 +199,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     if (conf.setupDirs)
         makeFileStructure(LlmConfig.init);
     auto llmConf = readConfig(uconf.config, !conf.prompt.empty).userToLlmConfig(conf);
-
+    llmConf.loadState();
     auto rag = () {
         try {
             auto embed = createEmbedder(llmConf.embedConfig);
@@ -214,7 +219,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     auto agent = new Agent("main", llmConf, monitor, rag, llmConf.toolFilter.to());
     scope (exit)
         agent.saveHistory(agentHistory);
-    const systemPrompt = SystemPromptInit(llmConf.promptToPath(llmConf.codeModel.prompt)).toString;
+    const systemPrompt = SystemPromptInit(llmConf.promptToPath(llmConf.prompt)).toString;
     agent.setSystemPrompt(systemPrompt);
     agent.loadHistory(agentHistory);
 
@@ -267,7 +272,8 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     do {
         if (running) {
             playNotification;
-            query = multiLineConsole(format!"[%s/%s]$ "(agent.contextUsed, agent.contextSize));
+            query = multiLineConsole(format!"[%s/%s %s]$ "(agent.contextUsed,
+                    agent.contextSize, llmConf.activeModelName()));
             clearInterruptSignal();
             if (query.among("/quit", "/q", "/exit")) {
                 break;
@@ -280,6 +286,41 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
                 continue;
             } else if (query == "/help") {
                 printHelp();
+                continue;
+            } else if (query == "/model" || query.startsWith("/model ")) {
+                auto arg = query == "/model" ? "" : query["/model ".length .. $].strip();
+                if (arg.empty) {
+                    writeln("Available models:");
+                    foreach (i, model; llmConf.codeModels) {
+                        auto activeMarker = (i == cast(size_t) llmConf.activeCodeModelIndex) ? " [active]"
+                            : "";
+                        writefln("  %s  %s%s", i, model.name, activeMarker);
+                    }
+                    writeln();
+                    writeln("Use /model <index> or /model <name> to switch.");
+                } else {
+                    const oldModel = llmConf.activeCodeModel.name;
+                    // Try to switch model
+                    bool switched;
+                    size_t idx = ifThrown(arg.to!long, -1);
+                    if (idx >= 0) {
+                        switched = llmConf.selectModelByIndex(idx);
+                        if (!switched) {
+                            logger.errorf("Error: Invalid model index '%s'. Valid indices: 0-%s.",
+                                    arg, llmConf.codeModels.length - 1);
+                        }
+                    } else {
+                        auto result = llmConf.selectModelByName(arg);
+                        switched = result.empty;
+                        logger.warningf(!result.empty, "failed to switch model: ", result);
+                    }
+                    if (switched) {
+                        agent.resetModel(llmConf.activeCodeModel());
+                        logger.infof("switched to model: %s", llmConf.activeModelName());
+                        logger.infof("Agent model reset: %s -> %s, context: %s",
+                                oldModel, agent.modelName, agent.modelContextSize);
+                    }
+                }
                 continue;
             } else if (query.startsWith("/plan ")) {
                 auto q = query["/plan ".length .. $];
