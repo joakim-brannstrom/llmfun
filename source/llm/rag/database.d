@@ -92,6 +92,8 @@ Optional!Database openDatabase(AbsolutePath dbFile_, long embedDimensions, bool 
     import std.file : exists;
     import std.path : dirName;
     import llm.rag.sqlite3_vec;
+    import my.file : getAttrs;
+    import core.sys.posix.sys.stat;
 
     string dbFile = dbFile_.toString;
 
@@ -111,9 +113,26 @@ Optional!Database openDatabase(AbsolutePath dbFile_, long embedDimensions, bool 
     }
 
     logger.trace("opening database ", dbFile).collectException;
-    if (!dbFile.dirName.exists) {
-        logger.trace("No RAG database opened. Using only in-memory database").collectException;
+    auto dbDir = dbFile.dirName;
+    if (!dbDir.exists) {
+        if (readOnly) {
+            logger.warningf("Requested read-only database directory does not exist: %s, falling back to in-memory",
+                    dbDir).collectException;
+        } else {
+            logger.tracef("No RAG database opened. Directory does not exist: '%s'",
+                    dbDir).collectException;
+        }
         dbFile = ":memory:";
+    } else if (!readOnly) {
+        uint attrs;
+        if (!getAttrs(dbDir.Path, attrs)) {
+            logger.tracef("Unable to get file permissions: '%s'", dbDir).collectException;
+        }
+        if ((attrs & (S_IWUSR)) == 0) {
+            logger.tracef("No RAG database opened. Directory is not writable: '%s'",
+                    dbDir).collectException;
+            dbFile = ":memory:";
+        }
     }
 
     for (int counter; counter < 100; ++counter) {
