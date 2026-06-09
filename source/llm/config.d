@@ -67,7 +67,7 @@ struct LlmConfig {
     RagFilter ragFilter;
 
     // Searched for in promptDir
-    string prompt = "AGENT.md";
+    string agentPrompt = "AGENT.md";
 
     CodeModelConfig[] codeModels;
     long activeCodeModelIndex = 0;

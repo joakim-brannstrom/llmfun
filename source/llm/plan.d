@@ -79,19 +79,21 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
 
     // Create transient agents
     auto codeAnalyser = new Agent("code_analyser", llmConf, monitor, rag, toolFilter);
-    codeAnalyser.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.prompt)).toString);
+    codeAnalyser.setSystemPrompt(
+            SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
     codeAnalyser.addUserQuery(codeAnalyserPrompt);
 
     auto designer = new Agent("system_designer", llmConf, monitor, rag, toolFilter);
-    designer.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.prompt)).toString);
+    designer.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
     designer.addUserQuery(systemDesignerPrompt);
 
     auto designReview = new Agent("system_design_review", llmConf, monitor, rag, toolFilter);
-    designReview.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.prompt)).toString);
+    designReview.setSystemPrompt(
+            SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
     designReview.addUserQuery(systemDesignerFeedbackPrompt);
 
     auto planner = new Agent("implementation_planner", llmConf, monitor, rag, toolFilter);
-    planner.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.prompt)).toString);
+    planner.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
     planner.addUserQuery(implPlannerPrompt);
 
     // Wire into a linear pipeline (no loops)

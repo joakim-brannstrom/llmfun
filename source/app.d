@@ -219,7 +219,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     auto agent = new Agent("main", llmConf, monitor, rag, llmConf.toolFilter.to());
     scope (exit)
         agent.saveHistory(agentHistory);
-    const systemPrompt = SystemPromptInit(llmConf.promptToPath(llmConf.prompt)).toString;
+    const systemPrompt = SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString;
     agent.setSystemPrompt(systemPrompt);
     agent.loadHistory(agentHistory);
 

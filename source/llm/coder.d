@@ -77,11 +77,11 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
     // codeAnalyser.addUserQuery(codeAnalyserPrompt);
 
     auto coder = new Agent("coder", llmConf, monitor, rag, toolFilter);
-    coder.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.prompt)).toString);
+    coder.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
     coder.addUserQuery(codeQuery);
 
     auto reviewer = new Agent("code_reviewer", llmConf, monitor, rag, toolFilter);
-    reviewer.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.prompt)).toString);
+    reviewer.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
     reviewer.addUserQuery(reviewerQuery);
 
     // Wire into a loop pipeline: coder -> reviewer -> coder (up to 3 coder runs)
