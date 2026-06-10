@@ -576,12 +576,17 @@ ORDER BY fusion_score DESC;
 
         auto results = appender!(Tuple!(long, "id", double, "rank")[])();
         foreach (ref r; stmt.get.execute) {
+            // TODO: this should not be needed
+            if (results.length >= limit)
+                break;
             results.put(tuple!("id", "rank")(r.peek!long(0),
                     reduceRankBias(chunkCount, r.peek!double(1))));
         }
+        logger.trace("Hits ", results.length);
 
         auto rval = appender!(SourceMatch[])();
         foreach (res; results[].map!(a => tuple(getChunkByRowid(a.id), a.rank))
+                .cache
                 .filter!(a => !a[0].text.empty)) {
             auto src = getSourceByEmbedId(res[0].embedId);
             src.match!((Source src) {
