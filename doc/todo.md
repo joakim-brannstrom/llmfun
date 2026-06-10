@@ -10,6 +10,8 @@
 - Max timeout when using -p
 - readLines number of lines should be configurable
 - deep research
+- add /debug
+- add autocomplete
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
