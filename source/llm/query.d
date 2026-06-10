@@ -123,6 +123,7 @@ struct LlmRequester {
     }
 }
 
+long[string] LlmSlotRequesterCache;
 struct LlmSlotRequester {
     RequestConfig cfg;
 
@@ -170,6 +171,10 @@ struct LlmSlotRequester {
     }
 
     long request(long fallbackContext) nothrow {
+        if (auto v = cfg.chat.model in LlmSlotRequesterCache) {
+            return *v;
+        }
+
         try {
             return request().match!((JSONValue j) {
                 if (cfg.verbosity >= 2)
@@ -177,7 +182,8 @@ struct LlmSlotRequester {
                 if (j.type == JSONType.array) {
                     j[0]["n_ctx"].integer;
                 } else if ("n_ctx" in j) {
-                    return j["n_ctx"].integer;
+                    const v = j["n_ctx"].integer;
+                    LlmSlotRequesterCache[cfg.chat.model] = v;
                 }
                 return fallbackContext;
             }, (LlamaRequestError e) {
