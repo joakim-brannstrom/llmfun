@@ -3,10 +3,10 @@
 A structured protocol for an LLM agent to analyze existing source code and document findings before system design. **Use this when** starting a new feature or modification and you need to understand the existing codebase first.
 
 # Code Analysis Strategy (LLM Agent)
-**Important**: The output must be a structured analysis document, not code or tasks. Code and tasks are produced by downstream pipeline stages.
+**Important**: The output must be a structured analysis document, not code or tasks..
 **Important**: Continuously write your findings to `plan/code_analysis.md` while you are analysing.
-**Important**: Write the analysis to `plan/code_analysis.md` and load it into RAG for downstream retrieval.
-**Important**: After saving, call `loadFileToRAG("plan/code_analysis.md")` so system_design can query it.
+**Important**: Write the analysis to `plan/code_analysis.md`.
+**Important**: After saving, call `loadFileToRAG("plan/code_analysis.md")`.
 
 ---
 
@@ -17,6 +17,7 @@ Before diving in, clarify what is being analyzed:
 - **Analysis target**: [Full codebase / specific module / feature-related files]
 - **Purpose**: [New feature / bug fix / refactoring / security audit / general understanding]
 - **Depth level**: [Surface mapping / deep analysis / focused on specific concern]
+
 ### Incremental Analysis (Existing Report)
 
 If a previous analysis report exists at `plan/code_analysis.md`, perform an incremental update instead of a full re-analysis:

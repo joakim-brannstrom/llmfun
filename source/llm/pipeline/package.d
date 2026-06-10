@@ -35,22 +35,32 @@ struct AgentName {
     }
 }
 
+struct NodeConfig {
+    uint maxRetries = 3;
+}
+
 /// Node in the pipeline graph; wraps an agent and tracks execution state.
 class PipelineNode : Node {
     string id_;
     IBasicAgent agent;
     bool executed;
     NodeContext ctx;
+    NodeConfig conf;
 
-    this(string id_, IBasicAgent agent) {
+    this(string id_, IBasicAgent agent, NodeConfig conf) {
         this.id_ = id_;
         this.agent = agent;
         this.ctx = new NodeContext;
         this.agent.setPipelineContext(ctx);
+        this.conf = conf;
     }
 
     override string id() const {
         return id_;
+    }
+
+    void addUserQuery(string query) {
+        agent.addUserQuery(query);
     }
 
     string output() @safe pure nothrow const @nogc {
@@ -68,54 +78,55 @@ class PipelineNode : Node {
         }
     }
 }
+
 /// Wrapper that ensures an agent calls pipelineOutput before completing.
 /// Implements the retry loop: if node output is empty after a run, re-prompt
-/// the agent and retry up to _maxRetries times.
+/// the agent and retry up to conf.maxRetries times.
 class PipelineAgent : IBasicAgent {
-    IBasicAgent _wrappedAgent;
-    PipelineNode _node;
-    uint _maxRetries;
+    IBasicAgent wrappedAgent;
+    PipelineNode node;
 
-    this(IBasicAgent wrappedAgent, PipelineNode node, uint maxRetries = 3) {
-        _wrappedAgent = wrappedAgent;
-        _node = node;
-        _maxRetries = maxRetries;
+    this(IBasicAgent wrappedAgent, PipelineNode node)
+    in (wrappedAgent !is null)
+    in (node !is null) {
+        this.wrappedAgent = wrappedAgent;
+        this.node = node;
     }
 
     override string id() {
-        return _wrappedAgent.id();
+        return wrappedAgent.id();
     }
 
     override void addUserQuery(string query) {
-        _wrappedAgent.addUserQuery(query);
+        wrappedAgent.addUserQuery(query);
     }
 
     override void setPipelineContext(PipelineControlContext ctx) {
-        _wrappedAgent.setPipelineContext(ctx);
+        wrappedAgent.setPipelineContext(ctx);
     }
 
     override ProcessResult runToCompletion(void delegate(ProcessResult) step = null,
             SummaryAgent.ProgressCallback compressCallback = null, bool delegate() interrupt = null) {
         ProcessResult result;
         uint attempts = 0;
-        _node.clearOutput;
+        node.clearOutput;
 
         while (true) {
-            result = _wrappedAgent.runToCompletion(step, compressCallback, interrupt);
+            result = wrappedAgent.runToCompletion(step, compressCallback, interrupt);
 
-            if (!_node.output.empty) {
+            if (!node.output.empty) {
                 return result; // Agent produced output
             }
 
             attempts++;
-            if (attempts >= _maxRetries) {
+            if (attempts >= node.conf.maxRetries) {
                 logger.warningf(
                         "[PipelineAgent] Agent '%s' failed to produce output after %s attempts (1 initial + %s retries)",
-                        _wrappedAgent.id(), attempts + 1, _maxRetries);
+                        wrappedAgent.id(), attempts + 1, node.conf.maxRetries);
                 return result;
             }
 
-            _wrappedAgent.addUserQuery("You stopped without calling 'pipelineOutput'. Please continue your work, "
+            wrappedAgent.addUserQuery("You stopped without calling 'pipelineOutput'. Please continue your work, "
                     ~ "or call 'pipelineOutput' followed by 'taskDone' if you're finished.");
         }
     }
@@ -282,16 +293,6 @@ struct Pipeline {
         _doneCondition = new Condition(_mutex);
     }
 
-    this(PipelineNode[] nodes, PipelineEdge[] edges) {
-        this.graph = new Graph;
-        foreach (n; nodes)
-            add(n);
-        foreach (e; edges)
-            add(e);
-        _mutex = new Mutex();
-        _doneCondition = new Condition(_mutex);
-    }
-
     void add(PipelineNode node) {
         graph.add(node);
         if (isFirst)
@@ -300,8 +301,8 @@ struct Pipeline {
     }
 
     /// Add a node to the pipeline graph.
-    void addNode(string id, IBasicAgent agent) {
-        add(new PipelineNode(id, agent));
+    void addNode(string id, IBasicAgent agent, NodeConfig conf) {
+        add(new PipelineNode(id, agent, conf));
     }
 
     void add(PipelineEdge edge) {
@@ -329,11 +330,11 @@ struct Pipeline {
     }
 
     /// Run the pipeline using pool-based, event-driven execution.
-    PipelineResult run(string query, bool delegate() interrupt = null) @trusted {
-        logger.tracef("[pipeline] run(query='%s', workerThreads=%s)", query, _workerThreads);
+    PipelineResult run(bool delegate() interrupt = null) @trusted {
+        logger.tracef("[pipeline] run(workerThreads=%s)", _workerThreads);
 
         SysTime startTime = Clock.currTime;
-        auto result = runGraph(query, interrupt);
+        auto result = runGraph(interrupt);
         SysTime endTime = Clock.currTime;
         result.totalDurationMs = (endTime - startTime).total!"msecs";
 
@@ -442,7 +443,7 @@ struct Pipeline {
                 }
 
                 // Prepare the agent with its inputs
-                pn.agent.addUserQuery(query);
+                pn.addUserQuery(query);
 
                 // Record start time for duration tracking
                 _nodeStartTimes[pn.id] = Clock.currTime;
@@ -531,7 +532,7 @@ struct Pipeline {
         }
     }
 
-    PipelineResult runGraph(string query, bool delegate() interrupt) {
+    PipelineResult runGraph(bool delegate() interrupt) {
         // Reset result tracking state
         _agentResults = null;
         _executionOrder = null;
@@ -566,7 +567,7 @@ struct Pipeline {
             _interrupt = null;
         }
 
-        // Get start node and submit initial query
+        // Get start node
         auto startNode = cast(PipelineNode) graph.startNode;
         if (!startNode) {
             logger.errorf("[pipeline] No start node found in graph");
@@ -574,7 +575,6 @@ struct Pipeline {
             _pipelineDone = true;
             return buildResult();
         }
-        startNode.agent.addUserQuery(query);
 
         // Submit start node to pool
         {
@@ -669,46 +669,46 @@ struct Pipeline {
 
 /// Fluent builder for constructing graph-based pipelines.
 struct PipelineBuilder {
-    PipelineNode[] _nodes;
-    PipelineEdge[] _edges;
+    PipelineNode[] nodes;
+    PipelineEdge[] edges;
     string startId;
     string stopId;
-    size_t _workerThreads = 1;
+    size_t workerThreads_ = 1;
 
     /// Set the number of worker threads for pool-based execution.
     /// Returns the builder for fluent chaining.
     PipelineBuilder workerThreads(size_t n) {
-        _workerThreads = n;
+        workerThreads_ = n;
         return this;
     }
 
     /// Add a node to the pipeline.
-    PipelineBuilder addNode(string id, IBasicAgent agent) {
-        _nodes ~= new PipelineNode(id, agent);
+    PipelineBuilder addNode(string id, IBasicAgent agent, NodeConfig conf = NodeConfig.init) {
+        nodes ~= new PipelineNode(id, agent, conf);
         return this;
     }
 
     /// Add an edge with no condition and no loop limit.
     PipelineBuilder addEdge(string fromId, string toId) {
-        _edges ~= new PipelineEdge(fromId, toId, null, 0u);
+        edges ~= new PipelineEdge(fromId, toId, null, 0u);
         return this;
     }
 
     /// Add an edge with a transition condition.
     PipelineBuilder addEdge(string fromId, string toId, TransitionCondition condition) {
-        _edges ~= new PipelineEdge(fromId, toId, condition, 0u);
+        edges ~= new PipelineEdge(fromId, toId, condition, 0u);
         return this;
     }
 
     /// Add an edge with a loop limit.
     PipelineBuilder addEdge(string fromId, string toId, uint maxLoops) {
-        _edges ~= new PipelineEdge(fromId, toId, null, maxLoops);
+        edges ~= new PipelineEdge(fromId, toId, null, maxLoops);
         return this;
     }
 
     /// Add an edge with both condition and loop limit.
     PipelineBuilder addEdge(string fromId, string toId, TransitionCondition condition, uint maxLoops) {
-        _edges ~= new PipelineEdge(fromId, toId, condition, maxLoops);
+        edges ~= new PipelineEdge(fromId, toId, condition, maxLoops);
         return this;
     }
 
@@ -732,7 +732,7 @@ struct PipelineBuilder {
 
         // Validate no duplicate node IDs
         bool[string] seen;
-        foreach (ref n; _nodes) {
+        foreach (ref n; nodes) {
             if (n.id in seen) {
                 throw new Exception("PipelineBuilder.build: duplicate node ID '" ~ n.id ~ "'");
             }
@@ -744,7 +744,7 @@ struct PipelineBuilder {
         }
 
         // Validate edge references and self-loops
-        foreach (ref e; _edges) {
+        foreach (ref e; edges) {
             if (e.fromId !in seen) {
                 throw new Exception("PipelineBuilder.build: source node '" ~ e.fromId
                         ~ "' not found");
@@ -759,21 +759,21 @@ struct PipelineBuilder {
 
         bool[string] reachable;
         reachable[startId] = true;
-        string[] reachQueue = _nodes.filter!(a => a.id == startId)
+        string[] reachQueue = nodes.filter!(a => a.id == startId)
             .map!"a.id"
             .array;
 
         size_t rqi = 0;
         while (rqi < reachQueue.length) {
             string current = reachQueue[rqi++];
-            foreach (ref e; _edges) {
+            foreach (ref e; edges) {
                 if ((e.fromId == current) && (e.toId !in reachable)) {
                     reachable[e.toId] = true;
                     reachQueue ~= e.toId;
                 }
             }
         }
-        foreach (ref n; _nodes) {
+        foreach (ref n; nodes) {
             if (n.id !in reachable) {
                 logger.warningf("[pipeline] Unreachable node: '%s'", n.id);
             }
@@ -783,17 +783,17 @@ struct PipelineBuilder {
             throw new Exception("PipelineBuilder.build: stop node is not reachable");
         }
 
-        foreach (n; _nodes) {
+        foreach (n; nodes) {
             g.add(n);
         }
-        foreach (e; _edges) {
+        foreach (e; edges) {
             g.add(e);
         }
         g.setStartNode(startId);
         g.setStopNode(stopId);
 
         auto p = Pipeline(g);
-        p.setWorkerThreads(_workerThreads);
+        p.setWorkerThreads(workerThreads_);
         return p;
     }
 }
@@ -1071,7 +1071,7 @@ unittest {
 // Test PipelineAgent with agent that produces output immediately
 unittest {
     auto mockAgent = new ControllableMockAgent("instantOutput", 1); // produces output on call 1
-    auto node = new PipelineNode("testNode", mockAgent);
+    auto node = new PipelineNode("testNode", mockAgent, NodeConfig.init);
     auto wrapper = new PipelineAgent(mockAgent, node);
     auto result = wrapper.runToCompletion();
 
@@ -1083,11 +1083,11 @@ unittest {
 
 // Test PipelineAgent with agent that never produces output
 unittest {
+    const uint maxRetries = 3;
     auto mockAgent = new ControllableMockAgent("noOutput", 0); // never produces output
-    auto node = new PipelineNode("testNode", mockAgent);
+    auto node = new PipelineNode("testNode", mockAgent, NodeConfig(maxRetries: maxRetries));
 
-    uint maxRetries = 3;
-    auto wrapper = new PipelineAgent(mockAgent, node, maxRetries);
+    auto wrapper = new PipelineAgent(mockAgent, node);
     auto result = wrapper.runToCompletion();
 
     assert(result.status == ProcessResult.Status.ok, "Result should still be ok (safety valve)");
@@ -1101,7 +1101,7 @@ unittest {
 // Test PipelineAgent with agent that produces output on second retry
 unittest {
     auto mockAgent = new ControllableMockAgent("secondTryOutput", 2); // produces output on call 2
-    auto node = new PipelineNode("testNode", mockAgent);
+    auto node = new PipelineNode("testNode", mockAgent, NodeConfig.init);
 
     auto wrapper = new PipelineAgent(mockAgent, node);
     auto result = wrapper.runToCompletion();

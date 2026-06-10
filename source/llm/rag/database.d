@@ -2,7 +2,7 @@ module llm.rag.database;
 
 import core.thread : Thread;
 import logger = std.experimental.logger;
-import std.algorithm : map, filter;
+import std.algorithm : map, filter, cache;
 import std.array : appender, empty;
 import std.conv : to;
 import std.datetime : dur, SysTime;

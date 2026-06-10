@@ -44,11 +44,12 @@ You have four search/discovery tools for the external knowledge base. Choose bas
 **Database Parameter**: All query tools that accept a database parameter (`querySemantic`, `queryTextSearch`, `queryBestMatch`, `queryReadFile`) restrict the search to the database with that name. Pass an empty string (`""`) to search all databases (default behavior). Use `listRAGDatabases` to discover available database names before filtering.
 
 **Default Strategy**:
-1. If your query contains specific keywords, names, or exact terms → start with `queryTextSearch`.
-2. If your query is conceptual or you're exploring a topic broadly → start with `querySemantic`.
-3. If uncertain → run `queryTextSearch` first, then follow up with `queryBestMatch` to catch semantically related content the FTS might have missed.
-4. Use `listRAGDatabases` to discover available database names, then use the `database` parameter to scope queries to a specific database when needed.
-5. Refine search terms and re-query if initial results are insufficient.
+1. Start by using the combined semantic+text function `queryBestMatch`.
+2. If your query contains specific keywords, names, or exact terms → start with `queryTextSearch`.
+3. If your query is conceptual or you're exploring a topic broadly → start with `querySemantic`.
+4. If uncertain → run `queryTextSearch` first, then follow up with `querySemantic` to catch semantically related content the FTS might have missed.
+5. Use `listRAGDatabases` to discover available database names, then use the `database` parameter to scope queries to a specific database when needed.
+6. Refine search terms and re-query if initial results are insufficient.
 
 - **When to use**: Call search tools whenever you are unsure of a factual claim, need up-to-date information, or are dealing with a technical topic where your internal training data may be outdated. Always verify facts from the knowledge base before asserting them.
 - **Distinction**: Use readMemory for user-specific context and past session history.
