@@ -27,3 +27,4 @@ dub.selections.json
 llmfun/workarea
 llmfun/data/scratch
 llmfun/data/rag.sqlite3
+llmfun/data/state.json
