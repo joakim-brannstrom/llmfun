@@ -173,6 +173,8 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     import llm.coder;
     import llm.pipeline : prettyPrint;
 
+    bool debugMode = false;
+
     /// TODO: If help text ever needs externalization (config file, i18n),
     ///       the function signature should accept a content parameter.
     void printHelp() {
@@ -194,6 +196,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         writeln("   /model <name>      Select model by exact name (case-insensitive)");
         writeln("   /plan <query>      Run the plan pipeline");
         writeln("   /code <query>      Run the coder pipeline");
+        writeln("   /debug             Toggle verbose debug output");
     }
 
     if (conf.setupDirs)
@@ -286,6 +289,11 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
                 continue;
             } else if (query == "/help") {
                 printHelp();
+                continue;
+            } else if (query == "/debug") {
+                debugMode = !debugMode;
+                logger.globalLogLevel = debugMode ? logger.LogLevel.trace : logger.LogLevel.info;
+                logger.infof("Debug output: %s", debugMode ? "ON" : "OFF");
                 continue;
             } else if (query == "/model" || query.startsWith("/model ")) {
                 auto arg = query == "/model" ? "" : query["/model ".length .. $].strip();
