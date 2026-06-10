@@ -10,8 +10,9 @@
 - Max timeout when using -p
 - readLines number of lines should be configurable
 - deep research
-- add /debug
 - add autocomplete
+- add a specific /code analyze mode to update a plan/code_analysis.md
+- add internal cache of Slot requests
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -44,4 +45,3 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - memories should automatically be added to the RAG so they are always searchable
 
 # Prompt
-
