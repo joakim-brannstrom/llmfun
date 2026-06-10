@@ -455,8 +455,9 @@ ExecuteFuncResult replaceAll(Context baseCtx, string text, string from, string t
     return ExecuteFuncResult(res, success: true);
 }
 
-@Function(
-        "List files in directory as JSON array of paths, types and sizes. recursive=1 for recursive scan")
+immutable MaxDirEntries = 50;
+@Function("List files in directory as JSON array of paths, types and sizes. recursive=1 for recursive scan. Max "
+        ~ MaxDirEntries.to!string ~ " entries are returned for recursive scan or error.")
 ExecuteFuncResult listFilesInDirectory(Context baseCtx, string path, long recursive) {
     mixin(baseContextToSpecific!FileContext);
 
@@ -467,7 +468,13 @@ ExecuteFuncResult listFilesInDirectory(Context baseCtx, string path, long recurs
 
     try {
         JSONValue[] rval;
-        foreach (a; dirEntries(path_.toString, recursive == 1 ? SpanMode.depth : SpanMode.shallow)) {
+        foreach (a; dirEntries(path_.toString, recursive != 0 ? SpanMode.depth : SpanMode.shallow)) {
+            if (recursive != 0 && rval.length > MaxDirEntries) {
+                return ExecuteFuncResult(
+                        format!"error: failed listing directory recursive: more than %s entries in the result"(
+                        MaxDirEntries), success: false);
+            }
+
             auto e = JSONValue.emptyObject;
             e["path"] = a.name.relativePath(ctx.workArea.toString).JSONValue;
             e["type"] = (a.isDir ? "dir" : "file").JSONValue;
