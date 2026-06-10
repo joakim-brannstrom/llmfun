@@ -1,7 +1,7 @@
 module llm.tool_call.io;
 
 import logger = std.logger;
-import std.algorithm : map, filter, startsWith, count, joiner, endsWith;
+import std.algorithm : map, filter, startsWith, count, joiner, endsWith, splitter;
 import std.array : empty, appender, array;
 import std.conv : to;
 import std.file : readText, exists, mkdirRecurse, getSize, remove, dirEntries, SpanMode;
@@ -482,6 +482,7 @@ ExecuteFuncResult listFilesInDirectory(Context baseCtx, string path, long recurs
     }
 }
 
+immutable GrepMaxResults = 1000;
 @Function(
         "Search for a pattern in files at path. Returns up to maxResults matching lines with file and line number")
 ExecuteFuncResult grepFiles(Context baseCtx, string path, string pattern, long maxResults) {
@@ -498,6 +499,11 @@ ExecuteFuncResult grepFiles(Context baseCtx, string path, string pattern, long m
     auto result = execute(cmd);
     if (result.status == 0) {
         string rval = result.output.strip.replace(path_.toString, path);
+        const results = rval.splitter('\n').count;
+        if (results > GrepMaxResults) {
+            return ExecuteFuncResult(format!"error: %s results exceeds max allowed %s"(results,
+                    GrepMaxResults), success: false);
+        }
         if (rval.empty) {
             return ExecuteFuncResult(format!"error: no matches found searching in path '%s' with pattern '%s'"(path,
                     pattern), success: false);
