@@ -140,7 +140,7 @@ struct SystemPromptInit {
     }
 }
 
-private bool signalInterrupt;
+private shared bool signalInterrupt;
 private extern (C) void handleSIGINT(int sig) nothrow @nogc @system {
     .signalInterrupt = true;
 }
@@ -159,4 +159,23 @@ T getValue(T)(JSONValue v, T delegate(JSONValue v) accessor, T default_) @truste
     } catch (Exception e) {
         return default_;
     }
+}
+
+void catchSignalSIGPIPE() {
+    import core.sys.posix.signal;
+
+    signal(SIGPIPE, &handleSIGPIPE);
+}
+
+private shared bool signalSIGPIPE;
+private extern (C) void handleSIGPIPE(int sig) nothrow @nogc @system {
+    .signalSIGPIPE = true;
+}
+
+bool isSignalSIGPIPETriggered() @safe nothrow @nogc {
+    return .signalSIGPIPE;
+}
+
+void clearSignalSIGPIPE() @safe nothrow @nogc {
+    .signalSIGPIPE = false;
 }
