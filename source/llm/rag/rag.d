@@ -15,14 +15,15 @@
 module llm.rag.rag;
 
 import logger = std.logger;
-import std.path : baseName, stripExtension;
 import std.algorithm : map, filter, joiner, sort, cache, swap, count;
 import std.array : array, empty, appender;
-import std.random : uniform;
 import std.digest.murmurhash : MurmurHash3;
 import std.digest;
+import std.path : baseName, stripExtension;
+import std.random : uniform;
 import std.range : take, enumerate, iota;
 import std.stdio : File;
+import std.string : strip;
 import std.sumtype;
 
 import miniorm : spinSql;
@@ -109,7 +110,7 @@ class RAG {
     }
 
     size_t[] resolveDatabaseIndices(string databaseName) {
-        if (databaseName.empty) {
+        if (databaseName.strip == "*") {
             return iota(dbs.length).array;
         }
         return dbNames.enumerate
@@ -130,15 +131,13 @@ class RAG {
 
     bool validateDatabase(string databaseName, ref size_t[] indices) {
         indices = resolveDatabaseIndices(databaseName);
-        if (indices.empty && !databaseName.empty) {
+        if (indices.empty) {
             logger.tracef("no database found with name '%s'. Available: [%s]",
                     databaseName, getDatabaseNames().joiner(", "));
             return false;
         }
-        if (!databaseName.empty) {
-            logger.tracef("query with database filter: '%s' (%d databases)",
-                    databaseName, indices.length);
-        }
+        logger.tracef("query with database filter: '%s' (%d databases)",
+                databaseName, indices.length);
         return true;
     }
 

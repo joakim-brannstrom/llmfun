@@ -72,21 +72,21 @@ ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query,
     }
 }
 
-@Function("Search RAG for topK relevant results by query text. If 'database' is empty string, all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
+@Function("Search RAG for topK relevant results by query text. If 'database' is '*', all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
 ExecuteFuncResult querySemantic(Context baseCtx, string query, long topK, string database) {
     return queryFunc!((RAG rag, string query, long topK,
             string database) => rag.querySemantic(query, topK, database))(baseCtx,
             query, topK, database);
 }
 
-@Function("Search RAG using FTS5 full-text search for topK relevant results by query text. If 'database' is empty string, all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
+@Function("Search RAG using FTS5 full-text search for topK relevant results by query text. If 'database' is '*', all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
 ExecuteFuncResult queryTextSearch(Context baseCtx, string query, long topK, string database) {
     return queryFunc!((RAG rag, string query, long topK,
             string database) => rag.queryTextSearch(query, topK, database))(baseCtx,
             query, topK, database);
 }
 
-@Function("Search RAG using semantic and FTS5 full-text search for topK relevant results by query text. If 'database' is empty string, all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
+@Function("Search RAG using semantic and FTS5 full-text search for topK relevant results by query text. If 'database' is '*', all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
 ExecuteFuncResult queryBestMatch(Context baseCtx, string query, long topK, string database) {
     return queryFunc!((RAG rag, string query, long topK,
             string database) => rag.queryBestMatch(query, topK, database))(baseCtx,
@@ -218,7 +218,7 @@ private string applyAppendLoc(string text, long startLineNumber, long appendLoc)
     return buf[];
 }
 
-@Function("Read a specific line from a file in the RAG index. Returns the text chunk(s) containing the given line number. If 'database' is empty string, all databases are searched. The 'appendLoc' parameter (non-zero = true) prefixes each line with its line number, matching readFile behavior.")
+@Function("Read a specific line from a file in the RAG index. Returns the text chunk(s) containing the given line number. If 'database' is '*', all databases are searched. The 'appendLoc' parameter (non-zero = true) prefixes each line with its line number, matching readFile behavior.")
 ExecuteFuncResult queryReadFile(Context baseCtx, string filePath, long lineNumber,
         string database, long appendLoc) {
     mixin(baseContextToSpecific!RAGContext);
