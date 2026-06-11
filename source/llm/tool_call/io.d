@@ -458,7 +458,7 @@ ExecuteFuncResult replaceAll(Context baseCtx, string text, string from, string t
 immutable MaxDirEntries = 50;
 @Function("List files in directory as JSON array of paths, types and sizes. recursive=1 for recursive scan. Max "
         ~ MaxDirEntries.to!string ~ " entries are returned for recursive scan or error.")
-ExecuteFuncResult listFilesInDirectory(Context baseCtx, string path, long recursive) {
+ExecuteFuncResult listDirectory(Context baseCtx, string path, long recursive) {
     mixin(baseContextToSpecific!FileContext);
 
     auto path_ = pathToWorkarea(ctx, path, checkExist: true);
