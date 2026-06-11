@@ -9,6 +9,7 @@ import std.file : exists;
 import std.format : format;
 import std.stdio : writeln, writefln;
 import std.sumtype : match;
+import std.string : strip, startsWith;
 
 import argparse : CLI, NamedArgument, PositionalArgument, ArgumentGroup,
     ansiStylingArgument, Command, Description, Required,
@@ -76,6 +77,8 @@ struct UserConfig {
             bool rm;
             @(NamedArgument().Description("List all sources"))
             bool list;
+            @(NamedArgument().Description("Sync files with database"))
+            bool sync;
         }
 
         @(NamedArgument("path").Description("Recursively add all text files"))
@@ -97,6 +100,9 @@ struct UserConfig {
         @(NamedArgument("local-setup")
                 .Description("Create the directory structure 'llmfun'/... in current directory"))
         bool setupDirs;
+
+        @(NamedArgument("dry-run").Description("Preview changes without modifying database"))
+        bool dryRun;
     }
 
     @(Command("tool_metrics"))
@@ -164,7 +170,6 @@ LlmConfigT userToLlmConfig(LlmConfigT, ConfigT)(LlmConfigT llm, ConfigT conf) {
 int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     import std.file : readText;
     import std.stdio : readln, writef, stdout;
-    import std.string : strip;
     import llm.rag.embedder : createEmbedder;
     import llm.agent;
     import llm.chat;
@@ -436,35 +441,48 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         }
     }
 
-    void addData() {
-        import std.file : dirEntries, SpanMode, isFile;
+    auto ragFilter = buildRagFilter();
 
+    Path[] collectFiles(Path root, ReFilter filter) {
+        if (!exists(root)) {
+            return null;
+        }
+        auto files = appender!(Path[])();
+        if (isFile(root) && filter.match(root)) {
+            files.put(root.Path);
+        } else if (isDir(root)) {
+            foreach (p; dirEntries(root, SpanMode.depth).filter!(a => a.isFile)
+                    .filter!(a => filter.match(a.name))) {
+                files.put(p.name.Path);
+            }
+        }
+        return files[];
+    }
+
+    void addData() {
         if (!conf.path.exists) {
             logger.warningf("Path %s do not exist", conf.path);
             return;
         }
 
-        auto ragFilter = buildRagFilter();
+        auto files = collectFiles(conf.path.Path, ragFilter);
 
-        if (conf.path.isFile) {
-            if (ragFilter.match(baseName(conf.path))) {
-                addFile(conf.path.Path);
-            } else {
+        if (files.empty) {
+            if (isFile(conf.path)) {
                 logger.infof("File %s excluded by ragFilter", conf.path);
+            } else {
+                logger.infof("No files matched in %s", conf.path);
             }
             return;
         }
 
         logger.info("Add files from ", conf.path);
-        foreach (p; dirEntries(conf.path, SpanMode.depth).filter!(a => a.isFile)
-                .filter!(a => ragFilter.match(a.name))) {
-            addFile(p.name.Path);
+        foreach (p; files) {
+            addFile(p);
         }
     }
 
     void removeData() {
-        auto ragFilter = buildRagFilter();
-
         if (conf.path.empty) {
             if (conf.ragInclude.empty && conf.ragExclude.empty
                     && llmConf.ragFilter.include.empty && llmConf.ragFilter.exclude.empty) {
@@ -554,12 +572,93 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         }
     }
 
+    long syncData() {
+        import my.set : Set;
+        import std.path : buildNormalizedPath;
+
+        if (conf.path.empty) {
+            logger.warning("--path is required for sync");
+            return 1;
+        }
+
+        auto path = conf.path.buildNormalizedPath.Path;
+        if (!exists(path)) {
+            logger.warningf("Path %s does not exist", path);
+            return 1;
+        }
+
+        auto files = collectFiles(path, ragFilter);
+
+        long added = 0;
+        long skipped = 0;
+        long failed = 0;
+
+        Set!string syncedOrigins;
+
+        logger.infof("Phase 1: Scanning %s for files", path);
+        foreach (p; files) {
+            try {
+                if (conf.dryRun) {
+                    logger.infof("  [dry-run] Would add: %s", p);
+                    added++;
+                } else {
+                    auto result = rag.add(Document(Origin(p), readText(p.toString)));
+                    if (result.chunks > 0) {
+                        logger.infof("  Added/updated: %s (%s chunks)", p, result.chunks);
+                        added++;
+                    } else {
+                        logger.infof("  Skipped (unchanged): %s", p);
+                        skipped++;
+                    }
+                    syncedOrigins.add(p);
+                }
+            } catch (Exception e) {
+                logger.warningf("Failed to process '%s': %s", p, e.msg);
+                failed++;
+            }
+        }
+
+        logger.infof("Phase 2: Checking for deleted sources in %s", conf.path);
+        long removed = 0;
+        long removeFailed = 0;
+
+        foreach (src; rag.getSources.map!(a => a.sources).joiner) {
+            src.origin.match!((Topic a) { return; }, (Path a) {
+                auto normPath = a.toString.buildNormalizedPath;
+                if (normPath.startsWith(path.toString)
+                    && ragFilter.match(normPath) && !syncedOrigins.contains(normPath)) {
+                    try {
+                        if (conf.dryRun) {
+                            logger.infof("  [dry-run] Would remove: %s", a);
+                        } else {
+                            logger.infof("  Removing: %s", a);
+                            rag.removeSource(Origin(a.Path));
+                        }
+                        removed++;
+                    } catch (Exception e) {
+                        logger.warningf("  Failed to remove '%s': %s", a, e.msg);
+                        removeFailed++;
+                    }
+                }
+            }, (Url a) { return; });
+        }
+
+        logger.infof("Sync complete: %s added/updated, %s skipped, %s removed, %s failed",
+                added, skipped, removed, failed + removeFailed);
+        if (!conf.dryRun && (added > 0 || removed > 0)) {
+            spinSql!(() { rag.fts5Rebuild; });
+        }
+        return failed + removeFailed;
+    }
+
     if (conf.add) {
         addData();
         spinSql!(() { rag.vacuum; rag.fts5Rebuild; });
     } else if (conf.rm) {
         removeData();
         spinSql!(() { rag.vacuum; rag.fts5Rebuild; });
+    } else if (conf.sync) {
+        return syncData() != 0 ? 1 : 0;
     } else if (conf.list) {
         listSources();
     }
