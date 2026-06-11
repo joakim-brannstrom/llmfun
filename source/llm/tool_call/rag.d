@@ -62,7 +62,7 @@ ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query,
     try {
         auto docs = searchFunc(ctx.getRAG, query, topK, database);
         if (docs.length == 0) {
-            return ExecuteFuncResult(format!"Search completed but no results found for query: '%s'"(query),
+            return ExecuteFuncResult(format!"error: search completed but no results found for query: '%s'"(query),
                     success: false);
         }
         return ExecuteFuncResult(toResult(docs), success: true);
@@ -189,7 +189,7 @@ ExecuteFuncResult removeTopicFromRAG(Context baseCtx, string topic) {
 
     try {
         const chunks = spinSql!(() => ctx.getRAG().removeSource(Origin(Topic(topic))));
-        return ExecuteFuncResult(format!"Removed topic '%s' with %s chunks from RAG"(topic,
+        return ExecuteFuncResult(format!"removed topic '%s' with %s chunks from RAG"(topic,
                 chunks), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: failed to remove topic '%s' from RAG: %s"(topic,
@@ -231,7 +231,7 @@ ExecuteFuncResult queryReadFile(Context baseCtx, string filePath, long lineNumbe
                 success: false);
     }
     if (!database.empty && !ctx.getRAG().databaseExists(database)) {
-        return ExecuteFuncResult(format!"Database '%s' not found"(database), success: false);
+        return ExecuteFuncResult(format!"error: database '%s' not found"(database), success: false);
     }
 
     auto fileAsPath = Path(filePath);
@@ -241,10 +241,10 @@ ExecuteFuncResult queryReadFile(Context baseCtx, string filePath, long lineNumbe
 
         if (matches.length == 0) {
             if (!ctx.getRAG().hasFile(fileAsPath, database)) {
-                return ExecuteFuncResult(format!"File '%s' not found in RAG index"(filePath),
+                return ExecuteFuncResult(format!"error: file '%s' not found in RAG index"(filePath),
                         success: false);
             }
-            return ExecuteFuncResult(format!"File '%s' exists in RAG but no chunk contains line %s"(filePath,
+            return ExecuteFuncResult(format!"error: file '%s' exists in RAG but no chunk contains line %s"(filePath,
                     lineNumber), success: false);
         }
 
