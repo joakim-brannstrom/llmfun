@@ -30,7 +30,7 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
     // dfmt off
     // Agent 1: Code Analyser
     const codeAnalyserPromptNew =
-        "You are a Code Analyser Expert. Your job is to analyze the program produce a comprehensive report\n\n" ~
+        "You are a Code Analyser Expert. Your job is to analyze the program and produce a comprehensive report.\n\n" ~
         "## Instructions\n" ~
         "1. Call `getThinkingTemplate(\"code_analysis\")` to get a structured thinking framework.\n" ~
         "2. Follow the template steps to analyze the project thoroughly.\n" ~
@@ -40,7 +40,7 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
         "6. After saving, call 'setPipelineOutput' with 'ok' and call `taskDone` to complete your task.\n";
 
     const codeAnalyserPromptUpdate =
-        "You are a Code Analyser Expert. Your job is to analyze the program produce a comprehensive report\n\n" ~
+        "You are a Code Analyser Expert. Your job is to analyze the program and produce a comprehensive report.\n\n" ~
         "## Instructions\n" ~
         "1. A previous code analysis report exist at `plan/code_analysis.md`. Start by reading it one to understand the project, then updated it based on the changed files.\n" ~
         "2. Save your updated report document to the file at `plan/code_analysis.md`.\n" ~
@@ -49,10 +49,9 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
 
     // Agent 2: System Designer
     const systemDesignerPrompt =
-        "You are a System Designer. Your job is to analyze a user's request and produce a\n" ~
-        "comprehensive system design document.\n\n" ~
+        "You are a System Designer. Your job is to analyze a user's request and produce a comprehensive system design document.\n\n" ~
         "## Instructions\n" ~
-        "1. An analysis of the source code and project is available via the query tools. Use it when unclear about details in the source code.\n" ~
+        "1. An analysis of the source code and project is available via the query tools in the first database return from `listRAGDatabases`. Use it when unclear about details in the source code.\n" ~
         "2. Call `getThinkingTemplate(\"system_design\")` to get a structured thinking framework.\n" ~
         "3. Follow the template steps to analyze the user's request thoroughly.\n" ~
         "4. Produce a clear, well-structured system design document.\n" ~
@@ -64,7 +63,7 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
     const systemDesignerFeedbackPrompt =
         "You are a System Design Reviewer. Your job is to review a system design plan, critique it, and provide actionable feedback for improvement.\n\n" ~
         "## Instructions\n" ~
-        "1. Analysis of the source code is available via the query tools. Use it to better understand the source code.\n" ~
+        "1. Analysis of the source code is available via the query tools in the first database return from `listRAGDatabases`. Use it to better understand the source code.\n" ~
         "2. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
         "3. Call `getThinkingTemplate(\"system_design\")` to get a structured framework for reviewing designs.\n" ~
         "4. Follow the template to thoroughly analyze the design across dimensions such as requirements clarity, architecture, scalability, reliability, security, cost-efficiency, maintainability, and documentation quality.\n" ~
@@ -80,7 +79,7 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
         "You are an Implementation Planner. Your job is to convert a system design into a\n" ~
         "detailed, actionable implementation plan with individual tasks.\n\n" ~
         "## Instructions\n" ~
-        "1. Read the code analysis report from the file \"plan/code_analysis.md\" with readFile.\n" ~
+        "1. Analysis of the source code is available via the query tools in the first database return from `listRAGDatabases`. Use it to better understand the source code.\n" ~
         "2. Call `getThinkingTemplate(\"implementation_plan\")` to get a structured thinking framework.\n" ~
         "3. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
         "4. Follow the template steps to break the design into concrete implementation tasks.\n" ~
