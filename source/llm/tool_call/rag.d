@@ -98,20 +98,12 @@ ExecuteFuncResult listRAGDatabases(Context baseCtx) {
     mixin(baseContextToSpecific!RAGContext);
 
     try {
-        import std.range : iota;
-
-        auto rag = ctx.getRAG();
-        auto names = rag.getDatabaseNames();
-        auto files = rag.dbFiles;
-
+        auto names = ctx.getRAG.getDatabaseNames();
         if (names.empty) {
             return ExecuteFuncResult("No RAG databases loaded", success: true);
         }
-
-        auto lines = iota(names.length).map!(i => format("  - %-15s -> %s",
-                names[i], files[i].toString)).array;
-
-        return ExecuteFuncResult("Available RAG databases:\n" ~ lines.join("\n"), success: true);
+        return ExecuteFuncResult(format!"Available RAG databases:\n%-(%s\n%)"(names),
+                success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: failed to list RAG databases: %s"(e.msg),
                 success: false);
