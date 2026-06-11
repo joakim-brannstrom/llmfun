@@ -124,6 +124,7 @@ ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
         auto relPath = relativePath(absPath.toString, ctx.workArea.toString);
         auto normalizedPath = buildNormalizedPath(relPath);
         auto result = ctx.getRAG().add(Document(Origin(Path(normalizedPath)), data, Offset.init));
+        spinSql!(() => ctx.getRAG.fts5Rebuild);
         return ExecuteFuncResult(format!"File '%s' (%s length) added as %s chunks to the RAG"(path,
                 result.length, result.chunks), success: true);
     } catch (Exception e) {
@@ -157,6 +158,7 @@ ExecuteFuncResult loadContentToRAG(Context baseCtx, string topic, string content
 
     try {
         auto result = ctx.getRAG().add(Document(Origin(Topic(topic)), content, Offset.init));
+        spinSql!(() => ctx.getRAG.fts5Rebuild);
         return ExecuteFuncResult(format!"Content (%s length) added to '%s' as %s chunks to the RAG"(result.length,
                 topic, result.chunks), success: true);
     } catch (Exception e) {
@@ -181,6 +183,7 @@ ExecuteFuncResult removeTopicFromRAG(Context baseCtx, string topic) {
 
     try {
         const chunks = spinSql!(() => ctx.getRAG().removeSource(Origin(Topic(topic))));
+        spinSql!(() => ctx.getRAG.fts5Rebuild);
         return ExecuteFuncResult(format!"removed topic '%s' with %s chunks from RAG"(topic,
                 chunks), success: true);
     } catch (Exception e) {
