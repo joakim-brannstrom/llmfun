@@ -5,6 +5,7 @@ import std.algorithm;
 import std.array : empty;
 import std.conv : to;
 import std.exception : ifThrown;
+import std.file : exists;
 import std.format : format;
 import std.stdio : writeln, writefln;
 import std.sumtype : match;
@@ -275,12 +276,14 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     configCatchCtrlC();
     bool running = conf.prompt.empty;
     string query = conf.prompt;
-    configLinenoise();
+    auto linenoiseHistory = llmConf.scratchArea.exists
+        ? llmConf.scratchArea ~ Path("cli_history.txt") : Path.init;
+    configLinenoise(historyFile: linenoiseHistory, len: 50000); // TODO: make history size configurable
     do {
         if (running) {
             playNotification;
-            query = multiLineConsole(format!"[%s/%s %s]$ "(agent.contextUsed,
-                    agent.contextSize, llmConf.activeModelName()));
+            query = multiLineConsole(prompt: format!"[%s/%s %s]$ "(agent.contextUsed,
+                    agent.contextSize, llmConf.activeModelName()), historyFile: linenoiseHistory);
             clearInterruptSignal();
             if (query.among("/quit", "/q", "/exit")) {
                 break;
@@ -373,7 +376,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     import llm.config;
     import my.filter : ReFilter;
     import llm.rag.embedder : createEmbedder;
-    import std.file : readText, exists, isFile, isDir, dirEntries, SpanMode;
+    import std.file : readText, isFile, isDir, dirEntries, SpanMode;
     import std.path : extension, baseName;
     import std.array : appender;
     import miniorm : spinSql;
