@@ -253,7 +253,6 @@ struct ServerConfig {
     long httpVerbosity;
     bool verifySslCert = true;
     bool keepAlive = true;
-    bool reuseConnection = false; // SSL lib crash when connected to vLLM but not llama-server
     long maxRetries = 3; // maximum number of retries for transient failures
     long backoffMs = 500; // initial backoff in milliseconds (exponential)
 
@@ -329,7 +328,6 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
          timeoutS: cast(int) conf.server.timeoutSeconds,
          verifySslCert: conf.server.verifySslCert,
          keepAlive: conf.server.keepAlive,
-         reuseConnection: conf.server.reuseConnection,
          verbosity: cast(int) conf.server.httpVerbosity,
          apiKey: conf.server.apiKey.empty ? getEnvApiKey() : conf.server.apiKey,
          chat: RequestConfig.Chat(model: conf.name,
