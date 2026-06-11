@@ -180,10 +180,13 @@ struct LlmSlotRequester {
                 if (cfg.verbosity >= 2)
                     logger.trace(j.toPrettyString);
                 if (j.type == JSONType.array) {
-                    j[0]["n_ctx"].integer;
+                    const v = j[0]["n_ctx"].integer;
+                    LlmSlotRequesterCache[cfg.chat.model] = v;
+                    return v;
                 } else if ("n_ctx" in j) {
                     const v = j["n_ctx"].integer;
                     LlmSlotRequesterCache[cfg.chat.model] = v;
+                    return v;
                 }
                 return fallbackContext;
             }, (LlamaRequestError e) {
