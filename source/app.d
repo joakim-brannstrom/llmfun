@@ -23,6 +23,10 @@ int main(string[] args) {
     confLogger(cli.verbosity);
     logger.trace(cli);
 
+    import llm.utility : catchSignalSIGPIPE;
+
+    catchSignalSIGPIPE;
+
     return matchCmd!((a) => appMain(cli, a))(cli.cmd);
 }
 

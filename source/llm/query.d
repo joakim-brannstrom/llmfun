@@ -252,6 +252,7 @@ SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(ref Request rq
         string url, string body, ref LibRequestConfig cfg) {
     import std.algorithm : canFind;
     import std.conv : to;
+    import llm.utility : isSignalSIGPIPETriggered, clearSignalSIGPIPE;
 
     alias ReturnT = typeof(return);
 
@@ -264,6 +265,12 @@ SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(ref Request rq
         if (attempt > 0) {
             long backoff = cfg.backoffBaseMs * (1L << (attempt - 1));
             Thread.sleep(backoff.dur!"msecs");
+        }
+        if (isSignalSIGPIPETriggered) {
+            logger.trace("SIGPIPE detected. Resetting Request instance");
+            rq = Request();
+            cfg.reconfigure(rq);
+            clearSignalSIGPIPE;
         }
 
         attempt++;
