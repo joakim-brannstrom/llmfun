@@ -13,7 +13,7 @@ import std.sumtype : match;
 import std.typecons : Tuple, tuple;
 
 static import miniorm;
-import miniorm : ColumnName, TablePrimaryKey, Miniorm, spinSql, toSqliteDateTime,
+import miniorm : ColumnName, TablePrimaryKey, Miniorm, toSqliteDateTime,
     TableConstraint, TableForeignKey, KeyRef, KeyParam, ColumnParam;
 import my.path;
 import my.named_type;

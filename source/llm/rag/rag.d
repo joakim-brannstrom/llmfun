@@ -141,26 +141,14 @@ class RAG {
         return true;
     }
 
-    Document[] querySemantic(string query, long getTopK) {
-        return querySemantic(query, getTopK, "");
-    }
-
-    Document[] queryTextSearch(string query, long getTopK) {
-        return queryTextSearch(query, getTopK, "");
-    }
-
-    Document[] queryBestMatch(string query, long getTopK) {
-        return queryBestMatch(query, getTopK, "");
-    }
-
     Document[] querySemantic(string query, long getTopK, string database) {
         size_t[] indices;
         if (!validateDatabase(database, indices))
             return null;
 
         Document[] runMatch(float[] embed) {
-            return indices.map!(i => dbs[i].querySemantic(Search(embed),
-                    getTopK)).cache.joiner.array.randomizeRanks().sort!((a,
+            return indices.map!(i => spinSql!(() => dbs[i].querySemantic(Search(embed),
+                    getTopK))).cache.joiner.array.randomizeRanks().sort!((a,
                     b) => a.rank > b.rank).take(getTopK)
                 .array.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
@@ -176,8 +164,8 @@ class RAG {
         if (!validateDatabase(database, indices))
             return null;
 
-        return indices.map!(i => dbs[i].queryTextSearch(query, getTopK))
-            .cache.joiner.array.randomizeRanks().sort!((a,
+        return indices.map!(i => spinSql!(() => dbs[i].queryTextSearch(query,
+                getTopK))).cache.joiner.array.randomizeRanks().sort!((a,
                 b) => a.rank < b.rank).take(getTopK)
             .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
     }
@@ -188,8 +176,8 @@ class RAG {
             return null;
 
         Document[] runMatch(float[] embed) {
-            return indices.map!(i => dbs[i].queryCombineSemanticText(Search(embed),
-                    query, getTopK)).cache.joiner.array.randomizeRanks()
+            return indices.map!(i => spinSql!(() => dbs[i].queryCombineSemanticText(Search(embed),
+                    query, getTopK))).cache.joiner.array.randomizeRanks()
                 .sort!((a, b) => a.rank > b.rank).take(getTopK)
                 .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
@@ -206,17 +194,13 @@ class RAG {
         });
     }
 
-    SourceMatch[] queryReadFile(Path filePath, long lineNumber) {
-        return queryReadFile(filePath, lineNumber, "");
-    }
-
     SourceMatch[] queryReadFile(Path filePath, long lineNumber, string database) {
         size_t[] indices;
         if (!validateDatabase(database, indices))
             return null;
 
-        auto results = indices.map!(i => dbs[i].queryByPathAndLine(filePath,
-                lineNumber)).cache.joiner.array;
+        auto results = indices.map!(i => spinSql!(() => dbs[i].queryByPathAndLine(filePath,
+                lineNumber))).cache.joiner.array;
 
         logger.tracef("Hits %s for %s line %s", results.length, filePath, lineNumber);
         return results;
