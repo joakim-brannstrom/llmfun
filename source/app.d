@@ -597,6 +597,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 
         logger.infof("Phase 1: Scanning %s for files", path);
         foreach (p; files) {
+            syncedOrigins.add(p);
             try {
                 if (conf.dryRun) {
                     logger.infof("  [dry-run] Would add: %s", p);
@@ -610,7 +611,6 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
                         logger.infof("  Skipped (unchanged): %s", p);
                         skipped++;
                     }
-                    syncedOrigins.add(p);
                 }
             } catch (Exception e) {
                 logger.warningf("Failed to process '%s': %s", p, e.msg);
