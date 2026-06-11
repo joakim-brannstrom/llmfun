@@ -469,7 +469,7 @@ struct Database {
             ~ "FROM FtsChunksTbl WHERE FtsChunksTbl MATCH :query ORDER BY rank LIMIT :limit";
 
         auto stmt = db.prepare(ftsSql);
-        stmt.get.bind(":query", query.cleanupTextSearch);
+        stmt.get.bind(":query", query.quoteFts5);
         stmt.get.bind(":limit", limit);
 
         auto results = appender!(Tuple!(long, "rowid", double, "rank")[])();
@@ -571,7 +571,7 @@ ORDER BY fusion_score DESC;
         const chunkCount = countTextChunks();
         auto stmt = db.prepare(sql);
         stmt.get.bind(":embedding", embedding.embed);
-        stmt.get.bind(":text_query", query.cleanupTextSearch);
+        stmt.get.bind(":text_query", query.quoteFts5);
         stmt.get.bind(":limit", limit);
 
         auto results = appender!(Tuple!(long, "id", double, "rank")[])();
@@ -637,14 +637,8 @@ ORDER BY fusion_score DESC;
 private:
 
 // fts5 interpret + and - as column subtractions
-string cleanupTextSearch(string s) {
-    import std.algorithm : among;
-    import std.uni : Grapheme, byGrapheme, byCodePoint;
+string quoteFts5(string s) {
+    import std.string : replace;
 
-    const g0 = Grapheme('+');
-    const g1 = Grapheme('-');
-    return s.byGrapheme
-        .filter!(a => !a.among(g0, g1))
-        .byCodePoint
-        .to!string;
+    return format!"'%s'"(s.replace("\"", "\"\""));
 }
