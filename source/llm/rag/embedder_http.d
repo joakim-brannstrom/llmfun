@@ -17,6 +17,11 @@ import llm.rag.embedder;
 import llm.query;
 import llm.config : RemoteEmbedConfig;
 
+// This should not lead to 3x the number of retry because of the builtin retry
+// in httpPostWithRetry. This try to catch another type of error which is an OK
+// reply from the embedder but it returned an empty embedder vector.
+private immutable MaxRetryEmbedder = 3;
+
 /// HTTP-based embedding backend for OpenAI-compatible API endpoints.
 class RemoteEmbedder : Embedder {
     private {
@@ -46,13 +51,9 @@ class RemoteEmbedder : Embedder {
     override EmbedResult embed(string text) {
         import llm.utility : getValue;
 
-        JSONValue jsonReq;
-        jsonReq["model"] = cfg.name;
-        jsonReq["input"] = text;
+        bool hasError = true;
 
-        auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, rqCfg);
-
-        return result.match!((HttpResult r) {
+        EmbedResult parseHttp(HttpResult r) {
             logger.tracef(r.statusCode != 200, "RemoteEmbedder: Response status %d", r.statusCode);
 
             JSONValue json;
@@ -81,14 +82,27 @@ class RemoteEmbedder : Embedder {
             if (resultVec.empty) {
                 logger.trace(json);
                 logger.trace(embeddings);
+                hasError = true;
             } else {
                 logger.tracef("RemoteEmbedder: Embedding dimensions: %s", resultVec.length);
             }
             return EmbedResult(resultVec);
-        }, (HttpError e) {
-            logger.errorf("RemoteEmbedder: HTTP error %s: %s", e.statusCode, e.errorMsg);
-            return EmbedResult(e.errorMsg);
-        });
+        }
+
+        JSONValue jsonReq;
+        jsonReq["model"] = cfg.name;
+        jsonReq["input"] = text;
+        EmbedResult rval;
+
+        for (int i = 0; i < MaxRetryEmbedder && hasError; ++i) {
+            hasError = false;
+            auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, rqCfg);
+            result.match!((HttpResult r) { rval = parseHttp(r); }, (HttpError e) {
+                logger.errorf("RemoteEmbedder: HTTP error %s: %s", e.statusCode, e.errorMsg);
+                rval = EmbedResult(e.errorMsg);
+            });
+        }
+        return rval;
     }
 
     override int batchSize() {

@@ -110,7 +110,7 @@ class RAG {
     }
 
     size_t[] resolveDatabaseIndices(string databaseName) {
-        if (databaseName.strip == "*") {
+        if (databaseName.strip == "*" || databaseName.strip.empty) {
             return iota(dbs.length).array;
         }
         return dbNames.enumerate
@@ -194,7 +194,13 @@ class RAG {
                 .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
-        return embedder.embed(query).match!((float[] a) => runMatch(a), (string errMsg) {
+        return embedder.embed(query).match!((float[] embed) {
+            if (embed.empty) {
+                logger.trace("Unable to do a combined search because embedding is empty");
+                return queryTextSearch(query, getTopK, database);
+            }
+            return runMatch(embed);
+        }, (string errMsg) {
             logger.tracef(errMsg);
             return queryTextSearch(query, getTopK, database);
         });
