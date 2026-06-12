@@ -39,7 +39,7 @@ ExecuteFuncResult getThinkingTemplate(Context baseCtx, string name) {
         }
         return ExecuteFuncResult(template_, success: true);
     } catch (Exception e) {
-        logger.warningf("error getting thinking template '%s': %s", name, e.msg);
+        logger.tracef("error getting thinking template '%s': %s", name, e.msg);
         return ExecuteFuncResult(format!"error: retrieving template: %s"(e.msg), success: false);
     }
 }
@@ -73,7 +73,7 @@ string getTemplate(ThinkingContext ctx, string name) {
     auto path = ctx.getThinkingTemplatesDir ~ (name ~ ".md");
 
     if (!path.exists) {
-        logger.warningf("thinking template not found: %s", path);
+        logger.tracef("thinking template not found: %s", path);
         return null;
     }
     return readText(path);
@@ -84,7 +84,7 @@ string getTemplateDescription(ThinkingContext ctx, string name) {
 
     auto path = ctx.getThinkingTemplatesDir ~ (name ~ ".md");
     if (!path.exists) {
-        logger.warningf("thinking template not found: %s", path);
+        logger.tracef("thinking template not found: %s", path);
         return null;
     }
     foreach (line; File(path).byLine)
