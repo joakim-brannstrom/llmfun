@@ -30,7 +30,7 @@ string multiLineConsole(string prompt, string contPrompt = "> ", Path historyFil
         const char* pr = first ? prompt.toStringz : contPrompt.toStringz;
         char* raw = linenoise.linenoise(pr);
         if (raw is null) { // Ctrl+D → EOF
-            if (result.length == 0)
+            if (result[].length == 0)
                 return null;
             break;
         }

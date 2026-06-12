@@ -80,7 +80,7 @@ private:
         }
     }
 
-    void loadEvents() @safe {
+    void loadEvents() @trusted {
         if (!exists(dataFile)) {
             return;
         }
@@ -98,7 +98,7 @@ private:
         }
     }
 
-    void trimLogFile() @safe {
+    void trimLogFile() @trusted {
         import std.file : getSize, rename;
 
         if (!dataFile.exists)

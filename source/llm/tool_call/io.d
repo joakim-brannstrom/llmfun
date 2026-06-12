@@ -163,7 +163,7 @@ ExecuteFuncResult editFile(Context baseCtx, string path, string content,
 }
 
 string[] editFileMemory(RangeT)(RangeT fileLines, EditMode mode, string content,
-        long startLine, long count) @safe {
+        long startLine, long count) @trusted {
     --startLine;
     long endLine = startLine + count;
     auto lines = appender!(string[])();
