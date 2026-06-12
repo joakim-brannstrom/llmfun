@@ -18,6 +18,8 @@ import my.term_color;
 import my.path;
 import colorlog;
 
+import llm.config : RagDatabaseConfig;
+
 int main(string[] args) {
     UserConfig cli;
     if (!CLI!UserConfig.parseArgs(cli, args[1 .. $]))
@@ -129,6 +131,22 @@ LlmConfigT userToLlmConfig(LlmConfigT, ConfigT)(LlmConfigT llm, ConfigT conf) {
                         if (!__traits(getMember, conf, confMemberName).empty) {
                             __traits(getMember, llm, llmMemberName) = __traits(getMember,
                                     conf, confMemberName).Path;
+                        }
+                    } else static if (is(Type == RagDatabaseConfig[])) {
+                        alias ConfType = typeof(__traits(getMember, conf, confMemberName));
+                        static if (is(ConfType == string[])) {
+                            auto cv = __traits(getMember, conf, confMemberName);
+                            if (!cv.empty) {
+                                RagDatabaseConfig[] result;
+                                foreach (s; cv) {
+                                    result ~= RagDatabaseConfig(s.Path, "");
+                                }
+                                __traits(getMember, llm, llmMemberName) = result;
+                            }
+                        } else {
+                            static assert(0,
+                                    "unknown conversion of field " ~ llmMemberName ~ " type " ~ typeof(member)
+                                        .stringof);
                         }
                     } else static if (is(Type == Path[])) {
                         alias ConfType = typeof(__traits(getMember, conf, confMemberName));

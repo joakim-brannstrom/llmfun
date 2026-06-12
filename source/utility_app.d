@@ -344,7 +344,8 @@ int appMain(UserConfig uconf, UserConfig.TestRagSqliteConfig conf) {
 
     // auto db = openDatabase("smurf.sqlite3".Path, 768);
     auto rag = new RAG(embedder, [
-        "smurf.sqlite3".Path, "llmfun/data/rag.sqlite3".Path
+        RagDatabaseConfig("smurf.sqlite3".Path, ""),
+        RagDatabaseConfig("llmfun/data/rag.sqlite3".Path, "")
     ], llmConf.embedConfig.match!((RemoteEmbedConfig a) => a.dimensions,
             (LocalEmbedConfig a) => a.dimensions));
     // logger.warning(llmConf);

@@ -98,11 +98,18 @@ ExecuteFuncResult listRAGDatabases(Context baseCtx) {
     mixin(baseContextToSpecific!RAGContext);
 
     try {
-        auto names = ctx.getRAG.getDatabaseNames();
-        if (names.empty) {
+        auto infos = ctx.getRAG.getDatabaseInfo();
+        if (infos.empty) {
             return ExecuteFuncResult("No RAG databases loaded", success: true);
         }
-        return ExecuteFuncResult(format!"Available RAG databases:\n%-(%s\n%)"(names),
+        import std.typecons : tuple;
+
+        auto lines = appender!(string[])();
+        foreach (a; infos) {
+            lines.put(format!"%s - '%s'"(a.name, a.description));
+        }
+
+        return ExecuteFuncResult(format!"Available RAG databases:\n%-(%s\n%)"(lines[]),
                 success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: failed to list RAG databases: %s"(e.msg),

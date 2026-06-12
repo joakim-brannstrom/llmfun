@@ -30,12 +30,19 @@ import miniorm : spinSql;
 import my.path;
 public import my.path : Path;
 
+import llm.config : RagDatabaseConfig;
+import llm.rag.database : SourceMatch;
 import llm.rag.embedder;
 import llm.rag.embedder_llama;
-import llm.rag.database : SourceMatch;
 
 struct Topic {
     string name;
+}
+
+struct DatabaseInfo {
+    Path path;
+    string name;
+    string description;
 }
 
 struct Url {
@@ -73,8 +80,7 @@ class RAG {
 
     Embedder embedder;
     Array!Database dbs;
-    Path[] dbFiles;
-    string[] dbNames;
+    DatabaseInfo[] databases;
 
     ref Database db() {
         return dbs[0];
@@ -82,19 +88,19 @@ class RAG {
 
     alias db this;
 
-    this(Embedder embedder, Path[] dbFiles, long dimensions) {
+    this(Embedder embedder, RagDatabaseConfig[] configs, long dimensions) {
         import my.optional;
         import llm.rag.database : openDatabase;
 
         this.embedder = embedder;
-        if (dbFiles.empty)
-            dbFiles ~= Path(":memory:");
+        if (configs.empty)
+            configs ~= RagDatabaseConfig(Path(":memory:"), "");
         bool isReadOnly = false;
-        foreach (dbFile; dbFiles) {
-            openDatabase(dbFile.AbsolutePath, dimensions, isReadOnly).match!((Database db) {
+        foreach (cfg; configs) {
+            openDatabase(cfg.path.AbsolutePath, dimensions, isReadOnly).match!((Database db) {
                 this.dbs.insertBack(db);
-                this.dbFiles ~= dbFile;
-                this.dbNames ~= dbFile.baseName.stripExtension;
+                this.databases ~= DatabaseInfo(cfg.path,
+                    cfg.path.baseName.stripExtension, cfg.description);
             }, (None _) {});
             isReadOnly = true;
         }
@@ -105,22 +111,25 @@ class RAG {
         foreach (ref a; dbs)
             a.destroy;
         dbs.clear;
-        dbFiles.length = 0;
-        dbNames.length = 0;
+        databases.length = 0;
     }
 
     size_t[] resolveDatabaseIndices(string databaseName) {
         if (databaseName.strip == "*" || databaseName.strip.empty) {
             return iota(dbs.length).array;
         }
-        return dbNames.enumerate
-            .filter!(a => a.value == databaseName)
+        return databases.enumerate
+            .filter!(a => a.value.name == databaseName)
             .map!(a => a.index)
             .array;
     }
 
     string[] getDatabaseNames() {
-        return dbNames;
+        return databases.map!(d => d.name).array;
+    }
+
+    DatabaseInfo[] getDatabaseInfo() {
+        return databases;
     }
 
     bool databaseExists(string databaseName) {
@@ -222,9 +231,10 @@ class RAG {
     }
 
     DbSource[] getSources() {
+        assert(databases.length == dbs.length, "databases and dbs arrays are out of sync");
         auto rval = appender!(DbSource[])();
         foreach (idx; 0 .. dbs.length) {
-            rval.put(DbSource(dbFiles[idx], dbs[idx].getSources));
+            rval.put(DbSource(databases[idx].path, dbs[idx].getSources));
         }
         return rval[];
     }

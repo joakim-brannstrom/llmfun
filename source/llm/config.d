@@ -17,6 +17,11 @@ import llm.query : RequestConfig;
 
 immutable ProgramName = "llmfun";
 
+struct RagDatabaseConfig {
+    Path path;
+    string description;
+}
+
 struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
@@ -29,7 +34,9 @@ struct LlmConfig {
 
     Path promptDir = ProgramName ~ "/config/prompt";
 
-    Path[] rag = [ProgramName ~ "/data/rag.sqlite3"];
+    RagDatabaseConfig[] rag = [
+        RagDatabaseConfig((ProgramName ~ "/data/rag.sqlite3").Path, "")
+    ];
 
     void resolvePaths() {
         import my.resource;
@@ -43,9 +50,11 @@ struct LlmConfig {
         memoryArea = prioDataCwdDirs.resolve("memory".Path)
             .orElse(ResourceFile(memoryArea.AbsolutePath)).get.Path;
 
+        // Only rag[0] is resolved (intentional: first database is primary/writable,
+        // additional databases are read-only and use their configured paths directly)
         if (rag.length >= 1) {
-            rag[0] = prioDataCwdDirs.resolve("rag.sqlite3".Path)
-                .orElse(ResourceFile(rag[0].AbsolutePath)).get.Path;
+            rag[0].path = prioDataCwdDirs.resolve("rag.sqlite3".Path)
+                .orElse(ResourceFile(rag[0].path.AbsolutePath)).get.Path;
         }
 
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
@@ -394,6 +403,40 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                         used[llmMemberName] = true;
                         static if (is(Type : Path)) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].str.Path;
+                        } else static if (is(Type == RagDatabaseConfig[])) {
+                            auto val = json[llmMemberName];
+                            if (val.type != JSONType.ARRAY) {
+                                throw new Exception(
+                                        "rag config must be an array, got " ~ val.type.stringof);
+                            }
+                            RagDatabaseConfig[] configs;
+                            foreach (elem; val.array) {
+                                if (elem.type == JSONType.STRING) {
+                                    // Backward compat: plain string → path with empty description
+                                    configs ~= RagDatabaseConfig(elem.str.Path, "");
+                                } else if (elem.type == JSONType.OBJECT) {
+                                    // Object format: {"path": "...", "description": "..."}
+                                    if ("path" !in elem) {
+                                        throw new Exception(
+                                                "rag entry missing required field 'path'");
+                                    }
+                                    auto pathVal = elem["path"];
+                                    if (pathVal.type != JSONType.STRING) {
+                                        throw new Exception("rag 'path' must be a string");
+                                    }
+                                    string desc;
+                                    if ("description" in elem) {
+                                        auto descVal = elem["description"];
+                                        if (descVal.type != JSONType.STRING) {
+                                            throw new Exception(
+                                                    "rag 'description' must be a string");
+                                        }
+                                        desc = descVal.str;
+                                    }
+                                    configs ~= RagDatabaseConfig(pathVal.str.Path, desc);
+                                }
+                            }
+                            __traits(getMember, conf, llmMemberName) = configs;
                         } else static if (is(Type == Path[])) {
                             auto val = json[llmMemberName];
                             if (val.type == JSONType.STRING) {
