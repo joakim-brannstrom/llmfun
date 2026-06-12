@@ -6,12 +6,12 @@
 - add a simple expression execution so the llm can call a tool with e.g. `1+3*4` to calculate 
 - make ctrl+c able to interrupt a http request
 - add trace logging support to file
-- models should be possible to have multiple of
 - Max timeout when using -p
 - readLines number of lines should be configurable
 - deep research
 - add autocomplete
 - add a specific /code analyze mode to update a plan/code_analysis.md
+- support AGENT.md
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -35,6 +35,7 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - planner, there should be a plan execute
 
 # rag
+- the "window" in the rag database should be configurable. Both the absolute window (nBatch) and the stride (50%).
 - databases need a description
 - Add a warning when the DB is wiped. Need to add migration in the future.
 - Add option to drop all files that aren't found
