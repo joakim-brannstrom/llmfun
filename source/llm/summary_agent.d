@@ -318,7 +318,7 @@ struct SummaryAgent {
             }, (ToolResponse m) { return m.toJson.toString; }, (VisionMessage m) {
                 return m.toJson.toString;
             });
-            if (((m.length + buf.length) / ApproxTokenSize) > maxTokens) {
+            if (((m.length + buf[].length) / ApproxTokenSize) > maxTokens) {
                 rval ~= tuple(buf[].idup, start, curr);
                 start = curr;
                 buf.clear;
@@ -327,7 +327,7 @@ struct SummaryAgent {
                 formattedWrite(buf, "%s\n", m);
             curr++;
         }
-        if (!buf.empty)
+        if (!buf[].empty)
             rval ~= tuple(buf[].idup, start, curr);
         return rval;
     }

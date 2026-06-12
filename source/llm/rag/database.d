@@ -287,7 +287,7 @@ struct Database {
             foreach (ref r; stmt.get.execute) {
                 auto src = Source(origin, r.peek!long(1).SourceChecksum);
                 auto srcId = r.peek!long(0).SourceId;
-                return ReturnT(tuple!("src", "id")(src, srcId).some);
+                return tuple!("src", "id")(src, srcId).some;
             }
             return ReturnT(None.init);
         }
@@ -449,7 +449,7 @@ struct Database {
             ids.put(tuple!("embedId", "sourceId", "rank")(r.peek!long(0),
                     r.peek!long(1), r.peek!double(2)));
         }
-        logger.trace("Hits ", ids.length);
+        logger.trace("Hits ", ids[].length);
 
         auto rval = appender!(SourceMatch[])();
         foreach (id; ids[]) {
@@ -476,7 +476,7 @@ struct Database {
         foreach (ref r; stmt.get.execute) {
             results.put(tuple!("rowid", "rank")(r.peek!long(0), r.peek!double(1)));
         }
-        logger.trace("Hits ", results.length);
+        logger.trace("Hits ", results[].length);
 
         auto rval = appender!(SourceMatch[])();
         foreach (res; results) {
@@ -516,7 +516,7 @@ struct Database {
                     end: r.peek!long(4)), text: r.peek!string(0), rank: 0));
         }
 
-        logger.tracef("queryByPathAndLine hits %d for %s line %d", rval.length,
+        logger.tracef("queryByPathAndLine hits %d for %s line %d", rval[].length,
                 filePath, lineNumber);
         return rval[];
     }
@@ -577,12 +577,12 @@ ORDER BY fusion_score DESC;
         auto results = appender!(Tuple!(long, "id", double, "rank")[])();
         foreach (ref r; stmt.get.execute) {
             // TODO: this should not be needed
-            if (results.length >= limit)
+            if (results[].length >= limit)
                 break;
             results.put(tuple!("id", "rank")(r.peek!long(0),
                     reduceRankBias(chunkCount, r.peek!double(1))));
         }
-        logger.trace("Hits ", results.length);
+        logger.trace("Hits ", results[].length);
 
         auto rval = appender!(SourceMatch[])();
         foreach (res; results[].map!(a => tuple(getChunkByRowid(a.id), a.rank))
