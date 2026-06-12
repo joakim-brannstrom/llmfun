@@ -259,7 +259,7 @@ RagAddResult add(RAG rag, Document doc) {
 
     if (spinSql!(() => rag.hasSource(Source(doc.origin, dataHash.SourceChecksum)))) {
         logger.trace("source already exist in database");
-        return RagAddResult(doc.data.length, 1);
+        return RagAddResult(doc.data.length, 0);
     }
 
     const nBatch = rag.embedder.batchSize();

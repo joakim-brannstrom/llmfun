@@ -428,11 +428,9 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     }
 
     void addFile(Path p) {
-        import llm.rag.database;
-
-        logger.info("Add ", p);
         try {
-            rag.add(Document(p.Origin, readText(p.toString)));
+            auto added = rag.add(Document(p.Origin, readText(p.toString))).chunks != 0;
+            logger.info(added, "Add ", p);
         } catch (Exception e) {
             logger.warning(e.msg);
         }
