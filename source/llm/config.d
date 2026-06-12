@@ -64,7 +64,7 @@ struct LlmConfig {
             .orElse(ResourceFile(thinkingTemplatesDir.AbsolutePath)).get.Path;
 
         promptDir = prioConfCwdDirs.resolve("prompt".Path)
-            .orElse(ResourceFile(thinkingTemplatesDir.AbsolutePath)).get.Path;
+            .orElse(ResourceFile(promptDir.AbsolutePath)).get.Path;
     }
 
     // Directory where the LLM can work with assets, create files etc.
@@ -347,21 +347,53 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
     // dfmt on
 }
 
-LlmConfig readConfig(Path path, bool silent = false) {
+LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig = false) {
     import std.process : environment;
 
     auto conf = makeLlmConfig();
+    bool loadedAnyFile = false;
 
-    if (path.empty) {
-        path = environment.get("LLMFUN_DEFAULT_CONFIG", "").Path;
-    }
-    if (path.exists) {
-        logger.infof(!silent, "Reading configuration from %s", path);
-        conf = jsonToLlmConfig(conf, readText(path.toString).parseJSON);
-        validateConfig(conf);
+    // Layer 1: Base config from LLMFUN_DEFAULT_CONFIG
+    auto basePath = environment.get("LLMFUN_DEFAULT_CONFIG", "").Path;
+    if (basePath.exists) {
+        logger.infof(!silent, "Reading base configuration from %s", basePath);
+        try {
+            conf = jsonToLlmConfig(conf, readText(basePath.toString).parseJSON);
+            loadedAnyFile = true;
+        } catch (Exception e) {
+            logger.errorf(!silent, "Failed to parse base config %s: %s", basePath, e.msg);
+        }
     } else {
-        logger.infof("No configuration at %s. Using default values", path);
+        logger.infof(!silent,
+                "No base configuration found (LLMFUN_DEFAULT_CONFIG not set or file missing)");
     }
+    // Layer 2: Overlay config
+    Path overlayPath;
+    if (!path.empty) {
+        overlayPath = path; // from -c/--config
+    } else if (!noCwdConfig) {
+        overlayPath = Path(".llmfun.json");
+    } else {
+        logger.infof(!silent, "Skipping project configuration (--no-cwd-config)");
+    }
+
+    if (!overlayPath.empty && overlayPath.exists) {
+        logger.infof(!silent, "Reading project configuration from %s", overlayPath);
+        try {
+            conf = jsonToLlmConfig(conf, readText(overlayPath.toString).parseJSON);
+            loadedAnyFile = true;
+        } catch (Exception e) {
+            logger.errorf(!silent, "Failed to parse project config %s: %s", overlayPath, e.msg);
+        }
+    } else if (!overlayPath.empty) {
+        logger.infof(!silent, "No project configuration found at %s", overlayPath);
+    }
+
+    // Validation guard
+    if (loadedAnyFile) {
+        validateConfig(conf);
+    }
+
     conf.loadState();
     return conf;
 }

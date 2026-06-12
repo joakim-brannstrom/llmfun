@@ -135,7 +135,7 @@ int appMain(UserConfig uconf, UserConfig.ChatTestConfig conf) {
     import llm.chat;
     import llm.query;
 
-    auto llmConf = readConfig(conf.config).userToLlmConfig(conf);
+    auto llmConf = readConfig(conf.config, false, true).userToLlmConfig(conf);
     llmConf.codeModel.server.httpVerbosity = 2;
     Chat chat;
     chat.add(Message(Role.system, readText(llmConf.codeModel.prompt)));
@@ -165,7 +165,7 @@ int appMain(UserConfig uconf, UserConfig.SummaryTestConfig conf) {
     import llm.query;
     import llm.summary_agent;
 
-    auto llmConf = readConfig(conf.config).userToLlmConfig(conf);
+    auto llmConf = readConfig(conf.config, false, true).userToLlmConfig(conf);
     llmConf.summaryModel.server.httpVerbosity = 2;
 
     Chat chat;
@@ -185,7 +185,7 @@ int appMain(UserConfig uconf, UserConfig.TestSlotApiConfig conf) {
     import llm.chat;
     import llm.query;
 
-    auto llmConf = readConfig(Path("config/remote.json")).userToLlmConfig(conf);
+    auto llmConf = readConfig(Path("config/remote.json"), false, true).userToLlmConfig(conf);
     auto slot = LlmSlotRequester(llmConf.codeModel.server.toSlotUrl,
             llmConf.codeModel.server.apiKey.empty ? getEnvApiKey() : llmConf
                 .codeModel.server.apiKey);
@@ -205,7 +205,7 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
     import llm.tool_call.think;
     import llm.config;
 
-    auto llmConf = readConfig.userToLlmConfig(conf);
+    auto llmConf = readConfig(Path(), false, true).userToLlmConfig(conf);
 
     writeln(getFunctions);
 
@@ -284,7 +284,7 @@ int appMain(UserConfig uconf, UserConfig.TestPipelineConfig conf) {
     import llm.pipeline;
     import llm.metric.monitor : MetricMonitor;
 
-    auto llmConf = readConfig(conf.config.Path).userToLlmConfig(conf);
+    auto llmConf = readConfig(conf.config.Path, false, true).userToLlmConfig(conf);
     auto monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor_pipeline_test.jsonl");
 
     auto writer = new Agent("writer", llmConf, monitor);
@@ -339,7 +339,7 @@ int appMain(UserConfig uconf, UserConfig.TestRagSqliteConfig conf) {
     import llm.rag.rag;
     import d2sqlite3 : ResultRange;
 
-    auto llmConf = readConfig(conf.config.Path).userToLlmConfig(conf);
+    auto llmConf = readConfig(conf.config.Path, false, true).userToLlmConfig(conf);
     auto embedder = createEmbedder(llmConf.embedConfig);
 
     // auto db = openDatabase("smurf.sqlite3".Path, 768);

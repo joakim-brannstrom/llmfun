@@ -47,6 +47,10 @@ struct UserConfig {
 
     Path config;
 
+    @(NamedArgument("no-cwd-config")
+            .Description("Do not read .llmfun.json from current directory (security)"))
+    bool noCwdConfig;
+
     @(Command("agent"))
     struct AgentChatConfig {
         @(NamedArgument("workarea", "w")
@@ -229,8 +233,8 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
 
     if (conf.setupDirs)
         makeFileStructure(LlmConfig.init);
-    auto llmConf = readConfig(uconf.config, !conf.prompt.empty).userToLlmConfig(conf);
-    llmConf.loadState();
+    auto llmConf = readConfig(uconf.config, !conf.prompt.empty, uconf.noCwdConfig)
+        .userToLlmConfig(conf);
     auto rag = () {
         try {
             auto embed = createEmbedder(llmConf.embedConfig);
@@ -407,7 +411,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     if (conf.setupDirs) {
         makeFileStructure(LlmConfig.init, rag: true);
     }
-    auto llmConf = readConfig(uconf.config).userToLlmConfig(conf);
+    auto llmConf = readConfig(uconf.config, false, uconf.noCwdConfig).userToLlmConfig(conf);
 
     auto rag = () {
         try {
