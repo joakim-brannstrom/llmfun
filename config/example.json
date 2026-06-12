@@ -1,37 +1,111 @@
 {
-  "codeModels": [{
-    "server": {
-      "url": "http://127.0.0.1:1234",
-      "timeoutSeconds": 3600,
-      "httpVerbosity": 0
+  "dataDir": "llmfun/data",
+  "memoryArea": "llmfun/data/memory",
+  "scratchArea": "llmfun/data/scratch",
+  "thinkingTemplatesDir": "llmfun/config/thinking",
+  "promptDir": "llmfun/config/prompt",
+  "workArea": "llmfun/workarea",
+  "containerCmd": "podman",
+  "agentPrompt": "AGENT.md",
+  "activeCodeModelIndex": 0,
+
+  "rag": [
+    {
+      "path": "llmfun/data/rag.sqlite3",
+      "description": "Primary RAG database (read/write)"
     },
-    "name": "my-model",
-    "temp": 0.6,
-    "contextSize": 128000,
-    "reasoningBudget": 4096,
-    "preserveThinking": true,
-    "maxTokens": -1
+    {
+      "path": "/path/to/readonly_knowledge.sqlite3",
+      "description": "Read-only knowledge base"
+    }
+  ],
+
+  "toolFilter": {
+    "include": [
+      ".*"
+    ],
+    "exclude": [
+      "executeCode",
+      "executeDCodeWithDub",
+      "executeGit"
+    ]
+  },
+
+  "ragFilter": {
+    "include": [
+      ".*\\.txt",
+      ".*\\.md",
+      ".*\\.d",
+      ".*\\.json"
+    ],
+    "exclude": [
+      ".*deprecated.*",
+      ".*\\.git.*"
+    ]
+  },
+
+  "codeModels": [
+    {
+      "server": {
+        "url": "http://127.0.0.1:1234",
+        "promptUrl": "v1/completion",
+        "chatUrl": "v1/chat/completions",
+        "slotUrl": "slots",
+        "embedUrl": "embeddings",
+        "timeoutSeconds": 3600,
+        "httpVerbosity": 0,
+        "verifySslCert": true,
+        "keepAlive": true,
+        "maxRetries": 3,
+        "backoffMs": 500,
+        "apiKey": ""
+      },
+      "name": "local-model",
+      "temp": 0.6,
+      "contextSize": 128000,
+      "maxTokens": -1,
+      "reasoningBudget": 4096,
+      "preserveThinking": true
   }],
   "summaryModel": {
     "server": {
       "url": "http://127.0.0.1:1234",
+      "promptUrl": "v1/completion",
+      "chatUrl": "v1/chat/completions",
+      "slotUrl": "slots",
+      "embedUrl": "embeddings",
       "timeoutSeconds": 60,
-      "httpVerbosity": 0
+      "httpVerbosity": 0,
+      "verifySslCert": true,
+      "keepAlive": true,
+      "maxRetries": 3,
+      "backoffMs": 500,
+      "apiKey": ""
     },
-    "name": "my-model",
+    "name": "summary-model",
+    "prompt": "SUMMARY.md",
     "temp": 0.3,
     "contextSize": 32768,
+    "contextChunkSize": 32768,
+    "maxTokens": 4096,
     "reasoningBudget": 0,
-    "maxTokens": 4096
+    "preserveThinking": false
   },
+
   "embedConfig": {
     "type": "remote",
     "server": {
       "url": "http://127.0.0.1:1234",
       "timeoutSeconds": 60,
-      "httpVerbosity": 0
+      "httpVerbosity": 0,
+      "verifySslCert": true,
+      "keepAlive": true,
+      "maxRetries": 3,
+      "backoffMs": 500,
+      "apiKey": ""
     },
-    "name": "lfm2-2.6b",
+    "name": "nomic-embed-text",
+    "nBatch": 512,
     "dimensions": 768
   }
 }

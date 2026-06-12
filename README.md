@@ -9,6 +9,7 @@ An interactive AI agent with tool calling, RAG (Retrieval-Augmented Generation),
 - [Examples](#examples)
 - [CLI Parameters](#cli-parameters)
 - [Slash Commands](#slash-commands)
+- [Configuration](#configuration)
 - [Configuration Directory Structure](#configuration-directory-structure)
 - [Security & Configuration](#security--configuration)
 - [Tools](#tools)
@@ -153,6 +154,229 @@ When in interactive agent mode (`agent` command), the following slash commands a
 
 - **`/code <query>`**: Executes a coder-reviewer loop pipeline. The Coder agent implements code, saves it to `code/implementation.md`, and a Code Reviewer agent provides feedback. The loop runs up to 3 iterations.
 
+## Configuration
+
+llmfun is configured via a JSON configuration file specified with `--config <path>` or the `LLMFUN_DEFAULT_CONFIG` environment variable. See `example.json` for a complete reference of all available options.
+
+### Configuration Structure
+
+```json
+{
+  "dataDir": "llmfun/data",
+  "memoryArea": "llmfun/data/memory",
+  "scratchArea": "llmfun/data/scratch",
+  "thinkingTemplatesDir": "llmfun/config/thinking",
+  "promptDir": "llmfun/config/prompt",
+  "workArea": "llmfun/workarea",
+  "containerCmd": "podman",
+  "agentPrompt": "AGENT.md",
+  "activeCodeModelIndex": 0,
+  "rag": [...],
+  "toolFilter": {...},
+  "ragFilter": {...},
+  "codeModels": [...],
+  "summaryModel": {...},
+  "embedConfig": {...}
+}
+```
+
+### Top-Level Options
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `dataDir` | string | `llmfun/data` | Base directory for data files |
+| `memoryArea` | string | `llmfun/data/memory` | Path to persistent memory file |
+| `scratchArea` | string | `llmfun/data/scratch` | Temporary workspace and runtime data |
+| `thinkingTemplatesDir` | string | `llmfun/config/thinking` | Directory with thinking strategy templates |
+| `promptDir` | string | `llmfun/config/prompt` | Directory with prompt templates |
+| `workArea` | string | `llmfun/workarea` | Agent working directory for file operations |
+| `containerCmd` | string | `podman` | Container runtime command (podman or docker) |
+| `agentPrompt` | string | `AGENT.md` | Agent system prompt file name (searched in promptDir) |
+| `activeCodeModelIndex` | long | `0` | Index of the active code model in `codeModels` array |
+
+### RAG Database Configuration (`rag`)
+
+Array of RAG database configurations. The first database is primary (read/write); additional databases are read-only.
+
+```json
+"rag": [
+  {
+    "path": "llmfun/data/rag.sqlite3",
+    "description": "Primary RAG database (read/write)"
+  },
+  {
+    "path": "/path/to/readonly_knowledge.sqlite3",
+    "description": "Read-only knowledge base"
+  }
+]
+```
+
+Each entry supports:
+- `path` (string, required): Path to the SQLite database file
+- `description` (string, optional): Human-readable description
+
+**Note**: For backward compatibility, plain strings are also accepted (treated as path with empty description).
+
+### Tool Filter (`toolFilter`)
+
+Controls which tools the agent can access via regex include/exclude patterns.
+
+```json
+"toolFilter": {
+  "include": [".*"],
+  "exclude": ["executeCode", "executeDCodeWithDub", "executeGit"]
+}
+```
+
+- `include` (string[]): Regex patterns for tools to allow (default: all tools)
+- `exclude` (string[]): Regex patterns for tools to block
+
+### RAG Filter (`ragFilter`)
+
+Controls which files are indexed into the RAG database.
+
+```json
+"ragFilter": {
+  "include": [".*\\.txt", ".*\\.md"],
+  "exclude": []
+}
+```
+
+- `include` (string[]): Regex patterns for files to include (default: `.*\.txt`, `.*\.md`)
+- `exclude` (string[]): Regex patterns for files to exclude
+
+### Code Models (`codeModels`)
+
+Array of LLM model configurations for the agent. At least one model is required.
+
+```json
+"codeModels": [
+  {
+    "server": { ... },
+    "name": "local-model",
+    "temp": 0.6,
+    "contextSize": 128000,
+    "maxTokens": -1,
+    "reasoningBudget": 4096,
+    "preserveThinking": true
+  }
+]
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server` | object | (required) | Server configuration (see below) |
+| `name` | string | (required) | Model name (e.g. "gpt-4o", "local-model") |
+| `temp` | double | 0 | Temperature for generation |
+| `contextSize` | long | 0 | Context window size in tokens |
+| `maxTokens` | long | -1 | Maximum tokens to generate (-1 = unlimited) |
+| `reasoningBudget` | long | 0 | Token budget for reasoning/thinking |
+| `preserveThinking` | bool | false | Preserve thinking tags in output |
+
+### Server Configuration (`server`)
+
+Used by `codeModels`, `summaryModel`, and `embedConfig`.
+
+```json
+"server": {
+  "url": "http://127.0.0.1:1234",
+  "promptUrl": "v1/completion",
+  "chatUrl": "v1/chat/completions",
+  "slotUrl": "slots",
+  "embedUrl": "embeddings",
+  "timeoutSeconds": 3600,
+  "httpVerbosity": 0,
+  "verifySslCert": true,
+  "keepAlive": true,
+  "maxRetries": 3,
+  "backoffMs": 500,
+  "apiKey": ""
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | string | (required) | Base URL of the LLM server |
+| `promptUrl` | string | `v1/completion` | Endpoint for prompt completion |
+| `chatUrl` | string | `v1/chat/completions` | Endpoint for chat completion |
+| `slotUrl` | string | `slots` | Endpoint for slot management |
+| `embedUrl` | string | `embeddings` | Endpoint for embeddings |
+| `timeoutSeconds` | long | 0 | Request timeout in seconds |
+| `httpVerbosity` | long | 0 | HTTP logging verbosity level |
+| `verifySslCert` | bool | true | Verify SSL/TLS certificates |
+| `keepAlive` | bool | true | Keep HTTP connections alive |
+| `maxRetries` | long | 3 | Maximum retries for transient failures |
+| `backoffMs` | long | 500 | Initial backoff in milliseconds (exponential) |
+| `apiKey` | string | "" | API key for Bearer token auth (falls back to `OPENAI_API_KEY` env var) |
+
+### Summary Model (`summaryModel`)
+
+Configuration for the model used to compress chat history.
+
+```json
+"summaryModel": {
+  "server": { ... },
+  "name": "summary-model",
+  "prompt": "SUMMARY.md",
+  "temp": 0.3,
+  "contextSize": 32768,
+  "contextChunkSize": 32768,
+  "maxTokens": 4096,
+  "reasoningBudget": 0,
+  "preserveThinking": false
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server` | object | (required) | Server configuration |
+| `name` | string | (required) | Model name |
+| `prompt` | string | `SUMMARY.md` | Summary prompt template file |
+| `temp` | double | 0 | Temperature |
+| `contextSize` | long | 0 | Context window size |
+| `contextChunkSize` | long | 32768 | Chunk size for summarization |
+| `maxTokens` | long | -1 | Maximum generation tokens |
+| `reasoningBudget` | long | 0 | Reasoning token budget |
+| `preserveThinking` | bool | false | Preserve thinking tags |
+
+### Embedding Configuration (`embedConfig`)
+
+Configuration for the embedding backend. Supports both local (llama.cpp) and remote (HTTP API) backends.
+
+#### Remote Embedding (HTTP API)
+
+```json
+"embedConfig": {
+  "type": "remote",
+  "server": { ... },
+  "name": "nomic-embed-text",
+  "nBatch": 512,
+  "dimensions": 768
+}
+```
+
+#### Local Embedding (llama.cpp)
+
+```json
+"embedConfig": {
+  "type": "local",
+  "modelPath": "/path/to/embedding-model.gguf",
+  "context": 8192,
+  "nBatch": 512,
+  "dimensions": 768
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | string | (required) | Either `"remote"` or `"local"` |
+| `server` | object | - | Server config (remote only) |
+| `name` | string | - | Model name (remote only) |
+| `modelPath` | string | - | Path to GGUF model file (local only) |
+| `context` | long | - | Context size for local embedding |
+| `nBatch` | long | 512 | Batch size for embedding |
+| `dimensions` | long | 768 | Embedding vector dimensions |
+
 ## Configuration Directory Structure
 
 llmfun uses a local directory structure for data and configuration. The structure can be created with the `--local-setup` flag.
@@ -167,6 +391,7 @@ llmfun/
 ├── data/
 │   ├── memory           # LLM-persisted memory file (shared across sessions)
 │   ├── rag.sqlite3      # RAG database (SQLite with FTS5 and vector search)
+│   ├── state.json       # Active model selection state (auto-saved)
 │   └── scratch/         # Temporary workspace and runtime data
 │       └── monitor.jsonl # Tool call metrics log (JSONL format)
 └── workarea/            # Agent working directory for file operations
@@ -180,6 +405,7 @@ llmfun/
 | `llmfun/config/thinking/` | Thinking templates accessible via `getThinkingTemplate()` tool |
 | `llmfun/data/memory` | Persistent memory file where the LLM stores cross-session information |
 | `llmfun/data/rag.sqlite3` | SQLite database for RAG with full-text search (FTS5) and vector embeddings |
+| `llmfun/data/state.json` | Auto-saved state (active model index) |
 | `llmfun/data/scratch/` | Temporary runtime data, including tool call monitoring logs |
 | `llmfun/workarea/` | Sandbox directory where the agent can create and modify files |
 
