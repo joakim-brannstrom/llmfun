@@ -25,6 +25,7 @@ import std.range : take, enumerate, iota;
 import std.stdio : File;
 import std.string : strip;
 import std.sumtype;
+import std.uni : Grapheme;
 
 import miniorm : spinSql;
 import my.path;
@@ -33,7 +34,6 @@ public import my.path : Path;
 import llm.config : RagDatabaseConfig;
 import llm.rag.database : SourceMatch;
 import llm.rag.embedder;
-import llm.rag.embedder_llama;
 
 struct Topic {
     string name;
@@ -162,10 +162,10 @@ class RAG {
                 .array.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
-        return embedder.embed(query).match!((float[] a) => runMatch(a), (string errMsg) {
-            logger.warning(errMsg);
+        return embedder.embed(query).match!((float[] a) => runMatch(a), (HttpError e) {
+            logger.warning(e.errorMsg);
             return null;
-        });
+        }, (string errMsg) { logger.warning(errMsg); return null; });
     }
 
     Document[] queryTextSearch(string query, long getTopK, string database) {
@@ -197,6 +197,9 @@ class RAG {
                 return queryTextSearch(query, getTopK, database);
             }
             return runMatch(embed);
+        }, (HttpError e) {
+            logger.tracef(e.errorMsg);
+            return queryTextSearch(query, getTopK, database);
         }, (string errMsg) {
             logger.tracef(errMsg);
             return queryTextSearch(query, getTopK, database);
@@ -245,11 +248,17 @@ struct RagAddResult {
     size_t chunks;
 }
 
+// the configured nBatch is too large but the server has informed us of what it should be.
+size_t ServerNBatch = 0;
+
 // Add a document to the RAG.
 RagAddResult add(RAG rag, Document doc) {
-    import std.utf;
-    import std.uni;
+    import std.algorithm : max;
+    import std.json : parseJSON;
+    import std.uni : byCodePoint, byGrapheme;
+    import std.utf : toUTF8;
     import llm.rag.database;
+    import llm.utility : getValue;
 
     long toUint(ubyte[4] a) {
         return a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
@@ -262,44 +271,87 @@ RagAddResult add(RAG rag, Document doc) {
         return RagAddResult(doc.data.length, 0);
     }
 
-    const nBatch = rag.embedder.batchSize();
+    immutable MaxIterations = 2;
+    size_t nBatch = ServerNBatch == 0 ? rag.embedder.batchSize() : ServerNBatch;
 
     auto embeddings = appender!(Embedding[])();
     size_t nChunks;
-    size_t startCharPos;
-    size_t startLine, endLine;
-    Grapheme[] graphemes;
-    void addChunk() {
+    // used to detect if the fallback mode where nBatch is halfed always used.
+    // If it has been used for 5 consecutive turns the nBatch is probably just
+    // too high and should be adjusted down.
+    int failureCount;
+    void addChunk(Grapheme[] graphemes, size_t startCharPos, size_t startLine, int iteration) {
         auto data = graphemes.byCodePoint.toUTF8;
 
-        rag.embedder.embed(data).match!((float[] embed) {
-            embeddings.put(Embedding(Offset(startCharPos,
-                startCharPos + graphemes.length), Line(startLine, endLine), data, embed));
+        float[] emb;
+        rag.embedder.embed(data).match!((float[] embed) { emb = embed; }, (HttpError e) {
+            logger.tracef("Failed to generate embedding '%s' (len:%s): %s",
+                e.errorMsg, graphemes.length, data);
+            try {
+                const old = nBatch;
+                nBatch = getValue(parseJSON(e.body), (v) => v["error"]["n_ctx"].integer * 2, nBatch);
+                ServerNBatch = max(128, nBatch);
+                logger.tracef("Changed nBatch from %s->%s", old, nBatch);
+            } catch (Exception e) {
+                logger.trace(e.msg);
+            }
         }, (string e) {
-            logger.tracef("Failed to generate embedding '%s': %s", e, data);
+            logger.tracef("Failed to generate embedding '%s' (len:%s): %s", e,
+                graphemes.length, data);
         });
-        logger.tracef("add chunk length:%s line(%s-%s) offset(%s-%s)", data.length,
-                startLine, endLine, startCharPos, startCharPos + graphemes.length);
 
-        // 50% sliding window
-        const size_t half = graphemes.length / 2;
-        startCharPos += half;
-        startLine += graphemes[0 .. half].count(Grapheme('\n'));
-        graphemes = graphemes[half .. $];
+        if (emb.empty) {
+            ++failureCount;
+        }
+
+        if (graphemes.length < 4 && emb.empty) {
+            logger.tracef("Failed to generate embedding after %s iterations using batch size %s '%s'",
+                    iteration, graphemes.length, data);
+            return;
+        }
+        if (emb.empty && iteration < MaxIterations) {
+            logger.trace("Using fallback with nBatch ", graphemes.length / 2);
+            addChunk(graphemes[0 .. $ / 2], startCharPos, startLine, iteration + 1);
+            auto p1 = graphemes[$ / 2 .. $];
+            addChunk(p1, startCharPos + p1.length, startLine + countLines(p1), iteration + 1);
+            return;
+        }
+        if (iteration == 0 && failureCount > 0) {
+            logger.trace("Reset failure count");
+            failureCount = 0;
+        }
+
+        embeddings.put(Embedding(Offset(startCharPos, startCharPos + graphemes.length),
+                Line(startLine, startLine + countLines(graphemes)), data, emb));
+
+        logger.tracef("add chunk length:%s line(%s-%s) offset(%s-%s)", data.length, startLine,
+                startLine + countLines(graphemes), startCharPos, startCharPos + graphemes.length);
         nChunks++;
     }
 
-    const newline = Grapheme('\n');
+    size_t startCharPos;
+    size_t startLine;
+    Grapheme[] graphemes;
     foreach (graphem; doc.data.byGrapheme) {
         graphemes ~= graphem;
-        if (graphem == newline)
-            ++endLine;
         if (graphemes.length >= nBatch) {
-            addChunk();
+            addChunk(graphemes, startCharPos, startLine, 0);
+            // 50% sliding window
+            const size_t half = graphemes.length / 2;
+            startCharPos += half;
+            startLine += countLines(graphemes[0 .. half]);
+            graphemes = graphemes[half .. $];
+        }
+        if (failureCount > 5 && nBatch > 128) {
+            logger.tracef("Adjusting down nBatch %s -> %s", nBatch, nBatch - 64);
+            nBatch -= 64;
+            failureCount = 0;
+            // trim the server down so future RAG chunking on other documents work better
+            ServerNBatch = nBatch;
         }
     }
     if (!graphemes.empty) {
-        addChunk();
+        addChunk(graphemes, startCharPos, startLine, 0);
     }
 
     spinSql!(() {
@@ -317,6 +369,12 @@ RagAddResult add(RAG rag, Document doc) {
 }
 
 private:
+
+size_t countLines(Grapheme[] graphemes) {
+    immutable newline = Grapheme('\n');
+
+    return graphemes.filter!(a => a == newline).count;
+}
 
 /// Fisher-Yates shuffle on a copy of the result array, before sorting by rank.
 /// Eliminates database-order bias among results with identical ranks.

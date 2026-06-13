@@ -55,7 +55,7 @@ class RemoteEmbedder : Embedder {
         bool hasError = true;
 
         EmbedResult parseHttp(HttpResult r) {
-            logger.tracef(r.statusCode != 200, "RemoteEmbedder: Response status %d", r.statusCode);
+            logger.tracef(r.statusCode != 200, "RemoteEmbedder: Response status %s", r.statusCode);
 
             JSONValue json;
             try {
@@ -93,6 +93,7 @@ class RemoteEmbedder : Embedder {
         JSONValue jsonReq;
         jsonReq["model"] = cfg.name;
         jsonReq["input"] = text;
+        jsonReq["encoding_format"] = "float";
         EmbedResult rval;
 
         for (int i = 0; i < MaxRetryEmbedder && hasError; ++i) {
@@ -100,7 +101,7 @@ class RemoteEmbedder : Embedder {
             auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, rqCfg);
             result.match!((HttpResult r) { rval = parseHttp(r); }, (HttpError e) {
                 logger.errorf("RemoteEmbedder: HTTP error %s: %s", e.statusCode, e.errorMsg);
-                rval = EmbedResult(e.errorMsg);
+                rval = EmbedResult(e);
             });
         }
         return rval;

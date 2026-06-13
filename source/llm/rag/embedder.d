@@ -9,9 +9,9 @@ import std.sumtype : SumType, match;
 
 import llm.config : EmbedConfig, LocalEmbedConfig, RemoteEmbedConfig;
 import llm.rag.embedder_http;
-import llm.rag.embedder_llama;
+public import llm.query : HttpError;
 
-alias EmbedResult = SumType!(float[], string);
+alias EmbedResult = SumType!(float[], HttpError, string);
 
 /// Produce an embedding vector for the given text.
 /// Returns float[] of fixed dimension (e.g. 384, 768, 1536).
@@ -30,6 +30,8 @@ interface Embedder {
 
 /// Factory function to create an Embedder from an EmbedConfig sum type.
 Embedder createEmbedder(EmbedConfig config) {
+    import llm.rag.embedder_llama;
+
     return config.match!((LocalEmbedConfig local) {
         version (llmfun_llama_backend) {
             import llm.llama.model : Model, LlamaParams, contextEmbedding;
