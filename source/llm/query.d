@@ -241,6 +241,7 @@ struct LibRequestConfig {
         rq.sslSetVerifyPeer = sslSetVerifyPeer;
         rq.verbosity = cast(uint) verbosity;
         rq.keepAlive = keepAlive;
+        isConfigured = true;
     }
 }
 

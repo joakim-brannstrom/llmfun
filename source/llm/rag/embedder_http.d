@@ -42,7 +42,8 @@ class RemoteEmbedder : Embedder {
         this.rqCfg = LibRequestConfig(headers: headers, maxRetries: cfg.server.maxRetries,
                 timeout: cfg.server.timeoutSeconds.dur!"seconds", sslSetVerifyPeer: cfg.server.verifySslCert,
                 backoffBaseMs: cfg.server.backoffMs, verbosity: cfg.server.httpVerbosity,
-                keepAlive: cfg.server.keepAlive);
+                // must be turned off or llama.cpp server return null when connection is reused
+                keepAlive: false);
     }
 
     override void destroy() {

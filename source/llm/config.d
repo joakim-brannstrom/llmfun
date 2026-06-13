@@ -257,7 +257,7 @@ struct ServerConfig {
     string promptUrl = "v1/completion";
     string chatUrl = "v1/chat/completions";
     string slotUrl = "slots";
-    string embedUrl = "embeddings";
+    string embedUrl = "v1/embeddings";
     long timeoutSeconds;
     long httpVerbosity;
     bool verifySslCert = true;
