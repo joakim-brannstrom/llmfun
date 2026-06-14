@@ -17,6 +17,12 @@ alias EmbedResult = SumType!(float[], HttpError, string);
 /// Returns float[] of fixed dimension (e.g. 384, 768, 1536).
 /// Throws Exception on failure (model error, network error).
 interface Embedder {
+    /// Name of the model used for creating embeddings
+    string modelName();
+
+    /// Dimensions of the vectors created.
+    long dimensions();
+
     /// Produce an embedding vector for the given text.
     EmbedResult embed(string text);
 

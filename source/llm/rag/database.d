@@ -22,12 +22,13 @@ import my.optional;
 public import llm.rag.rag : Topic, Url, Origin, Document, Offset, Line;
 
 immutable timeout = 30.dur!"seconds";
-enum SchemaVersion = 5;
+enum SchemaVersion = 6;
 
 private struct VersionTbl {
     @ColumnName("version")
     ulong version_;
     long embedDimensions;
+    string model;
 }
 
 @TableConstraint("unique_ UNIQUE (urlType, checksum)")
@@ -88,7 +89,8 @@ CREATE VIRTUAL TABLE FtsChunksTbl USING fts5(
     tokenize='unicode61'
 )`;
 
-Optional!Database openDatabase(AbsolutePath dbFile_, long embedDimensions, bool readOnly = false) nothrow {
+Optional!Database openDatabase(AbsolutePath dbFile_, string model,
+        long embedDimensions, bool readOnly = false) nothrow {
     import std.file : exists;
     import std.path : dirName;
     import llm.rag.sqlite3_vec;
@@ -161,10 +163,10 @@ Optional!Database openDatabase(AbsolutePath dbFile_, long embedDimensions, bool 
             }
 
             if (versionData.version_ < SchemaVersion
-                    || versionData.embedDimensions != embedDimensions) {
-                logger.tracef("Updating database to schema version %s->%s with %s->%s dimensions",
-                        versionData.version_,
-                        SchemaVersion, versionData.embedDimensions, embedDimensions);
+                    || versionData.embedDimensions != embedDimensions || versionData.model != model) {
+                logger.tracef("Updating database to schema version %s->%s with %s->%s dimensions model %s->%s",
+                        versionData.version_, SchemaVersion,
+                        versionData.embedDimensions, embedDimensions, versionData.model, model);
                 auto trans = db.transaction;
                 static foreach (tbl; Schema)
                     db.run("DROP TABLE " ~ tbl.stringof).collectException;
@@ -173,7 +175,8 @@ Optional!Database openDatabase(AbsolutePath dbFile_, long embedDimensions, bool 
                 db.run(miniorm.buildSchema!Schema);
                 db.run(format!EmbeddingsTblSql(embedDimensions));
                 db.run(FTSChunksSql);
-                db.run(miniorm.insert!VersionTbl, VersionTbl(SchemaVersion, embedDimensions));
+                db.run(miniorm.insert!VersionTbl, VersionTbl(SchemaVersion,
+                        embedDimensions, model));
                 trans.commit;
             }
             return Database(db, embedDimensions).some;

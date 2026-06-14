@@ -88,7 +88,7 @@ class RAG {
 
     alias db this;
 
-    this(Embedder embedder, RagDatabaseConfig[] configs, long dimensions) {
+    this(Embedder embedder, RagDatabaseConfig[] configs) {
         import my.optional;
         import llm.rag.database : openDatabase;
 
@@ -97,7 +97,8 @@ class RAG {
             configs ~= RagDatabaseConfig(Path(":memory:"), "");
         bool isReadOnly = false;
         foreach (cfg; configs) {
-            openDatabase(cfg.path.AbsolutePath, dimensions, isReadOnly).match!((Database db) {
+            openDatabase(cfg.path.AbsolutePath, embedder.modelName,
+                    embedder.dimensions, isReadOnly).match!((Database db) {
                 this.dbs.insertBack(db);
                 this.databases ~= DatabaseInfo(cfg.path,
                     cfg.path.baseName.stripExtension, cfg.description);

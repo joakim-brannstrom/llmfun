@@ -238,12 +238,11 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     auto rag = () {
         try {
             auto embed = createEmbedder(llmConf.embedConfig);
-            return new RAG(embed, llmConf.rag, llmConf.embedDimensions);
+            return new RAG(embed, llmConf.rag);
         } catch (Exception e) {
             logger.warning(e);
         }
-        return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)),
-                null, llmConf.embedDimensions);
+        return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)), null);
     }();
     scope (exit) {
         rag.destroy;
@@ -416,12 +415,12 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     auto rag = () {
         try {
             auto embed = createEmbedder(llmConf.embedConfig);
-            return new RAG(embed, llmConf.rag, llmConf.embedDimensions);
+            return new RAG(embed, llmConf.rag);
         } catch (Exception e) {
             logger.warning(e);
         }
         return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)),
-                null, llmConf.embedDimensions);
+                null);
     }();
     scope (exit) {
         rag.destroy;

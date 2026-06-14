@@ -49,6 +49,14 @@ class RemoteEmbedder : Embedder {
     override void destroy() {
     }
 
+    override string modelName() {
+        return cfg.name;
+    }
+
+    override long dimensions() {
+        return cfg.dimensions;
+    }
+
     override EmbedResult embed(string text) {
         import llm.utility : getValue;
 
