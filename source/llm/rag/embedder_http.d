@@ -103,15 +103,20 @@ class RemoteEmbedder : Embedder {
         jsonReq["input"] = text;
         jsonReq["encoding_format"] = "float";
         EmbedResult rval;
-
+        HttpError err;
         for (int i = 0; i < MaxRetryEmbedder && hasError; ++i) {
             hasError = false;
             auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, rqCfg);
             result.match!((HttpResult r) { rval = parseHttp(r); }, (HttpError e) {
-                logger.errorf("RemoteEmbedder: HTTP error %s: %s", e.statusCode, e.errorMsg);
+                hasError = true;
+                err = e;
                 rval = EmbedResult(e);
             });
         }
+        if (hasError) {
+            logger.errorf("RemoteEmbedder: HTTP error %s: %s", err.statusCode, err.errorMsg);
+        }
+
         return rval;
     }
 
