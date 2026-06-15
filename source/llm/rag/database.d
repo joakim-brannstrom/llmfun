@@ -145,8 +145,14 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
             setPragmas(db);
             sqlite3_vec_init(cast(sqlite3*) db.handle, null, null);
             const versionData = () {
-                foreach (a; db.run(miniorm.select!VersionTbl))
-                    return a;
+                auto stmt = db.prepare("SELECT version FROM VersionTbl");
+                foreach (ref r; stmt.get.execute) {
+                    if (r.peek!long(0) == SchemaVersion) {
+                        foreach (a; db.run(miniorm.select!VersionTbl)) {
+                            return a;
+                        }
+                    }
+                }
                 return VersionTbl(0);
             }().ifThrown(VersionTbl(0));
 
