@@ -37,7 +37,7 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
     auto codeQuery =
         "You are a Coder. Your job is to implement working code based on the user's request.\n\n" ~
         "## Instructions\n" ~
-        "1. Analysis of the source code is available via the query tools in the first database return from `listRAGDatabases`. Use it to better understand the source code.\n" ~
+        "1. Analysis of the source code is available via the query tools in the primary RAG database. Use it to better understand the source code.\n" ~
         "2. Call `getThinkingTemplate(\"code_task\")` to get a structured thinking framework.\n" ~
         "3. Analyze the user's request and plan your implementation.\\n" ~
         "4. Write clean, well-structured code.\n" ~
@@ -49,7 +49,7 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
     const reviewerQuery =
         "You are a Code Reviewer. Your job is to review the coder's implementation and provide actionable feedback.\n\n" ~
         "## Instructions\n" ~
-        "1. Analysis of the source code is available via the query tools in the first database return from `listRAGDatabases`. Use it to better understand the source code.\n" ~
+        "1. Analysis of the source code is available via the query tools in the primary RAG database. Use it to better understand the source code.\n" ~
         "2. Read the implementation from `code/implementation.md` using `readFile`.\n" ~
         "3. Call `getThinkingTemplate(\"code_review\")` to get a structured framework for reviewing code.\n" ~
         "4. Follow the template to thoroughly analyze the code for bugs, security issues, style violations, performance problems, and improvements.\n" ~
