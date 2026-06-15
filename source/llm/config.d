@@ -34,9 +34,9 @@ struct LlmConfig {
 
     Path promptDir = ProgramName ~ "/config/prompt";
 
-    RagDatabaseConfig[] rag = [
-        RagDatabaseConfig((ProgramName ~ "/data/rag.sqlite3").Path, "")
-    ];
+    RagDatabaseConfig ragPrimary = RagDatabaseConfig((ProgramName ~ "/data/rag.sqlite3")
+            .Path, "Read/write database containing temporary data");
+    RagDatabaseConfig[][string] ragSecondary;
 
     void resolvePaths() {
         import my.resource;
@@ -50,12 +50,9 @@ struct LlmConfig {
         memoryArea = prioDataCwdDirs.resolve("memory".Path)
             .orElse(ResourceFile(memoryArea.AbsolutePath)).get.Path;
 
-        // Only rag[0] is resolved (intentional: first database is primary/writable,
-        // additional databases are read-only and use their configured paths directly)
-        if (rag.length >= 1) {
-            rag[0].path = prioDataCwdDirs.resolve("rag.sqlite3".Path)
-                .orElse(ResourceFile(rag[0].path.AbsolutePath)).get.Path;
-        }
+        // Only ragPrimary is resolved
+        ragPrimary.path = prioDataCwdDirs.resolve("rag.sqlite3".Path)
+            .orElse(ResourceFile(ragPrimary.path.AbsolutePath)).get.Path;
 
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
             .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;
@@ -204,6 +201,11 @@ struct LlmConfig {
         }
     }
 
+    RagDatabaseConfig[] getRagDatabases() @safe {
+        import std.algorithm : joiner;
+
+        return [ragPrimary] ~ ragSecondary.byValue.joiner.array;
+    }
 }
 
 Path promptToPath(LlmConfig conf, string prompt) {
@@ -419,6 +421,23 @@ private EmbedConfig jsonToEmbedConfig(JSONValue json) {
 auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
     import std.traits;
 
+    void validateRagDatabase(JSONValue elem) {
+        // Object format: {"path": "...", "description": "..."}
+        if ("path" !in elem) {
+            throw new Exception("rag entry missing required field 'path'");
+        }
+        auto pathVal = elem["path"];
+        if (pathVal.type != JSONType.STRING) {
+            throw new Exception("rag 'path' must be a string");
+        }
+        if ("description" in elem) {
+            auto descVal = elem["description"];
+            if (descVal.type != JSONType.STRING) {
+                throw new Exception("rag 'description' must be a string");
+            }
+        }
+    }
+
     logger.trace("read json config start: " ~ ConfigT.stringof);
     bool[string] used;
 
@@ -435,40 +454,24 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                         used[llmMemberName] = true;
                         static if (is(Type : Path)) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].str.Path;
-                        } else static if (is(Type == RagDatabaseConfig[])) {
-                            auto val = json[llmMemberName];
-                            if (val.type != JSONType.ARRAY) {
-                                throw new Exception(
-                                        "rag config must be an array, got " ~ val.type.stringof);
-                            }
-                            RagDatabaseConfig[] configs;
-                            foreach (elem; val.array) {
-                                if (elem.type == JSONType.STRING) {
-                                    // Backward compat: plain string → path with empty description
-                                    configs ~= RagDatabaseConfig(elem.str.Path, "");
-                                } else if (elem.type == JSONType.OBJECT) {
-                                    // Object format: {"path": "...", "description": "..."}
-                                    if ("path" !in elem) {
-                                        throw new Exception(
-                                                "rag entry missing required field 'path'");
-                                    }
-                                    auto pathVal = elem["path"];
-                                    if (pathVal.type != JSONType.STRING) {
-                                        throw new Exception("rag 'path' must be a string");
-                                    }
-                                    string desc;
-                                    if ("description" in elem) {
-                                        auto descVal = elem["description"];
-                                        if (descVal.type != JSONType.STRING) {
-                                            throw new Exception(
-                                                    "rag 'description' must be a string");
-                                        }
-                                        desc = descVal.str;
-                                    }
-                                    configs ~= RagDatabaseConfig(pathVal.str.Path, desc);
+                        } else static if (is(Type == RagDatabaseConfig)) {
+                            auto elem = json[llmMemberName];
+                            validateRagDatabase(elem);
+                            string path = elem["path"].str;
+                            string desc = elem["description"].str;
+                            __traits(getMember, conf, llmMemberName) = RagDatabaseConfig(path.Path,
+                                    desc);
+                        } else static if (is(Type == RagDatabaseConfig[][string])) {
+                            foreach (key, ref JSONValue dbs; json[llmMemberName].object) {
+                                RagDatabaseConfig[] configs;
+                                foreach (db; dbs.array) {
+                                    validateRagDatabase(db);
+                                    string path = db["path"].str;
+                                    string desc = db["description"].str;
+                                    configs ~= RagDatabaseConfig(path.Path, desc);
                                 }
+                                __traits(getMember, conf, llmMemberName)[key] = configs;
                             }
-                            __traits(getMember, conf, llmMemberName) = configs;
                         } else static if (is(Type == Path[])) {
                             auto val = json[llmMemberName];
                             if (val.type == JSONType.STRING) {
