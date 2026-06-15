@@ -116,14 +116,12 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
 
     logger.trace("opening database ", dbFile).collectException;
     auto dbDir = dbFile.dirName;
-    if (!dbDir.exists) {
-        if (readOnly) {
-            logger.warningf("Requested read-only database directory does not exist: %s, falling back to in-memory",
-                    dbDir).collectException;
-        } else {
-            logger.tracef("No RAG database opened. Directory does not exist: '%s'",
-                    dbDir).collectException;
-        }
+    if (readOnly && !dbFile.exists) {
+        logger.warningf("Requested read-only database does not exist: %s", dbFile).collectException;
+        return none!Database();
+    } else if (!dbDir.exists) {
+        logger.tracef("No RAG database opened. Directory does not exist: '%s'",
+                dbDir).collectException;
         dbFile = ":memory:";
     } else if (!readOnly) {
         uint attrs;
