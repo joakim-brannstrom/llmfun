@@ -36,13 +36,5 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 
 # rag
 - the "window" in the rag database should be configurable. Both the absolute window (nBatch) and the stride (50%).
-- databases need a description
 - Add a warning when the DB is wiped. Need to add migration in the future.
-- Add option to drop all files that aren't found
-- queryBestMatch fungerar inte när sökordet innehåller "smurf-bar"
-
-- must check the write permissions of the directory before trying to create the database.
-
 - memories should automatically be added to the RAG so they are always searchable
-
-# Prompt
