@@ -318,6 +318,11 @@ RagAddResult add(RAG rag, Document doc) {
             addChunk(p1, startCharPos + p1.length, startLine + countLines(p1), iteration + 1);
             return;
         }
+        if (emb.empty && iteration >= MaxIterations) {
+            logger.warningf("Failed to generate embedding after %s iterations using batch size %s '%s'",
+                    iteration, graphemes.length, data);
+            return;
+        }
         if (iteration == 0 && failureCount > 0) {
             logger.trace("Reset failure count");
             failureCount = 0;
