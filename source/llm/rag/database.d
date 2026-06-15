@@ -525,8 +525,8 @@ struct Database {
                     end: r.peek!long(4)), text: r.peek!string(0), rank: 0));
         }
 
-        logger.tracef("queryByPathAndLine hits %d for %s line %d", rval[].length,
-                filePath, lineNumber);
+        logger.tracef("queryByPathAndLine hits %s for %s line %s",
+                rval[].length, filePath, lineNumber);
         return rval[];
     }
 
