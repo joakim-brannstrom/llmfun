@@ -145,8 +145,14 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
             setPragmas(db);
             sqlite3_vec_init(cast(sqlite3*) db.handle, null, null);
             const versionData = () {
-                foreach (a; db.run(miniorm.select!VersionTbl))
-                    return a;
+                auto stmt = db.prepare("SELECT version FROM VersionTbl");
+                foreach (ref r; stmt.get.execute) {
+                    if (r.peek!long(0) == SchemaVersion) {
+                        foreach (a; db.run(miniorm.select!VersionTbl)) {
+                            return a;
+                        }
+                    }
+                }
                 return VersionTbl(0);
             }().ifThrown(VersionTbl(0));
 
@@ -519,8 +525,8 @@ struct Database {
                     end: r.peek!long(4)), text: r.peek!string(0), rank: 0));
         }
 
-        logger.tracef("queryByPathAndLine hits %d for %s line %d", rval[].length,
-                filePath, lineNumber);
+        logger.tracef("queryByPathAndLine hits %s for %s line %s",
+                rval[].length, filePath, lineNumber);
         return rval[];
     }
 

@@ -259,7 +259,7 @@ RagAddResult add(RAG rag, Document doc) {
     import std.uni : byCodePoint, byGrapheme;
     import std.utf : toUTF8;
     import llm.rag.database;
-    import llm.utility : getValue;
+    import llm.utility : getValue, ApproxTokenSize;
 
     long toUint(ubyte[4] a) {
         return a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
@@ -290,7 +290,8 @@ RagAddResult add(RAG rag, Document doc) {
                 e.errorMsg, graphemes.length, data);
             try {
                 const old = nBatch;
-                nBatch = getValue(parseJSON(e.body), (v) => v["error"]["n_ctx"].integer * 2, nBatch);
+                nBatch = getValue(parseJSON(e.body),
+                    (v) => v["error"]["n_ctx"].integer * ApproxTokenSize, nBatch);
                 ServerNBatch = max(128, nBatch);
                 logger.tracef("Changed nBatch from %s->%s", old, nBatch);
             } catch (Exception e) {
