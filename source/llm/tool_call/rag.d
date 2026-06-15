@@ -105,8 +105,10 @@ ExecuteFuncResult listRAGDatabases(Context baseCtx) {
         import std.typecons : tuple;
 
         auto lines = appender!(string[])();
+        bool isFirst = true;
         foreach (a; infos) {
-            lines.put(format!"%s - '%s'"(a.name, a.description));
+            lines.put(format!"%s -%s '%s'"(a.name, isFirst ? " [primary] - " : "", a.description));
+            isFirst = false;
         }
 
         return ExecuteFuncResult(format!"Available RAG databases:\n%-(%s\n%)"(lines[]),
