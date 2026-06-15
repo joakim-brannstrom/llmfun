@@ -122,15 +122,15 @@ ExecuteFuncResult listRAGDatabases(Context baseCtx) {
 @Function("Load file content into RAG index")
 ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
     mixin(baseContextToSpecific!RAGContext);
-    auto absPath = AbsolutePath(path);
-    if (!ctx.isPathInsideWorkArea(absPath)) {
-        return ExecuteFuncResult(format!"error: path '%s' must be inside the allowed workarea"(path),
-                success: false);
+
+    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
+    if (!path_.valid) {
+        return ExecuteFuncResult(path_.errorMsg, success: false);
     }
 
     try {
-        auto data = readText(absPath.toString);
-        auto relPath = relativePath(absPath.toString, ctx.workArea.toString);
+        auto data = readText(path_);
+        auto relPath = relativePath(path_.toString, ctx.workArea.toString);
         auto normalizedPath = buildNormalizedPath(relPath);
         auto result = ctx.getRAG().add(Document(Origin(Path(normalizedPath)), data, Offset.init));
         spinSql!(() => ctx.getRAG.fts5Rebuild);
