@@ -65,10 +65,8 @@ struct UserConfig {
                 .Description("Create the directory structure 'llmfun'/... in current directory"))
         bool setupDirs;
 
-        @(NamedArgument("db")
-                .Description(
-                    "RAG database. First DB is the primary (read/write) and the rest is read only"))
-        string[] rag;
+        @(NamedArgument("db").Description("Primary RAG database (read/write)"))
+        string ragPrimary;
 
         @(NamedArgument("prompt", "p").Description("One shot prompt for the agent"))
         string prompt;
@@ -90,8 +88,8 @@ struct UserConfig {
         @(NamedArgument("path").Description("Recursively add all text files"))
         string path;
 
-        @(NamedArgument("db").Description("RAG database"))
-        string[] rag;
+        @(NamedArgument("db").Description("Primary RAG database (read/write)"))
+        string ragPrimary;
 
         @(NamedArgument("include", "i")
                 .Description(
@@ -136,17 +134,12 @@ LlmConfigT userToLlmConfig(LlmConfigT, ConfigT)(LlmConfigT llm, ConfigT conf) {
                             __traits(getMember, llm, llmMemberName) = __traits(getMember,
                                     conf, confMemberName).Path;
                         }
-                    } else static if (is(Type == RagDatabaseConfig[])) {
+                    } else static if (is(Type == RagDatabaseConfig)) {
                         alias ConfType = typeof(__traits(getMember, conf, confMemberName));
-                        static if (is(ConfType == string[])) {
+                        static if (is(ConfType == string)) {
                             auto cv = __traits(getMember, conf, confMemberName);
-                            if (!cv.empty) {
-                                RagDatabaseConfig[] result;
-                                foreach (s; cv) {
-                                    result ~= RagDatabaseConfig(s.Path, "");
-                                }
-                                __traits(getMember, llm, llmMemberName) = result;
-                            }
+                            __traits(getMember, llm, llmMemberName) = RagDatabaseConfig(cv.Path,
+                                    "Primary database (read/write)");
                         } else {
                             static assert(0,
                                     "unknown conversion of field " ~ llmMemberName ~ " type " ~ typeof(member)
