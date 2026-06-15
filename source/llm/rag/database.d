@@ -149,6 +149,8 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
                         foreach (a; db.run(miniorm.select!VersionTbl)) {
                             return a;
                         }
+                    } else {
+                        return VersionTbl(r.peek!long(0));
                     }
                 }
                 return VersionTbl(0);
@@ -160,15 +162,23 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
                 || versionData.embedDimensions != embedDimensions;
 
             if (mismatch && readOnly) {
-                logger.warningf("Unable to open '%s' because there is a mismatch between either db schema or embedding dimensions. Expect schema %s, db has schema %s. Expected dimensions %s, db has %s dimensions",
-                        dbFile, SchemaVersion, versionData.version_,
+                logger.warningf(
+                        "Unable to open '%s' because there is a mismatch between expected configuration of the database.",
+                        dbFile);
+                logger.warningf(SchemaVersion != versionData.version_,
+                        "Expected schema version %s but database has %s",
+                        SchemaVersion, versionData.version_);
+                logger.warningf(embedDimensions != versionData.embedDimensions,
+                        "Expected embed dimensions %s but database have %s",
                         embedDimensions, versionData.embedDimensions);
+                logger.warningf(model != versionData.model,
+                        "Expected model name '%s' but database have '%s'", model, versionData.model);
                 return none!Database();
             }
 
             if (versionData.version_ < SchemaVersion
                     || versionData.embedDimensions != embedDimensions || versionData.model != model) {
-                logger.tracef("Updating database to schema version %s->%s with %s->%s dimensions model %s->%s",
+                logger.tracef("Updating database to: schema version %s->%s dimensions %s->%s model %s->%s",
                         versionData.version_, SchemaVersion,
                         versionData.embedDimensions, embedDimensions, versionData.model, model);
                 auto trans = db.transaction;

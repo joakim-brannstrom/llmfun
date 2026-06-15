@@ -138,8 +138,10 @@ LlmConfigT userToLlmConfig(LlmConfigT, ConfigT)(LlmConfigT llm, ConfigT conf) {
                         alias ConfType = typeof(__traits(getMember, conf, confMemberName));
                         static if (is(ConfType == string)) {
                             auto cv = __traits(getMember, conf, confMemberName);
-                            __traits(getMember, llm, llmMemberName) = RagDatabaseConfig(cv.Path,
-                                    "Primary database (read/write)");
+                            if (!cv.empty) {
+                                __traits(getMember, llm, llmMemberName) = RagDatabaseConfig(cv.Path,
+                                        "Primary database (read/write)");
+                            }
                         } else {
                             static assert(0,
                                     "unknown conversion of field " ~ llmMemberName ~ " type " ~ typeof(member)

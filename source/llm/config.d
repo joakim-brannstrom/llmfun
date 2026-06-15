@@ -369,6 +369,7 @@ LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig = false) {
         logger.infof(!silent,
                 "No base configuration found (LLMFUN_DEFAULT_CONFIG not set or file missing)");
     }
+
     // Layer 2: Overlay config
     Path overlayPath;
     if (!path.empty) {
