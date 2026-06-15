@@ -50,10 +50,6 @@ struct LlmConfig {
         memoryArea = prioDataCwdDirs.resolve("memory".Path)
             .orElse(ResourceFile(memoryArea.AbsolutePath)).get.Path;
 
-        // Only ragPrimary is resolved
-        ragPrimary.path = prioDataCwdDirs.resolve("rag.sqlite3".Path)
-            .orElse(ResourceFile(ragPrimary.path.AbsolutePath)).get.Path;
-
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
             .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;
 
