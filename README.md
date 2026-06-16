@@ -64,13 +64,14 @@ llmfun rag [options]
 | `--add` | *none* | Add files to the RAG index |
 | `--rm` | *none* | Remove files from the RAG index |
 | `--list` | *none* | List all indexed sources |
+| `--sync` | *none* | Synchronize files with the RAG index (add or remove as needed) |
 | `--path <path>` | *none* | Recursively add all text files from the specified path |
 | `--db <path>` | *none* | RAG database path(s) |
 | `--include <pattern>` | `-i` | Include regex pattern for RAG files (repeatable). Overrides config file |
 | `--exclude <pattern>` | `-e` | Exclude regex pattern for RAG files (repeatable). Overrides config file |
 | `--local-setup` | *none* | Create the `llmfun/...` directory structure in the current working directory |
 
-**Note**: `--add`, `--rm`, and `--list` are mutually exclusive.
+**Note**: `--add`, `--rm`, `--list` and `--sync` are mutually exclusive.
 
 ### `tool_metrics`
 
