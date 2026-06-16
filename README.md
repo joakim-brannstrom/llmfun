@@ -208,9 +208,16 @@ Configures per-tool limits.
 }
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `readFileMaxLines` | long | `20` | Maximum number of lines the `readFile` tool can read per call |
+| Field                 | Type | Default | Description |
+|-----------------------|------|---------|-------------|
+| `readFileMaxLines`    | long | 20      | Max lines readFile can read in one call |
+| `editFileMaxLines`    | long | 80      | Max lines editFile can operate on in one call |
+| `maxDirEntries`       | long | 50      | Max entries returned by listDirectory recursive scan |
+| `grepMaxResults`      | long | 1000    | Max results returned by grepFiles |
+| `maxSummaryLength`    | long | 200     | Max chars for memory topic summary |
+| `maxTopicLength`      | long | 100     | Max chars for topic names (memory and RAG) |
+| `maxTopK`             | long | 20      | Max topK value for RAG search queries |
+| `maxArgLength`        | long | 200     | Max chars for argument truncation in tool history |
 
 ### RAG Database Configuration (`rag`)
 

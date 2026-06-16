@@ -11,19 +11,28 @@
   "warnIfNoApiKey": true,
 
   "toolLimits": {
-    "readFileMaxLines": 20
+    "readFileMaxLines": 20,
+    "editFileMaxLines": 80,
+    "maxDirEntries": 50,
+    "grepMaxResults": 1000,
+    "maxSummaryLength": 200,
+    "maxTopicLength": 100,
+    "maxTopK": 20,
+    "maxArgLength": 200
   },
 
-  "rag": [
-    {
+  "ragPrimary": {
       "path": "llmfun/data/rag.sqlite3",
       "description": "Primary RAG database (read/write)"
-    },
-    {
-      "path": "/path/to/readonly_knowledge.sqlite3",
-      "description": "Read-only knowledge base"
-    }
-  ],
+  },
+  "ragSecondary": {
+      "user_knowledge": [
+        {
+          "path": "/path/to/knowledge.sqlite3",
+          "description": "Read-only user collected knowledge base"
+        }
+      ]
+  },
 
   "toolFilter": {
     "include": [
