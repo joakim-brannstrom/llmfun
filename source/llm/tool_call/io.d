@@ -138,14 +138,21 @@ enum EditMode {
         ~ "startLine: First line of the range (1-based)\n" ~ "count: number of lines to read")
 ExecuteFuncResult editFile(Context baseCtx, string path, string content,
         string mode, long startLine, long count) {
-    immutable MaxEditLines = MaxLines * 4;
+
     mixin(baseContextToSpecific!FileContext);
+
+    auto editFileMaxLines = ctx.getToolLimits().editFileMaxLines;
+    if (editFileMaxLines <= 0) {
+        logger.warning("editFileMaxLines is ", editFileMaxLines,
+                ", falling back to default ", MaxLines * 4);
+        editFileMaxLines = MaxLines * 4;
+    }
 
     auto path_ = pathToWorkarea(ctx, path, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
-    if (auto err = validateLineRange(startLine, count, MaxEditLines)) {
+    if (auto err = validateLineRange(startLine, count, editFileMaxLines)) {
         return ExecuteFuncResult(err, success: false);
     }
 
@@ -462,11 +469,11 @@ ExecuteFuncResult replaceAll(Context baseCtx, string text, string from, string t
     return ExecuteFuncResult(res, success: true);
 }
 
-immutable MaxDirEntries = 50;
-@Function("List files in directory as JSON array of paths, types and sizes. recursive=1 for recursive scan. Max "
-        ~ MaxDirEntries.to!string ~ " entries are returned for recursive scan or error.")
+@Function("List files in directory as JSON array of paths, types and sizes. recursive=1 for recursive scan. Max entries are returned for recursive scan or error.")
 ExecuteFuncResult listDirectory(Context baseCtx, string path, long recursive) {
     mixin(baseContextToSpecific!FileContext);
+
+    auto maxDirEntries = ctx.getToolLimits().maxDirEntries;
 
     auto path_ = pathToWorkarea(ctx, path, checkExist: true);
     if (!path_.valid) {
@@ -476,10 +483,10 @@ ExecuteFuncResult listDirectory(Context baseCtx, string path, long recursive) {
     try {
         JSONValue[] rval;
         foreach (a; dirEntries(path_.toString, recursive != 0 ? SpanMode.depth : SpanMode.shallow)) {
-            if (recursive != 0 && rval.length > MaxDirEntries) {
+            if (recursive != 0 && rval.length > maxDirEntries) {
                 return ExecuteFuncResult(
                         format!"error: failed listing directory recursive: more than %s entries in the result"(
-                        MaxDirEntries), success: false);
+                        maxDirEntries), success: false);
             }
 
             auto e = JSONValue.emptyObject;
@@ -496,11 +503,20 @@ ExecuteFuncResult listDirectory(Context baseCtx, string path, long recursive) {
     }
 }
 
-immutable GrepMaxResults = 1000;
 @Function(
         "Search for a pattern in files at path. Returns up to maxResults matching lines with file and line number")
 ExecuteFuncResult grepFiles(Context baseCtx, string path, string pattern, long maxResults) {
     mixin(baseContextToSpecific!FileContext);
+
+    auto grepMaxResults = ctx.getToolLimits().grepMaxResults;
+
+    if (maxResults > grepMaxResults) {
+        return ExecuteFuncResult(format!"error: requested maxResults %s exceeds limit %s"(maxResults,
+                grepMaxResults), success: false);
+    }
+    if (maxResults < 1) {
+        return ExecuteFuncResult("error: maxResults must be >= 1", success: false);
+    }
 
     auto path_ = pathToWorkarea(ctx, path, checkExist: true);
     if (!path_.valid) {
@@ -514,9 +530,9 @@ ExecuteFuncResult grepFiles(Context baseCtx, string path, string pattern, long m
     if (result.status == 0) {
         string rval = result.output.strip.replace(path_.toString, path);
         const results = rval.splitter('\n').count;
-        if (results > GrepMaxResults) {
+        if (results > grepMaxResults) {
             return ExecuteFuncResult(format!"error: %s results exceeds max allowed %s"(results,
-                    GrepMaxResults), success: false);
+                    grepMaxResults), success: false);
         }
         if (rval.empty) {
             return ExecuteFuncResult(format!"error: no matches found searching in path '%s' with pattern '%s'"(path,

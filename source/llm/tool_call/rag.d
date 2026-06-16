@@ -22,6 +22,7 @@ import miniorm : spinSql;
 import llm.tool_call;
 import llm.rag.rag;
 import llm.tool_call.utility;
+import llm.config : ToolLimits;
 
 mixin RegisterLlmFunctions!();
 
@@ -29,9 +30,19 @@ interface RAGContext : Context {
     RAG getRAG();
     bool isPathInsideWorkArea(AbsolutePath path);
     AbsolutePath workArea();
+    ToolLimits getToolLimits();
 }
 
-private immutable maxTopK = 20;
+private string checkTopic(RAGContext ctx, string topic) {
+    if (topic.empty)
+        return "error: topic must not be empty";
+    auto maxLen = ctx.getToolLimits().maxTopicLength;
+    if (topic.length > maxLen)
+        return format!"error: topic too long. Max %s characters"(maxLen);
+    if (auto err = checkAlphaNumUnderscore(topic))
+        return err;
+    return null;
+}
 
 private string location(Document doc) {
     import std.sumtype : match;
@@ -51,8 +62,9 @@ ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query,
         long topK, string database) {
     mixin(baseContextToSpecific!RAGContext);
 
-    if (topK < 1 || topK > maxTopK) {
-        return ExecuteFuncResult(format!"error: topK parameter must be in range [1, %s]"(maxTopK),
+    auto maxTopKVal = ctx.getToolLimits().maxTopK;
+    if (topK < 1 || topK > maxTopKVal) {
+        return ExecuteFuncResult(format!"error: topK parameter must be in range [1, %s]"(maxTopKVal),
                 success: false);
     }
     if (query.length == 0 || query.strip.length == 0) {
@@ -142,19 +154,12 @@ ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
     }
 }
 
-@Function(
-        "Load content into RAG index with a topic name. Topic must be alphanumeric + underscore, max 100 chars.")
+@Function("Load content into RAG index with a topic name. Topic must be alphanumeric + underscore, limited length. See error messages for exact limit.")
 ExecuteFuncResult loadContentToRAG(Context baseCtx, string topic, string content) {
     mixin(baseContextToSpecific!RAGContext);
 
-    if (topic.empty) {
-        return ExecuteFuncResult("error: topic must not be empty", success: false);
-    }
-    if (topic.length > 100) {
-        return ExecuteFuncResult("error: topic too long. Max 100 characters", success: false);
-    }
-    if (auto err = checkAlphaNumUnderscore(topic)) {
-        return ExecuteFuncResult(err, success: false);
+    if (auto e = checkTopic(ctx, topic)) {
+        return ExecuteFuncResult(e, success: false);
     }
     if (content.empty) {
         return ExecuteFuncResult("error: content must not be empty", success: false);
@@ -176,18 +181,12 @@ ExecuteFuncResult loadContentToRAG(Context baseCtx, string topic, string content
     }
 }
 
-@Function("Remove topic from RAG index. Topic must be alphanumeric + underscore, max 100 chars.")
+@Function("Remove topic from RAG index. Topic must be alphanumeric + underscore, limited length. See error messages for exact limit.")
 ExecuteFuncResult removeTopicFromRAG(Context baseCtx, string topic) {
     mixin(baseContextToSpecific!RAGContext);
 
-    if (topic.empty) {
-        return ExecuteFuncResult("error: topic must not be empty", success: false);
-    }
-    if (topic.length > 100) {
-        return ExecuteFuncResult("error: topic too long. Max 100 characters", success: false);
-    }
-    if (auto err = checkAlphaNumUnderscore(topic)) {
-        return ExecuteFuncResult(err, success: false);
+    if (auto e = checkTopic(ctx, topic)) {
+        return ExecuteFuncResult(e, success: false);
     }
 
     try {

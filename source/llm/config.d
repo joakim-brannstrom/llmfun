@@ -24,6 +24,13 @@ struct RagDatabaseConfig {
 
 struct ToolLimits {
     long readFileMaxLines = 20;
+    long editFileMaxLines = 80;
+    long maxDirEntries = 50;
+    long grepMaxResults = 1000;
+    long maxSummaryLength = 200;
+    long maxTopicLength = 100;
+    long maxTopK = 20;
+    long maxArgLength = 200;
 }
 
 struct LlmConfig {
@@ -579,9 +586,22 @@ void validateConfig(LlmConfig conf) {
             throw new Exception(format!"codeModels[%s].server.url must not be empty"(i));
     }
 
-    // Validate toolLimits
     if (conf.toolLimits.readFileMaxLines < 1)
         throw new Exception("toolLimits.readFileMaxLines must be >= 1");
+    if (conf.toolLimits.editFileMaxLines < 1)
+        throw new Exception("toolLimits.editFileMaxLines must be >= 1");
+    if (conf.toolLimits.maxDirEntries < 1)
+        throw new Exception("toolLimits.maxDirEntries must be >= 1");
+    if (conf.toolLimits.grepMaxResults < 1)
+        throw new Exception("toolLimits.grepMaxResults must be >= 1");
+    if (conf.toolLimits.maxSummaryLength < 1)
+        throw new Exception("toolLimits.maxSummaryLength must be >= 1");
+    if (conf.toolLimits.maxTopicLength < 1)
+        throw new Exception("toolLimits.maxTopicLength must be >= 1");
+    if (conf.toolLimits.maxTopK < 1)
+        throw new Exception("toolLimits.maxTopK must be >= 1");
+    if (conf.toolLimits.maxArgLength < 1)
+        throw new Exception("toolLimits.maxArgLength must be >= 1");
 
     // Emit warnings for missing API keys (after all hard validation)
     checkApiKeyWarnings(conf);

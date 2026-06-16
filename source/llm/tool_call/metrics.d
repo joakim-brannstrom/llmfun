@@ -8,12 +8,14 @@ import std.json : JSONValue;
 import llm.tool_call;
 import llm.metric.calculator;
 import llm.metric.monitor;
+import llm.config : ToolLimits;
 
 mixin RegisterLlmFunctions!();
 
 interface MetricsContext : Context {
     ref MetricsCalculator getCalculator();
     ToolCallEvent[] getRecentEvents(long count);
+    ToolLimits getToolLimits();
 }
 
 @Function("Get current system metrics as a markdown report")
@@ -32,6 +34,8 @@ ExecuteFuncResult getMetrics(Context baseCtx) {
 ExecuteFuncResult getToolHistory(Context baseCtx, long limit, long resultLen) {
     mixin(baseContextToSpecific!MetricsContext);
 
+    auto maxArgLen = ctx.getToolLimits().maxArgLength;
+
     try {
         auto events = ctx.getRecentEvents(limit);
         if (events.length == 0) {
@@ -41,9 +45,10 @@ ExecuteFuncResult getToolHistory(Context baseCtx, long limit, long resultLen) {
         string result;
         foreach (i, event; events) {
             auto dt = SysTime(DateTime.init) + event.timestamp.dur!"msecs";
-            result ~= format!"%s. [%s] %s - Success: %s\n   Args: %s\n   Result: %s\n\n"(i + 1, dt.toISOExtString(),
-                    event.toolName, event.success ? "Yes" : "No",
-                    truncate(event.arguments, 200), truncate(event.result, resultLen));
+            result ~= format!"%s. [%s] %s - Success: %s\n   Args: %s\n   Result: %s\n\n"(i + 1,
+                    dt.toISOExtString(), event.toolName,
+                    event.success ? "Yes" : "No", truncate(event.arguments,
+                        maxArgLen), truncate(event.result, resultLen));
         }
         return ExecuteFuncResult(result, success: true);
     } catch (Exception e) {
@@ -57,5 +62,5 @@ private:
 string truncate(string s, long maxLen) {
     if (s.length <= maxLen)
         return s;
-    return s[(s.length - maxLen) .. $] ~ "...";
+    return s[0 .. maxLen] ~ "...";
 }

@@ -17,26 +17,28 @@ import my.path : AbsolutePath;
 import llm.rag.rag;
 import llm.tool_call.utility : checkAlphaNumUnderscore;
 import llm.tool_call;
+import llm.config : ToolLimits;
 
 mixin RegisterLlmFunctions!();
-
-private immutable MaxSummaryLength = 200;
 
 interface MemoryContext : Context {
     Path getMemoryFile(string topic);
     string[] getMemoryFileTopics();
+    ToolLimits getToolLimits();
 }
 
-private string checkTopic(string topic) {
-    if (topic.length > 100)
-        return format!"error: topic too long. Max 100 characters";
+private string checkTopic(MemoryContext ctx, string topic) {
+    auto maxLen = ctx.getToolLimits().maxTopicLength;
+    if (topic.length > maxLen)
+        return format!"error: topic too long. Max %s characters"(maxLen);
     if (auto err = checkAlphaNumUnderscore(topic))
         return err;
     return null;
 }
 
 private string getMemorySummary(MemoryContext ctx, string topic) {
-    if (auto e = checkTopic(topic))
+    auto maxSummaryLen = ctx.getToolLimits().maxSummaryLength;
+    if (auto e = checkTopic(ctx, topic))
         return "Error reading memory";
     auto path_ = ctx.getMemoryFile(topic);
     if (!path_.exists)
@@ -47,14 +49,14 @@ private string getMemorySummary(MemoryContext ctx, string topic) {
         foreach (line; content.splitLines) {
             auto trimmed = line.strip;
             if (!trimmed.empty) {
-                if (trimmed.length > MaxSummaryLength) {
-                    auto cutoff = trimmed[0 .. MaxSummaryLength];
+                if (trimmed.length > maxSummaryLen) {
+                    auto cutoff = trimmed[0 .. maxSummaryLen];
                     auto spacePos = cutoff.lastIndexOf(" ");
-                    if (spacePos > MaxSummaryLength / 2 && spacePos != size_t.max) {
+                    if (spacePos > maxSummaryLen / 2 && spacePos != size_t.max) {
                         return trimmed[0 .. spacePos].strip ~ "...";
                     }
-                    // Fallback: hard-truncate at MaxSummaryLength
-                    return trimmed[0 .. MaxSummaryLength] ~ "...";
+                    // Fallback: hard-truncate at maxSummaryLen
+                    return trimmed[0 .. maxSummaryLen] ~ "...";
                 }
                 return trimmed;
             }
@@ -69,7 +71,7 @@ private string getMemorySummary(MemoryContext ctx, string topic) {
 ExecuteFuncResult writeMemory(Context baseCtx, string topic, string content) {
     mixin(baseContextToSpecific!MemoryContext);
 
-    if (auto e = checkTopic(topic))
+    if (auto e = checkTopic(ctx, topic))
         return ExecuteFuncResult(e, success: false);
     auto path_ = ctx.getMemoryFile(topic);
 
@@ -85,7 +87,7 @@ ExecuteFuncResult writeMemory(Context baseCtx, string topic, string content) {
 ExecuteFuncResult readMemory(Context baseCtx, string topic) {
     mixin(baseContextToSpecific!MemoryContext);
 
-    if (auto e = checkTopic(topic))
+    if (auto e = checkTopic(ctx, topic))
         return ExecuteFuncResult(e, success: false);
 
     auto path_ = ctx.getMemoryFile(topic);
@@ -106,7 +108,7 @@ ExecuteFuncResult removeMemory(Context baseCtx, string topic) {
 
     mixin(baseContextToSpecific!MemoryContext);
 
-    if (auto e = checkTopic(topic))
+    if (auto e = checkTopic(ctx, topic))
         return ExecuteFuncResult(e, success: false);
 
     auto path_ = ctx.getMemoryFile(topic);
