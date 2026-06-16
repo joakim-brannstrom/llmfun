@@ -171,6 +171,7 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
   "containerCmd": "podman",
   "agentPrompt": "AGENT.md",
   "activeCodeModelIndex": 0,
+  "toolLimits": {...},
   "rag": [...],
   "toolFilter": {...},
   "ragFilter": {...},
@@ -193,6 +194,21 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
 | `containerCmd` | string | `podman` | Container runtime command (podman or docker) |
 | `agentPrompt` | string | `AGENT.md` | Agent system prompt file name (searched in promptDir) |
 | `activeCodeModelIndex` | long | `0` | Index of the active code model in `codeModels` array |
+| `toolLimits` | object | `{}` | Tool execution limits (see below) |
+
+### Tool Limits (`toolLimits`)
+
+Configures per-tool limits.
+
+```json
+"toolLimits": {
+  "readFileMaxLines": 20
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `readFileMaxLines` | long | `20` | Maximum number of lines the `readFile` tool can read per call |
 
 ### RAG Database Configuration (`rag`)
 
@@ -451,10 +467,10 @@ The agent has access to the following tools:
 | `editFile` | Edit a file by replacing, removing, or appending lines |
 | `applyDiff` | Apply a unified diff patch to a file |
 | `replaceAll` | Replace all occurrences of a string in text |
-| `listFilesInDirectory` | List files in a directory as JSON array |
+| `listDirectory` | List files in a directory as JSON array |
 | `grepFiles` | Search for a pattern in files |
 | `countLinesInFile` | Count lines in a file |
-| `loadImage` | Load an image into the vision context (jpg, png, bmp, gif) |
+| `md5HashFile` | Calculate the MD5 hash of a file |
 | `loadImageApi` | Load an image for OpenAI API vision context |
 
 ### Encoding
@@ -484,6 +500,8 @@ The agent has access to the following tools:
 | `listRAGDatabases` | List all available RAG databases with names and file paths |
 | `loadFileToRAG` | Index a file into the RAG database |
 | `loadContentToRAG` | Index raw content into the RAG database |
+| `removeTopicFromRAG` | Remove a topic from the RAG index |
+| `queryReadFile` | Read a specific line from a file in the RAG index |
 
 ### Thinking & Reasoning
 

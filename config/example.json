@@ -9,6 +9,10 @@
   "agentPrompt": "AGENT.md",
   "activeCodeModelIndex": 0,
 
+  "toolLimits": {
+    "readFileMaxLines": 20
+  },
+
   "rag": [
     {
       "path": "llmfun/data/rag.sqlite3",
