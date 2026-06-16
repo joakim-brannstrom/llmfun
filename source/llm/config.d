@@ -81,6 +81,9 @@ struct LlmConfig {
     long activeCodeModelIndex = 0;
     SummaryModelConfig summaryModel;
 
+    /// If true, emit a warning when no API key is configured for a model server. Defaults to true.
+    bool warnIfNoApiKey = true;
+
     EmbedConfig embedConfig;
     long embedDimensions() const @safe {
         return embedConfig.match!((LocalEmbedConfig a) => a.dimensions,
@@ -525,6 +528,38 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
     return conf;
 }
 
+/// Emit warnings for models configured without API keys.
+/// Called from validateConfig() after all hard validation checks.
+/// No-op when warnIfNoApiKey is false or OPENAI_API_KEY env var is set.
+private void checkApiKeyWarnings(LlmConfig conf) {
+    if (!conf.warnIfNoApiKey || !getEnvApiKey.empty)
+        return;
+
+    bool warned;
+
+    foreach (model; conf.codeModels.filter!(a => a.server.apiKey.empty)) {
+        logger.warningf("No API key configured for code model '%s'", model.name);
+        warned = true;
+    }
+
+    if (!conf.summaryModel.server.url.empty && conf.summaryModel.server.apiKey.empty) {
+        logger.warningf("No API key configured for summary model '%s'", conf.summaryModel.name);
+        warned = true;
+    }
+
+    conf.embedConfig.match!((RemoteEmbedConfig r) {
+        if (r.server.apiKey.empty) {
+            logger.warningf("No API key configured for remote embed model '%s'", r.name);
+            warned = true;
+        }
+    }, (LocalEmbedConfig) {} // No API key needed for local embed
+    );
+
+    if (warned)
+        logger.warningf(
+                "To suppress these warnings, set 'warnIfNoApiKey' to false or provide OPENAI_API_KEY.");
+}
+
 /// Validate LlmConfig after JSON parsing. Throws on validation failure.
 void validateConfig(LlmConfig conf) {
     if (conf.codeModels.length <= 0)
@@ -547,6 +582,9 @@ void validateConfig(LlmConfig conf) {
     // Validate toolLimits
     if (conf.toolLimits.readFileMaxLines < 1)
         throw new Exception("toolLimits.readFileMaxLines must be >= 1");
+
+    // Emit warnings for missing API keys (after all hard validation)
+    checkApiKeyWarnings(conf);
 }
 
 alias jsonToLlmConfig = jsonToConfig!LlmConfig;

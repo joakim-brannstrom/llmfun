@@ -8,6 +8,7 @@
   "containerCmd": "podman",
   "agentPrompt": "AGENT.md",
   "activeCodeModelIndex": 0,
+  "warnIfNoApiKey": true,
 
   "toolLimits": {
     "readFileMaxLines": 20

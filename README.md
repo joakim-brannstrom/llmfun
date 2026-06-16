@@ -195,6 +195,7 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
 | `containerCmd` | string | `podman` | Container runtime command (podman or docker) |
 | `agentPrompt` | string | `AGENT.md` | Agent system prompt file name (searched in promptDir) |
 | `activeCodeModelIndex` | long | `0` | Index of the active code model in `codeModels` array |
+| `warnIfNoApiKey` | bool | `true` | Emit warnings when no API key is configured for model servers |
 | `toolLimits` | object | `{}` | Tool execution limits (see below) |
 
 ### Tool Limits (`toolLimits`)
