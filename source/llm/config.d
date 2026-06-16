@@ -22,6 +22,10 @@ struct RagDatabaseConfig {
     string description;
 }
 
+struct ToolLimits {
+    long readFileMaxLines = 20;
+}
+
 struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
@@ -64,6 +68,8 @@ struct LlmConfig {
     Path workArea = ProgramName ~ "/workarea";
 
     string containerCmd = "podman";
+
+    ToolLimits toolLimits;
 
     ToolFilter toolFilter;
     RagFilter ragFilter;
@@ -537,6 +543,10 @@ void validateConfig(LlmConfig conf) {
         if (model.server.url.empty)
             throw new Exception(format!"codeModels[%s].server.url must not be empty"(i));
     }
+
+    // Validate toolLimits
+    if (conf.toolLimits.readFileMaxLines < 1)
+        throw new Exception("toolLimits.readFileMaxLines must be >= 1");
 }
 
 alias jsonToLlmConfig = jsonToConfig!LlmConfig;

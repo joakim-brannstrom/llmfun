@@ -246,8 +246,11 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
             return Path("scratch/thinking");
         }
 
-        override void taskDone() {
+        override ToolLimits getToolLimits() {
+            return ToolLimits();
         }
+
+        override void taskDone() {
     }
 
     auto ctx = new DummyContext;

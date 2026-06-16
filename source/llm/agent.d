@@ -575,6 +575,10 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             return workArea_;
         }
 
+        override ToolLimits getToolLimits() {
+            return conf.toolLimits;
+        }
+
         override string getContainerCmd() {
             return conf.containerCmd;
         }

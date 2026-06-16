@@ -20,6 +20,7 @@ import my.path : AbsolutePath;
 
 import llm.tool_call;
 import llm.tool_call.utility;
+import llm.config : ToolLimits;
 
 mixin RegisterLlmFunctions!();
 
@@ -28,6 +29,7 @@ immutable MaxLines = 20;
 interface FileContext : Context {
     bool isPathInsideWorkArea(AbsolutePath path);
     AbsolutePath workArea();
+    ToolLimits getToolLimits();
 }
 
 @Function("Remove file")
@@ -85,7 +87,12 @@ ExecuteFuncResult readFile(Context baseCtx, string path, long startLine, long co
         json["error"] = path_.errorMsg;
         return ExecuteFuncResult(json.toString, success: false);
     }
-    if (auto err = validateLineRange(startLine, count, MaxLines)) {
+    auto maxLines = ctx.getToolLimits().readFileMaxLines;
+    if (maxLines <= 0) {
+        logger.warning("readFileMaxLines is ", maxLines, ", falling back to default ", MaxLines);
+        maxLines = MaxLines;
+    }
+    if (auto err = validateLineRange(startLine, count, maxLines)) {
         json["error"] = err;
         return ExecuteFuncResult(json.toString, success: false);
     }
