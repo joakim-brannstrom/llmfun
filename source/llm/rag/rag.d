@@ -272,7 +272,7 @@ RagAddResult add(RAG rag, Document doc) {
         return RagAddResult(doc.data.length, 0);
     }
 
-    immutable MaxIterations = 2;
+    immutable MaxIterations = 8;
     size_t nBatch = ServerNBatch == 0 ? rag.embedder.batchSize() : ServerNBatch;
 
     auto embeddings = appender!(Embedding[])();
