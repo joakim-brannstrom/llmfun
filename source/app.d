@@ -2,7 +2,7 @@ module app;
 
 import logger = std.logger;
 import std.algorithm;
-import std.array : empty;
+import std.array : empty, array;
 import std.conv : to;
 import std.exception : ifThrown;
 import std.file : exists;
@@ -85,8 +85,8 @@ struct UserConfig {
             bool sync;
         }
 
-        @(NamedArgument("path").Description("Recursively add all text files"))
-        string path;
+        @(NamedArgument("path").Description("Recursively add all text files (can be repeated)"))
+        string[] path;
 
         @(NamedArgument("db").Description("Primary RAG database (read/write)"))
         string ragPrimary;
@@ -433,6 +433,15 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         }
     }
 
+    long printNoneExistingPaths(T)(T paths) {
+        long counter;
+        foreach (p; paths.filter!(a => !exists(a))) {
+            logger.warningf("Path '%s' does not exist", p);
+            counter++;
+        }
+        return counter;
+    }
+
     ReFilter buildRagFilter() {
         auto filter = llmConf.ragFilter;
 
@@ -476,57 +485,76 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         return files[];
     }
 
-    void addData() {
-        if (!conf.path.exists) {
-            logger.warningf("Path %s do not exist", conf.path);
-            return;
+    long addData() {
+        if (conf.path.empty) {
+            logger.warning("No --path provided. Nothing to add.");
+            return 0;
         }
 
-        auto files = collectFiles(conf.path.Path, ragFilter);
+        const failed = printNoneExistingPaths(conf.path);
 
-        if (files.empty) {
-            if (isFile(conf.path)) {
-                logger.infof("File %s excluded by ragFilter", conf.path);
-            } else {
-                logger.infof("No files matched in %s", conf.path);
+        foreach (p; conf.path.filter!(a => exists(a))) {
+            auto files = collectFiles(p.Path, ragFilter);
+
+            if (files.empty) {
+                if (isFile(p)) {
+                    logger.infof("File %s excluded by ragFilter", p);
+                } else {
+                    logger.infof("No files matched in %s", p);
+                }
+                continue;
             }
-            return;
-        }
 
-        logger.info("Add files from ", conf.path);
-        foreach (p; files) {
-            addFile(p);
+            logger.infof("Adding files from %s", p);
+            foreach (f; files) {
+                addFile(f);
+            }
         }
+        return failed;
     }
 
-    void removeData() {
+    long removeData() {
         if (conf.path.empty) {
             if (conf.ragInclude.empty && conf.ragExclude.empty
                     && llmConf.ragFilter.include.empty && llmConf.ragFilter.exclude.empty) {
                 logger.warning("No --path provided and no --include/--exclude filters active (CLI or config). " ~ "Nothing to remove. Use --include <pattern> or --exclude <pattern> to select sources for removal, " ~ "or provide --path for a specific file/directory.");
-                return;
+                return 0;
             }
         }
 
         // path-based removal
         if (!conf.path.empty) {
-            long entriesRemoved = 0; // Scoped to this branch
-
-            if (conf.path.isFile) {
-                logger.info("Remove embeddings from file", conf.path);
-                entriesRemoved = rag.removeSource(Origin(conf.path.Path));
-            } else if (conf.path.isDir) {
-                logger.info("Remove embeddings from files in ", conf.path);
-                foreach (p; dirEntries(conf.path, SpanMode.depth).filter!(a => a.isFile)
-                        .filter!(a => ragFilter.match(a.name))) {
-                    entriesRemoved += rag.removeSource(Origin(p.name.Path));
+            long entriesRemoved = 0;
+            long entriesFailed = 0;
+            foreach (p; conf.path) {
+                auto path = p.Path;
+                try {
+                    if (path.isFile) {
+                        logger.infof("Removing embeddings from file %s", p);
+                        entriesRemoved += rag.removeSource(Origin(path));
+                    } else if (path.isDir) {
+                        logger.infof("Removing embeddings from files in %s", p);
+                        foreach (entry; dirEntries(path, SpanMode.depth).filter!(a => a.isFile)
+                                .filter!(a => ragFilter.match(a.name))) {
+                            entriesRemoved += rag.removeSource(Origin(entry.Path));
+                        }
+                    } else {
+                        if (p.startsWith("http://") || p.startsWith("https://")) {
+                            logger.infof("Removing URL %s", p);
+                            entriesRemoved += rag.removeSource(Origin(Url(p)));
+                        } else {
+                            logger.warningf("Path '%s' does not exist and is not a URL, skipping",
+                                    p);
+                            entriesFailed++;
+                        }
+                    }
+                } catch (Exception e) {
+                    entriesFailed++;
+                    logger.warningf("Failed to remove '%s': %s", p, e.msg);
                 }
-            } else { // assuming it is a URL
-                logger.info("Removing URL ", conf.path);
-                entriesRemoved = rag.removeSource(Origin(Url(conf.path)));
             }
-            logger.infof("Removed %s embeddings", entriesRemoved);
-            return;
+            logger.infof("Removed %s embeddings, %s failed", entriesRemoved, entriesFailed);
+            return entriesFailed;
         }
 
         // Filter-based source iteration and matching
@@ -572,6 +600,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 
         logger.infof("Removed %s embeddings from %s source(s), %s failed",
                 entriesRemoved, candidateArray.length, entriesFailed);
+        return entriesFailed;
     }
 
     void listSources() {
@@ -598,13 +627,30 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
             return 1;
         }
 
-        auto path = conf.path.buildNormalizedPath.Path;
-        if (!exists(path)) {
-            logger.warningf("Path %s does not exist", path);
+        const invalidPaths = printNoneExistingPaths(conf.path);
+
+        // Build normalized paths for prefix matching
+        Path[] normalizedPaths = conf.path
+            .filter!(a => exists(a))
+            .map!(a => a.buildNormalizedPath.Path)
+            .array;
+        if (normalizedPaths.empty) {
+            logger.warning("No valid paths to sync");
             return 1;
         }
 
-        auto files = collectFiles(path, ragFilter);
+        // Collect files from all paths, deduplicate
+        Set!string seenFiles;
+        Path[] allFiles;
+        foreach (np; normalizedPaths) {
+            auto files = collectFiles(np, ragFilter);
+            foreach (f; files) {
+                if (!seenFiles.contains(f)) {
+                    seenFiles.add(f);
+                    allFiles ~= f.Path;
+                }
+            }
+        }
 
         long added = 0;
         long skipped = 0;
@@ -612,8 +658,9 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 
         Set!string syncedOrigins;
 
-        logger.infof("Phase 1: Scanning %s for files", path);
-        foreach (p; files) {
+        // Phase 1: Scan and add
+        logger.warningf(invalidPaths > 0, "Skipped %s invalid path(s)", invalidPaths);
+        foreach (p; allFiles) {
             syncedOrigins.add(p);
             try {
                 if (conf.dryRun) {
@@ -636,15 +683,25 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
             }
         }
 
-        logger.infof("Phase 2: Checking for deleted sources in %s", conf.path);
+        // Phase 2: Remove stale sources
+        logger.info("Phase 2: Checking for deleted sources");
         long removed = 0;
         long removeFailed = 0;
+
+        // Helper: check if normPath is under any managed path with boundary check
+        bool isUnderManagedPath(string normPath) {
+            foreach (np; normalizedPaths.map!(a => a.toString)
+                    .filter!(a => normPath.startsWith(a))) {
+                return true;
+            }
+            return false;
+        }
 
         foreach (src; rag.getSources.map!(a => a.sources).joiner) {
             src.origin.match!((Topic a) { return; }, (Path a) {
                 auto normPath = a.toString.buildNormalizedPath;
-                if (normPath.startsWith(path.toString)
-                    && ragFilter.match(normPath) && !syncedOrigins.contains(normPath)) {
+                if (isUnderManagedPath(normPath) && ragFilter.match(normPath)
+                    && !syncedOrigins.contains(normPath)) {
                     try {
                         if (conf.dryRun) {
                             logger.infof("  [dry-run] Would remove: %s", a);
@@ -670,11 +727,13 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     }
 
     if (conf.add) {
-        addData();
+        long failed = addData();
         spinSql!(() { rag.vacuum; rag.fts5Rebuild; });
+        return failed != 0 ? 1 : 0;
     } else if (conf.rm) {
-        removeData();
+        long failed = removeData();
         spinSql!(() { rag.vacuum; rag.fts5Rebuild; });
+        return failed != 0 ? 1 : 0;
     } else if (conf.sync) {
         return syncData() != 0 ? 1 : 0;
     } else if (conf.list) {
