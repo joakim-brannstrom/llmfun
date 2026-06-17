@@ -47,7 +47,7 @@ ExecuteFuncResult getToolHistory(Context baseCtx, long limit, long resultLen) {
             auto dt = SysTime(DateTime.init) + event.timestamp.dur!"msecs";
             result ~= format!"%s. [%s] %s - Success: %s\n   Args: %s\n   Result: %s\n\n"(i + 1,
                     dt.toISOExtString(), event.toolName,
-                    event.success ? "Yes" : "No", truncate(event.arguments,
+                    event.success ? "Yes" : "No", truncate(event.arguments.toString,
                         maxArgLen), truncate(event.result, resultLen));
         }
         return ExecuteFuncResult(result, success: true);

@@ -57,7 +57,8 @@ private:
     int countSimilarFailures(ToolCallEvent target, ToolCallEvent[] allFailures) @safe {
         int count = 1; // Count the target itself
         foreach (other; allFailures.filter!(a => a.toolName == target.toolName)) {
-            if (similarity(other.arguments, target.arguments) > SimilarityThreshold) {
+            if (similarity(other.arguments.toString,
+                    target.arguments.toString) > SimilarityThreshold) {
                 count++;
             }
         }

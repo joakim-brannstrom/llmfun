@@ -111,15 +111,18 @@ struct UserConfig {
 
     @(Command("tool_metrics"))
     struct PrintToolMetricsConfig {
-        @(NamedArgument("data").Required().Description("Metric data file to read"))
+        @(NamedArgument("data").Description("Metric data file to read (.jsonl)"))
         void data_(string v) {
             data = Path(v);
         }
 
-        Path data;
+        Path data = "llmfun/data/scratch/monitor.jsonl";
 
         @(NamedArgument("number", "n").Description("Number of tools to print"))
         int number;
+
+        @(NamedArgument("follow", "f").Description("Live monitor the tool calls"))
+        bool follow;
     }
 }
 
@@ -680,17 +683,49 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 }
 
 int appMain(UserConfig uconf, UserConfig.PrintToolMetricsConfig conf) {
-    import llm.metric.monitor : MetricMonitor;
+    import core.thread : Thread;
+    import core.time : dur;
+    import std.json : parseJSON;
+    import llm.metric.monitor : MetricMonitor, ToolCallEvent;
     import llm.metric.calculator : MetricsCalculator;
+    import std.algorithm : countUntil;
+    import my.term_color;
 
-    try {
-        auto monitor = new MetricMonitor(conf.data);
-        auto calculator = new MetricsCalculator();
-        calculator.setEvents(monitor.getRecentEvents(10000));
-        writeln(calculator.generateReport(conf.number));
-    } catch (Exception e) {
-        writeln("Error: ", e.msg);
-        return 1;
+    if (conf.follow) {
+        ToolCallEvent lastEvent;
+        while (true) {
+            try {
+                scope monitor = new MetricMonitor(conf.data);
+                auto events = monitor.getRecentEvents(50);
+                auto idx = events.countUntil!(a => a == lastEvent);
+                events = idx < 0 ? events : events[idx + 1 .. $];
+                foreach (e; events) {
+                    auto args = e.arguments.object.byKeyValue.map!(a => format!"%s:%s"(a.key.color(Color.yellow),
+                            a.value.toString)).joiner(", ");
+                    writefln("%s - agent:%s time:%s tool:%s(%s) -> %s",
+                            e.timestamp.to!string.color(e.success ? Color.green
+                                : Color.red), e.agentName, e.responseTimeMs.dur!"msecs",
+                            e.toolName, args, e.result);
+
+                }
+                if (!events.empty) {
+                    lastEvent = events[$ - 1];
+                }
+            } catch (Exception e) {
+                logger.trace(e.msg);
+            }
+            Thread.sleep(3.dur!"seconds");
+        }
+    } else {
+        try {
+            scope monitor = new MetricMonitor(conf.data);
+            scope calculator = new MetricsCalculator();
+            calculator.setEvents(monitor.getRecentEvents(10000));
+            writeln(calculator.generateReport(conf.number));
+        } catch (Exception e) {
+            writeln("Error: ", e.msg);
+            return 1;
+        }
     }
 
     return 0;

@@ -454,7 +454,8 @@ private:
             immutable responseTimeMs = (Clock.currTime - startTime).total!"msecs";
             try {
                 if (monitor !is null) {
-                    monitor.record(this.name, toolName, args, result, success, responseTimeMs);
+                    monitor.record(this.name, toolName, parseJSON(args),
+                            result, success, responseTimeMs);
                 }
             } catch (Exception e) {
                 logger.tracef("monitor record failed: %s", e.msg);

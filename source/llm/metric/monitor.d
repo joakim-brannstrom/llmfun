@@ -10,14 +10,13 @@ import std.stdio : File;
 
 import my.path;
 
-/// Tracks individual tool call events
 struct ToolCallEvent {
     string agentName;
     string toolName;
-    string arguments; // Sanitized (secrets masked)
+    JSONValue arguments;
     long timestamp;
     bool success;
-    string result; // First 200 chars
+    string result;
     long responseTimeMs;
 }
 
@@ -37,32 +36,25 @@ class MetricMonitor {
     }
 
     /// Record a tool call event
-    void record(string agentName, string toolName, string args, string result,
+    void record(string agentName, string toolName, JSONValue args, string result,
             bool success, long responseTimeMs) {
-        // Sanitize arguments to remove secrets
-        args = sanitizeArgs(args);
-
-        // Truncate result to save space
         if (result.length > MaxResultLength) {
-            result = result[(result.length - MaxResultLength) .. $];
+            result = result[0 .. MaxResultLength];
         }
 
-        // Add event to buffer
         events ~= ToolCallEvent(agentName: agentName, toolName: toolName, arguments: args, timestamp: currentTimestamp(), success: success,
                 result: result, responseTimeMs: responseTimeMs);
 
-        // Enforce buffer size (remove oldest if full)
         if (events.length > MaxEvents) {
             events = events[MaxEvents / 2 .. $];
         }
 
-        // Persist to JSONL (append only)
         saveEvent(events[$ - 1]);
     }
 
     ToolCallEvent[] getRecentEvents(size_t count) {
         if (count >= events.length) {
-            return events[];
+            return events;
         }
         return events[$ - count .. $];
     }
@@ -120,11 +112,6 @@ private:
         tmpFile.close;
         rename(tmpFileName, dataFile);
     }
-
-    string sanitizeArgs(string args) {
-        // TODO: implement in the future
-        return args;
-    }
 }
 
 private:
@@ -132,21 +119,22 @@ private:
 long currentTimestamp() {
     import std.datetime : SysTime, DateTime;
 
-    const begin = SysTime(DateTime.init);
-    return (Clock.currTime - begin).total!"msecs";
+    return (Clock.currTime - SysTime(DateTime.init)).total!"msecs";
 }
 
 ToolCallEvent jsonToEvent(JSONValue j) @safe {
     import llm.utility : getValue;
 
-    string agentName = getValue(j, (v) => v["agentName"].str, "");
-    return ToolCallEvent(agentName: agentName, toolName: getValue(j,
-            (v) => v["toolName"].str, ""), arguments: getValue(j,
-            (v) => v["arguments"].str, ""), timestamp: getValue(j,
-            (v) => v["timestamp"].integer, 0), success: getValue(j,
-            (v) => v["success"].boolean, false), result: getValue(j,
-            (v) => v["result"].str, ""), responseTimeMs: getValue(j,
-            (v) => v["responseTimeMs"].integer, 0));
+    // dfmt off
+    return ToolCallEvent(
+        agentName: getValue(j, (v) => v["agentName"].str, ""),
+        toolName: getValue(j, (v) => v["toolName"].str, ""),
+        arguments: getValue(j, (v) => v["arguments"], JSONValue.init),
+        timestamp: getValue(j, (v) => v["timestamp"].integer, 0),
+        success: getValue(j, (v) => v["success"].boolean, false),
+        result: getValue(j, (v) => v["result"].str, ""),
+        responseTimeMs: getValue(j, (v) => v["responseTimeMs"].integer, 0));
+    // dfmt on
 }
 
 JSONValue eventToJSON(ToolCallEvent event) @safe {
