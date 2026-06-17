@@ -174,6 +174,7 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
   "activeCodeModelIndex": 0,
   "toolLimits": {...},
   "rag": [...],
+  "ragConfig": {...},
   "toolFilter": {...},
   "ragFilter": {...},
   "codeModels": [...],
@@ -241,6 +242,20 @@ Each entry supports:
 - `description` (string, optional): Human-readable description
 
 **Note**: For backward compatibility, plain strings are also accepted (treated as path with empty description).
+
+### RAG Configuration (`ragConfig`)
+
+Controls RAG indexing behavior.
+
+```json
+"ragConfig": {
+  "windowOverlapPercent": 50
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `windowOverlapPercent` | long | 50 | Sliding window overlap as percentage (0-99). 50 means each chunk overlaps 50% with the previous one. Must be in range [0, 99]. |
 
 ### Tool Filter (`toolFilter`)
 

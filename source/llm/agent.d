@@ -588,6 +588,10 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             return rag;
         }
 
+        override RagConfig getRagConfig() {
+            return conf.ragConfig;
+        }
+
         override string[] getMemoryFileTopics() {
             import std.file : dirEntries, SpanMode;
             import std.path : stripExtension, baseName;

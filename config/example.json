@@ -58,6 +58,10 @@
     ]
   },
 
+  "ragConfig": {
+      "windowOverlapPercent": 50
+  },
+
   "codeModels": [
     {
       "server": {

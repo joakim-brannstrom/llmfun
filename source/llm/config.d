@@ -33,6 +33,19 @@ struct ToolLimits {
     long maxArgLength = 200;
 }
 
+struct RagConfig {
+    /// Sliding window overlap as percentage (0-99).
+    /// 50 means each chunk overlaps 50% with the previous one.
+    /// Must be in range [0, 99]. Value of 100 would cause infinite loop.
+    long windowOverlapPercent = 50;
+
+    invariant {
+        assert(windowOverlapPercent >= 0 && windowOverlapPercent <= 99,
+                "windowOverlapPercent must be in range [0, 99], got "
+                ~ windowOverlapPercent.to!string);
+    }
+}
+
 struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
@@ -80,6 +93,8 @@ struct LlmConfig {
 
     ToolFilter toolFilter;
     RagFilter ragFilter;
+
+    RagConfig ragConfig;
 
     // Searched for in promptDir
     string agentPrompt = "AGENT.md";

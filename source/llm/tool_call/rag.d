@@ -22,7 +22,7 @@ import miniorm : spinSql;
 import llm.tool_call;
 import llm.rag.rag;
 import llm.tool_call.utility;
-import llm.config : ToolLimits;
+import llm.config : ToolLimits, RagConfig;
 
 mixin RegisterLlmFunctions!();
 
@@ -31,6 +31,7 @@ interface RAGContext : Context {
     bool isPathInsideWorkArea(AbsolutePath path);
     AbsolutePath workArea();
     ToolLimits getToolLimits();
+    RagConfig getRagConfig();
 }
 
 private string checkTopic(RAGContext ctx, string topic) {
@@ -144,7 +145,8 @@ ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
         auto data = readText(path_);
         auto relPath = relativePath(path_.toString, ctx.workArea.toString);
         auto normalizedPath = buildNormalizedPath(relPath);
-        auto result = ctx.getRAG().add(Document(Origin(Path(normalizedPath)), data, Offset.init));
+        auto result = ctx.getRAG().add(Document(Origin(Path(normalizedPath)),
+                data, Offset.init), ctx.getRagConfig());
         spinSql!(() => ctx.getRAG.fts5Rebuild);
         return ExecuteFuncResult(format!"File '%s' (%s length) added as %s chunks to the RAG"(path,
                 result.length, result.chunks), success: true);
@@ -171,7 +173,8 @@ ExecuteFuncResult loadContentToRAG(Context baseCtx, string topic, string content
     }
 
     try {
-        auto result = ctx.getRAG().add(Document(Origin(Topic(topic)), content, Offset.init));
+        auto result = ctx.getRAG().add(Document(Origin(Topic(topic)), content,
+                Offset.init), ctx.getRagConfig());
         spinSql!(() => ctx.getRAG.fts5Rebuild);
         return ExecuteFuncResult(format!"Content (%s length) added to '%s' as %s chunks to the RAG"(result.length,
                 topic, result.chunks), success: true);

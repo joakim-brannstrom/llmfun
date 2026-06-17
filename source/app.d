@@ -425,7 +425,8 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 
     void addFile(Path p) {
         try {
-            auto added = rag.add(Document(p.Origin, readText(p.toString))).chunks != 0;
+            auto added = rag.add(Document(p.Origin, readText(p.toString)),
+                    llmConf.ragConfig).chunks != 0;
             logger.info(added, "Add ", p);
         } catch (Exception e) {
             logger.warning(e.msg);
@@ -619,7 +620,8 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
                     logger.infof("  [dry-run] Would add: %s", p);
                     added++;
                 } else {
-                    auto result = rag.add(Document(Origin(p), readText(p.toString)));
+                    auto result = rag.add(Document(Origin(p),
+                            readText(p.toString)), llmConf.ragConfig);
                     if (result.chunks > 0) {
                         logger.infof("  Added/updated: %s (%s chunks)", p, result.chunks);
                         added++;

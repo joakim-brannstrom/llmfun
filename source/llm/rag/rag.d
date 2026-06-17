@@ -31,7 +31,7 @@ import miniorm : spinSql;
 import my.path;
 public import my.path : Path;
 
-import llm.config : RagDatabaseConfig;
+import llm.config : RagDatabaseConfig, RagConfig;
 import llm.rag.database : SourceMatch;
 import llm.rag.embedder;
 
@@ -253,7 +253,7 @@ struct RagAddResult {
 size_t ServerNBatch = 0;
 
 // Add a document to the RAG.
-RagAddResult add(RAG rag, Document doc) {
+RagAddResult add(RAG rag, Document doc, RagConfig config) {
     import std.algorithm : max;
     import std.json : parseJSON;
     import std.uni : byCodePoint, byGrapheme;
@@ -343,11 +343,11 @@ RagAddResult add(RAG rag, Document doc) {
         graphemes ~= graphem;
         if (graphemes.length >= nBatch) {
             addChunk(graphemes, startCharPos, startLine, 0);
-            // 50% sliding window
-            const size_t half = graphemes.length / 2;
-            startCharPos += half;
-            startLine += countLines(graphemes[0 .. half]);
-            graphemes = graphemes[half .. $];
+            const size_t advance = max(cast(size_t) 1,
+                    cast(size_t)(graphemes.length * (100.0 - config.windowOverlapPercent) / 100.0));
+            startCharPos += advance;
+            startLine += countLines(graphemes[0 .. advance]);
+            graphemes = graphemes[advance .. $];
         }
         if (failureCount > 5 && nBatch > 128) {
             logger.tracef("Adjusting down nBatch %s -> %s", nBatch, nBatch - 64);
