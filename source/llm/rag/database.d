@@ -486,7 +486,7 @@ struct Database {
             ~ "FROM FtsChunksTbl WHERE FtsChunksTbl MATCH :query ORDER BY rank LIMIT :limit";
 
         auto stmt = db.prepare(ftsSql);
-        stmt.get.bind(":query", query.quoteFts5);
+        stmt.get.bind(":query", query);
         stmt.get.bind(":limit", limit);
 
         auto results = appender!(Tuple!(long, "rowid", double, "rank")[])();
@@ -588,7 +588,7 @@ ORDER BY fusion_score DESC;
         const chunkCount = countTextChunks();
         auto stmt = db.prepare(sql);
         stmt.get.bind(":embedding", embedding.embed);
-        stmt.get.bind(":text_query", query.quoteFts5);
+        stmt.get.bind(":text_query", query);
         stmt.get.bind(":limit", limit);
 
         auto results = appender!(Tuple!(long, "id", double, "rank")[])();
@@ -649,38 +649,4 @@ ORDER BY fusion_score DESC;
     void fts5Rebuild() {
         db.run("INSERT INTO FtsChunksTbl(FtsChunksTbl) VALUES('rebuild')");
     }
-}
-
-private:
-
-// Full-text query syntax for FTS5 sqlite manual
-// The following block contains a summary of the FTS query syntax in BNF form. A detailed explanation follows.
-//
-// <phrase>    := string [*]
-// <phrase>    := <phrase> + <phrase>
-// <neargroup> := NEAR ( <phrase> <phrase> ... [, N] )
-// <query>     := [ [-] <colspec> :] [^] <phrase>
-// <query>     := [ [-] <colspec> :] <neargroup>
-// <query>     := [ [-] <colspec> :] ( <query> )
-// <query>     := <query> AND <query>
-// <query>     := <query> OR <query>
-// <query>     := <query> NOT <query>
-// <colspec>   := colname
-// <colspec>   := { colname1 colname2 ... }
-string quoteFts5(string s) {
-    import std.algorithm : among, splitter, count;
-    import std.ascii : isAlphaNum;
-    import std.string : join;
-    import std.uni : byCodePoint;
-
-    static string quoteIfNeeded(string s) {
-        if (s.byCodePoint.filter!(a => !(a.isAlphaNum || a == '_')).count == 0)
-            return s;
-        return "\"" ~ s ~ "\"";
-    }
-
-    return s.splitter
-        .filter!(a => !a.among("AND", "NOT", "NOT", "NEAR"))
-        .map!(a => quoteIfNeeded(a))
-        .join(" ");
 }

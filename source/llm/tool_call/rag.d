@@ -59,8 +59,8 @@ private string toResult(Document[] docs) {
             "\n\n");
 }
 
-ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query,
-        long topK, string database) {
+ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string textQuery,
+        string vectorQuery, long topK, string database) {
     mixin(baseContextToSpecific!RAGContext);
 
     auto maxTopKVal = ctx.getToolLimits().maxTopK;
@@ -68,14 +68,26 @@ ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query,
         return ExecuteFuncResult(format!"error: topK parameter must be in range [1, %s]"(maxTopKVal),
                 success: false);
     }
-    if (query.length == 0 || query.strip.length == 0) {
-        return ExecuteFuncResult("error: query must not be empty", success: false);
+    if (textQuery.length == 0 || textQuery.strip.length == 0) {
+        return ExecuteFuncResult("error: textQuery must not be empty", success: false);
+    }
+    if (vectorQuery.length == 0 || vectorQuery.strip.length == 0) {
+        return ExecuteFuncResult("error: vectorQuery must not be empty", success: false);
     }
 
     try {
-        auto docs = searchFunc(ctx.getRAG, query, topK, database);
+        auto docs = searchFunc(ctx.getRAG, textQuery, vectorQuery, topK, database);
         if (docs.length == 0) {
-            return ExecuteFuncResult(format!"error: search completed but no results found for query: '%s'"(query),
+            auto query = () {
+                if (!textQuery.empty && !vectorQuery.empty) {
+                    return format!"textQuery: '%s' vectorQuery: '%s'"(textQuery, vectorQuery);
+                }
+                if (textQuery.empty) {
+                    return format!"vectorQuery: '%s'"(vectorQuery);
+                }
+                return format!"textQuery: '%s'"(textQuery);
+            }();
+            return ExecuteFuncResult(format!"error: search completed but no results found for %s"(query),
                     success: false);
         }
         return ExecuteFuncResult(toResult(docs), success: true);
@@ -86,24 +98,33 @@ ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string query,
 }
 
 @Function("Search RAG for topK relevant results by query text. If 'database' is '*', all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
-ExecuteFuncResult querySemantic(Context baseCtx, string query, long topK, string database) {
-    return queryFunc!((RAG rag, string query, long topK,
-            string database) => rag.querySemantic(query, topK, database))(baseCtx,
-            query, topK, database);
+ExecuteFuncResult querySemantic(Context baseCtx, string vectorQuery, long topK, string database) {
+    return queryFunc!((RAG rag, string textQuery, string vectorQuery, long topK,
+            string database) => rag.querySemantic(vectorQuery, topK, database))(baseCtx,
+            null, vectorQuery, topK, database);
 }
 
-@Function("Search RAG using FTS5 full-text search for topK relevant results by query text. If 'database' is '*', all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
-ExecuteFuncResult queryTextSearch(Context baseCtx, string query, long topK, string database) {
-    return queryFunc!((RAG rag, string query, long topK,
-            string database) => rag.queryTextSearch(query, topK, database))(baseCtx,
-            query, topK, database);
+@Function("Search RAG using FTS5 full-text search for topK relevant results. The `textQuery` is passed directly to SQLite FTS5. Supported syntax:
+- Boolean: `AND`, `OR`, `NOT`. Precedence (highest to lowest): implicit AND (space) > explicit `NOT` > explicit `AND` > `OR`.
+- Grouping: `( )` for sub-expressions. **Note**: parenthesized groups cannot be combined with bare terms via implicit AND — `(a OR b) c` is a syntax error. Use `(a OR b) AND c` explicitly.
+- Phrases: `\"exact phrase\"` matches ordered tokens. Use `+` to concatenate phrases: `foo + bar`.
+- Prefix: `term*` matches terms starting with \"term\" (keep `*` outside quotes).
+- Start-of-column: `^phrase` only matches if phrase starts at first token.
+- Proximity: `NEAR(phrase1 phrase2, N)` matches phrases within N tokens (default 10).
+- Quoting: Strings with special characters must be double-quoted. Barewords are alphanumeric + underscore.
+Note: Column filters (`colname:` or `{col1 col2}:`) are NOT supported and will cause errors. If `database` is `*`, all databases are searched. Use `listRAGDatabases` to discover available database names.")
+ExecuteFuncResult queryTextSearch(Context baseCtx, string textQuery, long topK, string database) {
+    return queryFunc!((RAG rag, string textQuery, string vectorQuery, long topK,
+            string database) => rag.queryTextSearch(textQuery, topK, database))(baseCtx,
+            textQuery, null, topK, database);
 }
 
-@Function("Search RAG using semantic and FTS5 full-text search for topK relevant results by query text. If 'database' is '*', all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
-ExecuteFuncResult queryBestMatch(Context baseCtx, string query, long topK, string database) {
-    return queryFunc!((RAG rag, string query, long topK,
-            string database) => rag.queryBestMatch(query, topK, database))(baseCtx,
-            query, topK, database);
+@Function("Search RAG using combined semantic (`vectorQuery`) and FTS5 full-text (`textQuery`) search for topK relevant results. The `textQuery` uses FTS5 syntax: `AND`/`OR`/`NOT` (precedence: implicit space-AND > NOT > AND > OR), `( )` grouping (always use explicit AND after parens), `\"phrases\"`, `term*` prefix, `^` start-of-column, `NEAR()` proximity, and `+` phrase concatenation. Column filters are NOT supported. See `queryTextSearch` for the full specification. The `vectorQuery` is a natural language question for semantic similarity. Use `listRAGDatabases` to discover available database names.")
+ExecuteFuncResult queryBestMatch(Context baseCtx, string textQuery,
+        string vectorQuery, long topK, string database) {
+    return queryFunc!((RAG rag, string textQuery, string vectorQuery, long topK,
+            string database) => rag.queryBestMatch(textQuery, vectorQuery, topK, database))(baseCtx,
+            textQuery, vectorQuery, topK, database);
 }
 
 @Function("List all available RAG databases with their names and file paths. Use this to discover database names for filtering queries.")

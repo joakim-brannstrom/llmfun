@@ -180,30 +180,30 @@ class RAG {
             .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
     }
 
-    Document[] queryBestMatch(string query, long getTopK, string database) {
+    Document[] queryBestMatch(string textQuery, string vectorQuery, long getTopK, string database) {
         size_t[] indices;
         if (!validateDatabase(database, indices))
             return null;
 
         Document[] runMatch(float[] embed) {
             return indices.map!(i => spinSql!(() => dbs[i].queryCombineSemanticText(Search(embed),
-                    query, getTopK))).cache.joiner.array.randomizeRanks()
+                    textQuery, getTopK))).cache.joiner.array.randomizeRanks()
                 .sort!((a, b) => a.rank > b.rank).take(getTopK)
                 .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
-        return embedder.embed(query).match!((float[] embed) {
+        return embedder.embed(vectorQuery).match!((float[] embed) {
             if (embed.empty) {
                 logger.trace("Unable to do a combined search because embedding is empty");
-                return queryTextSearch(query, getTopK, database);
+                return queryTextSearch(textQuery, getTopK, database);
             }
             return runMatch(embed);
         }, (HttpError e) {
             logger.tracef(e.errorMsg);
-            return queryTextSearch(query, getTopK, database);
+            return queryTextSearch(textQuery, getTopK, database);
         }, (string errMsg) {
             logger.tracef(errMsg);
-            return queryTextSearch(query, getTopK, database);
+            return queryTextSearch(textQuery, getTopK, database);
         });
     }
 
