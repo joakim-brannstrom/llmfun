@@ -765,8 +765,10 @@ int appMain(UserConfig uconf, UserConfig.PrintToolMetricsConfig conf) {
                             a.value.toString)).joiner(", ");
                     writefln("%s - agent:%s time:%s tool:%s(%s) -> %s",
                             e.timestamp.to!string.color(e.success ? Color.green
-                                : Color.red), e.agentName, e.responseTimeMs.dur!"msecs",
-                            e.toolName, args, e.result);
+                                : Color.red), e.agentName, e.responseTimeMs == 0
+                            ? "0 ms" : e.responseTimeMs
+                                .dur!"msecs"
+                                .to!string, e.toolName, args, e.result);
 
                 }
                 if (!events.empty) {
