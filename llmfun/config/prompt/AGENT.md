@@ -41,7 +41,7 @@ You have four search/discovery tools for the external knowledge base. Choose bas
 
 - **`queryReadFile`** (Exact Line Lookup): Retrieves the exact text chunk(s) containing a specific line number from a file in the RAG index. Use when you need to read precise content from a known file at a known line. Supports `database` parameter for scoping and `appendLoc` for line number prefixes.
 
-**Database Parameter**: All query tools that accept a database parameter (`querySemantic`, `queryTextSearch`, `queryBestMatch`, `queryReadFile`) restrict the search to the database with that name. Pass an empty string (`""`) to search all databases (default behavior). Use `listRAGDatabases` to discover available database names before filtering.
+**Database Parameter**: All query tools that accept a database parameter (`querySemantic`, `queryTextSearch`, `queryBestMatch`, `queryReadFile`) restrict the search to the database with that name. Pass the string (`"*"`) to search all databases (default behavior). Use `listRAGDatabases` to discover available database names before filtering.
 
 **Default Strategy**:
 1. Start by using the combined semantic+text function `queryBestMatch`.
