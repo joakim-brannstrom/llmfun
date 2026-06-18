@@ -290,9 +290,10 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
                 e.errorMsg, graphemes.length, data);
             try {
                 const old = nBatch;
-                nBatch = getValue(parseJSON(e.body),
+                const serverN = getValue(parseJSON(e.body),
                     (v) => v["error"]["n_ctx"].integer * ApproxTokenSize, nBatch);
-                ServerNBatch = max(128, nBatch);
+                ServerNBatch = max(128, serverN);
+                nBatch = max(128, min(nBatch, ServerNBatch));
                 logger.tracef("Changed nBatch from %s->%s", old, nBatch);
             } catch (Exception e) {
                 logger.trace(e.msg);
@@ -312,7 +313,8 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
             return;
         }
         if (emb.empty && iteration < MaxIterations) {
-            logger.trace("Using fallback with nBatch ", graphemes.length / 2);
+            logger.tracef("%s too large for embedding model. Using fallback with nBatch %s",
+                    graphemes.length, graphemes.length / 2);
             addChunk(graphemes[0 .. $ / 2], startCharPos, startLine, iteration + 1);
             auto p1 = graphemes[$ / 2 .. $];
             addChunk(p1, startCharPos + p1.length, startLine + countLines(p1), iteration + 1);
