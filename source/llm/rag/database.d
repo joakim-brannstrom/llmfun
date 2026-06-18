@@ -485,30 +485,35 @@ struct Database {
         static immutable ftsSql = "SELECT rowid, rank "
             ~ "FROM FtsChunksTbl WHERE FtsChunksTbl MATCH :query ORDER BY rank LIMIT :limit";
 
-        auto stmt = db.prepare(ftsSql);
-        stmt.get.bind(":query", query);
-        stmt.get.bind(":limit", limit);
+        try {
+            auto stmt = db.prepare(ftsSql);
+            stmt.get.bind(":query", query.cleanFts5);
+            stmt.get.bind(":limit", limit);
 
-        auto results = appender!(Tuple!(long, "rowid", double, "rank")[])();
-        foreach (ref r; stmt.get.execute) {
-            results.put(tuple!("rowid", "rank")(r.peek!long(0), r.peek!double(1)));
-        }
-        logger.trace("Hits ", results[].length);
-
-        auto rval = appender!(SourceMatch[])();
-        foreach (res; results) {
-            // rowid in FtsChunksTbl maps to TextChunkTbl.id (content_rowid='id')
-            auto chunk = getChunkByRowid(res.rowid);
-            if (!chunk.text.empty) {
-                auto src = getSourceByEmbedId(chunk.embedId);
-                src.match!((Source src) {
-                    rval.put(SourceMatch(src.origin, offset: chunk.offset,
-                        line: chunk.line, text: chunk.text, rank: res.rank));
-                }, (None _) {});
+            auto results = appender!(Tuple!(long, "rowid", double, "rank")[])();
+            foreach (ref r; stmt.get.execute) {
+                results.put(tuple!("rowid", "rank")(r.peek!long(0), r.peek!double(1)));
             }
-        }
+            logger.trace("Hits ", results[].length);
 
-        return rval[];
+            auto rval = appender!(SourceMatch[])();
+            foreach (res; results) {
+                // rowid in FtsChunksTbl maps to TextChunkTbl.id (content_rowid='id')
+                auto chunk = getChunkByRowid(res.rowid);
+                if (!chunk.text.empty) {
+                    auto src = getSourceByEmbedId(chunk.embedId);
+                    src.match!((Source src) {
+                        rval.put(SourceMatch(src.origin, offset: chunk.offset,
+                            line: chunk.line, text: chunk.text, rank: res.rank));
+                    }, (None _) {});
+                }
+            }
+
+            return rval[];
+        } catch (Exception e) {
+            logger.trace(e.msg);
+        }
+        return null;
     }
 
     SourceMatch[] queryByPathAndLine(Path filePath, long lineNumber) {
@@ -585,34 +590,38 @@ ORDER BY fusion_score DESC;
             return 1.0 / (k + rank) * log(chunkCount);
         }
 
-        const chunkCount = countTextChunks();
-        auto stmt = db.prepare(sql);
-        stmt.get.bind(":embedding", embedding.embed);
-        stmt.get.bind(":text_query", query);
-        stmt.get.bind(":limit", limit);
+        try {
+            const chunkCount = countTextChunks();
+            auto stmt = db.prepare(sql);
+            stmt.get.bind(":embedding", embedding.embed);
+            stmt.get.bind(":text_query", query.cleanFts5);
+            stmt.get.bind(":limit", limit);
 
-        auto results = appender!(Tuple!(long, "id", double, "rank")[])();
-        foreach (ref r; stmt.get.execute) {
-            // TODO: this should not be needed
-            if (results[].length >= limit)
-                break;
-            results.put(tuple!("id", "rank")(r.peek!long(0),
-                    reduceRankBias(chunkCount, r.peek!double(1))));
+            auto results = appender!(Tuple!(long, "id", double, "rank")[])();
+            foreach (ref r; stmt.get.execute) {
+                // TODO: this should not be needed
+                if (results[].length >= limit)
+                    break;
+                results.put(tuple!("id", "rank")(r.peek!long(0),
+                        reduceRankBias(chunkCount, r.peek!double(1))));
+            }
+            logger.trace("Hits ", results[].length);
+
+            auto rval = appender!(SourceMatch[])();
+            foreach (res; results[].map!(a => tuple(getChunkByRowid(a.id), a.rank))
+                    .cache
+                    .filter!(a => !a[0].text.empty)) {
+                auto src = getSourceByEmbedId(res[0].embedId);
+                src.match!((Source src) {
+                    rval.put(SourceMatch(src.origin, offset: res[0].offset,
+                        line: res[0].line, text: res[0].text, rank: res[1]));
+                }, (None _) {});
+            }
+            return rval[];
+        } catch (Exception e) {
+            logger.trace(e.msg);
         }
-        logger.trace("Hits ", results[].length);
-
-        auto rval = appender!(SourceMatch[])();
-        foreach (res; results[].map!(a => tuple(getChunkByRowid(a.id), a.rank))
-                .cache
-                .filter!(a => !a[0].text.empty)) {
-            auto src = getSourceByEmbedId(res[0].embedId);
-            src.match!((Source src) {
-                rval.put(SourceMatch(src.origin, offset: res[0].offset, line: res[0].line,
-                    text: res[0].text, rank: res[1]));
-            }, (None _) {});
-        }
-
-        return rval[];
+        return null;
     }
 
     private TextChunkWithEmbed getChunkByRowid(long rowid) {
@@ -649,4 +658,35 @@ ORDER BY fusion_score DESC;
     void fts5Rebuild() {
         db.run("INSERT INTO FtsChunksTbl(FtsChunksTbl) VALUES('rebuild')");
     }
+}
+
+private:
+
+// Full-text query syntax for FTS5 sqlite manual
+// The following block contains a summary of the FTS query syntax in BNF form. A detailed explanation follows.
+//
+// <phrase>    := string [*]
+// <phrase>    := <phrase> + <phrase>
+// <neargroup> := NEAR ( <phrase> <phrase> ... [, N] )
+// <query>     := [ [-] <colspec> :] [^] <phrase>
+// <query>     := [ [-] <colspec> :] <neargroup>
+// <query>     := [ [-] <colspec> :] ( <query> )
+// <query>     := <query> AND <query>
+// <query>     := <query> OR <query>
+// <query>     := <query> NOT <query>
+// <colspec>   := colname
+// <colspec>   := { colname1 colname2 ... }
+string cleanFts5(string s) {
+    import std.algorithm : among, splitter, count;
+    import std.ascii : isAlphaNum;
+    import std.string : join;
+    import std.uni : byCodePoint;
+
+    static string quoteIfNeeded(string s) {
+        if (s.byCodePoint.filter!(a => !(a.isAlphaNum || a.among('_', '(', ')', '+'))).count == 0)
+            return s;
+        return "\"" ~ s ~ "\"";
+    }
+
+    return s.splitter.map!(a => quoteIfNeeded(a)).join(" ");
 }

@@ -142,11 +142,11 @@ class RAG {
     bool validateDatabase(string databaseName, ref size_t[] indices) {
         indices = resolveDatabaseIndices(databaseName);
         if (indices.empty) {
-            logger.tracef("no database found with name '%s'. Available: [%s]",
-                    databaseName, getDatabaseNames().joiner(", "));
+            logger.tracef("no database found with name '%s'. Available: [%-(%s, %)]",
+                    databaseName, getDatabaseNames);
             return false;
         }
-        logger.tracef("query with database filter: '%s' (%d databases)",
+        logger.tracef("query with database filter: '%s' (%s databases)",
                 databaseName, indices.length);
         return true;
     }
