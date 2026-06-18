@@ -68,10 +68,10 @@ ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string textQuery,
         return ExecuteFuncResult(format!"error: topK parameter must be in range [1, %s]"(maxTopKVal),
                 success: false);
     }
-    if (textQuery.length == 0 || textQuery.strip.length == 0) {
-        return ExecuteFuncResult("error: textQuery must not be empty", success: false);
-    }
-    if (vectorQuery.length == 0 || vectorQuery.strip.length == 0) {
+
+    if ((textQuery.empty || textQuery.strip.empty) && (vectorQuery.empty || vectorQuery.strip.empty)) {
+        if (textQuery.strip.empty)
+            return ExecuteFuncResult("error: textQuery must not be empty", success: false);
         return ExecuteFuncResult("error: vectorQuery must not be empty", success: false);
     }
 
