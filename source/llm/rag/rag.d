@@ -254,9 +254,9 @@ size_t ServerNBatch = 0;
 
 // Add a document to the RAG.
 RagAddResult add(RAG rag, Document doc, RagConfig config) {
-    import std.algorithm : max;
+    import std.algorithm : max, min;
     import std.json : parseJSON;
-    import std.uni : byCodePoint, byGrapheme;
+    import std.uni : byCodePoint, byGrapheme, isWhite;
     import std.utf : toUTF8;
     import llm.rag.database;
     import llm.utility : getValue, ApproxTokenSize;
@@ -343,7 +343,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     Grapheme[] graphemes;
     foreach (graphem; doc.data.byGrapheme) {
         graphemes ~= graphem;
-        if (graphemes.length >= nBatch) {
+        if (graphemes.length >= nBatch && graphem[0].isWhite) {
             addChunk(graphemes, startCharPos, startLine, 0);
             const size_t advance = max(cast(size_t) 1,
                     cast(size_t)(graphemes.length * (100.0 - config.windowOverlapPercent) / 100.0));
