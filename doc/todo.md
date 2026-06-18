@@ -35,6 +35,5 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - planner, there should be a plan execute
 
 # rag
-- the "window" in the rag database should be configurable.
 - Add a warning when the DB is wiped. Need to add migration in the future.
 - memories should automatically be added to the RAG so they are always searchable
