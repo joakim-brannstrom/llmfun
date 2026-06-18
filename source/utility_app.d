@@ -136,12 +136,12 @@ int appMain(UserConfig uconf, UserConfig.ChatTestConfig conf) {
     import llm.query;
 
     auto llmConf = readConfig(conf.config, false, true).userToLlmConfig(conf);
-    llmConf.codeModel.server.httpVerbosity = 2;
+    llmConf.codeModels[0].server.httpVerbosity = 2;
     Chat chat;
-    chat.add(Message(Role.system, readText(llmConf.codeModel.prompt)));
+    chat.add(Message(Role.system, readText(llmConf.agentPrompt)));
     chat.add(Message(Role.user, "who are you"));
 
-    auto requester = LlmRequester(llmConf.codeModel.toRequestConfig);
+    auto requester = LlmRequester(llmConf.codeModels[0].toRequestConfig);
     auto resp = requester.request(chat);
     logger.info(resp);
     resp.match!((JSONValue j) {
@@ -186,9 +186,7 @@ int appMain(UserConfig uconf, UserConfig.TestSlotApiConfig conf) {
     import llm.query;
 
     auto llmConf = readConfig(Path("config/remote.json"), false, true).userToLlmConfig(conf);
-    auto slot = LlmSlotRequester(llmConf.codeModel.server.toSlotUrl,
-            llmConf.codeModel.server.apiKey.empty ? getEnvApiKey() : llmConf
-                .codeModel.server.apiKey);
+    auto slot = LlmSlotRequester(llmConf.codeModels[0].toRequestConfig);
     auto res = slot.request();
     res.match!((JSONValue j) { writeln(j.toPrettyString); }, (LlamaRequestError e) {
         writeln("error: ", e);
@@ -251,6 +249,7 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
         }
 
         override void taskDone() {
+        }
     }
 
     auto ctx = new DummyContext;
@@ -287,11 +286,15 @@ int appMain(UserConfig uconf, UserConfig.TestPipelineConfig conf) {
     import llm.pipeline;
     import llm.metric.monitor : MetricMonitor;
 
+    // string query = "Explain how BFS graph traversal works";
+    string query = "count from 1 to 5. Only output 1,2,3,4,5 and nothing else";
+
     auto llmConf = readConfig(conf.config.Path, false, true).userToLlmConfig(conf);
     auto monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor_pipeline_test.jsonl");
 
     auto writer = new Agent("writer", llmConf, monitor);
     writer.setSystemPrompt("You are a technical writer. Write a short, clear summary on the given topic. " ~ "Focus on accuracy and readability." ~ "You **MUST** call the tool pipelineOutput with the result and **THEN** call taskDone. Never call taskDone before pipelineOutput.");
+    writer.addUserQuery(query);
 
     auto reviewer = new Agent("reviewer", llmConf, monitor);
     reviewer.setSystemPrompt("You are a harsh reviewer. Evaluate the following draft.\n\n" ~ "If the draft is good, output: APPROVED: <the draft text>\n" ~ "If the draft has issues, output: REJECT: <specific feedback for rewriting>\n" ~ "You **MUST** call the tool pipelineOutput with the result of the review and **THEN** call taskDone. Never call taskDone before pipelineOutput.");
@@ -317,9 +320,7 @@ int appMain(UserConfig uconf, UserConfig.TestPipelineConfig conf) {
         .startNode("writer").stopNode("finalizer").build();
     writeln(pipeline);
 
-    // string query = "Explain how BFS graph traversal works";
-    string query = "count from 1 to 5. Only output 1,2,3,4,5 and nothing else";
-    auto result = pipeline.run(query);
+    auto result = pipeline.run();
 
     writeln("Pipeline completed: allSuccess=", result.allSuccess);
     writeln("Execution order: ", result.executionOrder);
@@ -349,15 +350,14 @@ int appMain(UserConfig uconf, UserConfig.TestRagSqliteConfig conf) {
     auto rag = new RAG(embedder, [
         RagDatabaseConfig("smurf.sqlite3".Path, ""),
         RagDatabaseConfig("llmfun/data/rag.sqlite3".Path, "")
-    ], llmConf.embedConfig.match!((RemoteEmbedConfig a) => a.dimensions,
-            (LocalEmbedConfig a) => a.dimensions));
+    ]);
     // logger.warning(llmConf);
     scope (exit)
         rag.destroy;
 
     auto query = "planner";
 
-    auto result = rag.queryBestMatch(query, 10);
+    auto result = rag.queryBestMatch(query, query, 10, "*");
     logger.info("best match: ", result);
 
     // result = rag.querySemantic(query, 10);
