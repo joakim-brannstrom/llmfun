@@ -26,6 +26,7 @@ import std.stdio : File;
 import std.string : strip;
 import std.sumtype;
 import std.uni : Grapheme;
+import std.parallelism;
 
 import miniorm : spinSql;
 import my.path;
@@ -72,6 +73,33 @@ struct Document {
     string data;
     Offset offset;
     Line line;
+}
+
+private struct ParallelQueryTask {
+    size_t index;
+    SourceMatch[] delegate(size_t) dg;
+}
+
+private SourceMatch[] executeParallelQuery(ParallelQueryTask qt) {
+    try {
+        return qt.dg(qt.index);
+    } catch (Exception e) {
+        logger.warningf("parallelQuery: database[%s] failed: %s", qt.index, e.msg);
+        return null;
+    }
+}
+
+private SourceMatch[] parallelQuery(
+        size_t[] indices,
+        SourceMatch[] delegate(size_t) queryFn)
+{
+    auto tasks = indices.map!((i) => ParallelQueryTask(i, queryFn)).array;
+    auto perDbResults = taskPool.amap!executeParallelQuery(tasks).array;
+    auto results = perDbResults.joiner.array;
+    if (results.empty && indices.length > 0) {
+        logger.tracef("parallelQuery: all %s database queries failed", indices.length);
+    }
+    return results;
 }
 
 class RAG {
@@ -157,9 +185,9 @@ class RAG {
             return null;
 
         Document[] runMatch(float[] embed) {
-            return indices.map!(i => spinSql!(() => dbs[i].querySemantic(Search(embed),
-                    getTopK))).cache.joiner.array.randomizeRanks().sort!((a,
-                    b) => a.rank > b.rank).take(getTopK)
+            return parallelQuery(indices, (size_t i) =>
+                spinSql!(() => dbs[i].querySemantic(Search(embed), getTopK))
+            ).randomizeRanks().sort!((a, b) => a.rank > b.rank).take(getTopK)
                 .array.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
@@ -174,9 +202,9 @@ class RAG {
         if (!validateDatabase(database, indices))
             return null;
 
-        return indices.map!(i => spinSql!(() => dbs[i].queryTextSearch(query,
-                getTopK))).cache.joiner.array.randomizeRanks().sort!((a,
-                b) => a.rank < b.rank).take(getTopK)
+        return parallelQuery(indices, (size_t i) =>
+            spinSql!(() => dbs[i].queryTextSearch(query, getTopK))
+        ).randomizeRanks().sort!((a, b) => a.rank < b.rank).take(getTopK)
             .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
     }
 
@@ -186,8 +214,9 @@ class RAG {
             return null;
 
         Document[] runMatch(float[] embed) {
-            return indices.map!(i => spinSql!(() => dbs[i].queryCombineSemanticText(Search(embed),
-                    textQuery, getTopK))).cache.joiner.array.randomizeRanks()
+            return parallelQuery(indices, (size_t i) =>
+                spinSql!(() => dbs[i].queryCombineSemanticText(Search(embed), textQuery, getTopK))
+            ).randomizeRanks()
                 .sort!((a, b) => a.rank > b.rank).take(getTopK)
                 .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
@@ -212,8 +241,9 @@ class RAG {
         if (!validateDatabase(database, indices))
             return null;
 
-        auto results = indices.map!(i => spinSql!(() => dbs[i].queryByPathAndLine(filePath,
-                lineNumber))).cache.joiner.array;
+        auto results = parallelQuery(indices, (size_t i) =>
+            spinSql!(() => dbs[i].queryByPathAndLine(filePath, lineNumber))
+        );
 
         logger.tracef("Hits %s for %s line %s", results.length, filePath, lineNumber);
         return results;
