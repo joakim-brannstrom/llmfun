@@ -77,7 +77,7 @@ struct Document {
 
 private struct ParallelQueryTask {
     size_t index;
-    SourceMatch[] delegate(size_t) dg;
+    SourceMatch[]delegate(size_t) dg;
 }
 
 private SourceMatch[] executeParallelQuery(ParallelQueryTask qt) {
@@ -89,10 +89,7 @@ private SourceMatch[] executeParallelQuery(ParallelQueryTask qt) {
     }
 }
 
-private SourceMatch[] parallelQuery(
-        size_t[] indices,
-        SourceMatch[] delegate(size_t) queryFn)
-{
+private SourceMatch[] parallelQuery(size_t[] indices, SourceMatch[]delegate(size_t) queryFn) {
     auto tasks = indices.map!((i) => ParallelQueryTask(i, queryFn)).array;
     auto perDbResults = taskPool.amap!executeParallelQuery(tasks).array;
     auto results = perDbResults.joiner.array;
@@ -185,9 +182,9 @@ class RAG {
             return null;
 
         Document[] runMatch(float[] embed) {
-            return parallelQuery(indices, (size_t i) =>
-                spinSql!(() => dbs[i].querySemantic(Search(embed), getTopK))
-            ).randomizeRanks().sort!((a, b) => a.rank > b.rank).take(getTopK)
+            return parallelQuery(indices,
+                    (size_t i) => spinSql!(() => dbs[i].querySemantic(Search(embed), getTopK))).randomizeRanks()
+                .sort!((a, b) => a.rank > b.rank).take(getTopK)
                 .array.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
@@ -202,9 +199,9 @@ class RAG {
         if (!validateDatabase(database, indices))
             return null;
 
-        return parallelQuery(indices, (size_t i) =>
-            spinSql!(() => dbs[i].queryTextSearch(query, getTopK))
-        ).randomizeRanks().sort!((a, b) => a.rank < b.rank).take(getTopK)
+        return parallelQuery(indices,
+                (size_t i) => spinSql!(() => dbs[i].queryTextSearch(query, getTopK))).randomizeRanks()
+            .sort!((a, b) => a.rank < b.rank).take(getTopK)
             .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
     }
 
@@ -214,10 +211,10 @@ class RAG {
             return null;
 
         Document[] runMatch(float[] embed) {
-            return parallelQuery(indices, (size_t i) =>
-                spinSql!(() => dbs[i].queryCombineSemanticText(Search(embed), textQuery, getTopK))
-            ).randomizeRanks()
-                .sort!((a, b) => a.rank > b.rank).take(getTopK)
+            return parallelQuery(indices,
+                    (size_t i) => spinSql!(() => dbs[i].queryCombineSemanticText(Search(embed),
+                        textQuery, getTopK))).randomizeRanks().sort!((a,
+                    b) => a.rank > b.rank).take(getTopK)
                 .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
         }
 
@@ -241,9 +238,8 @@ class RAG {
         if (!validateDatabase(database, indices))
             return null;
 
-        auto results = parallelQuery(indices, (size_t i) =>
-            spinSql!(() => dbs[i].queryByPathAndLine(filePath, lineNumber))
-        );
+        auto results = parallelQuery(indices,
+                (size_t i) => spinSql!(() => dbs[i].queryByPathAndLine(filePath, lineNumber)));
 
         logger.tracef("Hits %s for %s line %s", results.length, filePath, lineNumber);
         return results;
