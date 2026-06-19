@@ -7,7 +7,6 @@
 - make ctrl+c able to interrupt a http request
 - add trace logging support to file
 - Max timeout when using -p
-- readLines number of lines should be configurable
 - deep research
 - add autocomplete
 - add a specific /code analyze mode to update a plan/code_analysis.md
