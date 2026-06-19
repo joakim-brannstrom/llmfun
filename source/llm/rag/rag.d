@@ -322,7 +322,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
                 const old = nBatch;
                 const serverN = getValue(parseJSON(e.body),
                     (v) => v["error"]["n_ctx"].integer * ApproxTokenSize, nBatch);
-                ServerNBatch = max(128, serverN);
+                ServerNBatch = max(128, min(ServerNBatch, serverN));
                 nBatch = max(128, min(nBatch, ServerNBatch));
                 logger.tracef("Changed nBatch from %s->%s", old, nBatch);
             } catch (Exception e) {
