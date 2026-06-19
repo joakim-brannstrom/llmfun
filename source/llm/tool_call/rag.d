@@ -114,9 +114,15 @@ ExecuteFuncResult querySemantic(Context baseCtx, string vectorQuery, long topK, 
 - Quoting: Strings with special characters must be double-quoted. Barewords are alphanumeric + underscore.
 Note: Column filters (`colname:` or `{col1 col2}:`) are NOT supported and will cause errors. If `database` is `*`, all databases are searched. Use `listRAGDatabases` to discover available database names.")
 ExecuteFuncResult queryTextSearch(Context baseCtx, string textQuery, long topK, string database) {
-    return queryFunc!((RAG rag, string textQuery, string vectorQuery, long topK,
+    import llm.rag.database : fts5Help;
+
+    auto res = queryFunc!((RAG rag, string textQuery, string vectorQuery, long topK,
             string database) => rag.queryTextSearch(textQuery, topK, database))(baseCtx,
             textQuery, null, topK, database);
+    if (!res.success) {
+        res.msg ~= "\nDid you follow the syntax for an FTS5 query for the textQuery parameter? Here is the full specification:\n" ~ fts5Help;
+    }
+    return res;
 }
 
 @Function("Search RAG using combined semantic (`vectorQuery`) and FTS5 full-text (`textQuery`) search for topK relevant results. The `textQuery` uses FTS5 syntax: `AND`/`OR`/`NOT` (precedence: implicit space-AND > NOT > AND > OR), `( )` grouping (always use explicit AND after parens), `\"phrases\"`, `term*` prefix, `^` start-of-column, `NEAR()` proximity, and `+` phrase concatenation. Column filters are NOT supported. See `queryTextSearch` for the full specification. The `vectorQuery` is a natural language question for semantic similarity. Use `listRAGDatabases` to discover available database names.")

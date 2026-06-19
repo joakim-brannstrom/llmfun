@@ -660,22 +660,24 @@ ORDER BY fusion_score DESC;
     }
 }
 
+immutable string fts5Help = `Full-text query syntax for FTS5 sqlite manual
+The following block contains a summary of the FTS query syntax in BNF form. A detailed explanation follows.
+
+<phrase>    := string [*]
+<phrase>    := <phrase> + <phrase>
+<neargroup> := NEAR ( <phrase> <phrase> ... [, N] )
+<query>     := [ [-] <colspec> :] [^] <phrase>
+<query>     := [ [-] <colspec> :] <neargroup>
+<query>     := [ [-] <colspec> :] ( <query> )
+<query>     := <query> AND <query>
+<query>     := <query> OR <query>
+<query>     := <query> NOT <query>
+<colspec>   := colname
+<colspec>   := { colname1 colname2 ... }
+`;
+
 private:
 
-// Full-text query syntax for FTS5 sqlite manual
-// The following block contains a summary of the FTS query syntax in BNF form. A detailed explanation follows.
-//
-// <phrase>    := string [*]
-// <phrase>    := <phrase> + <phrase>
-// <neargroup> := NEAR ( <phrase> <phrase> ... [, N] )
-// <query>     := [ [-] <colspec> :] [^] <phrase>
-// <query>     := [ [-] <colspec> :] <neargroup>
-// <query>     := [ [-] <colspec> :] ( <query> )
-// <query>     := <query> AND <query>
-// <query>     := <query> OR <query>
-// <query>     := <query> NOT <query>
-// <colspec>   := colname
-// <colspec>   := { colname1 colname2 ... }
 string cleanFts5(string s) {
     import std.algorithm : among, splitter, count;
     import std.ascii : isAlphaNum;
