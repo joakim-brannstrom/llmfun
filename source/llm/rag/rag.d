@@ -298,8 +298,12 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
         return RagAddResult(doc.data.length, 0);
     }
 
+    if (ServerNBatch == 0)
+        ServerNBatch = rag.embedder.batchSize();
+
+    immutable nBatchStep = 128;
     immutable MaxIterations = 8;
-    size_t nBatch = ServerNBatch == 0 ? rag.embedder.batchSize() : ServerNBatch;
+    size_t nBatch = ServerNBatch;
 
     auto embeddings = appender!(Embedding[])();
     size_t nChunks;
@@ -307,6 +311,8 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     // If it has been used for 5 consecutive turns the nBatch is probably just
     // too high and should be adjusted down.
     int failureCount;
+    // detect if we have successfully generated embeddings and then adjust up nBatch if it has been previously lowered
+    int successCount;
     void addChunk(Grapheme[] graphemes, size_t startCharPos, size_t startLine, int iteration) {
         auto data = graphemes.byCodePoint.toUTF8;
 
@@ -316,11 +322,12 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
                 e.errorMsg, graphemes.length, data);
             try {
                 const old = nBatch;
-                const serverN = getValue(parseJSON(e.body),
+                const serverNCtx = getValue(parseJSON(e.body),
                     (v) => v["error"]["n_ctx"].integer * ApproxTokenSize, nBatch);
-                ServerNBatch = max(128, min(ServerNBatch, serverN));
-                nBatch = max(128, min(nBatch, ServerNBatch));
-                logger.tracef("Changed nBatch from %s->%s", old, nBatch);
+                ServerNBatch = max(nBatchStep, min(ServerNBatch, serverNCtx));
+                nBatch = max(nBatchStep, min(nBatch, ServerNBatch));
+                logger.tracef(old != nBatch, "Changed nBatch (serverNCtx:%s ServerNBatch:%s) from %s->%s",
+                    serverNCtx, ServerNBatch, old, nBatch);
             } catch (Exception e) {
                 logger.trace(e.msg);
             }
@@ -331,6 +338,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
 
         if (emb.empty) {
             ++failureCount;
+            successCount = 0;
         }
 
         if (graphemes.length < 4 && emb.empty) {
@@ -339,7 +347,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
             return;
         }
         if (emb.empty && iteration < MaxIterations) {
-            logger.tracef("%s too large for embedding model. Using fallback with nBatch %s",
+            logger.tracef("%s too large for embedding model. Trying half with nBatch %s",
                     graphemes.length, graphemes.length / 2);
             addChunk(graphemes[0 .. $ / 2], startCharPos, startLine, iteration + 1);
             auto p1 = graphemes[$ / 2 .. $];
@@ -355,13 +363,16 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
             logger.trace("Reset failure count");
             failureCount = 0;
         }
+        if (iteration == 0) {
+            ++successCount;
+        }
 
         embeddings.put(Embedding(Offset(startCharPos, startCharPos + graphemes.length),
                 Line(startLine, startLine + countLines(graphemes)), data, emb));
 
         logger.tracef("add chunk length:%s line(%s-%s) offset(%s-%s)", data.length, startLine,
                 startLine + countLines(graphemes), startCharPos, startCharPos + graphemes.length);
-        nChunks++;
+        ++nChunks;
     }
 
     size_t startCharPos;
@@ -379,11 +390,17 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
             startLine += countLines(graphemes[0 .. advance + endOfWord]);
             graphemes = graphemes[advance + endOfWord .. $];
         }
-        if (failureCount > 5 && nBatch > 128) {
-            logger.tracef("Adjusting down nBatch %s -> %s", nBatch, nBatch - 64);
-            nBatch -= 64;
+        if (failureCount > 5 && nBatch >= nBatchStep * 2) {
+            logger.tracef("Adjusting down nBatch %s -> %s", nBatch, nBatch - nBatchStep);
+            nBatch -= nBatchStep;
             failureCount = 0;
             // trim the server down so future RAG chunking on other documents work better
+            ServerNBatch = nBatch;
+        } else if (successCount > 5 && nBatch < rag.embedder.batchSize) {
+            logger.tracef("Adjusting up nBatch %s -> %s", nBatch, nBatch + nBatchStep);
+            nBatch = min(nBatch + nBatchStep, rag.embedder.batchSize);
+            successCount = 0;
+            // up the server so future RAG chunking on other documents work better
             ServerNBatch = nBatch;
         }
     }
