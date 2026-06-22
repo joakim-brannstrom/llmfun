@@ -14,7 +14,7 @@ import std.string : strip, startsWith;
 import argparse : CLI, NamedArgument, PositionalArgument, ArgumentGroup,
     ansiStylingArgument, Command, Description, Required,
     Optional, Parse, SubCommand, Placeholder, Default, matchCmd,
-    MutuallyExclusive, PositionalArgument;
+    MutuallyExclusive, PositionalArgument, Optional;
 import my.term_color;
 import my.path;
 import colorlog;
@@ -107,7 +107,7 @@ struct UserConfig {
         bool dryRun;
 
         @(PositionalArgument("PATHS")
-                .Description("Paths for the arguments --add/--rm/--list/--sync"))
+                .Optional.Description("Paths for the arguments --add/--rm/--list/--sync"))
         string[] path;
     }
 
