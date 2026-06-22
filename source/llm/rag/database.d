@@ -90,14 +90,14 @@ CREATE VIRTUAL TABLE FtsChunksTbl USING fts5(
 )`;
 
 Optional!Database openDatabase(AbsolutePath dbFile_, string model,
-        long embedDimensions, bool readOnly = false) nothrow {
+        long embedDimensions, bool readOnly = false, bool inMemory = false) nothrow {
     import std.file : exists;
     import std.path : dirName;
     import llm.rag.sqlite3_vec;
     import my.file : getAttrs;
     import core.sys.posix.sys.stat;
 
-    string dbFile = dbFile_.toString;
+    string dbFile = inMemory ? ":memory:" : dbFile_.toString;
 
     static void setPragmas(ref Miniorm db) {
         // dfmt off
@@ -122,16 +122,17 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
     } else if (!dbDir.exists) {
         logger.tracef("No RAG database opened. Directory does not exist: '%s'",
                 dbDir).collectException;
-        dbFile = ":memory:";
+        return none!Database();
     } else if (!readOnly) {
         uint attrs;
         if (!getAttrs(dbDir.Path, attrs)) {
             logger.tracef("Unable to get file permissions: '%s'", dbDir).collectException;
+            return none!Database();
         }
         if ((attrs & (S_IWUSR)) == 0) {
             logger.tracef("No RAG database opened. Directory is not writable: '%s'",
                     dbDir).collectException;
-            dbFile = ":memory:";
+            return none!Database();
         }
     }
 

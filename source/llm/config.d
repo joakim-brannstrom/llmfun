@@ -228,10 +228,10 @@ struct LlmConfig {
         }
     }
 
-    RagDatabaseConfig[] getRagDatabases() @safe {
+    RagDatabaseConfig[] getRagSecondary() @safe {
         import std.algorithm : joiner;
 
-        return [ragPrimary] ~ ragSecondary.byValue.joiner.array;
+        return ragSecondary.byValue.joiner.array;
     }
 }
 
