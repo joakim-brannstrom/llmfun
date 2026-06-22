@@ -482,7 +482,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
             return null;
         }
         auto files = appender!(Path[])();
-        if (isFile(root) && filter.match(root)) {
+        if (isFile(root)) {
             files.put(root.Path);
         } else if (isDir(root)) {
             foreach (p; dirEntries(root, SpanMode.depth).filter!(a => a.isFile)
