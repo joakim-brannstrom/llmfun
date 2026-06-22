@@ -363,10 +363,6 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
                     iteration, graphemes.length, data);
             return;
         }
-        if (iteration == 0 && failureCount > 0) {
-            logger.trace("Reset failure count");
-            failureCount = 0;
-        }
         if (iteration == 0) {
             ++successCount;
         }
@@ -394,10 +390,11 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
             startLine += countLines(graphemes[0 .. advance + endOfWord]);
             graphemes = graphemes[advance + endOfWord .. $];
         }
-        if (failureCount > 5 && nBatch >= nBatchStep * 2) {
+        if (failureCount > 2 && nBatch >= nBatchStep * 2) {
             logger.tracef("Adjusting down nBatch %s -> %s", nBatch, nBatch - nBatchStep);
             nBatch -= nBatchStep;
             failureCount = 0;
+            failureCount = max(0, failureCount - 1);
             // trim the server down so future RAG chunking on other documents work better
             ServerNBatch = nBatch;
         } else if (successCount > 5 && nBatch < rag.embedder.batchSize) {
