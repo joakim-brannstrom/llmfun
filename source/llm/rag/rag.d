@@ -113,22 +113,35 @@ class RAG {
 
     alias db this;
 
-    this(Embedder embedder, RagDatabaseConfig[] configs) {
+    this(Embedder embedder, RagDatabaseConfig primary, RagDatabaseConfig[] secondary) {
         import my.optional;
         import llm.rag.database : openDatabase;
 
         this.embedder = embedder;
-        if (configs.empty)
-            configs ~= RagDatabaseConfig(Path(":memory:"), "");
-        bool isReadOnly = false;
-        foreach (cfg; configs) {
+
+        openDatabase(primary.path.AbsolutePath, embedder.modelName,
+                embedder.dimensions, readOnly: false).match!((Database db) {
+            this.dbs.insertBack(db);
+            this.databases ~= DatabaseInfo(primary.path,
+                primary.path.baseName.stripExtension, primary.description);
+        }, (None _) {
+            openDatabase(primary.path.AbsolutePath, embedder.modelName,
+                embedder.dimensions, readOnly: false, inMemory: true).match!((Database db) {
+                this.dbs.insertBack(db);
+                this.databases ~= DatabaseInfo(":memory:".Path,
+                primary.path.baseName.stripExtension, primary.description);
+            }, (None _) {
+                logger.errorf("sqlite3 fatal error. This should not happen");
+            });
+        });
+
+        foreach (cfg; secondary) {
             openDatabase(cfg.path.AbsolutePath, embedder.modelName,
-                    embedder.dimensions, isReadOnly).match!((Database db) {
+                    embedder.dimensions, readOnly: true, inMemory: false).match!((Database db) {
                 this.dbs.insertBack(db);
                 this.databases ~= DatabaseInfo(cfg.path,
                     cfg.path.baseName.stripExtension, cfg.description);
             }, (None _) {});
-            isReadOnly = true;
         }
     }
 
