@@ -13,7 +13,8 @@ import std.string : strip, startsWith;
 
 import argparse : CLI, NamedArgument, PositionalArgument, ArgumentGroup,
     ansiStylingArgument, Command, Description, Required,
-    Optional, Parse, SubCommand, Placeholder, Default, matchCmd, MutuallyExclusive;
+    Optional, Parse, SubCommand, Placeholder, Default, matchCmd,
+    MutuallyExclusive, PositionalArgument;
 import my.term_color;
 import my.path;
 import colorlog;
@@ -85,9 +86,6 @@ struct UserConfig {
             bool sync;
         }
 
-        @(NamedArgument("path").Description("Recursively add all text files (can be repeated)"))
-        string[] path;
-
         @(NamedArgument("db").Description("Primary RAG database (read/write)"))
         string ragPrimary;
 
@@ -107,6 +105,10 @@ struct UserConfig {
 
         @(NamedArgument("dry-run").Description("Preview changes without modifying database"))
         bool dryRun;
+
+        @(PositionalArgument("PATHS")
+                .Description("Paths for the arguments --add/--rm/--list/--sync"))
+        string[] path;
     }
 
     @(Command("tool_metrics"))
