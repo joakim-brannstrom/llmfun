@@ -140,6 +140,10 @@ class RAG {
         databases.length = 0;
     }
 
+    bool isPrimaryInMemory() {
+        return databases[0].path.toString == ":memory:";
+    }
+
     size_t[] resolveDatabaseIndices(string databaseName) {
         if (databaseName.strip == "*" || databaseName.strip.empty) {
             return iota(dbs.length).array;

@@ -423,6 +423,12 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         rag.destroy;
     }
 
+    if (rag.isPrimaryInMemory) {
+        logger.errorf("No primary database opened for read/write. Tried to open '%s'",
+                llmConf.ragPrimary.path);
+        return 1;
+    }
+
     void addFile(Path p) {
         try {
             auto added = rag.add(Document(p.Origin, readText(p.toString)),
