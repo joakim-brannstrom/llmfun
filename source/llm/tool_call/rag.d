@@ -52,9 +52,9 @@ private string location(Document doc) {
             (Path a) => a.toString);
 }
 
-private string toResult(Document[] docs) {
-    return docs.enumerate.map!(doc => format("--- Result %s (%s line %s-%s chars %s-%s) ---\n%s",
-            doc.index + 1, location(doc.value), doc.value.line.begin,
+private string toResult(string database, Document[] docs) {
+    return docs.enumerate.map!(doc => format("--- Result %s (%s in database:'%s' line %s-%s chars %s-%s) ---\n%s",
+            doc.index + 1, location(doc.value), database, doc.value.line.begin,
             doc.value.line.end, doc.value.offset.begin, doc.value.offset.end, doc.value.data)).join(
             "\n\n");
 }
@@ -90,7 +90,7 @@ ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string textQuery,
             return ExecuteFuncResult(format!"error: search completed but no results found for %s"(query),
                     success: false);
         }
-        return ExecuteFuncResult(toResult(docs), success: true);
+        return ExecuteFuncResult(toResult(database, docs), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: database error during search: %s"(e.msg),
                 success: false);

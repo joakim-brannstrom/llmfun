@@ -399,14 +399,14 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
 }
 
 int appMain(UserConfig uconf, UserConfig.Rag conf) {
-    import llm.rag.rag;
-    import llm.config;
-    import my.filter : ReFilter;
-    import llm.rag.embedder : createEmbedder;
-    import std.file : readText, isFile, isDir, dirEntries, SpanMode;
-    import std.path : extension, baseName;
     import std.array : appender;
+    import std.file : readText, isFile, isDir, dirEntries, SpanMode;
+    import std.path : extension, baseName, buildNormalizedPath;
+    import llm.config;
+    import llm.rag.embedder : createEmbedder;
+    import llm.rag.rag;
     import miniorm : spinSql;
+    import my.filter : ReFilter;
 
     if (conf.setupDirs) {
         makeFileStructure(LlmConfig.init, rag: true);
@@ -431,16 +431,6 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         logger.errorf("No primary database opened for read/write. Tried to open '%s'",
                 llmConf.ragPrimary.path);
         return 1;
-    }
-
-    void addFile(Path p) {
-        try {
-            auto added = rag.add(Document(p.Origin, readText(p.toString)),
-                    llmConf.ragConfig).chunks != 0;
-            logger.info(added, "Add ", p);
-        } catch (Exception e) {
-            logger.warning(e.msg);
-        }
     }
 
     long printNoneExistingPaths(T)(T paths) {
@@ -485,11 +475,11 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         }
         auto files = appender!(Path[])();
         if (isFile(root)) {
-            files.put(root.Path);
+            files.put(root.buildNormalizedPath.Path);
         } else if (isDir(root)) {
             foreach (p; dirEntries(root, SpanMode.depth).filter!(a => a.isFile)
                     .filter!(a => filter.match(a.name))) {
-                files.put(p.name.Path);
+                files.put(p.name.buildNormalizedPath.Path);
             }
         }
         return files[];
@@ -507,17 +497,23 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
             auto files = collectFiles(p.Path, ragFilter);
 
             if (files.empty) {
-                if (isFile(p)) {
-                    logger.infof("File %s excluded by ragFilter", p);
-                } else {
-                    logger.infof("No files matched in %s", p);
-                }
+                logger.infof("No files matched in %s", p);
                 continue;
             }
 
             logger.infof("Adding files from %s", p);
             foreach (f; files) {
-                addFile(f);
+                try {
+                    auto result = rag.add(Document(f.Origin,
+                            readText(f.toString)), llmConf.ragConfig);
+                    if (result.chunks > 0) {
+                        logger.infof("  Added/updated: %s (%s chunks)", f, result.chunks);
+                    } else {
+                        logger.infof("  Skipped (unchanged): %s", f);
+                    }
+                } catch (Exception e) {
+                    logger.warning(e.msg);
+                }
             }
         }
         return failed;
@@ -527,7 +523,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         if (conf.path.empty) {
             if (conf.ragInclude.empty && conf.ragExclude.empty
                     && llmConf.ragFilter.include.empty && llmConf.ragFilter.exclude.empty) {
-                logger.warning("No --path provided and no --include/--exclude filters active (CLI or config). " ~ "Nothing to remove. Use --include <pattern> or --exclude <pattern> to select sources for removal, " ~ "or provide --path for a specific file/directory.");
+                logger.warning("No PATHS provided and/or no --include/--exclude filters active (CLI or config). " ~ "Nothing to remove. Use --include <pattern> or --exclude <pattern> to select sources for removal, " ~ "or provide --path for a specific file/directory.");
                 return 0;
             }
         }
@@ -630,10 +626,9 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 
     long syncData() {
         import my.set : Set;
-        import std.path : buildNormalizedPath;
 
         if (conf.path.empty) {
-            logger.warning("--path is required for sync");
+            logger.warning("PATHS is required for sync");
             return 1;
         }
 
