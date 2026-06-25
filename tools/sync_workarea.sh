@@ -15,4 +15,4 @@ git add source dub.sdl *.mak vendor
 git commit -m "import source"
 popd
 
-llmfun rag --db llmfun/data/rag.sqlite3 --sync --path source/ -i '.*\.d'
+llmfun rag --db llmfun/data/rag.sqlite3 --sync source/ -i '.*\.d'
