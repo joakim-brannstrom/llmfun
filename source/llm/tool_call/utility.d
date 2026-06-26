@@ -30,7 +30,7 @@ struct PathCheckResult {
 
 PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path, bool checkExist = false) {
     import std.path : isAbsolute;
-    import std.file : exists;
+    import std.file : exists, isSymlink;
 
     if (path.isAbsolute) {
         return PathCheckResult(ctx.workArea, false,
@@ -46,6 +46,12 @@ PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path, bool che
     if (checkExist && !path_.exists) {
         logger.trace(path_);
         return PathCheckResult(path_, false, format!"error: path '%s' do not exist"(path));
+    }
+    if (path_.isSymlink) {
+        logger.trace(path_);
+        return PathCheckResult(path_, false,
+                format!"error: path '%s' is a symlink. Symlinks are not allowed to be read/write."(
+                    path));
     }
     return PathCheckResult(path_, true, null);
 }
