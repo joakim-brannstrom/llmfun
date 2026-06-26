@@ -173,7 +173,8 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
   "agentPrompt": "AGENT.md",
   "activeCodeModelIndex": 0,
   "toolLimits": {...},
-  "rag": [...],
+  "ragPrimary": {...},
+  "ragSecondary": {...},
   "ragConfig": {...},
   "toolFilter": {...},
   "ragFilter": {...},
@@ -197,6 +198,8 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
 | `agentPrompt` | string | `AGENT.md` | Agent system prompt file name (searched in promptDir) |
 | `activeCodeModelIndex` | long | `0` | Index of the active code model in `codeModels` array |
 | `warnIfNoApiKey` | bool | `true` | Emit warnings when no API key is configured for model servers |
+| `ragPrimary` | object | `llmfun/data/rag.sqlite3` | Primary RAG database (read/write) |
+| `ragSecondary` | object | `{}` | Additional read-only RAG databases |
 | `toolLimits` | object | `{}` | Tool execution limits (see below) |
 
 ### Tool Limits (`toolLimits`)
@@ -220,28 +223,37 @@ Configures per-tool limits.
 | `maxTopK`             | long | 20      | Max topK value for RAG search queries |
 | `maxArgLength`        | long | 200     | Max chars for argument truncation in tool history |
 
-### RAG Database Configuration (`rag`)
+### RAG Database Configuration (`ragPrimary`, `ragSecondary`)
 
-Array of RAG database configurations. The first database is primary (read/write); additional databases are read-only.
+Configures the primary (read/write) and secondary (read-only) RAG databases.
+
+#### Primary Database (`ragPrimary`)
+The primary database is used for indexing and retrieval.
 
 ```json
-"rag": [
-  {
-    "path": "llmfun/data/rag.sqlite3",
-    "description": "Primary RAG database (read/write)"
-  },
-  {
-    "path": "/path/to/readonly_knowledge.sqlite3",
-    "description": "Read-only knowledge base"
-  }
-]
+"ragPrimary": {
+  "path": "llmfun/data/rag.sqlite3",
+  "description": "Primary RAG database (read/write)"
+}
 ```
 
-Each entry supports:
+#### Secondary Databases (`ragSecondary`)
+A collection of read-only databases organized by category.
+
+```json
+"ragSecondary": {
+  "user_knowledge": [
+    {
+      "path": "/path/to/knowledge.sqlite3",
+      "description": "Read-only user collected knowledge base"
+    }
+  ]
+}
+```
+
+Each database entry supports:
 - `path` (string, required): Path to the SQLite database file
 - `description` (string, optional): Human-readable description
-
-**Note**: For backward compatibility, plain strings are also accepted (treated as path with empty description).
 
 ### RAG Configuration (`ragConfig`)
 
