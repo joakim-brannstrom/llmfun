@@ -5,7 +5,6 @@ copyright "Copyright © 2026, Joakim Brännström"
 license "MPL-2.0"
 
 dependency "colorlog" version="~>0.0.10"
-dependency "proc" version="~>1.1.5"
 dependency "mylib" version="~>0.0.49"
 dependency "argparse" version="~>2.0.2"
 dependency "requests" version="~>2.2.0"
@@ -15,13 +14,13 @@ subConfiguration "miniorm" "without-lib"
 targetPath "build"
 targetType "executable"
 
-configuration "default" {
-    preBuildCommands "make -C $PACKAGE_DIR -f sqlite3.mak" platform="posix"
-    dflags "-P-I./vendor/sqlite3" "-P-I./vendor/sqlite3-vec"
-    preBuildCommands "make -C $PACKAGE_DIR -f linenoise.mak" platform="posix"
-    dflags "-P-I./vendor/linenoise"
+preBuildCommands "make -C $PACKAGE_DIR -f sqlite3.mak" platform="posix"
+dflags "-P-I./vendor/sqlite3" "-P-I./vendor/sqlite3-vec"
+preBuildCommands "make -C $PACKAGE_DIR -f linenoise.mak" platform="posix"
+dflags "-P-I./vendor/linenoise"
+sourceFiles "build/linenoise.o" "build/sqlite3.o" "build/sqlite-vec.o"
 
-    sourceFiles "build/linenoise.o" "build/sqlite3.o" "build/sqlite-vec.o"
+configuration "default" {
     mainSourceFile "source/app.d"
     excludeSourceFiles "source/utility_app.d"
 }
@@ -29,12 +28,6 @@ configuration "default" {
 configuration "llmfun_test" {
     targetName "llmfun_test"
 
-    preBuildCommands "make -C $PACKAGE_DIR -f sqlite3.mak" platform="posix"
-    dflags "-P-I./vendor/sqlite3" "-P-I./vendor/sqlite3-vec"
-    preBuildCommands "make -C $PACKAGE_DIR -f linenoise.mak" platform="posix"
-    dflags "-P-I./vendor/linenoise"
-
-    sourceFiles "./build/linenoise.o" "build/sqlite3.o" "build/sqlite-vec.o"
     mainSourceFile "source/utility_app.d"
     excludeSourceFiles "source/app.d"
 }
