@@ -36,3 +36,10 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 # rag
 - Add a warning when the DB is wiped. Need to add migration in the future.
 - memories should automatically be added to the RAG so they are always searchable
+- a tui to inspect the rag DB such as what files are in it, the chunks etc. Look at the GUI for https://github.com/MrDoe/OpenCodeRAG
+- add treesitter and grammar for at least c/c++/python
+- add a description for a document to the db. It is an optional field
+- add a "chunker" for a diff
+- add builtin pdf -> text -> rag
+- add builtin image -> text -> rag. This should probably be stored as "image path", "description".
+- add a date to all sources and then present it to the LLM so it can reason on the age of a source.
