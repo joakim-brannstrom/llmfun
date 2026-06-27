@@ -105,13 +105,12 @@ void playNotification() {
     if (!hasPlayer)
         return;
 
-    auto path = dataSearch(ProgramName).resolve(Path("notification.mp3"));
+    auto path = dataSearch(ProgramName).resolve(Path("notification.wav"));
     path.match!((Some!ResourceFile p) {
         try {
             if (p.get.exists) {
                 auto f = File("/dev/null");
-                spawnProcess(["cvlc", "--play-and-exit", p.get.toString], f, f,
-                    f, null, Config.detached);
+                spawnProcess(["aplay", p.get.toString], f, f, f, null, Config.detached);
             }
         } catch (Exception e) {
             logger.trace(e.msg);
