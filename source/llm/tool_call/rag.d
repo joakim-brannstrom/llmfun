@@ -4,6 +4,7 @@ import logger = std.logger;
 import std.algorithm : map, filter, startsWith, count, joiner, endsWith;
 import std.array : empty, appender, array;
 import std.conv : to;
+import std.datetime : SysTime;
 import std.file : readText, exists, mkdirRecurse, getSize, remove, dirEntries, SpanMode;
 import std.format : format, formattedWrite;
 import std.json : JSONValue;
@@ -53,10 +54,11 @@ private string location(Document doc) {
 }
 
 private string toResult(string database, Document[] docs) {
-    return docs.enumerate.map!(doc => format("--- Result %s (%s in database:'%s' line %s-%s chars %s-%s) ---\n%s",
+    return docs.enumerate.map!(doc => format(
+            "--- Result %s ('%s' in database '%s' line %s-%s chars %s-%s added '%s') ---\n%s",
             doc.index + 1, location(doc.value), database, doc.value.line.begin,
-            doc.value.line.end, doc.value.offset.begin, doc.value.offset.end, doc.value.data)).join(
-            "\n\n");
+            doc.value.line.end, doc.value.offset.begin, doc.value.offset.end,
+            doc.value.added.toISOExtString(), doc.value.data)).join("\n\n");
 }
 
 ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string textQuery,
@@ -286,7 +288,7 @@ ExecuteFuncResult queryReadFile(Context baseCtx, string filePath, long lineNumbe
             string originStr = match.origin.match!((Topic a) => format!"topic: '%s'"(a.name),
                     (Url a) => a.value, (Path a) => a.toString);
 
-            string text = applyAppendLoc(match.text, match.line.begin, appendLoc);
+            string text = applyAppendLoc(match.data, match.line.begin, appendLoc);
 
             resultBlocks ~= format("--- Result %d (%s line %s-%s chars %s-%s) ---\n%s", i + 1, originStr,
                     match.line.begin, match.line.end, match.offset.begin, match.offset.end, text);

@@ -17,6 +17,7 @@ module llm.rag.rag;
 import logger = std.logger;
 import std.algorithm : map, filter, joiner, sort, cache, swap, count;
 import std.array : array, empty, appender;
+import std.datetime : SysTime;
 import std.digest.murmurhash : MurmurHash3;
 import std.digest;
 import std.path : baseName, stripExtension;
@@ -73,6 +74,7 @@ struct Document {
     string data;
     Offset offset;
     Line line;
+    SysTime added;
 }
 
 private struct ParallelQueryTask {
@@ -202,7 +204,7 @@ class RAG {
             return parallelQuery(indices,
                     (size_t i) => spinSql!(() => dbs[i].querySemantic(Search(embed), getTopK))).randomizeRanks()
                 .sort!((a, b) => a.rank > b.rank).take(getTopK)
-                .array.map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
+                .map!(a => Document(a.origin, a.text, a.offset, a.line, a.added)).array;
         }
 
         return embedder.embed(query).match!((float[] a) => runMatch(a), (HttpError e) {
@@ -219,7 +221,7 @@ class RAG {
         return parallelQuery(indices,
                 (size_t i) => spinSql!(() => dbs[i].queryTextSearch(query, getTopK))).randomizeRanks()
             .sort!((a, b) => a.rank < b.rank).take(getTopK)
-            .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
+            .map!(a => Document(a.origin, a.text, a.offset, a.line, a.added)).array;
     }
 
     Document[] queryBestMatch(string textQuery, string vectorQuery, long getTopK, string database) {
@@ -231,8 +233,8 @@ class RAG {
             return parallelQuery(indices,
                     (size_t i) => spinSql!(() => dbs[i].queryCombineSemanticText(Search(embed),
                         textQuery, getTopK))).randomizeRanks().sort!((a,
-                    b) => a.rank > b.rank).take(getTopK)
-                .map!(a => Document(a.origin, a.text, a.offset, a.line)).array;
+                    b) => a.rank > b.rank).take(getTopK).map!(a => Document(a.origin,
+                    a.text, a.offset, a.line, a.added)).array;
         }
 
         return embedder.embed(vectorQuery).match!((float[] embed) {
@@ -250,13 +252,14 @@ class RAG {
         });
     }
 
-    SourceMatch[] queryReadFile(Path filePath, long lineNumber, string database) {
+    Document[] queryReadFile(Path filePath, long lineNumber, string database) {
         size_t[] indices;
         if (!validateDatabase(database, indices))
             return null;
 
         auto results = parallelQuery(indices,
-                (size_t i) => spinSql!(() => dbs[i].queryByPathAndLine(filePath, lineNumber)));
+                (size_t i) => spinSql!(() => dbs[i].queryByPathAndLine(filePath, lineNumber))).map!(
+                a => Document(a.origin, a.text, a.offset, a.line, a.added)).array;
 
         logger.tracef("Hits %s for %s line %s", results.length, filePath, lineNumber);
         return results;
@@ -455,7 +458,7 @@ SourceMatch[] randomizeRanks(SourceMatch[] results) {
 
 // Helper to create a SourceMatch with a given rank
 SourceMatch makeMatch(double rank) {
-    return SourceMatch(Origin(Topic("")), Offset(0, 0), Line(0, 0), "", rank);
+    return SourceMatch(Origin(Topic("")), Offset(0, 0), Line(0, 0), "", rank, SysTime.init);
 }
 
 unittest {

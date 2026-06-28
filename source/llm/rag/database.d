@@ -213,6 +213,7 @@ alias SourceChecksum = NamedType!(long, Tag!"SourceChecksum", 0, Comparable, Tag
 struct Source {
     Origin origin;
     SourceChecksum checksum;
+    SysTime added;
 }
 
 struct Embedding {
@@ -246,6 +247,7 @@ struct SourceMatch {
     Line line;
     string text;
     double rank;
+    SysTime added;
 }
 
 struct Database {
@@ -297,13 +299,14 @@ struct Database {
     Optional!(Tuple!(Source, "src", SourceId, "id")) getSource(Origin origin) {
         alias ReturnT = typeof(return);
         ReturnT urlSource(string url) {
-            static immutable sql = "SELECT t0.id, t0.checksum FROM SourceTbl t0, OriginUrlTbl t1 WHERE "
+            static immutable sql = "SELECT t0.id, t0.checksum, t0.added FROM SourceTbl t0, OriginUrlTbl t1 WHERE "
                 ~ "t0.urlType=:urlType AND t0.id=t1.sourceId AND t1.url=:url";
             auto stmt = db.prepare(sql);
             stmt.get.bind(":urlType", cast(long) convert(origin));
             stmt.get.bind(":url", url);
             foreach (ref r; stmt.get.execute) {
-                auto src = Source(origin, r.peek!long(1).SourceChecksum);
+                auto src = Source(origin, r.peek!long(1).SourceChecksum,
+                        miniorm.fromSqLiteDateTime(r.peek!string(2)));
                 auto srcId = r.peek!long(0).SourceId;
                 return tuple!("src", "id")(src, srcId).some;
             }
@@ -316,20 +319,21 @@ struct Database {
 
     Optional!Source getSource(SourceId id) {
         Optional!Source getUrl(SourceTbl.UrlType kind) {
-            static immutable sql = "SELECT t0.checksum,t1.url FROM SourceTbl t0, OriginUrlTbl t1 "
+            static immutable sql = "SELECT t0.checksum, t1.url, t0.added FROM SourceTbl t0, OriginUrlTbl t1 "
                 ~ "WHERE t0.id=:id AND t0.id=t1.sourceId";
             auto stmt = db.prepare(sql);
             stmt.get.bind(":id", id.get);
             foreach (ref r; stmt.get.execute) {
+                auto added = miniorm.fromSqLiteDateTime(r.peek!string(2));
                 if (kind == SourceTbl.UrlType.url)
                     return some(Source(Origin(Url(r.peek!string(1))),
-                            r.peek!long(0).SourceChecksum));
+                            r.peek!long(0).SourceChecksum, added));
                 if (kind == SourceTbl.UrlType.path)
                     return some(Source(Origin(Path(r.peek!string(1))),
-                            r.peek!long(0).SourceChecksum));
+                            r.peek!long(0).SourceChecksum, added));
                 if (kind == SourceTbl.UrlType.topic)
                     return some(Source(Origin(Topic(r.peek!string(1))),
-                            r.peek!long(0).SourceChecksum));
+                            r.peek!long(0).SourceChecksum, added));
             }
             return none!Source();
         }
@@ -475,7 +479,7 @@ struct Database {
             src.match!((Source src) {
                 auto chunk = getChunk(id.embedId);
                 rval.put(SourceMatch(src.origin, offset: chunk.offset, line: chunk.line,
-                    text: chunk.text, rank: id.rank));
+                    text: chunk.text, rank: id.rank, added: src.added));
             }, (None _) {});
         }
 
@@ -505,7 +509,7 @@ struct Database {
                     auto src = getSourceByEmbedId(chunk.embedId);
                     src.match!((Source src) {
                         rval.put(SourceMatch(src.origin, offset: chunk.offset,
-                            line: chunk.line, text: chunk.text, rank: res.rank));
+                            line: chunk.line, text: chunk.text, rank: res.rank, added: src.added));
                     }, (None _) {});
                 }
             }
@@ -518,14 +522,15 @@ struct Database {
     }
 
     SourceMatch[] queryByPathAndLine(Path filePath, long lineNumber) {
-        // INNER JOIN on OriginUrlTbl is correct: every path-type source always has
-        // a corresponding OriginUrlTbl entry (see addSource line 253-254).
-        // This is consistent with hasFile() which uses the same JOIN pattern.
-        static immutable sql = "SELECT t0.text, t0.charBeginPos, t0.charEndPos, t0.lineBegin, t0.lineEnd, t3.url "
-            ~ "FROM TextChunkTbl t0 " ~ "JOIN EmbeddingsTbl t1 ON t0.embedId = t1.id "
-            ~ "JOIN SourceTbl t2 ON t1.sourceId = t2.id " ~ "JOIN OriginUrlTbl t3 ON t2.id = t3.sourceId "
-            ~ "WHERE t2.urlType = :urlType AND t3.url = :url "
-            ~ "AND t0.lineBegin <= :lineNumber AND t0.lineEnd >= :lineNumber";
+        // dfmt off
+         static immutable sql = "SELECT t0.text, t0.charBeginPos, t0.charEndPos, t0.lineBegin, t0.lineEnd, t3.url, t2.added "
+             ~ "FROM TextChunkTbl t0 "
+             ~ "JOIN EmbeddingsTbl t1 ON t0.embedId = t1.id "
+             ~ "JOIN SourceTbl t2 ON t1.sourceId = t2.id "
+             ~ "JOIN OriginUrlTbl t3 ON t2.id = t3.sourceId "
+             ~ "WHERE t2.urlType = :urlType AND t3.url = :url "
+             ~ "AND t0.lineBegin <= :lineNumber AND t0.lineEnd >= :lineNumber";
+        // dfmt on
 
         auto stmt = db.prepare(sql);
         stmt.get.bind(":urlType", cast(long) SourceTbl.UrlType.path);
@@ -536,7 +541,8 @@ struct Database {
         foreach (ref r; stmt.get.execute) {
             rval.put(SourceMatch(Origin(Path(r.peek!string(5))), offset: Offset(begin: r.peek!long(1),
                     end: r.peek!long(2)), line: Line(begin: r.peek!long(3),
-                    end: r.peek!long(4)), text: r.peek!string(0), rank: 0));
+                    end: r.peek!long(4)), text: r.peek!string(0), rank: 0,
+                    added: miniorm.fromSqLiteDateTime(r.peek!string(6))));
         }
 
         logger.tracef("queryByPathAndLine hits %s for %s line %s",
@@ -615,7 +621,7 @@ ORDER BY fusion_score DESC;
                 auto src = getSourceByEmbedId(res[0].embedId);
                 src.match!((Source src) {
                     rval.put(SourceMatch(src.origin, offset: res[0].offset,
-                        line: res[0].line, text: res[0].text, rank: res[1]));
+                        line: res[0].line, text: res[0].text, rank: res[1], added: src.added));
                 }, (None _) {});
             }
             return rval[];
@@ -639,6 +645,7 @@ ORDER BY fusion_score DESC;
         return TextChunkWithEmbed.init;
     }
 
+    // TODO: return type should be a SourceId, not Source
     Optional!Source getSourceByEmbedId(long embedId) {
         static immutable sql = "SELECT sourceId FROM EmbeddingsTbl WHERE id=:embedId";
         auto stmt = db.prepare(sql);
