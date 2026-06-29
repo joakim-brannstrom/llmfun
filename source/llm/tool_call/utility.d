@@ -47,7 +47,7 @@ PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path, bool che
         logger.trace(path_);
         return PathCheckResult(path_, false, format!"error: path '%s' do not exist"(path));
     }
-    if (path_.isSymlink) {
+    if (path_.exists && path_.isSymlink) {
         logger.trace(path_);
         return PathCheckResult(path_, false,
                 format!"error: path '%s' is a symlink. Symlinks are not allowed to be read/write."(
