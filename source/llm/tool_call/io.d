@@ -310,6 +310,11 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
 
         // Copy lines from current position up to the start of this hunk
         while (fileIdx < oldPos) {
+            if (fileIdx >= fileLines.length) {
+                logger.tracef("Unexpected error. fileIdx:%s fileLines:%s\nfileLines:%s\ndiffLines:%s",
+                        fileIdx, fileLines.length, fileLines, diffLines);
+                throw new Exception("Unexpected error. Unable to apply diff");
+            }
             result ~= fileLines[fileIdx];
             fileIdx++;
         }
