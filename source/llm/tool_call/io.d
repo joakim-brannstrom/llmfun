@@ -58,6 +58,10 @@ ExecuteFuncResult writeFile(Context baseCtx, string path, string content) {
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
+    if (!ctx.workArea.exists) {
+        return ExecuteFuncResult("error: creating file is blocked. writeFile is disabled",
+                success: false);
+    }
 
     try {
         if (path_ != ctx.workArea && !path_.dirName.exists) {
