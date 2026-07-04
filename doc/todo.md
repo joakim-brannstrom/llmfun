@@ -11,6 +11,14 @@
 - add autocomplete
 - add a specific /code analyze mode to update a plan/code_analysis.md
 - support AGENT.md
+- write a system design review template and an implementation plan review template. The pipeline agents are complaining
+- maybe write the context use as part of the summary in the tree node chat
+- integrate imgui_markdown
+- move choosing a model to the menu
+- add back history save
+- look at what claude code is doing with .claude/rules and CLAUDE.md
+- change the behavior of loading a .llmfun.json from the current directory if it exist to only doing it if the project is trusted
+- before writing a file check that the file isn't inside a tree of symlinks from the workarea and up
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -19,6 +27,9 @@
 FeedbackEngine. When it triggers, such as a tool reaching a high enough threshold it should trigger a self improvement loop in the AI where it is forced to study why the tool use failed, come up with how to improve and write down as a memory for the tool. If there already exist a memory for the tool then it should be read, inspected, see if it helps correct the tool use. If not, improve or rewrite the memory.
     - This should probably execute as a separate agent that inspect how the tool was used such that it do not interrupt the current agents work and pollute the context with reasoning about how to improve the tool use.
     - Important that it do not trigger often. There must be a memory between sessions. Maybe a simple one such as keeping track of how many failed tool calls there where. If it was 20, and the improvered executed then it shouldn't execute again until 25 and 30min have elapsed. If it instead goes down to 0 the count is reset. The count has a min threshold of 10.
+
+# ui
+- change the background color for the input field to dark grey
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
@@ -32,6 +43,7 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 
 - planner need to be restructured. First it should analyze the source code to understand the project. This should be written to a file in plan/. Then that is used by the system design step.
 - planner, there should be a plan execute
+- live agent status update in a new imgui window while it is working
 
 # rag
 - Add a warning when the DB is wiped. Need to add migration in the future.
