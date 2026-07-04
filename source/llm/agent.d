@@ -15,8 +15,10 @@ import std.range;
 import std.regex : Regex, regex;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable, nullable;
-import my.path;
+
 import my.filter : ReFilter;
+import my.optional;
+import my.path;
 
 import llm.chat;
 import llm.config;
@@ -496,12 +498,15 @@ struct VisionImage {
 
 class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryContext,
     ThinkingContext, MetricsContext, PipelineControlContext, VisionContext {
+        import llm.vfs : FlatVfs;
+
         private {
             LlmConfig conf;
             AbsolutePath workArea_;
             RAG rag;
             Agent agent;
             PipelineControlContext pipelineCtx;
+            FlatVfs memoryVfs;
 
             SysTime nextMetricCalculation;
 
@@ -513,6 +518,8 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             this.workArea_ = conf.workArea.AbsolutePath;
             this.rag = agent.rag;
             this.agent = agent;
+
+            this.memoryVfs = FlatVfs(conf.memoryArea);
         }
 
         ~this() {
@@ -597,16 +604,23 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             import std.path : stripExtension, baseName;
 
             try {
-                return dirEntries(conf.memoryArea, SpanMode.shallow).map!(
-                        a => a.name.baseName.stripExtension).array;
+                return memoryVfs.getAllFiles.map!(a => a.baseName.stripExtension).array;
             } catch (Exception e) {
                 logger.warning("unable to read file area for memory topics: ", e.msg);
             }
             return null;
         }
 
-        override Path getMemoryFile(string topic) {
-            return conf.memoryArea ~ (topic ~ ".md");
+        override bool saveMemoryFile(string topic, string content) {
+            return memoryVfs.save(topic ~ ".md", content);
+        }
+
+        override Optional!string readMemory(string topic) {
+            return memoryVfs.read(topic ~ ".md");
+        }
+
+        override bool removeMemory(string topic) {
+            return memoryVfs.remove(topic ~ ".md");
         }
 
         override Path getThinkingTemplatesDir() {

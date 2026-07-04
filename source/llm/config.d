@@ -7,8 +7,7 @@ import std.conv : to;
 import std.file : readText, exists, mkdirRecurse;
 import std.format : format;
 import std.json : JSONValue, JSONType, parseJSON;
-import std.sumtype : SumType;
-import std.sumtype : match;
+import std.sumtype : SumType, match;
 import std.string : toLower, startsWith;
 
 import my.path;
@@ -50,7 +49,7 @@ struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
     // LLM save a memory to this file which is used between runs.
-    Path memoryArea = ProgramName ~ "/data/memory";
+    Path[] memoryArea;
 
     Path scratchArea = ProgramName ~ "/data/scratch";
 
@@ -71,8 +70,12 @@ struct LlmConfig {
         auto prioDataCwdDirs = AbsolutePath(ProgramName ~ "/data") ~ dataSearch(ProgramName);
         auto prioConfCwdDirs = AbsolutePath(ProgramName ~ "/config") ~ configSearch(ProgramName);
 
-        memoryArea = prioDataCwdDirs.resolve("memory".Path)
-            .orElse(ResourceFile(memoryArea.AbsolutePath)).get.Path;
+        if (memoryArea.empty) {
+            memoryArea ~= (ProgramName ~ "/data/memory").Path;
+            dataSearch(ProgramName).resolve("memory".Path).match!((ResourceFile a) {
+                memoryArea ~= a.get;
+            }, (_) {});
+        }
 
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
             .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;

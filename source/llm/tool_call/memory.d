@@ -4,15 +4,14 @@ import logger = std.logger;
 import std.algorithm : map, filter, startsWith, count;
 import std.array : empty, appender, array;
 import std.conv : to;
-import std.file : readText, exists;
 import std.format : format, formattedWrite;
 import std.json : JSONValue;
 import std.regex : Regex, regex;
-import std.stdio : File;
 import std.string : join, splitLines, indexOf, lastIndexOf, strip, split;
 import std.sumtype : match;
 
 import my.path : AbsolutePath;
+import my.optional;
 
 import llm.rag.rag;
 import llm.tool_call.utility : checkAlphaNumUnderscore;
@@ -22,13 +21,19 @@ import llm.config : ToolLimits;
 mixin RegisterLlmFunctions!();
 
 interface MemoryContext : Context {
-    Path getMemoryFile(string topic);
     string[] getMemoryFileTopics();
+
+    bool saveMemoryFile(string topic, string content);
+    Optional!string readMemory(string topic);
+    bool removeMemory(string topic);
+
     ToolLimits getToolLimits();
 }
 
 private string checkTopic(MemoryContext ctx, string topic) {
     auto maxLen = ctx.getToolLimits().maxTopicLength;
+    if (topic.empty)
+        return "error: empty topic";
     if (topic.length > maxLen)
         return format!"error: topic too long. Max %s characters"(maxLen);
     if (auto err = checkAlphaNumUnderscore(topic))
@@ -37,15 +42,12 @@ private string checkTopic(MemoryContext ctx, string topic) {
 }
 
 private string getMemorySummary(MemoryContext ctx, string topic) {
-    auto maxSummaryLen = ctx.getToolLimits().maxSummaryLength;
     if (auto e = checkTopic(ctx, topic))
-        return "Error reading memory";
-    auto path_ = ctx.getMemoryFile(topic);
-    if (!path_.exists)
-        return "No summary available";
+        return e;
 
     try {
-        auto content = readText(path_);
+        auto maxSummaryLen = ctx.getToolLimits().maxSummaryLength;
+        auto content = ctx.readMemory(topic).match!((string a) => a, (_) => "");
         foreach (line; content.splitLines) {
             auto trimmed = line.strip;
             if (!trimmed.empty) {
@@ -61,9 +63,9 @@ private string getMemorySummary(MemoryContext ctx, string topic) {
                 return trimmed;
             }
         }
-        return "No summary available";
+        return "error: no summary available";
     } catch (Exception e) {
-        return "Error reading memory";
+        return "error: reading memory";
     }
 }
 
@@ -73,10 +75,12 @@ ExecuteFuncResult writeMemory(Context baseCtx, string topic, string content) {
 
     if (auto e = checkTopic(ctx, topic))
         return ExecuteFuncResult(e, success: false);
-    auto path_ = ctx.getMemoryFile(topic);
 
     try {
-        File(path_, "w").writeln(content);
+        if (!ctx.saveMemoryFile(topic, content)) {
+            return ExecuteFuncResult(format!"error: failed saving the memory with topic '%s'"(topic),
+                    success: false);
+        }
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
@@ -90,13 +94,15 @@ ExecuteFuncResult readMemory(Context baseCtx, string topic) {
     if (auto e = checkTopic(ctx, topic))
         return ExecuteFuncResult(e, success: false);
 
-    auto path_ = ctx.getMemoryFile(topic);
-    if (!path_.exists)
-        return ExecuteFuncResult(format!"error: no memory for topic '%s' written"(topic),
-                success: false);
-
     try {
-        return ExecuteFuncResult(readText(path_), success: true);
+        auto memory = ctx.readMemory(topic);
+        return memory.match!((string a) {
+            return ExecuteFuncResult(a, success: true);
+        }, (_) {
+            return ExecuteFuncResult(format!"error: no memory topic '%s' exist"(topic),
+                success: false);
+        });
+
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
@@ -104,21 +110,18 @@ ExecuteFuncResult readMemory(Context baseCtx, string topic) {
 
 @Function("Remove a memory that is no longer useful such as temporary notes about a topic")
 ExecuteFuncResult removeMemory(Context baseCtx, string topic) {
-    import std.file : remove;
-
     mixin(baseContextToSpecific!MemoryContext);
 
     if (auto e = checkTopic(ctx, topic))
         return ExecuteFuncResult(e, success: false);
 
-    auto path_ = ctx.getMemoryFile(topic);
-    if (!path_.exists)
-        return ExecuteFuncResult(format!"error: no memory for topic '%s' written"(topic),
-                success: false);
-
     try {
-        remove(path_);
-        return ExecuteFuncResult("OK", success: true);
+        if (ctx.removeMemory(topic)) {
+            return ExecuteFuncResult("OK", success: true);
+        }
+        return ExecuteFuncResult(
+                format!"error: failed to remove memory '%s'. The memory do not exist or is write protected"(topic),
+                success: false);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
