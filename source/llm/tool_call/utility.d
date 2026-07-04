@@ -2,6 +2,7 @@ module llm.tool_call.utility;
 
 import logger = std.logger;
 import std.algorithm : filter, count;
+import std.array : empty;
 import std.ascii : letters, isAlphaNum;
 import std.conv : to;
 import std.format : format;
@@ -29,8 +30,9 @@ struct PathCheckResult {
 }
 
 PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path, bool checkExist = false) {
-    import std.path : isAbsolute;
     import std.file : exists, isSymlink;
+    import std.path : dirName, isAbsolute;
+    import std.string : startsWith;
 
     if (path.isAbsolute) {
         return PathCheckResult(ctx.workArea, false,
@@ -52,6 +54,17 @@ PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path, bool che
         return PathCheckResult(path_, false,
                 format!"error: path '%s' is a symlink. Symlinks are not allowed to be read/write."(
                     path));
+    }
+    auto checkPath = path.dirName;
+    while (!checkPath.empty && checkPath.startsWith(ctx.workArea.toString)) {
+        if (checkPath.exists && checkPath.isSymlink) {
+            logger.trace(checkPath);
+            return PathCheckResult(path_, false,
+                    format!"error: path '%s' is a symlink. Read/write is not allowed from inside a symlink."(
+                        checkPath));
+
+        }
+        checkPath = checkPath.dirName;
     }
     return PathCheckResult(path_, true, null);
 }
