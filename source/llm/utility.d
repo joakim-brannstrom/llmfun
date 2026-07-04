@@ -35,13 +35,13 @@ void displayProgress(size_t currentChunk, size_t totalChunks, string status) {
 }
 
 /// Display compression result
-void displayCompressionResult(bool compressed, size_t originalLength, size_t newLength,
-        size_t keptXCount, long keptXTokens, long ctxUsed, long newContextSize) {
+string compressionResultToString(bool compressed, size_t originalLength,
+        size_t newLength, size_t keptXCount, long keptXTokens, long ctxUsed, long newContextSize) {
     if (compressed) {
-        writef("[PROGRESS] Compression finished. History %s->%s messages, kept %s msgs (%s tokens), context %s->%s\n",
+        return format("Compression finished. History %s->%s messages, kept %s msgs (%s tokens), context %s->%s\n",
                 originalLength, newLength, keptXCount, keptXTokens, ctxUsed, newContextSize);
     }
-    stdout.flush;
+    return null;
 }
 
 string summarizeToolCalls(Role role, JSONValue calls) {
@@ -137,6 +137,20 @@ struct SystemPromptInit {
     string toString() @safe const {
         return promptTemplate;
     }
+}
+
+private shared bool signalStopAgent;
+
+void stopAgent() nothrow @nogc @system {
+    .signalStopAgent = true;
+}
+
+bool isStopAgentTriggered() @safe nothrow @nogc {
+    return .signalStopAgent;
+}
+
+void clearStopAgent() @safe nothrow @nogc {
+    .signalStopAgent = false;
 }
 
 private shared bool signalInterrupt;

@@ -1,0 +1,286 @@
+module llm.tui;
+
+import std.algorithm : filter;
+import std.array : appender, Appender, empty, array;
+import std.logger;
+import std.concurrency;
+
+import my.path : Path;
+
+import llmfun_tui;
+
+String toTuiString(string s) {
+    return String(s.ptr, s.length);
+}
+
+string toString(String s) {
+    if (s.len == 0)
+        return null;
+    auto r = s.data[0 .. s.len].idup;
+    while (!r.empty && r[$ - 1] == '\0') {
+        r = r[0 .. $ - 1];
+    }
+    return r;
+}
+
+string shortSummary(string msg) {
+    import std.range : take;
+    import std.string : split, strip;
+    import std.uni : byCodePoint, byGrapheme, isWhite, Grapheme;
+    import std.uni : isAlphaNum, isWhite;
+    import std.utf : toUTF8;
+
+    immutable hash = Grapheme('#');
+
+    auto tmp = msg.split('\n');
+    if (!tmp.empty)
+        msg = tmp[0].strip;
+    return msg.byGrapheme.filter!(a => a != hash).take(100).byCodePoint.toUTF8.strip;
+}
+
+class TuiLogger : Logger {
+    import core.sync.mutex;
+    import std.format : format;
+
+    private {
+        Appender!(string[]) entries;
+        Mutex mtx;
+        immutable MaxEntries = 1000;
+    }
+
+    this(const LogLevel lvl = LogLevel.warning) @safe {
+        super(lvl);
+        this.mtx = new Mutex;
+    }
+
+    override void writeLogMsg(ref LogEntry payload) @trusted {
+        import std.datetime : Clock;
+
+        mtx.lock_nothrow();
+        scope (exit)
+            mtx.unlock_nothrow();
+        if (entries[].length < MaxEntries) {
+            entries.put(format("%s - %s: %s [%s:%d]", Clock.currTime,
+                    payload.logLevel, payload.msg, payload.funcName, payload.line));
+        }
+    }
+
+    string[] drainEntries() @safe {
+        mtx.lock_nothrow();
+        scope (exit)
+            mtx.unlock_nothrow();
+        auto tmp = entries[];
+        entries.clear();
+        return tmp;
+    }
+}
+
+struct TuiLogSwap {
+    private {
+        bool isSwapped = false;
+        shared(Logger) prev;
+        shared(TuiLogger) tui;
+    }
+
+    ~this() {
+        if (isSwapped) {
+            sharedLog = prev;
+        }
+        isSwapped = false;
+    }
+
+    string[] drainEntries() @trusted {
+        return (cast() tui).drainEntries();
+    }
+}
+
+TuiLogSwap swapToTuiLogger() @trusted {
+    auto prev = sharedLog;
+    auto n = cast(shared) new TuiLogger(LogLevel.all);
+    sharedLog = n;
+    return TuiLogSwap(true, prev, n);
+}
+
+void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
+    if (!log.isSwapped)
+        return;
+
+    foreach (msg; log.drainEntries) {
+        string summary = shortSummary(msg);
+        auto s = String(summary.ptr, summary.length);
+        auto q = String(msg.ptr, msg.length);
+        tuiAddLogMessage(tuiState, s, q);
+    }
+}
+
+struct TextUserInterface {
+    private {
+        TuiState* tuiState;
+        TuiScreen* tuiScreen;
+        TuiLogSwap logSwap;
+        string query_;
+        bool userTerminated_;
+        string statusText;
+    }
+
+    this(TuiState* state, TuiScreen* screen) {
+        this.tuiState = state;
+        tuiSetLogging(tuiState, false);
+        this.tuiScreen = screen;
+    }
+
+    ~this() {
+        tuiDestroyState(tuiState);
+        tuiShutdown(tuiScreen);
+    }
+
+    void addChatMessage(string msg) {
+        string summary = shortSummary(msg);
+        auto s = String(summary.ptr, summary.length);
+        auto q = String(msg.ptr, msg.length);
+        tuiAddChatMessage(tuiState, s, q);
+    }
+
+    void clearChat() {
+        tuiClearChatMessages(tuiState);
+    }
+
+    void setIniFile(Path path) {
+        import std.file : exists;
+
+        auto s = () {
+            if (path.dirName.exists) {
+                return toTuiString(path);
+            }
+            return toTuiString(null);
+        }();
+        tuiSetIniFilename(tuiState, s);
+    }
+
+    void setStatusText(string s) {
+        statusText = s;
+    }
+
+    void setUiAsStdLogger() {
+        logSwap = swapToTuiLogger();
+    }
+
+    void useUiLogFile(bool useFile) {
+        tuiSetLogging(tuiState, useFile);
+    }
+
+    string userQuery() @safe {
+        auto tmp = query_;
+        query_ = null;
+        return tmp;
+    }
+
+    bool hasUserTerminated() @safe {
+        return userTerminated_;
+    }
+
+    void render() {
+        import std.string : strip;
+
+        tuiBackendNewFrame();
+
+        if (tuiRender(tuiState) == 0) {
+            userTerminated_ = true;
+        }
+
+        auto status = String(statusText.ptr, statusText.length);
+        tuiSetStatusText(tuiState, status);
+
+        if (tuiIsSubmitReady(tuiState) != 0) {
+            String userQuery = tuiGetSubmitQuery(tuiState);
+            query_ = toString(userQuery);
+            String_Free(userQuery);
+            tuiResetSubmit(tuiState);
+        }
+
+        tuiLogToTui(logSwap, tuiState);
+
+        tuiBackendRender(tuiScreen);
+    }
+
+    void setReadyStatus(bool x) {
+        tuiReadyStatus(tuiState, x ? 1 : 0);
+    }
+}
+
+auto makeTui() {
+    return TextUserInterface(tuiCreateState(), tuiInit());
+}
+
+struct UiShutdown {
+}
+
+struct UiSetIniFile {
+    Path path;
+}
+
+struct UiChatMessage {
+    string msg;
+}
+
+struct UiClearChat {
+}
+
+struct UiStatusText {
+    string status;
+}
+
+struct UiUserQuery {
+    string query;
+}
+
+struct UiLogFile {
+    bool useFile;
+}
+
+struct UiTerminate {
+}
+
+struct UiTerminated {
+}
+
+struct UiAgentBusy {
+}
+
+struct UiAgentReady {
+}
+
+void spawnUserInterface(Tid ownerTid) {
+    import std.string : strip;
+    import std.datetime : dur;
+
+    import llm.utility : stopAgent;
+
+    auto ui = makeTui();
+    ui.setUiAsStdLogger;
+    bool running = true;
+    do {
+        receiveTimeout(10.dur!"msecs", (UiShutdown _) { running = false; }, (UiSetIniFile a) {
+            ui.setIniFile(a.path);
+        }, (UiChatMessage a) { ui.addChatMessage(a.msg); }, (UiClearChat _) {
+            ui.clearChat;
+        }, (UiStatusText a) { ui.setStatusText(a.status); }, (UiLogFile a) {
+            ui.useUiLogFile(a.useFile);
+        }, (UiTerminate _) { running = false; }, (UiAgentBusy _) {
+            ui.setReadyStatus(false);
+        }, (UiAgentReady _) { ui.setReadyStatus(true); });
+
+        ui.render();
+        auto query = ui.userQuery;
+        if (!query.strip.empty) {
+            if (query == "/stop") {
+                stopAgent();
+                ui.setStatusText("Stopping agent");
+            } else {
+                send(ownerTid, UiUserQuery(query));
+            }
+        }
+    }
+    while (running);
+    send(ownerTid, UiTerminated.init);
+}

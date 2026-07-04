@@ -9,7 +9,8 @@ import std.file : exists;
 import std.format : format;
 import std.stdio : writeln, writefln;
 import std.sumtype : match;
-import std.string : strip, startsWith;
+import std.string : strip, startsWith, join, toStringz, split;
+import std.concurrency;
 
 import argparse : CLI, NamedArgument, PositionalArgument, ArgumentGroup,
     ansiStylingArgument, Command, Description, Required,
@@ -192,43 +193,45 @@ LlmConfigT userToLlmConfig(LlmConfigT, ConfigT)(LlmConfigT llm, ConfigT conf) {
 int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     import std.file : readText;
     import std.stdio : readln, writef, stdout;
-    import llm.rag.embedder : createEmbedder;
     import llm.agent;
     import llm.chat;
-    import llm.config;
-    import llm.query;
-    import llm.rag.rag;
-    import llm.cli : configLinenoise, multiLineConsole;
-    import llm.utility;
-    import llm.metric.monitor : MetricMonitor;
-    import llm.plan;
     import llm.coder;
+    import llm.config;
+    import llm.metric.monitor : MetricMonitor;
     import llm.pipeline : prettyPrint;
-
-    bool debugMode = false;
+    import llm.plan;
+    import llm.query;
+    import llm.rag.embedder : createEmbedder;
+    import llm.rag.rag;
+    import llm.tui;
+    import llm.utility;
+    import llmfun_tui;
 
     /// TODO: If help text ever needs externalization (config file, i18n),
     ///       the function signature should accept a content parameter.
-    void printHelp() {
+    string printHelp() {
         import std.process : environment;
 
         if (environment.get("LLMFUN_NO_SPLASH") || !conf.prompt.empty)
-            return;
+            return null;
 
-        writeln("llmfun agent mode — type a query and press Enter to start.");
-        writeln(" Use /commands for special actions:");
-        writeln("");
-        writeln("   (bare query)       Send a message to the agent");
-        writeln("   /help              Show this help message");
-        writeln("   /quit, /q, /exit   Exit the agent");
-        writeln("   /compact           Force compress the chat history");
-        writeln("   /new               Clear history and start a new conversation");
-        writeln("   /model             List available models");
-        writeln("   /model <index>     Select model by index");
-        writeln("   /model <name>      Select model by exact name (case-insensitive)");
-        writeln("   /plan <query>      Run the plan pipeline");
-        writeln("   /code <query>      Run the coder pipeline");
-        writeln("   /debug             Toggle verbose debug output");
+        string[] s;
+        s ~= "llmfun agent mode - type a query and press Tab to start.";
+        s ~= " Use /commands for special actions:";
+        s ~= "";
+        s ~= "   (bare query)       Send a message to the agent";
+        s ~= "   /help              Show this help message";
+        s ~= "   /quit, /q, /exit   Exit the agent";
+        s ~= "   /stop              Stop processing the currently active query";
+        s ~= "   /compact           Force compress the chat history";
+        s ~= "   /new               Clear history and start a new conversation";
+        s ~= "   /model             List available models";
+        s ~= "   /model <index>     Select model by index";
+        s ~= "   /model <name>      Select model by exact name (case-insensitive)";
+        s ~= "   /plan <query>      Run the plan pipeline";
+        s ~= "   /code <query>      Run the coder pipeline";
+        s ~= "   /debug             Toggle verbose debug output";
+        return s.join("\n");
     }
 
     if (conf.setupDirs)
@@ -258,140 +261,194 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     agent.setSystemPrompt(systemPrompt);
     agent.loadHistory(agentHistory);
 
+    const bool oneShotQuery = !conf.prompt.empty;
+    Tid uiTid;
+
+    void addChatMessage(Args...)(string msg, Args args) {
+        msg = format(msg, args);
+        if (oneShotQuery) {
+            writeln(msg);
+        } else {
+            send(uiTid, UiChatMessage(msg));
+        }
+    }
+
     void progressCallback(size_t currentChunk, size_t totalChunks, string status) {
-        displayProgress(currentChunk, totalChunks, status);
+        send(uiTid, UiChatMessage(format!"Compressing... %s/%s : %s"(currentChunk,
+                totalChunks, status)));
     };
+
     void doCompress(ref Agent agent, bool force) {
         if (!agent.needCompression && !force)
             return;
-        logger.info("Compressing chat...");
         const ctxUsed = agent.contextUsed;
+        send(uiTid, UiAgentBusy.init);
         auto res = agent.compress(force: force, callback: &progressCallback);
-        displayCompressionResult(res.compressed, res.originalLength, res.newLength,
-                res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize);
+        send(uiTid, UiChatMessage(compressionResultToString(res.compressed, res.originalLength,
+                res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize)));
+        send(uiTid, UiAgentReady.init);
+    }
+
+    void processChatMessage(Chat.MessageT m, bool printUser) {
+        m.match!((Message a) {
+            if (!a.role.among(Role.user, Role.system) || (printUser && a.role != Role.system)) {
+                addChatMessage("[%s]: %s", a.role, a.content);
+            } else {
+                logger.tracef("[%s]: %s", a.role, a.content);
+            }
+        }, (ToolMessage a) {
+            if (!isHiddenToolCall(a.toolCalls)) {
+                addChatMessage("%s", summarizeToolCalls(a.role, a.toolCalls));
+            }
+        }, (ToolResponse a) {
+            if (!isHiddenToolResponse(a.toolName)) {
+                addChatMessage("[%s %-s]: %s", a.role, a.toolName,
+                    a.content.length < 100 ? a.content : a.content[0 .. 100]);
+            }
+        }, (VisionMessage a) {
+            addChatMessage("[user]: %s (with image)", a.content);
+        });
     }
 
     void processResult(ProcessResult result) {
         foreach (m; result.chat) {
-            m.match!((Message a) {
-                if (!a.role.among(Role.user, Role.system)) {
-                    writefln("[%s]: %s", a.role, a.content);
-                } else {
-                    logger.tracef("[%s]: %s", a.role, a.content);
-                }
-            }, (ToolMessage a) {
-                if (!isHiddenToolCall(a.toolCalls)) {
-                    writefln("[%s %s/%s %s", a.role, agent.contextUsed,
-                        agent.contextSize, summarizeToolCalls(a.role, a.toolCalls));
-                }
-            }, (ToolResponse a) {
-                if (!isHiddenToolResponse(a.toolName)) {
-                    writefln("[%s %s/%s tool:%-s]: %s", a.role, agent.contextUsed,
-                        agent.contextSize, a.toolName, a.content.length < 100
-                        ? a.content : a.content[0 .. 100]);
-                }
-            }, (VisionMessage a) {
-                writefln("[user]: %s (with image)", a.content);
-            });
+            processChatMessage(m, printUser: false);
         }
         agent.saveHistory(agentHistory);
         logger.trace(result.status != ProcessResult.Status.ok, result.status);
     }
 
-    printHelp();
+    void setStatusText(bool readyState) {
+        auto status = format!"Context: %s/%s tokens | Model: '%s' | %s"(agent.contextUsed,
+                agent.contextSize, llmConf.activeModelName(), readyState ? "Ready" : "Busy");
+        send(uiTid, UiStatusText(status));
+    }
 
-    configCatchCtrlC();
-    bool running = conf.prompt.empty;
-    string query = conf.prompt;
-    auto linenoiseHistory = llmConf.scratchArea.exists
-        ? llmConf.scratchArea ~ Path("cli_history.txt") : Path.init;
-    configLinenoise(historyFile: linenoiseHistory, len: 50000); // TODO: make history size configurable
-    do {
-        if (running) {
-            playNotification;
-            query = multiLineConsole(prompt: format!"[%s/%s %s]$ "(agent.contextUsed,
-                    agent.contextSize, llmConf.activeModelName()), historyFile: linenoiseHistory);
-            clearInterruptSignal();
-            if (query.among("/quit", "/q", "/exit")) {
-                break;
-            } else if (query == "/compact") {
-                doCompress(agent, force: true);
-                continue;
-            } else if (query == "/new") {
-                agent.clearHistory;
-                logger.info("context cleared");
-                continue;
-            } else if (query == "/help") {
-                printHelp();
-                continue;
-            } else if (query == "/debug") {
-                debugMode = !debugMode;
-                logger.globalLogLevel = debugMode ? logger.LogLevel.trace : logger.LogLevel.info;
-                logger.infof("Debug output: %s", debugMode ? "ON" : "OFF");
-                continue;
-            } else if (query == "/model" || query.startsWith("/model ")) {
-                auto arg = query == "/model" ? "" : query["/model ".length .. $].strip();
-                if (arg.empty) {
-                    writeln("Available models:");
-                    foreach (i, model; llmConf.codeModels) {
-                        auto activeMarker = (i == cast(size_t) llmConf.activeCodeModelIndex) ? " [active]"
-                            : "";
-                        writefln("  %s  %s%s", i, model.name, activeMarker);
+    enum AgentStatus {
+        active,
+        terminate,
+    }
+
+    bool debugMode = false;
+
+    AgentStatus runAgent(string query) {
+        if (query.among("/quit", "/q", "/exit")) {
+            return AgentStatus.terminate;
+        } else if (query == "/compact") {
+            doCompress(agent, force: true);
+            return AgentStatus.active;
+        } else if (query == "/new") {
+            agent.clearHistory;
+            send(uiTid, UiClearChat.init);
+            return AgentStatus.active;
+        } else if (query == "/help") {
+            addChatMessage(printHelp());
+            return AgentStatus.active;
+        } else if (query == "/debug") {
+            debugMode = !debugMode;
+            send(uiTid, UiLogFile(debugMode));
+            logger.globalLogLevel = debugMode ? logger.LogLevel.trace : logger.LogLevel.info;
+            addChatMessage("Debug output: %s", debugMode ? "ON" : "OFF");
+            return AgentStatus.active;
+        } else if (query == "/model" || query.startsWith("/model ")) {
+            auto arg = query == "/model" ? "" : query["/model ".length .. $].strip();
+            if (arg.empty) {
+                auto m = "Available models:";
+                foreach (i, model; llmConf.codeModels) {
+                    auto activeMarker = (i == cast(size_t) llmConf.activeCodeModelIndex) ? " [active]"
+                        : "";
+                    m ~= format("  %s  %s%s\n", i, model.name, activeMarker);
+                }
+                m ~= "Use /model <index> or /model <name> to switch.";
+                addChatMessage(m);
+            } else {
+                const oldModel = llmConf.activeCodeModel.name;
+                // Try to switch model
+                bool switched;
+                size_t idx = ifThrown(arg.to!long, -1);
+                if (idx >= 0) {
+                    switched = llmConf.selectModelByIndex(idx);
+                    if (!switched) {
+                        addChatMessage("error: Invalid model index '%s'. Valid indices: 0-%s.",
+                                arg, llmConf.codeModels.length - 1);
                     }
-                    writeln();
-                    writeln("Use /model <index> or /model <name> to switch.");
                 } else {
-                    const oldModel = llmConf.activeCodeModel.name;
-                    // Try to switch model
-                    bool switched;
-                    size_t idx = ifThrown(arg.to!long, -1);
-                    if (idx >= 0) {
-                        switched = llmConf.selectModelByIndex(idx);
-                        if (!switched) {
-                            logger.errorf("Error: Invalid model index '%s'. Valid indices: 0-%s.",
-                                    arg, llmConf.codeModels.length - 1);
-                        }
-                    } else {
-                        auto result = llmConf.selectModelByName(arg);
-                        switched = result.empty;
-                        logger.warningf(!result.empty, "failed to switch model: ", result);
-                    }
-                    if (switched) {
-                        agent.resetModel(llmConf.activeCodeModel());
-                        logger.infof("switched to model: %s", llmConf.activeModelName());
-                        logger.infof("Agent model reset: %s -> %s, context: %s",
-                                oldModel, agent.modelName, agent.modelContextSize);
-                    }
+                    auto result = llmConf.selectModelByName(arg);
+                    switched = result.empty;
+                    if (result.empty)
+                        addChatMessage("failed to switch model: %s", result);
                 }
-                continue;
-            } else if (query.startsWith("/plan ")) {
-                auto q = query["/plan ".length .. $];
-                logger.infof("Running plan pipeline: %s", q);
-                auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
-                    return isInterruptTriggered;
-                }, llmConf.toolFilter.to());
-                writeln(prettyPrint(result));
-                continue;
-            } else if (query.startsWith("/code ")) {
-                auto q = query["/code ".length .. $];
-                logger.infof("Running coder pipeline: %s", q);
-                auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
-                    return isInterruptTriggered;
-                }, llmConf.toolFilter.to());
-                if (result.wasInterrupted) {
-                    writeln("\nPipeline interrupted by user.");
-                    continue;
+                if (switched) {
+                    agent.resetModel(llmConf.activeCodeModel());
+                    addChatMessage("switched to model: %s\nAgent model reset: %s -> %s, context: %s",
+                            llmConf.activeModelName(), oldModel,
+                            agent.modelName, agent.modelContextSize);
                 }
-                writeln(prettyPrint(result));
-                continue;
-            } else if (query.empty) {
-                continue;
             }
+            return AgentStatus.active;
+        } else if (query.startsWith("/plan ")) {
+            auto q = query["/plan ".length .. $];
+            addChatMessage("Running plan pipeline: %s", q);
+            auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
+                return isInterruptTriggered;
+            }, llmConf.toolFilter.to());
+            addChatMessage(prettyPrint(result));
+            return AgentStatus.active;
+        } else if (query.startsWith("/code ")) {
+            auto q = query["/code ".length .. $];
+            addChatMessage("Running coder pipeline: %s", q);
+            auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
+                return isInterruptTriggered;
+            }, llmConf.toolFilter.to());
+            if (result.wasInterrupted) {
+                addChatMessage("Pipeline interrupted by user.");
+                return AgentStatus.active;
+            }
+            addChatMessage(prettyPrint(result));
+            return AgentStatus.active;
+        } else if (query.empty) {
+            return AgentStatus.active;
         }
         agent.addUserQuery(query);
         doCompress(agent, force: false);
         auto result = agent.runToCompletion(&processResult, compressCallback: &progressCallback,
-                interrupt: () { return isInterruptTriggered; });
+                interrupt: () { return isStopAgentTriggered; });
+        return AgentStatus.active;
+    }
+
+    if (oneShotQuery) {
+        runAgent(conf.prompt);
+        return 0;
+    }
+
+    uiTid = spawn(&spawnUserInterface, thisTid);
+    send(uiTid, UiSetIniFile(llmConf.scratchArea ~ "imgui.ini"));
+
+    foreach (m; agent.chat.getMessages()) {
+        processChatMessage(m, printUser: true);
+    }
+    addChatMessage(printHelp());
+
+    bool running = true;
+    do {
+        setStatusText(true);
+        receive((UiUserQuery a) {
+            auto query = a.query.strip;
+            if (!query.empty) {
+                addChatMessage(query);
+                send(uiTid, UiAgentBusy.init);
+                clearStopAgent();
+                setStatusText(false);
+                final switch (runAgent(query)) {
+                case AgentStatus.active:
+                    break;
+                case AgentStatus.terminate:
+                    send(uiTid, UiTerminate.init);
+                    break;
+                }
+                send(uiTid, UiAgentReady.init);
+            }
+        }, (UiTerminated _) { running = false; });
     }
     while (running);
 
