@@ -281,7 +281,7 @@ void renderTabChat(TuiState& state, Log& log) {
         ImGui::EndChild();
     };
 
-    auto inputHistory = [&state = state.userQuery, &log, &io](bool isPageUp, bool isPageDown) {
+    auto inputHistory = [&state = state.userQuery, &log, &io](bool isPageDown, bool isPageUp) {
         if (state.inputHistory.empty()) {
             return;
         }
