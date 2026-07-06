@@ -20,7 +20,7 @@
 - change the behavior of loading a .llmfun.json from the current directory if it exist to only doing it if the project is trusted
 - before writing a file check that the file isn't inside a tree of symlinks from the workarea and up
 - a memory file that is written should have a date when it was updated. Even better if each section in it that is changed have a date. This is to enhance the LLM's capability to reason about the "age" of the data if it gets conflicting data from different sources.
-- different colors should be used for tool calls, tool response, user and assistant messages.
+
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -32,6 +32,8 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 
 # ui
 - change the background color for the input field to dark grey
+- show the thinking message as a "folded" sub header in CollapsingHeader chat log
+- support streaming of queries
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
