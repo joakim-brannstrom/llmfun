@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -11,10 +12,60 @@
 #include "imtui/imtui.h"
 
 namespace llmfun::tui {
+inline ImVec4 lighten(ImVec4 color, float amount) {
+    return ImVec4(std::min(color.x + amount, 1.0f), std::min(color.y + amount, 1.0f),
+                  std::min(color.z + amount, 1.0f), color.w);
+}
+
+// Internal C++ enum mirroring the C TuiChatMessageType.
+enum class ChatMessageType : uint8_t {
+    User = 0,
+    Assistant = 1,
+    ToolCall = 2,
+    ToolResponse = 3,
+    Count = 4 // Sentinel — not a valid type
+    // Reserved future values: Vision = 4, System = 5
+};
+
+// Color configuration for each chat message type.
+// Default values match the colorblind-safe palette from initializeDefaultColors().
+struct ChatMessageStyle {
+    // User message colors (Sky Blue)
+    ImVec4 userColor = ImVec4(0.45f, 0.70f, 0.90f, 1.00f);
+    ImVec4 userColorHover;
+    ImVec4 userColorActive;
+    // Assistant message colors (Soft Green)
+    ImVec4 assistantColor = ImVec4(0.55f, 0.85f, 0.55f, 1.00f);
+    ImVec4 assistantColorHover;
+    ImVec4 assistantColorActive;
+    // ToolCall message colors (Warm Orange)
+    ImVec4 toolCallColor = ImVec4(0.95f, 0.70f, 0.30f, 1.00f);
+    ImVec4 toolCallColorHover;
+    ImVec4 toolCallColorActive;
+    // ToolResponse message colors (Dark Warm Orange)
+    ImVec4 toolResponseColor = ImVec4(0.95f, 0.59, 0.40, 1.00f);
+    ImVec4 toolResponseColorHover;
+    ImVec4 toolResponseColorActive;
+
+    ChatMessageStyle() {
+        userColorHover = lighten(userColor, 0.10f);
+        userColorActive = lighten(userColor, 0.15f);
+
+        assistantColorHover = lighten(assistantColor, 0.10f);
+        assistantColorActive = lighten(assistantColor, 0.15f);
+
+        toolCallColorHover = lighten(toolCallColor, 0.10f);
+        toolCallColorActive = lighten(toolCallColor, 0.15f);
+
+        toolResponseColorHover = lighten(toolResponseColor, 0.10f);
+        toolResponseColorActive = lighten(toolResponseColor, 0.15f);
+    }
+};
 
 struct ChatMessage {
     std::string summary;
     std::string text;
+    ChatMessageType type = ChatMessageType::Assistant;
 };
 
 struct LogMessage {
@@ -62,7 +113,12 @@ struct TuiState {
 
     // Status line text
     std::string statusText;
+    // Color configuration for chat message headers
+    ChatMessageStyle chatStyle;
 };
+
+/// Initialize chat message header colors to colorblind-safe defaults.
+void initializeDefaultColors(ChatMessageStyle& style);
 
 /// Initialize terminal and create TScreen.
 /// Returns true on success, false on failure.

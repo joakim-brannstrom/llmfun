@@ -204,12 +204,17 @@ void tuiAddLogMessage(TuiState* state, String summary, String text) {
     ::llmfun::tui::tuiAddLogMessage(*state->inner, ::llmfun::tui::LogMessage{summary_, text_});
 }
 
-void tuiAddChatMessage(TuiState* state, String summary, String text) {
+void tuiAddChatMessage(TuiState* state, String summary, String text, TuiChatMessageType type) {
     if (!state || !state->inner)
         return;
+    if (type < 0 || type >= TuiChatMessageType_Count) {
+        type = TuiChatMessageType_Assistant;
+    }
     std::string summary_(summary.data ? summary.data : "", summary.len);
     std::string text_(text.data ? text.data : "", text.len);
-    ::llmfun::tui::tuiAddOutputLine(*state->inner, ::llmfun::tui::ChatMessage{summary_, text_});
+    auto cppType = static_cast<::llmfun::tui::ChatMessageType>(type);
+    ::llmfun::tui::tuiAddOutputLine(*state->inner,
+                                    ::llmfun::tui::ChatMessage{summary_, text_, cppType});
 }
 
 void tuiClearChatMessages(TuiState* state) {

@@ -134,11 +134,11 @@ struct TextUserInterface {
         tuiShutdown(tuiScreen);
     }
 
-    void addChatMessage(string msg) {
+    void addChatMessage(string msg, TuiChatMessageType type) {
         string summary = shortSummary(msg);
         auto s = String(summary.ptr, summary.length);
         auto q = String(msg.ptr, msg.length);
-        tuiAddChatMessage(tuiState, s, q);
+        tuiAddChatMessage(tuiState, s, q, type);
     }
 
     void clearChat() {
@@ -221,6 +221,7 @@ struct UiSetIniFile {
 
 struct UiChatMessage {
     string msg;
+    TuiChatMessageType type = TuiChatMessageType_Assistant;
 }
 
 struct UiClearChat {
@@ -262,7 +263,7 @@ void spawnUserInterface(Tid ownerTid) {
     do {
         receiveTimeout(10.dur!"msecs", (UiShutdown _) { running = false; }, (UiSetIniFile a) {
             ui.setIniFile(a.path);
-        }, (UiChatMessage a) { ui.addChatMessage(a.msg); }, (UiClearChat _) {
+        }, (UiChatMessage a) { ui.addChatMessage(a.msg, a.type); }, (UiClearChat _) {
             ui.clearChat;
         }, (UiStatusText a) { ui.setStatusText(a.status); }, (UiLogFile a) {
             ui.useUiLogFile(a.useFile);

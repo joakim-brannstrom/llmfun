@@ -35,6 +35,22 @@ extern "C" {
 
 #define TUI_API_VERSION 1
 
+/* TuiChatMessageType — Pure C enum for chat message types.
+ * Used to color-code chat message headers in the TUI.
+ * Values mirror the C++ ChatMessageType enum in tui.h.
+ *
+ * Reserved future values:
+ *   Vision   = 4  (for image/multimodal messages)
+ *   System   = 5  (for system/instruction messages)
+ */
+typedef enum TuiChatMessageType {
+    TuiChatMessageType_User = 0,
+    TuiChatMessageType_Assistant = 1,
+    TuiChatMessageType_ToolCall = 2,
+    TuiChatMessageType_ToolResponse = 3,
+    TuiChatMessageType_Count = 4 /* Sentinel — not a valid type */
+} TuiChatMessageType;
+
 /* String — Plain old data struct representing a string slice.
  * No constructors, no destructors, no hidden state. Trivially copyable.
  *
@@ -199,16 +215,19 @@ void tuiSetIniFilename(TuiState* state, String filename);
  */
 void tuiAddLogMessage(TuiState* state, String summary, String text);
 
-/* Append a line to the scrollable output display area.
+/* Append a chat message to the scrollable output display area.
  *
  * The output area has a maximum capacity (10000 lines). When exceeded, the
- * oldest lines are evicted first (FIFO). The `line` parameter is an inbound
- * String — its data is copied internally, so the caller's buffer can be
- * freed or reused immediately after this call returns.
+ * oldest lines are evicted first (FIFO). The `summary` and `text` parameters
+ * are inbound Strings — their data is copied internally, so the caller's
+ * buffers can be freed or reused immediately after this call returns.
+ *
+ * The `type` parameter specifies the message type (User, Assistant, ToolCall,
+ * ToolResponse) and is used to color-code the message header in the TUI.
  *
  * Null-safe: no-op if state is NULL.
  */
-void tuiAddChatMessage(TuiState* state, String summary, String text);
+void tuiAddChatMessage(TuiState* state, String summary, String text, TuiChatMessageType type);
 
 /* Clear all lines from the output display area.
  *

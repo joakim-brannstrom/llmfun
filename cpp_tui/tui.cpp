@@ -71,6 +71,54 @@ bool isWhitespaceOnly(const std::string& s) {
 
 size_t countNewLines(const std::string& str) { return std::count(str.begin(), str.end(), '\n'); }
 
+struct StyleColorGuard {
+private:
+    int count;
+
+public:
+    explicit StyleColorGuard(int n) : count(n) {}
+    ~StyleColorGuard() { pop(); }
+
+    void pop() {
+        for (int i = 0; i < count; ++i) {
+            ImGui::PopStyleColor();
+        }
+        count = 0;
+    }
+
+    StyleColorGuard(const StyleColorGuard&) = delete;
+    StyleColorGuard& operator=(const StyleColorGuard&) = delete;
+    StyleColorGuard(StyleColorGuard&&) = delete;
+    StyleColorGuard& operator=(StyleColorGuard&&) = delete;
+};
+
+// Number of ImGui style colors pushed per header
+static constexpr int HEADER_COLOR_COUNT = 4;
+
+struct HeaderColors {
+    ImVec4 base;
+    ImVec4 hovered;
+    ImVec4 active;
+};
+
+static HeaderColors getHeaderColors(ChatMessageType type, const ChatMessageStyle& style) {
+    switch (type) {
+    case ChatMessageType::User:
+        return {style.userColor, style.userColorHover, style.userColorActive};
+    case ChatMessageType::Assistant:
+        return {style.assistantColor, style.assistantColorHover, style.assistantColorActive};
+    case ChatMessageType::ToolCall:
+        return {style.toolCallColor, style.toolCallColorHover, style.toolCallColorActive};
+    case ChatMessageType::ToolResponse:
+        return {style.toolResponseColor, style.toolResponseColorHover,
+                style.toolResponseColorActive};
+    default:
+        // Neutral white fallback for unknown types
+        return {ImVec4(0.90f, 0.90f, 0.90f, 1.00f), ImVec4(0.95f, 0.95f, 0.95f, 1.00f),
+                ImVec4(1.00f, 1.00f, 1.00f, 1.00f)};
+    }
+}
+
 void tuiAddLogMessage(TuiState& state, const LogMessage& msg) {
     state.logMessages.push_back(msg);
     if (state.logMessages.size() > state.MaxLogMessages) {
@@ -225,17 +273,26 @@ void renderTabChat(TuiState& state, Log& log) {
                     ? ImGuiTreeNodeFlags_DefaultOpen
                     : ImGuiTreeNodeFlags_None;
 
-            auto s = state.outputLines[i].summary;
+            const auto& entry = state.outputLines[i];
+            auto s = entry.summary;
             s.append("##");
             s.append(std::to_string(i));
+
+            const auto& colors = getHeaderColors(entry.type, state.chatStyle);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Header, colors.base);
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, colors.hovered);
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, colors.active);
+            StyleColorGuard guard{HEADER_COLOR_COUNT};
             if (ImGui::CollapsingHeader(s.c_str(), flags)) {
+                guard.pop();
                 ImGui::PushTextWrapPos(DisplaySize.x - 4);
-                ImGui::TextUnformatted(state.outputLines[i].text.c_str());
+                ImGui::TextUnformatted(entry.text.c_str());
                 ImGui::PopTextWrapPos();
 
                 std::string buttonId = " [c] ##" + std::to_string(i);
                 if (ImGui::Button(buttonId.c_str())) {
-                    ImGui::SetClipboardText(state.outputLines[i].text.c_str());
+                    ImGui::SetClipboardText(entry.text.c_str());
                     ImGui::SetTooltip("Copied");
                 } else if (ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
