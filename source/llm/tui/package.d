@@ -1,6 +1,6 @@
 module llm.tui;
 
-import std.algorithm : filter;
+import std.algorithm : filter, among;
 import std.array : appender, Appender, empty, array;
 import std.logger;
 import std.concurrency;
@@ -17,7 +17,7 @@ string toString(String s) {
     if (s.len == 0)
         return null;
     auto r = s.data[0 .. s.len].idup;
-    while (!r.empty && r[$ - 1] == '\0') {
+    while (!r.empty && r[$ - 1].among('\0', '\n')) {
         r = r[0 .. $ - 1];
     }
     return r;
