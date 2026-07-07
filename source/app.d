@@ -329,17 +329,26 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         });
     }
 
+    double lastTokensPerSecond = 0.0;
     void processResult(ProcessResult result) {
         foreach (m; result.chat) {
             processChatMessage(m, printUser: false);
         }
         agent.saveHistory(agentHistory);
-        logger.trace(result.status != ProcessResult.Status.ok, result.status);
+        logger.trace(result.status != ProcessResult.Status.ok, result);
+
+        try {
+            if (auto t = "predicted_per_second" in result.timing)
+                lastTokensPerSecond = t.floating;
+        } catch (Exception e) {
+            logger.trace("Failed to extract predicted_per_second: ", e.msg);
+        }
     }
 
     void setStatusText(bool readyState) {
-        auto status = format!"Context: %s/%s tokens | Model: '%s' | %s"(agent.contextUsed,
-                agent.contextSize, llmConf.activeModelName(), readyState ? "Ready" : "Busy");
+        auto status = format!"Context: %s/%s tokens | %.1f tok/s | Model: '%s' | %s"(
+                agent.contextUsed, agent.contextSize,
+                lastTokensPerSecond, llmConf.activeModelName(), readyState ? "Ready" : "Busy");
         send(uiTid, UiStatusText(status));
     }
 

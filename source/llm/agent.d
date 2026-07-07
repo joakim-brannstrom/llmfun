@@ -155,7 +155,7 @@ class Agent : IBasicAgent {
                     return;
                 }
                 rval.status = parseResponse(j);
-                if (auto a = "timing" in j)
+                if (auto a = "timings" in j)
                     rval.timing = *a;
                 if (auto a = "usage" in j) {
                     rval.usage = *a;
