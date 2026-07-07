@@ -303,13 +303,14 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             }
         }, (ToolMessage a) {
             if (!isHiddenToolCall(a.toolCalls)) {
-                addChatMessage("%s", TuiChatMessageType_ToolCall,
-                    summarizeToolCalls(a.role, a.toolCalls));
+                auto calls = summarizeToolCalls(a.toolCalls);
+                addChatMessage("[tool calls %s]: %(%-s\n%)",
+                    TuiChatMessageType_ToolCall, calls.length, calls);
             }
         }, (ToolResponse a) {
             if (!isHiddenToolResponse(a.toolName)) {
-                addChatMessage("[%s %-s]: %s", TuiChatMessageType_ToolResponse, a.role,
-                    a.toolName, a.content.length < 100 ? a.content : a.content[0 .. 100]);
+                addChatMessage("[tool result %-s]: %s", TuiChatMessageType_ToolResponse,
+                    a.toolName, summarizeToolResponse(a, 100));
             }
         }, (VisionMessage a) {
             addChatMessage("[user]: %s (with image)", TuiChatMessageType_User, a.content);

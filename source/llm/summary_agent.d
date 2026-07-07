@@ -40,7 +40,7 @@ struct SummaryAgent {
         foreach (i, msg; messages) {
             auto content = msg.match!((Message m) => format!("%s: %s")(m.role.to!string,
                     m.content), (ToolMessage m) => format!("%s: tool_calls=[%s]")(m.role.to!string,
-                    summarizeToolCalls(m.role, m.toolCalls)), (ToolResponse m) => format!("%s: %s")(m.role.to!string,
+                    summarizeToolCalls(m.toolCalls)), (ToolResponse m) => format!("%s: %s")(m.role.to!string,
                     m.content.length < MaxToolResponse ? m.content : m.content[0 .. MaxToolResponse]),
                     (VisionMessage m) => "user: " ~ m.content ~ " [image]");
             buf.put(content);
@@ -253,8 +253,10 @@ struct SummaryAgent {
 
     /// Estimate token count of a message (role + content)
     long estimateTokens(Chat.MessageT msg) {
+        import std.string : join;
+
         auto text = msg.match!((Message m) => m.role.to!string ~ ": " ~ m.content,
-                (ToolMessage m) => summarizeToolCalls(m.role, m.toolCalls),
+                (ToolMessage m) => summarizeToolCalls(m.toolCalls).join('\n'),
                 (ToolResponse m) => m.role.to!string ~ ": " ~ m.content,
                 (VisionMessage m) => "user: " ~ m.content ~ " [image]");
         return cast(long) text.length / ApproxTokenSize;
@@ -271,11 +273,13 @@ struct SummaryAgent {
     /// Summarize a single oversized message to fit within TokenBudget.
     /// Returns the original message if summarization fails.
     Chat.MessageT summarizeSingleMessage(Chat.MessageT msg) {
+        import std.string : join;
+
         // Extract content from the message
         string content;
         Role role;
         msg.match!((Message m) { content = m.content; role = m.role; }, (ToolMessage m) {
-            content = summarizeToolCalls(m.role, m.toolCalls);
+            content = summarizeToolCalls(m.toolCalls).join('\n');
             role = m.role;
         }, (ToolResponse m) { content = m.content; role = m.role; }, (VisionMessage m) {
             content = m.content;

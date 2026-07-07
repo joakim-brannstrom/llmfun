@@ -9,7 +9,7 @@ import std.stdio : writef, stdout;
 
 import my.path;
 
-import llm.chat : Role;
+import llm.chat : Role, ToolResponse;
 
 /// Approximate number of characters per token. Used for estimating token counts from string lengths.
 immutable ApproxTokenSize = 2;
@@ -44,45 +44,82 @@ string compressionResultToString(bool compressed, size_t originalLength,
     return null;
 }
 
-string summarizeToolCalls(Role role, JSONValue calls) {
-    const errorMsg = format!"%s: Wants to run: <unknown>"(role);
-    if (calls.type != JSONType.array || calls.array.empty)
-        return errorMsg;
-    auto call = calls.array[0];
-    if ("function" !in call)
-        return errorMsg;
-    call = call["function"];
+string summarizeToolResponse(ToolResponse msg, size_t maxLength) {
+    auto content = msg.content;
 
-    auto buf = appender!string();
-
-    formattedWrite(buf, "%s: run: %s(", role, call["name"]);
-
-    // Extract only key arguments, NOT full content
     try {
-        auto args = parseJSON(call["arguments"].str);
-        string[] params;
-        foreach (key, value; args.object) {
+        auto j = parseJSON(msg.content);
+        bool foundContent;
+
+        // only decode and use the value of content if it is the only key.
+        foreach (key, value; j.object) {
+            if (foundContent) {
+                content = msg.content;
+                break;
+            }
+
             if (key == "content") {
-                auto contentStr = value.toString;
-                if (contentStr.length > 80) {
-                    params ~= format("content='%.80s...' (%d chars)", contentStr, contentStr.length);
-                } else {
-                    params ~= format("content='%s'", contentStr);
-                }
-            } else {
-                params ~= format("%s=%s", key, value);
+                content = value.str;
+                foundContent = true;
             }
         }
-
-        // Sort parameters by length so shortest (most visible) come first
-        sort!("a.length < b.length")(params);
-        buf.put(params.join(", "));
     } catch (Exception e) {
-        logger.trace("summary failed, should not happen: ", e.msg);
-        return format!"%s: Wants to run: %s"(role, call["name"]);
     }
-    buf.put(")");
-    return buf[];
+
+    return content.length < maxLength ? content : format("%s... (%d chars)",
+            content[0 .. maxLength], content.length);
+}
+
+string[] summarizeToolCalls(JSONValue calls) {
+    const errorMsg = "Wants to run: <unknown>";
+    if (calls.type != JSONType.array || calls.array.empty)
+        return [errorMsg];
+
+    string process(JSONValue call) {
+        try {
+            if ("function" !in call)
+                return errorMsg;
+            call = call["function"];
+
+            auto buf = appender!string();
+
+            formattedWrite(buf, "%-s(", call["name"].str);
+
+            // Extract only key arguments
+            auto args = parseJSON(call["arguments"].str);
+            string[] params;
+            foreach (key, value; args.object) {
+                auto valueStr = value.toString;
+                if (valueStr.length > 80) {
+                    valueStr = format("'%.80s...' (%d chars)", valueStr, valueStr.length);
+                }
+                params ~= format("%s=%s", key, valueStr);
+            }
+
+            // Sort parameters by length so shortest (most visible) come first
+            params = sort!("a.length < b.length")(params).array;
+            bool isFirst = true;
+            foreach (p; params) {
+                if (!isFirst)
+                    buf.put(", ");
+                buf.put(p);
+                isFirst = false;
+            }
+            buf.put(")");
+            return buf[];
+        } catch (Exception e) {
+            logger.trace("summary failed, should not happen: ", e.msg);
+            return "Wants to run: <unknown>";
+        }
+    }
+
+    auto rval = appender!(string[])();
+    foreach (call; calls.array) {
+        rval.put(process(call));
+    }
+    logger.trace(rval[]);
+
+    return rval[];
 }
 
 void configCatchCtrlC() {
