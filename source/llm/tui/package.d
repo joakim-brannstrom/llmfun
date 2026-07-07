@@ -1,5 +1,6 @@
 module llm.tui;
 
+import logger = std.logger;
 import std.algorithm : filter, among;
 import std.array : appender, Appender, empty, array;
 import std.logger;
@@ -23,19 +24,32 @@ string toString(String s) {
     return r;
 }
 
-string shortSummary(string msg) {
+string shortSummary(string msg) nothrow {
+    import std.algorithm : until;
+    import std.ascii : isASCII, isAlphaNum, isWhite;
+    import std.exception : collectException;
     import std.range : take;
-    import std.string : split, strip;
-    import std.uni : byCodePoint, byGrapheme, isWhite, Grapheme;
-    import std.uni : isAlphaNum, isWhite;
-    import std.utf : toUTF8;
+    import std.string : strip;
+    import std.uni : byCodePoint, byGrapheme, Grapheme;
+    import std.utf : toUTF8, UTFException;
 
-    immutable hash = Grapheme('#');
+    try {
+        immutable hash = Grapheme('#');
+        immutable newline = Grapheme('\n');
 
-    auto tmp = msg.split('\n');
-    if (!tmp.empty)
-        msg = tmp[0].strip;
-    return msg.byGrapheme.filter!(a => a != hash).take(100).byCodePoint.toUTF8.strip;
+        return msg.byGrapheme
+            .filter!(a => a != hash)
+            .until!(a => a == newline)
+            .take(100).byCodePoint.toUTF8.strip;
+    } catch (UTFException e) {
+    } catch (Exception e) {
+        logger.tracef("this should not happen: %s", e.msg).collectException;
+    }
+
+    return cast(string)(cast(const(ubyte[])) msg).filter!(a => a.isASCII)
+        .filter!(a => (a.isAlphaNum || a.isWhite))
+        .until!(a => a == '\n')
+        .take(100).array;
 }
 
 class TuiLogger : Logger {
@@ -261,25 +275,31 @@ void spawnUserInterface(Tid ownerTid) {
     ui.setUiAsStdLogger;
     bool running = true;
     do {
-        receiveTimeout(10.dur!"msecs", (UiShutdown _) { running = false; }, (UiSetIniFile a) {
-            ui.setIniFile(a.path);
-        }, (UiChatMessage a) { ui.addChatMessage(a.msg, a.type); }, (UiClearChat _) {
-            ui.clearChat;
-        }, (UiStatusText a) { ui.setStatusText(a.status); }, (UiLogFile a) {
-            ui.useUiLogFile(a.useFile);
-        }, (UiTerminate _) { running = false; }, (UiAgentBusy _) {
-            ui.setReadyStatus(false);
-        }, (UiAgentReady _) { ui.setReadyStatus(true); });
+        try {
+            receiveTimeout(10.dur!"msecs", (UiShutdown _) { running = false; }, (UiSetIniFile a) {
+                ui.setIniFile(a.path);
+            }, (UiChatMessage a) { ui.addChatMessage(a.msg, a.type); }, (UiClearChat _) {
+                ui.clearChat;
+            }, (UiStatusText a) { ui.setStatusText(a.status); }, (UiLogFile a) {
+                ui.useUiLogFile(a.useFile);
+            }, (UiTerminate _) { running = false; }, (UiAgentBusy _) {
+                ui.setReadyStatus(false);
+            }, (UiAgentReady _) { ui.setReadyStatus(true); });
 
-        ui.render();
-        auto query = ui.userQuery;
-        if (!query.strip.empty) {
-            if (query == "/stop") {
-                stopAgent();
-                ui.setStatusText("Stopping agent");
-            } else {
-                send(ownerTid, UiUserQuery(query));
+            ui.render();
+            auto query = ui.userQuery;
+            if (!query.strip.empty) {
+                if (query == "/stop") {
+                    stopAgent();
+                    ui.setStatusText("Stopping agent");
+                } else {
+                    send(ownerTid, UiUserQuery(query));
+                }
             }
+
+        } catch (Exception e) {
+            logger.trace(e);
+            logger.warning(e.msg);
         }
     }
     while (running);
