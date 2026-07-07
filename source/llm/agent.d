@@ -395,9 +395,12 @@ private:
             foreach (choice; resp["choices"].array) {
                 try {
                     auto msg = choice["message"];
-                    string content = getValue(msg, (v) => msg["content"].str, "");
-                    if (!content.empty)
-                        chat.add(Message(Role.assistant, content));
+                    string content = getValue(msg, (v) => v["content"].str, "");
+                    string thinking = getValue(msg, (v) => v["reasoning_content"].str, "");
+
+                    if (!content.empty || !thinking.empty) {
+                        chat.add(Message(Role.assistant, content, thinking));
+                    }
                     if (auto calls = getValue(msg, (v) => v["tool_calls"].array, null)) {
                         try {
                             handleToolCalls(calls);
@@ -407,7 +410,7 @@ private:
                     if (auto reason = getValue(choice, (v) => v["finish_reason"].str, null)) {
                         if (reason == "length")
                             return ProcessResult.Status.needCompression;
-                        if (reason == "stop" && content.empty)
+                        if (reason == "stop" && content.empty && thinking.empty)
                             return ProcessResult.Status.needMoreThinking;
                     }
                 } catch (Exception e) {

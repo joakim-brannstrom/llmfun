@@ -113,7 +113,7 @@ struct Chat {
                     if ("tool_calls" in entry) {
                         history ~= MessageT(ToolMessage(entry["tool_calls"], metadata));
                     } else {
-                        history ~= MessageT(Message(role, entry["content"].str, metadata));
+                        history ~= MessageT(Message(role, entry["content"].str, "", metadata));
                     }
                     break;
                 case Role.tool:
@@ -140,10 +140,10 @@ struct Chat {
                         if (imageDataUrl) {
                             history ~= MessageT(VisionMessage(text, imageDataUrl, metadata));
                         } else {
-                            history ~= MessageT(Message(role, text, metadata));
+                            history ~= MessageT(Message(role, text, "", metadata));
                         }
                     } else {
-                        history ~= MessageT(Message(role, entry["content"].str, metadata));
+                        history ~= MessageT(Message(role, entry["content"].str, "", metadata));
                     }
                     break;
                 }
@@ -244,11 +244,13 @@ struct Message {
 @safe:
     Role role;
     string content;
+    string thinking; // TUI-only, transient, not persisted, not sent to LLM
     JSONValue metadata;
 
-    this(Role role, string content, JSONValue metadata = JSONValue.init) @safe nothrow {
+    this(Role role, string content, string thinking = "", JSONValue metadata = JSONValue.init) @safe nothrow {
         this.role = role;
         this.content = content;
+        this.thinking = thinking;
         this.metadata = metadata;
     }
 
@@ -257,13 +259,15 @@ struct Message {
     }
 
     string toString() @safe const {
-        return format!"Message(role:%s content:%s)"(role, content);
+        return format!"Message(role:%s content:%s thinking:%.80s)"(role, content, thinking);
     }
 
+    // toJson — REST API: does NOT include thinking (no change needed)
     JSONValue toJson() @safe {
         return JSONValue(["role": role.to!string, "content": content]);
     }
 
+    // disk persistence: does NOT include thinking
     JSONValue toSaveJson() @safe {
         auto j = toJson();
         if (metadata != JSONValue.init) {
@@ -272,10 +276,14 @@ struct Message {
         return j;
     }
 
+    // thinking intentionally NOT loaded (transient, session-only)
     void fromJson(JSONValue j) @trusted nothrow {
+        this.thinking = "";
         try {
             this.role = j["role"].str.to!Role;
             this.content = j["content"].str;
+            // NOTE: thinking field is intentionally NOT loaded from JSON.
+            // Thinking content is session-only and extracted at parse time.
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }

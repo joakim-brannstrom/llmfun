@@ -264,7 +264,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     const bool oneShotQuery = !conf.prompt.empty;
     Tid uiTid;
 
-    void addChatMessage(Args...)(string msg, TuiChatMessageType type, Args args) {
+    void sendChatMessage(Args...)(string msg, TuiChatMessageType type, Args args) {
         static if (args.length > 0) {
             msg = format(msg, args);
         }
@@ -272,6 +272,18 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             writeln(msg);
         } else {
             send(uiTid, UiChatMessage(msg, type));
+        }
+    }
+
+    void sendChatThinkMessage(Args...)(string msg, string thinking,
+            TuiChatMessageType type, Args args) {
+        static if (args.length > 0) {
+            msg = format(msg, args);
+        }
+        if (oneShotQuery) {
+            writeln(msg);
+        } else {
+            send(uiTid, UiChatThinkMessage(msg, thinking, type));
         }
     }
 
@@ -297,23 +309,23 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             if (!a.role.among(Role.user, Role.system) || (printUser && a.role != Role.system)) {
                 auto msgType = a.role == Role.user ? TuiChatMessageType_User
                     : TuiChatMessageType_Assistant;
-                addChatMessage("[%s]: %s", msgType, a.role, a.content);
+                sendChatThinkMessage("[%s]: %s", a.thinking, msgType, a.role, a.content);
             } else {
                 logger.tracef("[%s]: %s", a.role, a.content);
             }
         }, (ToolMessage a) {
             if (!isHiddenToolCall(a.toolCalls)) {
                 auto calls = summarizeToolCalls(a.toolCalls);
-                addChatMessage("[tool calls %s]: %(%-s\n%)",
+                sendChatMessage("[tool calls %s]: %(%-s\n%)",
                     TuiChatMessageType_ToolCall, calls.length, calls);
             }
         }, (ToolResponse a) {
             if (!isHiddenToolResponse(a.toolName)) {
-                addChatMessage("[tool result %-s]: %s", TuiChatMessageType_ToolResponse,
+                sendChatMessage("[tool result %-s]: %s", TuiChatMessageType_ToolResponse,
                     a.toolName, summarizeToolResponse(a, 100));
             }
         }, (VisionMessage a) {
-            addChatMessage("[user]: %s (with image)", TuiChatMessageType_User, a.content);
+            sendChatMessage("[user]: %s (with image)", TuiChatMessageType_User, a.content);
         });
     }
 
@@ -349,13 +361,13 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             send(uiTid, UiClearChat.init);
             return AgentStatus.active;
         } else if (query == "/help") {
-            addChatMessage(printHelp(), TuiChatMessageType_Assistant);
+            sendChatMessage(printHelp(), TuiChatMessageType_Assistant);
             return AgentStatus.active;
         } else if (query == "/debug") {
             debugMode = !debugMode;
             send(uiTid, UiLogFile(debugMode));
             logger.globalLogLevel = debugMode ? logger.LogLevel.trace : logger.LogLevel.info;
-            addChatMessage("Debug output: %s", TuiChatMessageType_Assistant,
+            sendChatMessage("Debug output: %s", TuiChatMessageType_Assistant,
                     debugMode ? "ON" : "OFF");
             return AgentStatus.active;
         } else if (query == "/model" || query.startsWith("/model ")) {
@@ -368,7 +380,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
                     m ~= format("  %s  %s%s\n", i, model.name, activeMarker);
                 }
                 m ~= "Use /model <index> or /model <name> to switch.";
-                addChatMessage(m, TuiChatMessageType_Assistant);
+                sendChatMessage(m, TuiChatMessageType_Assistant);
             } else {
                 const oldModel = llmConf.activeCodeModel.name;
                 // Try to switch model
@@ -377,19 +389,19 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
                 if (idx >= 0) {
                     switched = llmConf.selectModelByIndex(idx);
                     if (!switched) {
-                        addChatMessage("error: Invalid model index '%s'. Valid indices: 0-%s.",
+                        sendChatMessage("error: Invalid model index '%s'. Valid indices: 0-%s.",
                                 TuiChatMessageType_Assistant, arg, llmConf.codeModels.length - 1);
                     }
                 } else {
                     auto result = llmConf.selectModelByName(arg);
                     switched = result.empty;
                     if (result.empty)
-                        addChatMessage("failed to switch model: %s",
+                        sendChatMessage("failed to switch model: %s",
                                 TuiChatMessageType_Assistant, result);
                 }
                 if (switched) {
                     agent.resetModel(llmConf.activeCodeModel());
-                    addChatMessage("switched to model: %s\nAgent model reset: %s -> %s, context: %s",
+                    sendChatMessage("switched to model: %s\nAgent model reset: %s -> %s, context: %s",
                             TuiChatMessageType_Assistant,
                             llmConf.activeModelName(), oldModel,
                             agent.modelName, agent.modelContextSize);
@@ -398,23 +410,23 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             return AgentStatus.active;
         } else if (query.startsWith("/plan ")) {
             auto q = query["/plan ".length .. $];
-            addChatMessage("Running plan pipeline: %s", TuiChatMessageType_Assistant, q);
+            sendChatMessage("Running plan pipeline: %s", TuiChatMessageType_Assistant, q);
             auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
                 return isInterruptTriggered;
             }, llmConf.toolFilter.to());
-            addChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
+            sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
             return AgentStatus.active;
         } else if (query.startsWith("/code ")) {
             auto q = query["/code ".length .. $];
-            addChatMessage("Running coder pipeline: %s", TuiChatMessageType_Assistant, q);
+            sendChatMessage("Running coder pipeline: %s", TuiChatMessageType_Assistant, q);
             auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
                 return isInterruptTriggered;
             }, llmConf.toolFilter.to());
             if (result.wasInterrupted) {
-                addChatMessage("Pipeline interrupted by user.", TuiChatMessageType_Assistant);
+                sendChatMessage("Pipeline interrupted by user.", TuiChatMessageType_Assistant);
                 return AgentStatus.active;
             }
-            addChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
+            sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
             return AgentStatus.active;
         } else if (query.empty) {
             return AgentStatus.active;
@@ -437,7 +449,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     foreach (m; agent.chat.getMessages()) {
         processChatMessage(m, printUser: true);
     }
-    addChatMessage(printHelp(), TuiChatMessageType_Assistant);
+    sendChatMessage(printHelp(), TuiChatMessageType_Assistant);
 
     bool running = true;
     do {
@@ -445,7 +457,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         receive((UiUserQuery a) {
             auto query = a.query.strip;
             if (!query.empty) {
-                addChatMessage(query, TuiChatMessageType_User);
+                sendChatMessage(query, TuiChatMessageType_User);
                 send(uiTid, UiAgentBusy.init);
                 clearStopAgent();
                 setStatusText(false);

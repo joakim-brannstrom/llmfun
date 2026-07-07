@@ -65,6 +65,7 @@ struct ChatMessageStyle {
 struct ChatMessage {
     std::string summary;
     std::string text;
+    std::string thinking;
     ChatMessageType type = ChatMessageType::Assistant;
 };
 

@@ -267,11 +267,20 @@ void renderTabChat(TuiState& state, Log& log) {
 
         ImGui::BeginChild("llm_output", outSize, false, outFlags);
 
+        const bool lastMsgIsTool = [&state]() {
+            if (state.outputLines.size() > 0) {
+                const auto& lastEntry = state.outputLines.back();
+                return (lastEntry.type == ChatMessageType::ToolCall ||
+                        lastEntry.type == ChatMessageType::ToolResponse);
+            }
+            return false;
+        }();
+
         for (size_t i = 0; i < state.outputLines.size(); ++i) {
-            const auto flags =
-                (static_cast<int>(i) >= static_cast<int>(state.outputLines.size()) - 10)
-                    ? ImGuiTreeNodeFlags_DefaultOpen
-                    : ImGuiTreeNodeFlags_None;
+            // DefaultOpen if within last 10 messages
+            const bool isRecent =
+                (static_cast<int>(i) >= static_cast<int>(state.outputLines.size()) - 10);
+            const auto flags = isRecent ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
 
             const auto& entry = state.outputLines[i];
             auto s = entry.summary;
@@ -290,6 +299,25 @@ void renderTabChat(TuiState& state, Log& log) {
                 ImGui::TextUnformatted(entry.text.c_str());
                 ImGui::PopTextWrapPos();
 
+                // Render thinking as nested collapsible (closed by default)
+                // Open by default only if this is the last message AND it's a tool message
+                if (!entry.thinking.empty()) {
+                    std::string thinkId = "Model reasoning ##" + std::to_string(i) + "_thinking";
+                    bool isLastMsg = (i == state.outputLines.size() - 1);
+                    auto thinkFlags = (isLastMsg && lastMsgIsTool) ? ImGuiTreeNodeFlags_DefaultOpen
+                                                                   : ImGuiTreeNodeFlags_None;
+
+                    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.2f, 0.25f, 0.8f));
+                    StyleColorGuard thinkGuard{1};
+                    const bool thinkOpened = ImGui::CollapsingHeader(thinkId.c_str(), thinkFlags);
+                    if (thinkOpened) {
+                        ImGui::PushTextWrapPos(0.0f);
+                        ImGui::TextUnformatted(entry.thinking.c_str());
+                        ImGui::PopTextWrapPos();
+                    }
+                }
+
+                // Copy button for main content
                 std::string buttonId = " [c] ##" + std::to_string(i);
                 if (ImGui::Button(buttonId.c_str())) {
                     ImGui::SetClipboardText(entry.text.c_str());
@@ -434,8 +462,8 @@ void renderTabChat(TuiState& state, Log& log) {
             ImGui::Text("Send the query to the LLM for processing");
             ImGui::EndTooltip();
         }
-        bool historyNext = ImGui::Button("Next");
         bool historyPrev = ImGui::Button("Prev");
+        bool historyNext = ImGui::Button("Next");
         ImGui::EndGroup();
 
         inputHistory(historyNext, historyPrev);

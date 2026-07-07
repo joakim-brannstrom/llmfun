@@ -192,29 +192,32 @@ void tuiSetLogging(TuiState* state, int onOff) {
 void tuiSetIniFilename(TuiState* state, String filename) {
     if (!state || !state->inner)
         return;
-    std::string filename_{filename.data ? filename.data : "", filename.len};
+    std::string filename_(filename.data ? filename.data : "", filename.data ? filename.len : 0);
     ::llmfun::tui::tuiSetIniFilename(*state->inner, filename_);
 }
 
 void tuiAddLogMessage(TuiState* state, String summary, String text) {
     if (!state || !state->inner)
         return;
-    std::string summary_(summary.data ? summary.data : "", summary.len);
-    std::string text_(text.data ? text.data : "", text.len);
+    std::string summary_(summary.data ? summary.data : "", summary.data ? summary.len : 0);
+    std::string text_(text.data ? text.data : "", text.data ? text.len : 0);
     ::llmfun::tui::tuiAddLogMessage(*state->inner, ::llmfun::tui::LogMessage{summary_, text_});
 }
 
-void tuiAddChatMessage(TuiState* state, String summary, String text, TuiChatMessageType type) {
+void tuiAddChatMessage(TuiState* state, ChatMessageParam param) {
     if (!state || !state->inner)
         return;
-    if (type < 0 || type >= TuiChatMessageType_Count) {
-        type = TuiChatMessageType_Assistant;
+    if (param.type < 0 || param.type >= TuiChatMessageType_Count) {
+        param.type = TuiChatMessageType_Assistant;
     }
-    std::string summary_(summary.data ? summary.data : "", summary.len);
-    std::string text_(text.data ? text.data : "", text.len);
-    auto cppType = static_cast<::llmfun::tui::ChatMessageType>(type);
-    ::llmfun::tui::tuiAddOutputLine(*state->inner,
-                                    ::llmfun::tui::ChatMessage{summary_, text_, cppType});
+    std::string summary_(param.summary.data ? param.summary.data : "",
+                         param.summary.data ? param.summary.len : 0);
+    std::string text_(param.text.data ? param.text.data : "", param.text.data ? param.text.len : 0);
+    std::string thinking_(param.thinking.data ? param.thinking.data : "",
+                          param.thinking.data ? param.thinking.len : 0);
+    auto cppType = static_cast<::llmfun::tui::ChatMessageType>(param.type);
+    ::llmfun::tui::tuiAddOutputLine(
+        *state->inner, ::llmfun::tui::ChatMessage{summary_, text_, thinking_, cppType});
 }
 
 void tuiClearChatMessages(TuiState* state) {
@@ -226,7 +229,7 @@ void tuiClearChatMessages(TuiState* state) {
 void tuiSetStatusText(TuiState* state, String text) {
     if (!state || !state->inner)
         return;
-    std::string s(text.data ? text.data : "", text.len);
+    std::string s(text.data ? text.data : "", text.data ? text.len : 0);
     ::llmfun::tui::tuiSetStatusText(*state->inner, s);
 }
 

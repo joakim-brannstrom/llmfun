@@ -17,10 +17,15 @@ extern "C" {
  *
  *   extern(C) {
  *       struct String { const(char)* data; size_t len; }
+ *       struct ChatMessageParam {
+ *           String summary;
+ *           String text;
+ *           String thinking;
+ *           TuiChatMessageType type;
+ *       }
  *       struct TuiState {}
  *       struct TuiScreen {}
- *       TuiScreen* tuiInit();
- *       void tuiShutdown(TuiScreen* screen);
+ *       void tuiAddChatMessage(TuiState* state, ChatMessageParam param);
  *       // ... etc
  *   }
  *
@@ -90,6 +95,30 @@ String String_NewBuf(const char* data, size_t len);
  * The caller should zero the String struct if needed: s.data = NULL; s.len = 0;
  */
 void String_Free(String s);
+
+/* ChatMessageParam — Bundles all parameters for a chat message.
+ *
+ * Layout (64-bit): 3x String{ptr(8) + size_t(8)} + enum(4) = 52 bytes
+ * Each String is 16 bytes. Total struct size: 52 bytes (+ 4-byte tail padding).
+ * All fields are naturally aligned.
+ *
+ * Pass by value (trivially copyable). The thinking field is optional
+ * and may be {NULL, 0} if no thinking content exists.
+ *
+ * Example initialization:
+ *   ChatMessageParam msg = {
+ *       .summary  = String{"User", 4},
+ *       .text     = String{"Hello", 5},
+ *       .thinking = {NULL, 0},  // no thinking content
+ *       .type     = TuiChatMessageType_User,
+ *   };
+ */
+typedef struct ChatMessageParam {
+    String summary;          /* offset 0,  size 16 */
+    String text;             /* offset 16, size 16 */
+    String thinking;         /* offset 32, size 16  (NEW) */
+    TuiChatMessageType type; /* offset 48, size 4 */
+} ChatMessageParam;          /* total size: 52 bytes (+ 4-byte tail padding) */
 
 /* TuiState — Opaque handle to the internal TUI state.
  * Created via tuiCreateState(), destroyed via tuiDestroyState().
@@ -218,16 +247,17 @@ void tuiAddLogMessage(TuiState* state, String summary, String text);
 /* Append a chat message to the scrollable output display area.
  *
  * The output area has a maximum capacity (10000 lines). When exceeded, the
- * oldest lines are evicted first (FIFO). The `summary` and `text` parameters
- * are inbound Strings — their data is copied internally, so the caller's
- * buffers can be freed or reused immediately after this call returns.
+ * oldest lines are evicted first (FIFO). The `param` fields are inbound
+ * Strings — their data is copied internally, so the caller's buffers can be
+ * freed or reused immediately after this call returns.
  *
- * The `type` parameter specifies the message type (User, Assistant, ToolCall,
- * ToolResponse) and is used to color-code the message header in the TUI.
+ * The `type` field in `param` specifies the message type (User, Assistant,
+ * ToolCall, ToolResponse) and is used to color-code the message header in
+ * the TUI. The `thinking` field is optional and may be {NULL, 0}.
  *
  * Null-safe: no-op if state is NULL.
  */
-void tuiAddChatMessage(TuiState* state, String summary, String text, TuiChatMessageType type);
+void tuiAddChatMessage(TuiState* state, ChatMessageParam param);
 
 /* Clear all lines from the output display area.
  *

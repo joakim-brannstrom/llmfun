@@ -148,11 +148,12 @@ struct TextUserInterface {
         tuiShutdown(tuiScreen);
     }
 
-    void addChatMessage(string msg, TuiChatMessageType type) {
+    void addChatMessage(string msg, string thinking, TuiChatMessageType type) {
         string summary = shortSummary(msg);
         auto s = String(summary.ptr, summary.length);
         auto q = String(msg.ptr, msg.length);
-        tuiAddChatMessage(tuiState, s, q, type);
+        auto t = String(thinking.ptr, thinking.length);
+        tuiAddChatMessage(tuiState, ChatMessageParam(s, q, t, type));
     }
 
     void clearChat() {
@@ -238,6 +239,12 @@ struct UiChatMessage {
     TuiChatMessageType type = TuiChatMessageType_Assistant;
 }
 
+struct UiChatThinkMessage {
+    string msg;
+    string thinking;
+    TuiChatMessageType type = TuiChatMessageType_Assistant;
+}
+
 struct UiClearChat {
 }
 
@@ -278,13 +285,15 @@ void spawnUserInterface(Tid ownerTid) {
         try {
             receiveTimeout(10.dur!"msecs", (UiShutdown _) { running = false; }, (UiSetIniFile a) {
                 ui.setIniFile(a.path);
-            }, (UiChatMessage a) { ui.addChatMessage(a.msg, a.type); }, (UiClearChat _) {
-                ui.clearChat;
-            }, (UiStatusText a) { ui.setStatusText(a.status); }, (UiLogFile a) {
-                ui.useUiLogFile(a.useFile);
-            }, (UiTerminate _) { running = false; }, (UiAgentBusy _) {
-                ui.setReadyStatus(false);
-            }, (UiAgentReady _) { ui.setReadyStatus(true); });
+            }, (UiChatMessage a) { ui.addChatMessage(a.msg, null, a.type); }, (UiChatThinkMessage a) {
+                ui.addChatMessage(a.msg, a.thinking, a.type);
+            }, (UiClearChat _) { ui.clearChat; }, (UiStatusText a) {
+                ui.setStatusText(a.status);
+            }, (UiLogFile a) { ui.useUiLogFile(a.useFile); }, (UiTerminate _) {
+                running = false;
+            }, (UiAgentBusy _) { ui.setReadyStatus(false); }, (UiAgentReady _) {
+                ui.setReadyStatus(true);
+            });
 
             ui.render();
             auto query = ui.userQuery;

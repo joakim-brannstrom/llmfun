@@ -36,8 +36,8 @@ int main() {
         std::string summary{"hello"};
         std::string text{"hello\nthis is some much longer text"};
         text.append(std::to_string(i));
-        tuiAddChatMessage(state, makeStr(summary.c_str()), makeStr(text.c_str()),
-                          TuiChatMessageType_User);
+        tuiAddChatMessage(state, ChatMessageParam{makeStr(summary.c_str()), makeStr(text.c_str()),
+                                                  makeStr("thinking..."), TuiChatMessageType_User});
     }
 
     while (true) {
@@ -51,8 +51,10 @@ int main() {
             if (query.data && query.len > 0) {
                 std::string text(query.data, query.len);
                 std::string summary = text.size() > 30 ? text.substr(0, 30) : text;
-                tuiAddChatMessage(state, String{summary.c_str(), summary.size()},
-                                  String{text.c_str(), text.size()}, TuiChatMessageType_User);
+                tuiAddChatMessage(state, ChatMessageParam{String{summary.c_str(), summary.size()},
+                                                          String{text.c_str(), text.size()},
+                                                          makeStr("thinking..."),
+                                                          TuiChatMessageType_User});
                 std::string log = std::to_string(text.size());
                 tuiAddLogMessage(state, String{summary.c_str(), summary.size()},
                                  String{log.c_str(), log.size()});
