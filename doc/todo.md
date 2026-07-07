@@ -31,11 +31,9 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 
 # ui
 - change the background color for the input field to dark grey
-- show the thinking message as a "folded" sub header in CollapsingHeader chat log
 - support streaming of queries
 - show what pipeline agents are doing in a window
 - stream visualization of the current message
-- in status bar show tokens/s
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
