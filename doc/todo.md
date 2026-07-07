@@ -20,6 +20,7 @@
 - change the behavior of loading a .llmfun.json from the current directory if it exist to only doing it if the project is trusted
 - before writing a file check that the file isn't inside a tree of symlinks from the workarea and up
 - a memory file that is written should have a date when it was updated. Even better if each section in it that is changed have a date. This is to enhance the LLM's capability to reason about the "age" of the data if it gets conflicting data from different sources.
+- memory directory in ~/.local/share/llmfun should always be created
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -66,3 +67,29 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - add builtin pdf -> text -> rag
 - add builtin image -> text -> rag. This should probably be stored as "image path", "description".
 - add a date to all sources and then present it to the LLM so it can reason on the age of a source.
+
+# memory
+## Workflow Improvements
+- D. Automatic Template Loading
+**Current state:** `update_memory` template must be explicitly fetched
+**Proposed change:** When memory operations are triggered, automatically load the template:
+
+When the reflection gate activates (pre-taskDone):
+1. Auto-fetch `getThinkingTemplate('update_memory')` as reference
+2. Follow the structured workflow in the template
+
+## Phase 4: Feedback Loop
+
+- H. Memory Usage Tracking
+**Proposed change:** Add a mechanism to track whether memories are actually being used:
+
+After reading a memory at session start, note in the conversation:
+"Relevant prior knowledge from [topic]: [brief summary]"
+This creates visible evidence that memories are being consulted.
+
+
+- I. Self-Correction Mechanism
+**Proposed change:** When I catch myself about to make a mistake that's documented in memory, explicitly acknowledge it:
+
+"Memory notes that [pitfall] — avoiding that approach."
+This reinforces the value of the memory system.
