@@ -4,7 +4,7 @@ import logger = std.logger;
 import std.algorithm : filter, map;
 import std.array : array, empty, appender;
 import std.conv : to;
-import std.file : readText, exists, mkdirRecurse;
+import std.file : readText, exists, mkdirRecurse, rename;
 import std.format : format;
 import std.json : JSONValue, JSONType, parseJSON;
 import std.sumtype : SumType, match;
@@ -104,6 +104,14 @@ struct LlmConfig {
 
     CodeModelConfig[] codeModels;
     long activeCodeModelIndex = 0;
+
+    /// Tracks total session starts (incremented at the beginning of each session).
+    uint sessionCount = 0;
+    /// Prevents concurrent or crash-retry consolidation. Cleared on load if stale.
+    bool isConsolidating = false;
+    /// Default trigger threshold (every N sessions). 0 means disabled.
+    uint consolidationInterval = 10;
+
     SummaryModelConfig summaryModel;
 
     /// If true, emit a warning when no API key is configured for a model server. Defaults to true.
@@ -208,6 +216,19 @@ struct LlmConfig {
                     }
                 }
             }
+            if ("sessionCount" in json) {
+                sessionCount = cast(uint) json["sessionCount"].integer;
+            }
+            if ("isConsolidating" in json) {
+                auto val = json["isConsolidating"].boolean;
+                if (val) {
+                    logger.warning("Found stale consolidation lock - clearing");
+                }
+                isConsolidating = false; // Always clear - stale lock recovery
+            }
+            if ("consolidationInterval" in json) {
+                consolidationInterval = cast(uint) json["consolidationInterval"].integer;
+            }
         } catch (Exception e) {
             logger.tracef("Failed to load state: %s", e.msg);
         }
@@ -223,12 +244,48 @@ struct LlmConfig {
 
         try {
             auto stateFile = dataDir ~ "state.json";
+            string tempFile = stateFile.toString ~ ".tmp";
             JSONValue stateObj;
             stateObj["activeCodeModelIndex"] = activeCodeModelIndex;
-            File(stateFile.toString, "w").writeln(stateObj.toString);
+            stateObj["sessionCount"] = sessionCount;
+            stateObj["isConsolidating"] = isConsolidating;
+            stateObj["consolidationInterval"] = consolidationInterval;
+            File(tempFile, "w").writeln(stateObj.toString);
+            rename(tempFile, stateFile);
         } catch (Exception e) {
             logger.tracef("Failed to save state: %s", e.msg);
         }
+    }
+
+    /// Increments session count and begins consolidation if it should trigger.
+    /// Returns true if consolidation was triggered (lock acquired).
+    /// Persists state immediately.
+    bool beginConsolidation() @safe {
+        sessionCount++;
+        bool trigger = shouldConsolidateInternal();
+        if (trigger) {
+            isConsolidating = true;
+        }
+        saveState();
+        return trigger;
+    }
+
+    bool shouldConsolidate() const @safe {
+        return !isConsolidating && shouldConsolidateInternal;
+    }
+
+    /// Internal check without the isConsolidating guard (used after increment).
+    private bool shouldConsolidateInternal() const @safe {
+        if (consolidationInterval == 0 || sessionCount == 0) {
+            return false;
+        }
+        return sessionCount % consolidationInterval == 0;
+    }
+
+    /// Clears consolidation lock after completion (success or failure). Persists immediately.
+    void clearConsolidationLock() @safe {
+        isConsolidating = false;
+        saveState();
     }
 
     RagDatabaseConfig[] getRagSecondary() @safe {

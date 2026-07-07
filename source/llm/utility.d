@@ -1,7 +1,7 @@
 module llm.utility;
 
 import logger = std.logger;
-import std.algorithm : among, sort;
+import std.algorithm : among, sort, filter;
 import std.array : array, appender, empty, join;
 import std.format : format, formattedWrite;
 import std.json : JSONValue, JSONType, parseJSON;
@@ -228,4 +228,147 @@ bool isSignalSIGPIPETriggered() @safe nothrow @nogc {
 
 void clearSignalSIGPIPE() @safe nothrow @nogc {
     .signalSIGPIPE = false;
+}
+
+bool isReadWrite(Path p) nothrow {
+    import core.sys.posix.sys.stat;
+    import my.file : getAttrs;
+
+    uint attrs;
+    if (getAttrs(p, attrs)) {
+        return (attrs & (S_IRUSR | S_IRGRP | S_IROTH)) != 0
+            && (attrs & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0;
+    }
+    return false;
+}
+
+/// Backup memory area path to a per-area "_backup" sibling directory.
+/// Returns: true on success, false on failure.
+bool backupMemoryFiles(Path[] memoryArea) {
+    import std.file : rmdirRecurse, exists, rename;
+    import my.file : copyRecurse;
+
+    foreach (area; memoryArea.filter!(a => a.exists)
+            .filter!(a => a.isReadWrite)) {
+        // Per-area backup directory to avoid filename collisions between sibling memory areas.
+        auto backupDir = (area.toString ~ "_backup").Path;
+        auto stagingDir = (area.toString ~ "_backup_staging").Path;
+
+        try {
+            if (stagingDir.exists) {
+                rmdirRecurse(stagingDir);
+            }
+        } catch (Exception e) {
+            logger.tracef("failed to clean old staging dir %s: %s", stagingDir, e.msg);
+            return false;
+        }
+
+        try {
+            copyRecurse(area, stagingDir);
+            logger.tracef("staged %s -> %s", area, stagingDir);
+        } catch (Exception e) {
+            logger.warningf("failed to copy files %s -> %s: %s", area, stagingDir, e.msg);
+            try {
+                rmdirRecurse(stagingDir);
+            } catch (Exception _) {
+            }
+            return false;
+        }
+
+        try {
+            if (backupDir.exists) {
+                rmdirRecurse(backupDir);
+            }
+            rename(stagingDir, backupDir);
+            logger.tracef("backup complete for %s -> %s", area, backupDir);
+        } catch (Exception e) {
+            logger.warningf("failed to finalize backup for %s: %s", area, e.msg);
+            try {
+                rmdirRecurse(stagingDir);
+            } catch (Exception _) {
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/// Restore memory from per-area backup directories back to their original memory areas.
+/// Creates a rollback snapshot before restore; on failure, rolls back from snapshot.
+/// Deletes backup directories after successful restore.
+/// Returns: true on success, false on failure.
+bool restoreMemoryFiles(Path[] memoryArea) {
+    import std.file : dirEntries, SpanMode, copy, rmdirRecurse, mkdirRecurse, exists, rename;
+    import my.file : copyRecurse;
+
+    foreach (area; memoryArea.filter!(a => (a.toString ~ "_backup").exists)
+            .filter!(a => a.isReadWrite)) {
+        auto backupDir = (area.toString ~ "_backup").Path;
+
+        auto rollbackDir = (area.toString ~ "_restore_rollback").Path;
+        try {
+            copyRecurse(backupDir, rollbackDir);
+        } catch (Exception e) {
+            logger.warningf("failed to create rollback snapshot for %s: %s", area, e.msg);
+            try {
+                rmdirRecurse(rollbackDir);
+            } catch (Exception _) {
+            }
+            return false;
+        }
+
+        bool restoreOk;
+        try {
+            copyRecurse(backupDir, area);
+            restoreOk = true;
+        } catch (Exception e) {
+            logger.warningf("restore failed for %s: %s", area, e.msg);
+        }
+
+        if (restoreOk) {
+            try {
+                rmdirRecurse(rollbackDir);
+            } catch (Exception _) {
+            }
+
+            try {
+                rmdirRecurse(backupDir);
+                logger.tracef("removed backup directory %s", backupDir);
+            } catch (Exception e) {
+                logger.tracef("failed to remove backup directory %s: %s", backupDir, e.msg);
+            }
+        } else {
+            try {
+                copyRecurse(rollbackDir, area);
+                logger.warningf("rolled back %s from snapshot", area);
+            } catch (Exception e) {
+                logger.warningf("rollback FAILED for %s: %s - manual recovery needed", area, e.msg);
+            }
+        }
+    }
+
+    return true;
+}
+
+/// Remove all memory backup directories. Logs at trace level.
+/// Returns: true if all backup directories were successfully removed or none existed.
+bool removeMemoryBackup(Path[] memoryArea) {
+    import std.file : rmdirRecurse, exists;
+
+    bool allOk = true;
+
+    foreach (area; memoryArea.filter!(a => (a.toString ~ "_backup").exists)) {
+        auto backupDir = (area.toString ~ "_backup").Path;
+
+        try {
+            rmdirRecurse(backupDir);
+            logger.tracef("removed backup directory %s", backupDir);
+        } catch (Exception e) {
+            logger.tracef("failed to remove %s: %s", backupDir, e.msg);
+            allOk = false;
+        }
+    }
+
+    return allOk;
 }
