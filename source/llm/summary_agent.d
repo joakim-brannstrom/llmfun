@@ -19,7 +19,7 @@ import my.set;
 
 import llm.chat;
 import llm.config : SummaryModelConfig, toRequestConfig, getEnvApiKey;
-import llm.utility : ApproxTokenSize, summarizeToolCalls;
+import llm.utility : ApproxTokenSize, summarizeToolCalls, summarizeToolResponse;
 import llm.query;
 
 struct SummaryAgent {
@@ -281,10 +281,10 @@ struct SummaryAgent {
         msg.match!((Message m) { content = m.content; role = m.role; }, (ToolMessage m) {
             content = summarizeToolCalls(m.toolCalls).join('\n');
             role = m.role;
-        }, (ToolResponse m) { content = m.content; role = m.role; }, (VisionMessage m) {
-            content = m.content;
-            role = Role.user;
-        });
+        }, (ToolResponse m) {
+            content = summarizeToolResponse(m, 8196);
+            role = m.role;
+        }, (VisionMessage m) { content = m.content; role = Role.user; });
 
         // Build a minimal chat with system prompt and the message to summarize
         Chat summaryChat;
