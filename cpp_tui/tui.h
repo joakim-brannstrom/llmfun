@@ -101,10 +101,10 @@ struct TuiState {
     std::chrono::system_clock::time_point nextIndicatorIncr;
 
     std::deque<ChatMessage> outputLines;
-    static constexpr size_t MaxChatMessages = 10000;
+    static constexpr size_t MaxChatMessages = 1000;
 
     std::deque<LogMessage> logMessages;
-    static constexpr size_t MaxLogMessages = 10000;
+    static constexpr size_t MaxLogMessages = 1000;
 
     // Auto-scroll flag
     bool autoScroll = true;
