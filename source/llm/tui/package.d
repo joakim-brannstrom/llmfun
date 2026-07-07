@@ -275,8 +275,7 @@ struct UiAgentReady {
 void spawnUserInterface(Tid ownerTid) {
     import std.string : strip;
     import std.datetime : dur;
-
-    import llm.utility : stopAgent;
+    import llm.utility : stopAgent, playNotification;
 
     auto ui = makeTui();
     ui.setUiAsStdLogger;
@@ -293,6 +292,7 @@ void spawnUserInterface(Tid ownerTid) {
                 running = false;
             }, (UiAgentBusy _) { ui.setReadyStatus(false); }, (UiAgentReady _) {
                 ui.setReadyStatus(true);
+                playNotification();
             });
 
             ui.render();
