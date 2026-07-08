@@ -147,8 +147,8 @@ ExecuteFuncResult editFile(Context baseCtx, string path, string content,
 
     auto editFileMaxLines = ctx.getToolLimits().editFileMaxLines;
     if (editFileMaxLines <= 0) {
-        logger.warning("editFileMaxLines is ", editFileMaxLines,
-                ", falling back to default ", MaxLines * 4);
+        logger.warningf("editFileMaxLines is %s, falling back to default %s",
+                editFileMaxLines, MaxLines * 4);
         editFileMaxLines = MaxLines * 4;
     }
 
@@ -198,12 +198,12 @@ string[] editFileMemory(RangeT)(RangeT fileLines, EditMode mode, string content,
                 lines.put(txtLine.value.idup);
                 break;
             }
+        } else if (mode == EditMode.append && txtLine.index == endLine) {
+            lines.put(txtLine.value.idup);
+            lines.put(content);
         } else {
             lines.put(txtLine.value.idup);
         }
-    }
-    if (mode == EditMode.append) {
-        lines.put(content);
     }
     return lines[];
 }
@@ -221,10 +221,11 @@ unittest {
     assert(res[1] == "world", res.to!string);
     assert(res[2] == "is", res.to!string);
 
-    res = editFileMemory(lines, EditMode.append, "cat", 1, 4);
+    res = editFileMemory(lines, EditMode.append, "cat", 1, 2);
     assert(res.length == 6, res.to!string);
-    assert(res[4] == "beautiful", res.to!string);
-    assert(res[5] == "cat", res.to!string);
+    assert(res[2] == "world", res.to!string);
+    assert(res[3] == "cat", res.to!string);
+    assert(res[4] == "is", res.to!string);
 }
 
 @Function("Apply a unified diff patch to a file.\n"
