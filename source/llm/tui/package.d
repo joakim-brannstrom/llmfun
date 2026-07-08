@@ -277,6 +277,9 @@ void spawnUserInterface(Tid ownerTid) {
     import std.datetime : dur;
     import llm.utility : stopAgent, playNotification;
 
+    setMaxMailboxSize(thisTid, 100, OnCrowding.block);
+    register("llmfun_tui", thisTid);
+
     auto ui = makeTui();
     ui.setUiAsStdLogger;
     bool running = true;
