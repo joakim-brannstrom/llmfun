@@ -13,6 +13,7 @@ set(IMTUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 # Bring in imtui as a subdirectory — builds imtui, imtui-ncurses, imgui-for-imtui
 # imtui-ncurses transitively provides the PUBLIC include path, so no extra target_include_directories needed
 add_subdirectory(../vendor/imtui ${CMAKE_BINARY_DIR}/imtui)
+add_subdirectory(../vendor/imgui_markdown ${CMAKE_BINARY_DIR}/imgui_markdown)
 
 # Ensure pthreads are available
 find_package(Threads REQUIRED)
@@ -27,7 +28,7 @@ add_library(llmfun_tui_lib STATIC
 target_include_directories(llmfun_tui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(llmfun_tui_lib
-    PUBLIC imtui-ncurses
+    PUBLIC imtui-ncurses imgui_markdown
     PRIVATE Threads::Threads stdc++
 )
 

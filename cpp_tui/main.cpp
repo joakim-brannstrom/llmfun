@@ -34,7 +34,7 @@ int main() {
 
     for (int i = 0; i < 300; ++i) {
         std::string summary{"hello"};
-        std::string text{"hello\nthis is some much longer text"};
+        std::string text{"**hello**\nthis is *some* much\n# Heading\nlonger text\n\n***\n\n"};
         text.append(std::to_string(i));
         tuiAddChatMessage(state, ChatMessageParam{makeStr(summary.c_str()), makeStr(text.c_str()),
                                                   makeStr("thinking..."), TuiChatMessageType_User});

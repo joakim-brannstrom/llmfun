@@ -12,6 +12,8 @@
 
 #include "imtui/imtui.h"
 
+#include "imgui_markdown.h"
+
 namespace llmfun::tui {
 inline ImVec4 lighten(ImVec4 color, float amount) {
     return ImVec4(std::min(color.x + amount, 1.0f), std::min(color.y + amount, 1.0f),
@@ -109,6 +111,8 @@ struct TuiState {
     std::deque<LogMessage> logMessages;
     static constexpr size_t MaxLogMessages = 1000;
 
+    ImGui::MarkdownConfig mdConfig;
+
     // Auto-scroll flag
     bool autoScroll = true;
 
@@ -119,9 +123,6 @@ struct TuiState {
     // Color configuration for chat message headers
     ChatMessageStyle chatStyle;
 };
-
-/// Initialize chat message header colors to colorblind-safe defaults.
-void initializeDefaultColors(ChatMessageStyle& style);
 
 /// Initialize terminal and create TScreen.
 /// Returns true on success, false on failure.

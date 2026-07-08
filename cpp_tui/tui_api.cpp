@@ -133,11 +133,35 @@ void tuiShutdown(TuiScreen* screen) {
     backendInitialized.store(false, std::memory_order_relaxed);
 }
 
+void markdownFormatCallback(const ImGui::MarkdownFormatInfo& markdownFormatInfo_, bool start_) {
+    ImGui::defaultMarkdownFormatCallback(markdownFormatInfo_, start_);
+}
+
 TuiState* tuiCreateState(void) {
     ::llmfun::tui::TuiState* inner = nullptr;
+
+    auto initMdConfig = [&inner](ImGui::MarkdownConfig& mdConfig) {
+        // mdConfig.linkCallback =         nullptr;
+        // mdConfig.tooltipCallback =      nullptr;
+        // mdConfig.imageCallback =        nullptr;
+        // mdConfig.linkIcon =             "";
+        // #ifdef IMGUI_HAS_TEXTURES // used to detect dynamic font capability
+        //     mdConfig.headingFormats[0] =    { nullptr, true,  fontSize * 1.1f };
+        //     mdConfig.headingFormats[1] =    { nullptr, true,  fontSize };
+        //     mdConfig.headingFormats[2] =    { nullptr, false, fontSize };
+        // #else
+        //     mdConfig.headingFormats[0] =    { nullptr, true };
+        //     mdConfig.headingFormats[1] =    { nullptr, true };
+        //     mdConfig.headingFormats[2] =    { nullptr, false };
+        // #endif
+        // mdConfig.userData =             inner;
+        // mdConfig.formatCallback =       nullptr;
+    };
+
     try {
         inner = new ::llmfun::tui::TuiState();
         TuiState* state = new TuiState{inner};
+        // initMdConfig(inner->mdConfig);
         return state;
     } catch (const std::bad_alloc&) {
         delete inner;
