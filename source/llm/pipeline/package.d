@@ -946,7 +946,7 @@ unittest {
     auto pipeline = pipelineBuilder().addNode("agentA", agentA).addNode("agentB",
             agentB).addEdge("agentA", "agentB").startNode("agentA").stopNode("agentB").build();
 
-    auto result = pipeline.run("initial query", null);
+    auto result = pipeline.run(null);
 
     assert(result.allSuccess, "Pipeline should succeed");
     assert(result.agentResults.length == 2, "Both agents should have run");
@@ -991,7 +991,7 @@ unittest {
         return shouldInterrupt;
     };
 
-    auto result = pipeline.run("test query", interruptDelegate);
+    auto result = pipeline.run(interruptDelegate);
 
     // Verify interrupt was detected
     assert(result.wasInterrupted, "Pipeline should have been interrupted");
@@ -1023,7 +1023,7 @@ unittest {
     // dfmt on
 
     // Run with null interrupt delegate — should behave identically to pre-interrupt
-    auto result = pipeline.run("test query", null);
+    auto result = pipeline.run(null);
 
     // All agents complete normally
     assert(result.agentResults.length == 3,
@@ -1058,7 +1058,7 @@ unittest {
     };
 
     // Pipeline should not crash and should complete normally
-    auto result = pipeline.run("test query", throwingDelegate);
+    auto result = pipeline.run(throwingDelegate);
 
     // Throwing delegate must not crash the pipeline
     assert(result.agentResults.length == 3,
