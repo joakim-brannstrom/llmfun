@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,7 @@ struct TuiState {
     std::uint32_t busyIndicatorState{0};
     std::chrono::system_clock::time_point nextIndicatorIncr;
 
+    std::set<size_t> outputLineOpen;
     std::deque<ChatMessage> outputLines;
     static constexpr size_t MaxChatMessages = 1000;
 

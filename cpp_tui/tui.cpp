@@ -283,17 +283,30 @@ void renderTabChat(TuiState& state, Log& log) {
             const auto flags = isRecent ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
 
             const auto& entry = state.outputLines[i];
+
             auto s = entry.summary;
             s.append("##");
             s.append(std::to_string(i));
 
+            const bool showHeader = state.outputLineOpen.count(i) == 0;
+
+            // style for CollapsingHeader
             const auto& colors = getHeaderColors(entry.type, state.chatStyle);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+            if (showHeader) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+            }
             ImGui::PushStyleColor(ImGuiCol_Header, colors.base);
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, colors.hovered);
             ImGui::PushStyleColor(ImGuiCol_HeaderActive, colors.active);
             StyleColorGuard guard{HEADER_COLOR_COUNT};
-            if (ImGui::CollapsingHeader(s.c_str(), flags)) {
+
+            bool outputLineOpen = ImGui::CollapsingHeader(s.c_str(), flags);
+
+            if (outputLineOpen) {
+                state.outputLineOpen.insert(i);
+
                 guard.pop();
                 ImGui::PushTextWrapPos(DisplaySize.x - 4);
                 ImGui::TextUnformatted(entry.text.c_str());
@@ -327,6 +340,8 @@ void renderTabChat(TuiState& state, Log& log) {
                     ImGui::Text("Copy to clipboard");
                     ImGui::EndTooltip();
                 }
+            } else {
+                state.outputLineOpen.erase(i);
             }
         }
 
