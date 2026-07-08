@@ -309,7 +309,8 @@ void renderTabChat(TuiState& state, Log& log) {
 
                 guard.pop();
                 ImGui::PushTextWrapPos(DisplaySize.x - 4);
-                ImGui::Markdown(entry.text.c_str(), entry.text.length(), state.mdConfig);
+                ImGui::TextUnformatted(entry.text.data(), entry.text.data() + entry.text.size());
+                // ImGui::Markdown(entry.text.c_str(), entry.text.length(), state.mdConfig);
                 ImGui::PopTextWrapPos();
 
                 // Render thinking as nested collapsible (closed by default)
