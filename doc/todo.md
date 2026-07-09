@@ -21,6 +21,7 @@
 - before writing a file check that the file isn't inside a tree of symlinks from the workarea and up
 - a memory file that is written should have a date when it was updated. Even better if each section in it that is changed have a date. This is to enhance the LLM's capability to reason about the "age" of the data if it gets conflicting data from different sources.
 - memory directory in ~/.local/share/llmfun should always be created
+- add a /fixcomments <filename> that goes through filename and updates all comments to be relevant to the current code. Those that seem to not match the code should be flagged.
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -35,6 +36,7 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - support streaming of queries
 - show what pipeline agents are doing in a window
 - stream visualization of the current message
+- add UI where an agent can query the user for input.
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
