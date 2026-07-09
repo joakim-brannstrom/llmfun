@@ -58,5 +58,5 @@ add_executable(llmfun_tui
 add_dependencies(llmfun_tui llmfun_tui_all_lib)
 target_link_libraries(llmfun_tui PRIVATE
     llmfun_tui_all_lib
-    ncurses
+    ncursesw
 )

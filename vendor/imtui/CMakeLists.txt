@@ -64,16 +64,30 @@ if (IMTUI_SUPPORT_NCURSES)
     if (MINGW)
         set(CURSES_LIBRARIES pdcurses)
     else()
-        find_package(Curses REQUIRED)
-        CHECK_LIBRARY_EXISTS("${CURSES_NCURSES_LIBRARY}"
-            nodelay "" CURSES_NCURSES_HAS_NODELAY)
-        if(NOT CURSES_NCURSES_HAS_NODELAY)
-            find_library(CURSES_EXTRA_LIBRARY tinfo)
-            CHECK_LIBRARY_EXISTS("${CURSES_EXTRA_LIBRARY}"
-                nodelay "" CURSES_TINFO_HAS_NODELAY)
-        endif()
+        # 1. Find the main curses library (prefer wide version)
+        find_library(CURSES_NCURSES_LIBRARY
+            NAMES ncursesw ncurses curses
+            REQUIRED  # stop if none found
+        )
+        set(CURSES_LIBRARIES ${CURSES_NCURSES_LIBRARY})
+
+        # 2. Find the extra terminfo library (prefer wide version)
+        find_library(CURSES_EXTRA_LIBRARY
+            NAMES tinfow tinfo
+        )
         if(CURSES_EXTRA_LIBRARY)
-            set(CURSES_LIBRARIES ${CURSES_LIBRARIES} ${CURSES_EXTRA_LIBRARY})
+            list(APPEND CURSES_LIBRARIES ${CURSES_EXTRA_LIBRARY})
+        endif()
+
+        # 4. Print for debugging
+        message(STATUS "Using CURSES_LIBRARIES: ${CURSES_LIBRARIES}")
+
+        if(CURSES_NCURSES_LIBRARY MATCHES "ncursesw")
+            set(IMTUI_USE_WIDE_DEFINE 1)
+            message(STATUS "ncursesw detected → enabling wide support (IMTUI_USE_WIDE)")
+        else()
+            set(IMTUI_USE_WIDE_DEFINE 0)
+            message(STATUS "Using narrow curses, wide support disabled")
         endif()
     endif()
 endif()

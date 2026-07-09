@@ -42,6 +42,9 @@ if (IMTUI_SUPPORT_NCURSES)
         imtui
         ${CURSES_LIBRARIES}
         )
+    if(IMTUI_USE_WIDE_DEFINE)
+        target_compile_definitions(imtui-ncurses PRIVATE IMTUI_USE_WIDE=1)
+    endif()
 endif()
 
 # emscripten

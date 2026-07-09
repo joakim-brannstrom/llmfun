@@ -1,5 +1,6 @@
 #include "tui_api.h"
 
+#include <clocale>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -8,6 +9,8 @@
 static inline String makeStr(const char* s) { return String{s, std::strlen(s)}; }
 
 int main() {
+    setlocale(LC_ALL, "");
+
     TuiScreen* screen = nullptr;
 
     screen = tuiInit();
@@ -34,7 +37,8 @@ int main() {
 
     for (int i = 0; i < 300; ++i) {
         std::string summary{"hello"};
-        std::string text{"**hello**\nthis is *some* much\n# Heading\nlonger text\n\n***\n\n"};
+        std::string text{
+            u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' \n\n***\n\n"};
         text.append(std::to_string(i));
         tuiAddChatMessage(state, ChatMessageParam{makeStr(summary.c_str()), makeStr(text.c_str()),
                                                   makeStr("thinking..."), TuiChatMessageType_User});

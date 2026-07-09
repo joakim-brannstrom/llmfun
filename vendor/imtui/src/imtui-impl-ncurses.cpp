@@ -33,6 +33,7 @@
 #include <vector>
 #include <string>
 #include <thread>
+#include <cstdio>
 
 namespace {
     struct VSync {
@@ -167,6 +168,27 @@ void ImTui_ImplNcurses_Shutdown() {
     g_screen = nullptr;
 }
 
+// Convert a single wchar_t (or wint_t) Unicode code point to UTF‑8 std::string
+void code_point_to_utf8(wint_t cp, std::string& utf8) {
+    utf8.clear();
+
+    if (cp < 0x80) {
+        utf8.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        utf8.push_back(static_cast<char>(0xC0 | ((cp >> 6) & 0x1F)));
+        utf8.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        utf8.push_back(static_cast<char>(0xE0 | ((cp >> 12) & 0x0F)));
+        utf8.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        utf8.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x110000) {
+        utf8.push_back(static_cast<char>(0xF0 | ((cp >> 18) & 0x07)));
+        utf8.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        utf8.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        utf8.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
 bool ImTui_ImplNcurses_NewFrame() {
     bool hasInput = false;
 
@@ -181,9 +203,6 @@ bool ImTui_ImplNcurses_NewFrame() {
     static int lbut = 0;
     static int rbut = 0;
     static unsigned long mstate = 0;
-    static char input[3];
-
-    input[2] = 0;
 
     auto & keysDown = ImGui::GetIO().KeysDown;
     std::fill(keysDown, keysDown + 512, 0);
@@ -192,36 +211,37 @@ bool ImTui_ImplNcurses_NewFrame() {
     ImGui::GetIO().KeyShift = false;
 
     while (true) {
-        int c = wgetch(stdscr);
+        wint_t wc;
+        int ret = wget_wch(stdscr, &wc);
 
-        if (c == ERR) {
+        if (ret == ERR) {
+            // mouse release handling
             if ((mstate & 0xf) == 0x1) {
                 lbut = 0;
                 rbut = 0;
             }
             break;
-        } else if (c == KEY_MOUSE) {
-            MEVENT event;
-            if (getmouse(&event) == OK) {
-                mx = event.x;
-                my = event.y;
-                mstate = event.bstate;
-                if ((mstate & 0x000f) == 0x0002) lbut = 1;
-                if ((mstate & 0x000f) == 0x0001) lbut = 0;
-                if ((mstate & 0xf000) == 0x2000) rbut = 1;
-                if ((mstate & 0xf000) == 0x1000) rbut = 0;
-                //printf("mstate = 0x%016lx\n", mstate);
-                ImGui::GetIO().KeyCtrl |= ((mstate & 0x0F000000) == 0x01000000);
-            }
-        } else {
-            input[0] = (c & 0x000000FF);
-            input[1] = (c & 0x0000FF00) >> 8;
-            //printf("c = %d, c0 = %d, c1 = %d xxx\n", c, input[0], input[1]);
-            if (c < 127) {
-                if (c != ImGui::GetIO().KeyMap[ImGuiKey_Enter]) {
-                    ImGui::GetIO().AddInputCharactersUTF8(input);
+        } else if (ret == KEY_CODE_YES) {
+            // This is a special key (arrows, function keys, backspace, etc.)
+            int c = static_cast<int>(wc);
+
+            if (c == KEY_MOUSE) {
+                MEVENT event;
+                if (getmouse(&event) == OK) {
+                    mx = event.x;
+                    my = event.y;
+                    mstate = event.bstate;
+                    if ((mstate & 0x000f) == 0x0002) lbut = 1;
+                    if ((mstate & 0x000f) == 0x0001) lbut = 0;
+                    if ((mstate & 0xf000) == 0x2000) rbut = 1;
+                    if ((mstate & 0xf000) == 0x1000) rbut = 0;
+                    //printf("mstate = 0x%016lx\n", mstate);
+                    ImGui::GetIO().KeyCtrl |= ((mstate & 0x0F000000) == 0x01000000);
                 }
+                hasInput = true;
+                continue;
             }
+
             if (c == 330) {
                 ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_Delete]] = true;
             } else if (c == KEY_BACKSPACE || c == KEY_DC || c == 127) {
@@ -249,12 +269,39 @@ bool ImTui_ImplNcurses_NewFrame() {
                 ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_UpArrow]] = true;
             } else if (c == KEY_DOWN) {
                 ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_DownArrow]] = true;
+            } else if (c == 353) { // shift + tab
+                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_Tab]] = true;
+                ImGui::GetIO().KeyShift = true;
             } else {
                 keysDown[c] = true;
             }
-        }
+            hasInput = true;
+        } else if (ret == OK) {
+            int c = static_cast<int>(wc);
 
-        hasInput = true;
+            // Handle control characters (Tab, Enter, Escape, Backspace, Ctrl+letter, etc.)
+            if (c < 32 || c == 127) {
+                // Set the corresponding key in ImGui's key state
+                // KeysDown is an array of 512 bools, index by the key code
+                keysDown[c] = true;
+
+                // Special: Enter, Escape, Tab should not be passed as text input
+                // (they are navigation keys)
+                // For Ctrl+A etc., do not add as text either
+                // (ImGui uses the KeysDown flags to detect shortcuts)
+            } else {
+                // space is both a printable character and a control
+                if (c == 32) {
+                    keysDown[32] = true;
+                }
+
+                // This is a printable wide character (e.g., 'A', '你', '❤')
+                static std::string utf8_char;
+                code_point_to_utf8(wc, utf8_char);
+                ImGui::GetIO().AddInputCharactersUTF8(utf8_char.c_str());
+            }
+            hasInput = true;
+        }
     }
 
     if (ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_A]]) ImGui::GetIO().KeyCtrl = true;
@@ -278,7 +325,7 @@ bool ImTui_ImplNcurses_NewFrame() {
 static int nColPairs = 1;
 static int nActiveFrames = 10;
 static ImTui::TScreen screenPrev;
-static std::vector<uint8_t> curs;
+static std::vector<wchar_t> curs;
 static std::array<std::pair<bool, int>, 256*256> colPairs;
 
 void ImTui_ImplNcurses_DrawScreen(bool active) {
@@ -328,24 +375,24 @@ void ImTui_ImplNcurses_DrawScreen(bool active) {
 
             if (lastp != (int) p) {
                 if (curs.size() > 0) {
-                    curs[ic] = 0;
-                    addstr((char *) curs.data());
+                    curs[ic] = L'\0';
+                    addwstr(curs.data());
                     ic = 0;
-                    curs[0] = 0;
+                    curs[0] = L'\0';
                 }
                 attron(COLOR_PAIR(colPairs[p].second));
                 lastp = p;
             }
 
             const uint16_t c = cell & 0x0000FFFF;
-            curs[ic++] = c > 0 ? c : ' ';
+            curs[ic++] = c > 0 ? static_cast<wchar_t>(c) : L' ';
         }
 
         if (curs.size() > 0) {
             curs[ic] = 0;
-            addstr((char *) curs.data());
+            addwstr(curs.data());
             ic = 0;
-            curs[0] = 0;
+            curs[0] = L'\0';
         }
 
         if (compare) {

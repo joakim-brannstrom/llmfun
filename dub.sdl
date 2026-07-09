@@ -17,7 +17,7 @@ targetType "executable"
 preBuildCommands "make -C $PACKAGE_DIR -f sqlite3.mak" platform="posix"
 dflags "-P-I./vendor/sqlite3" "-P-I./vendor/sqlite3-vec"
 preBuildCommands "make -C $PACKAGE_DIR -f tui.mak" platform="posix"
-dflags "-P-I./vendor/imtui/include" "-P-I./cpp_tui/" "-L-lstdc++" "-L-lcurses"
+dflags "-P-I./vendor/imtui/include" "-P-I./cpp_tui/" "-L-lstdc++" "-L-lncursesw"
 
 sourceFiles "build/sqlite3.o" "build/sqlite-vec.o" "build/tui/libllmfun_tui_all_lib.a"
 
