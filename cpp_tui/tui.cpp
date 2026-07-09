@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <clocale>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -177,6 +178,8 @@ void applyTheme() {
 }
 
 bool tuiInit(ImTui::TScreen** screen) {
+    setlocale(LC_ALL, "");
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     applyTheme();

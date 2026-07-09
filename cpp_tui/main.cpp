@@ -1,6 +1,5 @@
 #include "tui_api.h"
 
-#include <clocale>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -9,8 +8,6 @@
 static inline String makeStr(const char* s) { return String{s, std::strlen(s)}; }
 
 int main() {
-    setlocale(LC_ALL, "");
-
     TuiScreen* screen = nullptr;
 
     screen = tuiInit();
