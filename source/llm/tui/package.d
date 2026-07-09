@@ -1,7 +1,7 @@
 module llm.tui;
 
 import logger = std.logger;
-import std.algorithm : filter, among;
+import std.algorithm : filter, among, min, max;
 import std.array : appender, Appender, empty, array;
 import std.logger;
 import std.concurrency;
@@ -274,7 +274,7 @@ struct UiAgentReady {
 
 void spawnUserInterface(Tid ownerTid) {
     import std.string : strip;
-    import std.datetime : dur;
+    import std.datetime : dur, Clock, Duration;
     import llm.utility : stopAgent, playNotification;
 
     setMaxMailboxSize(thisTid, 100, OnCrowding.block);
@@ -283,9 +283,12 @@ void spawnUserInterface(Tid ownerTid) {
     auto ui = makeTui();
     ui.setUiAsStdLogger;
     bool running = true;
+
+    immutable UpdateInterval = 10.dur!"msecs";
+    auto nextUpdate = Clock.currTime;
     do {
         try {
-            receiveTimeout(10.dur!"msecs", (UiShutdown _) { running = false; }, (UiSetIniFile a) {
+            receiveTimeout(UpdateInterval, (UiShutdown _) { running = false; }, (UiSetIniFile a) {
                 ui.setIniFile(a.path);
             }, (UiChatMessage a) { ui.addChatMessage(a.msg, null, a.type); }, (UiChatThinkMessage a) {
                 ui.addChatMessage(a.msg, a.thinking, a.type);
@@ -298,8 +301,8 @@ void spawnUserInterface(Tid ownerTid) {
                 playNotification();
             });
 
-            ui.render();
             auto query = ui.userQuery;
+
             if (!query.strip.empty) {
                 if (query == "/stop") {
                     stopAgent();
@@ -309,6 +312,10 @@ void spawnUserInterface(Tid ownerTid) {
                 }
             }
 
+            if (Clock.currTime > nextUpdate) {
+                ui.render();
+                nextUpdate = Clock.currTime + UpdateInterval;
+            }
         } catch (Exception e) {
             logger.trace(e);
             logger.warning(e.msg);
