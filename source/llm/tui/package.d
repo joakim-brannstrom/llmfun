@@ -245,6 +245,10 @@ struct UiChatThinkMessage {
     TuiChatMessageType type = TuiChatMessageType_Assistant;
 }
 
+struct UiFinalAnswer {
+    string msg;
+}
+
 struct UiClearChat {
 }
 
@@ -288,18 +292,21 @@ void spawnUserInterface(Tid ownerTid) {
     auto nextUpdate = Clock.currTime;
     do {
         try {
-            receiveTimeout(UpdateInterval, (UiShutdown _) { running = false; }, (UiSetIniFile a) {
-                ui.setIniFile(a.path);
-            }, (UiChatMessage a) { ui.addChatMessage(a.msg, null, a.type); }, (UiChatThinkMessage a) {
-                ui.addChatMessage(a.msg, a.thinking, a.type);
-            }, (UiClearChat _) { ui.clearChat; }, (UiStatusText a) {
-                ui.setStatusText(a.status);
-            }, (UiLogFile a) { ui.useUiLogFile(a.useFile); }, (UiTerminate _) {
-                running = false;
-            }, (UiAgentBusy _) { ui.setReadyStatus(false); }, (UiAgentReady _) {
-                ui.setReadyStatus(true);
-                playNotification();
-            });
+            // dfmt off
+            receiveTimeout(UpdateInterval,
+                (UiShutdown _) { running = false; },
+                (UiSetIniFile a) { ui.setIniFile(a.path); },
+                (UiChatMessage a) { ui.addChatMessage(a.msg, null, a.type); },
+                (UiChatThinkMessage a) { ui.addChatMessage(a.msg, a.thinking, a.type); },
+                (UiFinalAnswer a) { ui.addChatMessage(a.msg, null, TuiChatMessageType_FinalAnswer); },
+                (UiClearChat _) { ui.clearChat; },
+                (UiStatusText a) { ui.setStatusText(a.status); },
+                (UiLogFile a) { ui.useUiLogFile(a.useFile); },
+                (UiTerminate _) { running = false; },
+                (UiAgentBusy _) { ui.setReadyStatus(false); },
+                (UiAgentReady _) { ui.setReadyStatus(true); playNotification(); }
+            );
+            // dfmt on
 
             auto query = ui.userQuery;
 

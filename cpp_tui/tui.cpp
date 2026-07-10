@@ -113,8 +113,13 @@ static HeaderColors getHeaderColors(ChatMessageType type, const ChatMessageStyle
     case ChatMessageType::ToolResponse:
         return {style.toolResponseColor, style.toolResponseColorHover,
                 style.toolResponseColorActive};
+    case ChatMessageType::Vision:
+        return {style.visionColor, style.visionColorHover, style.visionColorActive};
+    case ChatMessageType::System:
+        return {style.systemColor, style.systemColorHover, style.systemColorActive};
+    case ChatMessageType::FinalAnswer:
+        return {style.finalAnswerColor, style.finalAnswerColorHover, style.finalAnswerColorActive};
     default:
-        // Neutral white fallback for unknown types
         return {ImVec4(0.90f, 0.90f, 0.90f, 1.00f), ImVec4(0.95f, 0.95f, 0.95f, 1.00f),
                 ImVec4(1.00f, 1.00f, 1.00f, 1.00f)};
     }

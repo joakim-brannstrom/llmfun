@@ -43,17 +43,16 @@ extern "C" {
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
  * Values mirror the C++ ChatMessageType enum in tui.h.
- *
- * Reserved future values:
- *   Vision   = 4  (for image/multimodal messages)
- *   System   = 5  (for system/instruction messages)
  */
 typedef enum TuiChatMessageType {
     TuiChatMessageType_User = 0,
     TuiChatMessageType_Assistant = 1,
     TuiChatMessageType_ToolCall = 2,
     TuiChatMessageType_ToolResponse = 3,
-    TuiChatMessageType_Count = 4 /* Sentinel — not a valid type */
+    TuiChatMessageType_Vision = 4,
+    TuiChatMessageType_System = 5,
+    TuiChatMessageType_FinalAnswer = 6,
+    TuiChatMessageType_Count = 7 /* Sentinel — not a valid type */
 } TuiChatMessageType;
 
 /* String — Plain old data struct representing a string slice.

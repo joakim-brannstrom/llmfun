@@ -26,8 +26,10 @@ enum class ChatMessageType : uint8_t {
     Assistant = 1,
     ToolCall = 2,
     ToolResponse = 3,
-    Count = 4 // Sentinel — not a valid type
-    // Reserved future values: Vision = 4, System = 5
+    Vision = 4,
+    System = 5,
+    FinalAnswer = 6,
+    Count = 7 // Sentinel — not a valid type
 };
 
 // Color configuration for each chat message type.
@@ -46,9 +48,24 @@ struct ChatMessageStyle {
     ImVec4 toolCallColorHover;
     ImVec4 toolCallColorActive;
     // ToolResponse message colors (Dark Warm Orange)
-    ImVec4 toolResponseColor = ImVec4(0.95f, 0.59, 0.40, 1.00f);
+    ImVec4 toolResponseColor = ImVec4(0.95f, 0.59f, 0.40f, 1.00f);
     ImVec4 toolResponseColorHover;
     ImVec4 toolResponseColorActive;
+
+    // Vision message colors (Purple — distinct from existing types)
+    ImVec4 visionColor = ImVec4(0.70f, 0.50f, 0.90f, 1.00f);
+    ImVec4 visionColorHover;
+    ImVec4 visionColorActive;
+
+    // System message colors (Slate Gray — subdued, non-user-facing)
+    ImVec4 systemColor = ImVec4(0.60f, 0.65f, 0.70f, 1.00f);
+    ImVec4 systemColorHover;
+    ImVec4 systemColorActive;
+
+    // FinalAnswer message colors (Bright Green — distinct from Assistant)
+    ImVec4 finalAnswerColor = ImVec4(0.30f, 0.95f, 0.30f, 1.00f);
+    ImVec4 finalAnswerColorHover;
+    ImVec4 finalAnswerColorActive;
 
     ChatMessageStyle() {
         userColorHover = lighten(userColor, 0.10f);
@@ -62,6 +79,15 @@ struct ChatMessageStyle {
 
         toolResponseColorHover = lighten(toolResponseColor, 0.10f);
         toolResponseColorActive = lighten(toolResponseColor, 0.15f);
+
+        visionColorHover = lighten(visionColor, 0.10f);
+        visionColorActive = lighten(visionColor, 0.15f);
+
+        systemColorHover = lighten(systemColor, 0.10f);
+        systemColorActive = lighten(systemColor, 0.15f);
+
+        finalAnswerColorHover = lighten(finalAnswerColor, 0.10f);
+        finalAnswerColorActive = lighten(finalAnswerColor, 0.15f);
     }
 };
 

@@ -57,6 +57,7 @@ class Agent : IBasicAgent {
         MetricsCalculator calculator;
         FeedbackEngine feedbackEngine;
         bool taskDone_;
+        string taskDoneMessage_;
         int lastToolCallWarning;
         static immutable WarnEveryNthToolCall = 5;
         static immutable string[] ExcludedTools = ["taskDone"];
@@ -242,6 +243,7 @@ class Agent : IBasicAgent {
         this.compress(callback: compressCallback);
 
         taskDone_ = false;
+        taskDoneMessage_ = null;
         ProcessResult result;
         bool keepRunning;
         ProcessResult.Status lastStatus = ProcessResult.Status.unknownFailure;
@@ -383,10 +385,16 @@ class Agent : IBasicAgent {
         }
     }
 
-private:
+    string takeTaskDoneMessage() @safe {
+        auto msg = taskDoneMessage_;
+        taskDoneMessage_ = null;
+        return msg;
+    }
 
-    void taskDone() @safe {
+private:
+    void taskDone(string answer) @safe {
         this.taskDone_ = true;
+        this.taskDoneMessage_ = answer;
     }
 
     ProcessResult.Status parseResponse(JSONValue resp) @trusted nothrow {
@@ -645,8 +653,8 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             return null;
         }
 
-        override void taskDone() {
-            agent.taskDone;
+        override void taskDone(string answer) {
+            agent.taskDone(answer);
         }
 
         override void setPipelineOutput(string output) {

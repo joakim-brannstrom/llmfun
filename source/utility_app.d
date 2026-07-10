@@ -248,7 +248,7 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
             return ToolLimits();
         }
 
-        override void taskDone() {
+        override void taskDone(string answer) {
         }
     }
 

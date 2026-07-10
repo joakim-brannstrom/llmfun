@@ -444,6 +444,13 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         doCompress(agent, force: false);
         auto result = agent.runToCompletion(&processResult, compressCallback: &progressCallback,
                 interrupt: () { return isStopAgentTriggered; });
+        if (auto finalAnswer = agent.takeTaskDoneMessage()) {
+            try {
+                send(uiTid, UiFinalAnswer(finalAnswer));
+            } catch (Exception e) {
+                logger.warningf("Failed to send final answer to TUI: %s", e.msg);
+            }
+        }
         return AgentStatus.active;
     }
 

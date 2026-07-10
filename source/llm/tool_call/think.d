@@ -18,7 +18,7 @@ mixin RegisterLlmFunctions!();
 interface ThinkingContext : Context {
     /// Returns the directory where thinking templates are stored.
     Path getThinkingTemplatesDir();
-    void taskDone();
+    void taskDone(string answer);
 }
 
 @Function("Get a structured thinking template for a specific strategy. Use this when facing a complex problem that requires a systematic approach. Returns a formatted template with steps to follow.")
@@ -60,10 +60,15 @@ ExecuteFuncResult listThinkingTemplates(Context baseCtx) {
     return ExecuteFuncResult(buf.data, success: true);
 }
 
-@Function("Call `taskDone` **only** when you have fully completed the user’s request.")
-ExecuteFuncResult taskDone(Context baseCtx) {
+@Function("Call `taskDone` **only** when you have fully completed the user's request. The 'answer' parameter must be a clear and complete summary of what was accomplished - self-contained, substantive, and directly addressing the user's request. Include code examples, key details, and explanations when relevant. Do not compress to the bare minimum.")
+ExecuteFuncResult taskDone(Context baseCtx, string answer) {
     mixin(baseContextToSpecific!ThinkingContext);
-    ctx.taskDone;
+
+    if (answer.strip.empty) {
+        return ExecuteFuncResult("error: 'answer' parameter is required and must not be empty",
+                success: false);
+    }
+    ctx.taskDone(answer);
     return ExecuteFuncResult("done", success: true);
 }
 
