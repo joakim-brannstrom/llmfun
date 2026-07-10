@@ -37,6 +37,7 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - show what pipeline agents are doing in a window
 - stream visualization of the current message
 - add UI where an agent can query the user for input.
+- taskDone should be changed such that it takes a string which is the final answer to the user. This is displayed to the user. It should contain the final answer to the user.
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
@@ -69,6 +70,7 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - add builtin pdf -> text -> rag
 - add builtin image -> text -> rag. This should probably be stored as "image path", "description".
 - add a date to all sources and then present it to the LLM so it can reason on the age of a source.
+- files excluded by "-e" are not removed when running "--sync"
 
 # memory
 ## Workflow Improvements
