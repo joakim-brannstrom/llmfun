@@ -38,6 +38,8 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - stream visualization of the current message
 - add UI where an agent can query the user for input.
 - taskDone should be changed such that it takes a string which is the final answer to the user. This is displayed to the user. It should contain the final answer to the user.
+- that there is a new background color for each TuiChatMessageType make it hard to understand what is relevant. Instead use only three background colors. 1) user query, 2) all assistant/tool call/tool response 3) final answer from taskDone. For 2) use the prefix `[assistant]/[tool call][tool response]` and change the foreground color. For 2) a somewhat muted background color should be used to de-emphasis that the LLM is working.
+- make it easy to create a simple, straight pipeline from the TUI as a chat message.
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
@@ -60,8 +62,8 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - the output from the query functions should contain the database the chunk came from and then this should be part of the Result that the LLM see so it know which database to search further in.
 
 # rag
+- memories should automatically be synchronized to the RAG so they are always searchable
 - Add a warning when the DB is wiped. Need to add migration in the future.
-- memories should automatically be added to the RAG so they are always searchable
 - use an actual regulator such as PID och kalman filter for the token window instead of the primitive "5 times and fixed step +/-"
 - a tui to inspect the rag DB such as what files are in it, the chunks etc. Look at the GUI for https://github.com/MrDoe/OpenCodeRAG
 - add treesitter and grammar for at least c/c++/python
