@@ -72,7 +72,6 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - add builtin pdf -> text -> rag
 - add builtin image -> text -> rag. This should probably be stored as "image path", "description".
 - add a date to all sources and then present it to the LLM so it can reason on the age of a source.
-- files excluded by "-e" are not removed when running "--sync"
 
 # memory
 ## Workflow Improvements

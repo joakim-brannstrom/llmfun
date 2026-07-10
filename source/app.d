@@ -801,13 +801,13 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         foreach (src; rag.getSources.map!(a => a.sources).joiner) {
             src.origin.match!((Topic a) { return; }, (Path a) {
                 auto normPath = a.toString.buildNormalizedPath;
-                if (isUnderManagedPath(normPath) && ragFilter.match(normPath)
-                    && !syncedOrigins.contains(normPath)) {
+                if (isUnderManagedPath(normPath) && !syncedOrigins.contains(normPath)) {
+                    auto reason = exists(a) ? "excluded by filter" : "deleted from filesystem";
                     try {
                         if (conf.dryRun) {
-                            logger.infof("  [dry-run] Would remove: %s", a);
+                            logger.infof("  [dry-run] Would remove: %s (%s)", a, reason);
                         } else {
-                            logger.infof("  Removing: %s", a);
+                            logger.infof("  Removing: %s (%s)", a, reason);
                             rag.removeSource(Origin(a.Path));
                         }
                         removed++;
