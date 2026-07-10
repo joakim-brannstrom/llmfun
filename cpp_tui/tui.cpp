@@ -522,7 +522,7 @@ void renderTabChat(TuiState& state, Log& log) {
 void renderTabLog(TuiState& state, Log& log) {
     ImVec2 DisplaySize = ImGui::GetIO().DisplaySize;
     ImVec2 childPos(0, 1.0f);
-    ImVec2 childSize(DisplaySize.x, DisplaySize.y - 4);
+    ImVec2 childSize(DisplaySize.x, DisplaySize.y - 2);
     ImGui::SetCursorPos(childPos);
     ImGuiWindowFlags outFlags = ImGuiWindowFlags_HorizontalScrollbar;
 
