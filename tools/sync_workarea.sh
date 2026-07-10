@@ -9,6 +9,7 @@ rsync -a README.md llmfun/workarea/llmfun/
 rsync -a config/ llmfun/workarea/llmfun/config/
 rsync -a *.mak llmfun/workarea/llmfun/
 rsync -a --delete --exclude ".git" vendor/ llmfun/workarea/llmfun/vendor/
+rm -rf llmfun/workarea/llmfun/vendor/imtui/test/build
 
 pushd llmfun/workarea/llmfun
 git init
@@ -16,7 +17,7 @@ git add source dub.sdl *.mak vendor
 git commit -m "import source"
 popd
 
-llmfun rag --db llmfun/data/rag.sqlite3 --sync source/ -i '.*\.d$'
-llmfun rag --db llmfun/data/rag.sqlite3 --sync cpp_tui/ -i '.*\.(h|hpp|c|cpp)$'
-llmfun rag --db llmfun/data/rag.sqlite3 --sync vendor/imtui/include vendor/imtui/examples -i '.*\.(h|hpp|c|cpp)$'
-llmfun rag --db llmfun/data/rag.sqlite3 --sync vendor/imtui/third-party/imgui -i '.*\.(h|hpp|c|cpp)$' -e '.*backend.*' -e '.*examples/libs.*'
+llmfun rag --db llmfun/data/rag.sqlite3 --sync -i '.*\.d$' source/
+llmfun rag --db llmfun/data/rag.sqlite3 --sync -i '.*\.(h|hpp|c|cpp)$' cpp_tui/
+llmfun rag --db llmfun/data/rag.sqlite3 --sync -i '.*\.(h|hpp|c|cpp|md|py)$' -e '.*imtui/test/build/.*' vendor/imtui/test vendor/imtui/include vendor/imtui/examples vendor/imgui_markdown/imgui_markdown.h vendor/imgui_markdown/README.md
+llmfun rag --db llmfun/data/rag.sqlite3 --sync -i '.*\.(h|hpp|c|cpp|md|py)$' -e '.*backend.*' -e '.*examples/libs.*' vendor/imtui/third-party/imgui
