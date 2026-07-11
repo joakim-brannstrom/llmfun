@@ -314,10 +314,13 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
                 logger.tracef("[%s]: %s", a.role, a.content);
             }
         }, (ToolMessage a) {
-            if (!isHiddenToolCall(a.toolCalls)) {
+            if (!a.hasTool("taskDone")) {
                 auto calls = summarizeToolCalls(a.toolCalls, 500);
                 sendChatMessage("[tool calls %s]: %(%-s\n%)",
                     TuiChatMessageType_ToolCall, calls.length, calls);
+            }
+            if (a.isFinalAnswer()) {
+                send(uiTid, UiFinalAnswer(a.getFinalAnswer()));
             }
         }, (ToolResponse a) {
             if (!isHiddenToolResponse(a.toolName)) {
@@ -448,13 +451,6 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         doCompress(agent, force: false);
         auto result = agent.runToCompletion(&processResult, compressCallback: &progressCallback,
                 interrupt: () { return isStopAgentTriggered; });
-        if (auto finalAnswer = agent.takeTaskDoneMessage()) {
-            try {
-                send(uiTid, UiFinalAnswer(finalAnswer));
-            } catch (Exception e) {
-                logger.warningf("Failed to send final answer to TUI: %s", e.msg);
-            }
-        }
         return AgentStatus.active;
     }
 

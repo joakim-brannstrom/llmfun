@@ -8,7 +8,7 @@ import std.array;
 import std.conv : to;
 import std.datetime : Clock, SysTime, Duration;
 import std.exception : collectException;
-import std.file : readText, exists, read;
+import std.file : readText, exists, read, rename;
 import std.format : format;
 import std.json : JSONValue, parseJSON;
 import std.range;
@@ -360,7 +360,9 @@ class Agent : IBasicAgent {
 
         try {
             auto historyPath = dir ~ (this.name ~ "_history.json");
-            File(historyPath.toString, "w").write(chat.toSaveJson.toPrettyString);
+            string tempFile = historyPath.toString ~ ".tmp";
+            File(tempFile, "w").write(chat.toSaveJson.toPrettyString);
+            rename(tempFile, historyPath.toString);
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
@@ -474,7 +476,11 @@ private:
                 logger.tracef("monitor record failed: %s", e.msg);
             }
 
-            chat.add(ToolMessage(JSONValue([call])));
+            JSONValue sd = JSONValue.init;
+            if (toolName == "taskDone" && taskDone_ && !taskDoneMessage_.empty) {
+                sd["taskDoneAnswer"] = JSONValue(taskDoneMessage_);
+            }
+            chat.add(ToolMessage(JSONValue([call]), JSONValue.init, sd));
             chat.add(ToolResponse(content: result, toolCallId: call["id"].str, toolName: toolName));
             if (auto image = toolCtx.drainVisionImage) {
                 chat.add(VisionMessage(image.query, image.data));

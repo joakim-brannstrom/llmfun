@@ -101,17 +101,15 @@ struct Chat {
             const startLen = history.length;
             foreach (entry; json["messages"].array) {
                 const role = entry["role"].str.to!Role;
-                JSONValue metadata;
-                if (auto m = "metadata" in entry) {
-                    metadata = *m;
-                }
+                JSONValue metadata = getValue(entry, (v) => v["metadata"], JSONValue.init);
+                JSONValue saveData = getValue(entry, (v) => v["save_data"], JSONValue.init);
 
                 final switch (role) {
                 case Role.system:
                     break;
                 case Role.assistant:
                     if ("tool_calls" in entry) {
-                        history ~= MessageT(ToolMessage(entry["tool_calls"], metadata));
+                        history ~= MessageT(ToolMessage(entry["tool_calls"], metadata, saveData));
                     } else {
                         history ~= MessageT(Message(role, entry["content"].str, "", metadata));
                     }
@@ -294,12 +292,15 @@ struct ToolMessage {
 @safe:
     Role role;
     JSONValue toolCalls;
-    JSONValue metadata;
+    JSONValue metadata; // for external tools only
+    JSONValue saveData; // for llmfun internal use
 
-    this(JSONValue toolCalls, JSONValue metadata = JSONValue.init) @safe nothrow {
+    this(JSONValue toolCalls, JSONValue metadata = JSONValue.init,
+            JSONValue saveData = JSONValue.init) @safe nothrow {
         this.role = Role.assistant;
         this.toolCalls = toolCalls;
         this.metadata = metadata;
+        this.saveData = saveData;
     }
 
     size_t length() @safe const {
@@ -307,7 +308,8 @@ struct ToolMessage {
     }
 
     string toString() @safe const {
-        return format!"Message(role:%s content:%s)"(role, toolCalls.toString);
+        return format!"Message(role:%s toolCalls:%s saveData:%s)"(role,
+                toolCalls.toString, saveData.toString);
     }
 
     JSONValue toJson() @safe {
@@ -323,6 +325,9 @@ struct ToolMessage {
         if (metadata != JSONValue.init) {
             j["metadata"] = metadata;
         }
+        if (saveData != JSONValue.init) {
+            j["save_data"] = saveData;
+        }
         return j;
     }
 
@@ -330,9 +335,27 @@ struct ToolMessage {
         try {
             this.role = j["role"].str.to!Role;
             this.toolCalls = j["tool_calls"];
+            if (auto m = "metadata" in j) {
+                this.metadata = *m;
+            }
+            if (auto s = "save_data" in j) {
+                this.saveData = *s;
+            }
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
+    }
+
+    /// Returns true if this ToolMessage represents a final answer.
+    bool isFinalAnswer() const @safe {
+        if (saveData.type != JSONType.object)
+            return false;
+        return ("taskDoneAnswer" in saveData) !is null;
+    }
+
+    /// Returns: the final answer text or empty string.
+    string getFinalAnswer() const @safe {
+        return getValue(saveData, (v) => v["taskDoneAnswer"].str, null);
     }
 
     /// Returns all tool call names and call IDs in this message
