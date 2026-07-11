@@ -120,6 +120,7 @@ struct RenderGroup {
 };
 
 struct ChatTab {
+    ChatMessageStyle style;
     std::set<size_t> outputLineOpen;
     std::deque<ChatMessage> outputLines;
     std::size_t outputLineNextId;

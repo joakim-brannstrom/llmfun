@@ -242,8 +242,7 @@ static void renderSingleHeader(TuiState& state, size_t i, ImVec2 displaySize,
 
     const bool showHeader = state.chat.outputLineOpen.count(i) == 0;
 
-    // Style colors for CollapsingHeader
-    const auto colors = getHeaderColors(entry.type, state.chatStyle);
+    const auto colors = getHeaderColors(entry.type, state.chat.style);
     if (showHeader) {
         ImGui::PushStyleColor(ImGuiCol_Text, colors.textColor);
     } else {
@@ -487,7 +486,7 @@ void renderTabChat(TuiState& state, Log& log) {
 
                 const bool showHeader = state.chat.outputLineOpen.count(g.start) == 0;
 
-                const auto colors = getHeaderColors(ChatMessageType::Assistant, state.chatStyle);
+                const auto colors = getHeaderColors(ChatMessageType::Assistant, state.chat.style);
                 if (showHeader) {
                     ImGui::PushStyleColor(ImGuiCol_Text, colors.textColor);
                 } else {
