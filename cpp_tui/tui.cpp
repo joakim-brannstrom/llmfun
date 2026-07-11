@@ -188,8 +188,10 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
         return;
     const auto& entry = state.chat.outputLines[i];
 
+    const bool isLastMessage = state.chat.outputLines.size() - 1 == i;
     auto treeId = makeUniqueId(entry.summary, "", entry.id);
-    if (!ImGui::TreeNode(treeId.c_str())) {
+    if (!ImGui::TreeNodeEx(treeId.c_str(), isLastMessage ? ImGuiTreeNodeFlags_DefaultOpen
+                                                         : ImGuiTreeNodeFlags_None)) {
         return;
     }
 
