@@ -70,7 +70,7 @@ string summarizeToolResponse(ToolResponse msg, size_t maxLength) {
             content[0 .. maxLength], content.length);
 }
 
-string[] summarizeToolCalls(JSONValue calls) {
+string[] summarizeToolCalls(JSONValue calls, size_t maxLength) {
     const errorMsg = "Wants to run: <unknown>";
     if (calls.type != JSONType.array || calls.array.empty)
         return [errorMsg];
@@ -90,8 +90,9 @@ string[] summarizeToolCalls(JSONValue calls) {
             string[] params;
             foreach (key, value; args.object) {
                 auto valueStr = value.toString;
-                if (valueStr.length > 80) {
-                    valueStr = format("'%.80s...' (%d chars)", valueStr, valueStr.length);
+                if (valueStr.length > maxLength) {
+                    valueStr = format("'%s...' (%d chars)",
+                            valueStr[0 .. maxLength], valueStr.length);
                 }
                 params ~= format("%s=%s", key, valueStr);
             }

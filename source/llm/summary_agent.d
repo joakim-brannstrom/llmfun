@@ -33,6 +33,7 @@ struct SummaryAgent {
         immutable MaxToolResponse = 100;
         immutable KeepLast = 5;
         immutable TokenBudget = 4096L;
+        immutable ToolCallMaxLength = 200;
     }
 
     string formatMessagesToText(Chat.MessageT[] messages) {
@@ -40,8 +41,10 @@ struct SummaryAgent {
         foreach (i, msg; messages) {
             auto content = msg.match!((Message m) => format!("%s: %s")(m.role.to!string,
                     m.content), (ToolMessage m) => format!("%s: tool_calls=[%s]")(m.role.to!string,
-                    summarizeToolCalls(m.toolCalls)), (ToolResponse m) => format!("%s: %s")(m.role.to!string,
-                    m.content.length < MaxToolResponse ? m.content : m.content[0 .. MaxToolResponse]),
+                    summarizeToolCalls(m.toolCalls, ToolCallMaxLength)),
+                    (ToolResponse m) => format!("%s: %s")(m.role.to!string,
+                        m.content.length < MaxToolResponse ? m.content
+                        : m.content[0 .. MaxToolResponse]),
                     (VisionMessage m) => "user: " ~ m.content ~ " [image]");
             buf.put(content);
             if (i < messages.length - 1)
@@ -256,7 +259,7 @@ struct SummaryAgent {
         import std.string : join;
 
         auto text = msg.match!((Message m) => m.role.to!string ~ ": " ~ m.content,
-                (ToolMessage m) => summarizeToolCalls(m.toolCalls).join('\n'),
+                (ToolMessage m) => summarizeToolCalls(m.toolCalls, ToolCallMaxLength).join('\n'),
                 (ToolResponse m) => m.role.to!string ~ ": " ~ m.content,
                 (VisionMessage m) => "user: " ~ m.content ~ " [image]");
         return cast(long) text.length / ApproxTokenSize;
@@ -279,7 +282,7 @@ struct SummaryAgent {
         string content;
         Role role;
         msg.match!((Message m) { content = m.content; role = m.role; }, (ToolMessage m) {
-            content = summarizeToolCalls(m.toolCalls).join('\n');
+            content = summarizeToolCalls(m.toolCalls, ToolCallMaxLength).join('\n');
             role = m.role;
         }, (ToolResponse m) {
             content = summarizeToolResponse(m, 8196);

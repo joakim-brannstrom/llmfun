@@ -315,14 +315,14 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             }
         }, (ToolMessage a) {
             if (!isHiddenToolCall(a.toolCalls)) {
-                auto calls = summarizeToolCalls(a.toolCalls);
+                auto calls = summarizeToolCalls(a.toolCalls, 500);
                 sendChatMessage("[tool calls %s]: %(%-s\n%)",
                     TuiChatMessageType_ToolCall, calls.length, calls);
             }
         }, (ToolResponse a) {
             if (!isHiddenToolResponse(a.toolName)) {
                 sendChatMessage("[tool result %-s]: %s", TuiChatMessageType_ToolResponse,
-                    a.toolName, summarizeToolResponse(a, 100));
+                    a.toolName, summarizeToolResponse(a, 500));
             }
         }, (VisionMessage a) {
             sendChatMessage("[user]: %s (with image)", TuiChatMessageType_User, a.content);
