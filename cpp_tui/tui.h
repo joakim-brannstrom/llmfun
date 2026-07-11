@@ -86,6 +86,7 @@ struct ChatMessage {
     std::string text;
     std::string thinking;
     ChatMessageType type = ChatMessageType::Assistant;
+    size_t id{0}; // Unique, monotonic increasing ID number
 };
 
 struct LogMessage {
@@ -110,6 +111,25 @@ struct UserQueryState {
     static constexpr size_t MAX_HISTORY = 500;
 };
 
+enum class GroupKind { UserQuery, FinalAnswer, AssistantWork };
+
+struct RenderGroup {
+    size_t start; // inclusive index into outputLines
+    size_t end;   // exclusive index into outputLines
+    GroupKind kind;
+};
+
+struct ChatTab {
+    std::set<size_t> outputLineOpen;
+    std::deque<ChatMessage> outputLines;
+    std::size_t outputLineNextId;
+    static constexpr size_t MaxChatMessages = 1000;
+
+    std::vector<RenderGroup> renderGroups;
+    size_t renderGroupFirstId{0};
+    size_t renderGroupLastId{0};
+};
+
 // Note: This struct is non-copyable and non-movable due to std::mutex.
 // Always pass by reference (TuiState&) to avoid accidental copies.
 struct TuiState {
@@ -120,9 +140,7 @@ struct TuiState {
     std::uint32_t busyIndicatorState{0};
     std::chrono::system_clock::time_point nextIndicatorIncr;
 
-    std::set<size_t> outputLineOpen;
-    std::deque<ChatMessage> outputLines;
-    static constexpr size_t MaxChatMessages = 1000;
+    ChatTab chat;
 
     std::deque<LogMessage> logMessages;
     static constexpr size_t MaxLogMessages = 1000;

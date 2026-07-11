@@ -370,7 +370,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             send(uiTid, UiClearChat.init);
             return AgentStatus.active;
         } else if (query == "/help") {
-            sendChatMessage(printHelp(), TuiChatMessageType_Assistant);
+            sendChatMessage(printHelp(), TuiChatMessageType_User);
             return AgentStatus.active;
         } else if (query == "/debug") {
             debugMode = !debugMode;
@@ -469,7 +469,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     foreach (m; agent.chat.getMessages()) {
         processChatMessage(m, printUser: true);
     }
-    sendChatMessage(printHelp(), TuiChatMessageType_Assistant);
+    sendChatMessage(printHelp(), TuiChatMessageType_User);
 
     if (llmConf.shouldConsolidate) {
         import llm.memory;

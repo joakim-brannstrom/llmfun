@@ -37,8 +37,20 @@ int main() {
         std::string text{
             u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' \n\n***\n\n"};
         text.append(std::to_string(i));
+
+        TuiChatMessageType type = TuiChatMessageType_Assistant;
+        if (i % 15 == 0) {
+            type = TuiChatMessageType_FinalAnswer;
+        } else if (i % 10 == 0) {
+            type = TuiChatMessageType_User;
+        }
         tuiAddChatMessage(state, ChatMessageParam{makeStr(summary.c_str()), makeStr(text.c_str()),
-                                                  makeStr("thinking..."), TuiChatMessageType_User});
+                                                  makeStr("thinking..."), type});
+
+        // if (i == 299) {
+        // tuiAddChatMessage(state, ChatMessageParam{makeStr(summary.c_str()),
+        // makeStr(text.c_str()), makeStr("thinking..."), TuiChatMessageType_FinalAnswer});
+        // }
     }
 
     while (true) {

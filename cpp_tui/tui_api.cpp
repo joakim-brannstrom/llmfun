@@ -241,7 +241,8 @@ void tuiAddChatMessage(TuiState* state, ChatMessageParam param) {
                           param.thinking.data ? param.thinking.len : 0);
     auto cppType = static_cast<::llmfun::tui::ChatMessageType>(param.type);
     ::llmfun::tui::tuiAddOutputLine(
-        *state->inner, ::llmfun::tui::ChatMessage{summary_, text_, thinking_, cppType});
+        *state->inner, ::llmfun::tui::ChatMessage{summary_, text_, thinking_, cppType,
+                                                  state->inner->chat.outputLineNextId++});
 }
 
 void tuiClearChatMessages(TuiState* state) {
