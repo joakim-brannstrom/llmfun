@@ -6,6 +6,7 @@ import std.array : array, empty, appender;
 import std.conv : to;
 import std.file : readText, exists, mkdirRecurse, rename;
 import std.format : format;
+import std.datetime : Clock;
 import std.json : JSONValue, JSONType, parseJSON;
 import std.sumtype : SumType, match;
 import std.string : toLower, startsWith;
@@ -15,6 +16,9 @@ import my.path;
 import llm.query : RequestConfig;
 
 immutable ProgramName = "llmfun";
+
+/// Minimum interval (in seconds) between session count increments.
+private enum SessionCountMinIntervalSec = 3 * 3600;
 
 struct RagDatabaseConfig {
     Path path;
@@ -111,6 +115,8 @@ struct LlmConfig {
     bool isConsolidating = false;
     /// Default trigger threshold (every N sessions). 0 means disabled.
     uint consolidationInterval = 10;
+    /// Unix epoch seconds of the last session count increment. 0 means never incremented.
+    long lastSessionCountUpdate = 0;
 
     SummaryModelConfig summaryModel;
 
@@ -229,6 +235,9 @@ struct LlmConfig {
             if ("consolidationInterval" in json) {
                 consolidationInterval = cast(uint) json["consolidationInterval"].integer;
             }
+            if ("lastSessionCountUpdate" in json) {
+                lastSessionCountUpdate = cast(long) json["lastSessionCountUpdate"].integer;
+            }
         } catch (Exception e) {
             logger.tracef("Failed to load state: %s", e.msg);
         }
@@ -250,6 +259,7 @@ struct LlmConfig {
             stateObj["sessionCount"] = sessionCount;
             stateObj["isConsolidating"] = isConsolidating;
             stateObj["consolidationInterval"] = consolidationInterval;
+            stateObj["lastSessionCountUpdate"] = lastSessionCountUpdate;
             File(tempFile, "w").writeln(stateObj.toString);
             rename(tempFile, stateFile);
         } catch (Exception e) {
@@ -261,7 +271,22 @@ struct LlmConfig {
     /// Returns true if consolidation was triggered (lock acquired).
     /// Persists state immediately.
     bool beginConsolidation() @safe {
-        sessionCount++;
+        long nowSec = Clock.currTime().toUnixTime!long;
+        long diff = nowSec - lastSessionCountUpdate;
+
+        if (diff < 0) {
+            // Clock went backwards or timestamp is corrupted; force increment
+            logger.tracef("Session count timestamp appears to be in the future (diff=%s). Resetting timer.",
+                    diff);
+            lastSessionCountUpdate = nowSec;
+        } else if (diff >= SessionCountMinIntervalSec) {
+            sessionCount++;
+            lastSessionCountUpdate = nowSec;
+        } else {
+            logger.tracef("Skipping session count increment: only %ld seconds since last update (threshold: %d)",
+                    diff, SessionCountMinIntervalSec);
+        }
+
         bool trigger = shouldConsolidateInternal();
         if (trigger) {
             isConsolidating = true;
