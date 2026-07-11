@@ -43,6 +43,7 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - must remove the logic in runToCompletion that look for an assistant message ending in "?" and the stop. Add a new tool call "userQuestion" which the LLM can call if they want to ask the user a question.
 - when clicking on the Chat in the menu the input field should be focused
 - FinalAnswer is not shown correctly when the chat is re-loaded. There are also a lot of spam in the log for taskDone etc.
+- should only update sessionCount if it has been 3 hour since last session
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
