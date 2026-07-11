@@ -264,8 +264,6 @@ static void renderSingleHeader(TuiState& state, size_t i, ImVec2 displaySize,
         ImGui::TextUnformatted(entry.text.data(), entry.text.data() + entry.text.size());
         ImGui::PopTextWrapPos();
 
-        // Render thinking as nested collapsible (closed by default)
-        // Open by default only if this is the last message AND it's a tool message
         if (!entry.thinking.empty()) {
             std::string thinkId = makeUniqueId("Model reasoning", "_primary_think_", i);
             bool isLastMsg = (i == state.chat.outputLines.size() - 1);
