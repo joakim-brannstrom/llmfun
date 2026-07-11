@@ -513,16 +513,12 @@ void renderTabChat(TuiState& state, Log& log) {
             }
             }
         }
-        if (!state.readyStatus) {
-            static std::string fullIndicator{"...."};
-            std::string indicator =
-                fullIndicator.substr(state.busyIndicatorState % fullIndicator.size());
-            ImGui::Text("%s%s", "Processing query", indicator.c_str());
-            if (std::chrono::system_clock::now() > state.nextIndicatorIncr) {
-                state.busyIndicatorState++;
-                state.nextIndicatorIncr =
-                    std::chrono::system_clock::now() + std::chrono::seconds{1};
-            }
+        if (state.readyStatus) {
+            state.startProcesssingTime = std::chrono::system_clock::now();
+        } else {
+            ImGui::Text("%s%ds", "Thinking ",
+                        (std::chrono::system_clock::now() - state.startProcesssingTime).count() /
+                            1000000000);
         }
 
         if (state.autoScroll) {

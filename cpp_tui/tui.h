@@ -138,8 +138,7 @@ struct TuiState {
     std::string iniFilename;
 
     bool readyStatus{true};
-    std::uint32_t busyIndicatorState{0};
-    std::chrono::system_clock::time_point nextIndicatorIncr;
+    std::chrono::system_clock::time_point startProcesssingTime;
 
     ChatTab chat;
 
@@ -155,8 +154,8 @@ struct TuiState {
 
     // Status line text
     std::string statusText;
-    // Color configuration for chat message headers
-    ChatMessageStyle chatStyle;
+
+    TuiState() { startProcesssingTime = std::chrono::system_clock::now(); }
 };
 
 /// Initialize terminal and create TScreen.
