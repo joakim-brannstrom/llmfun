@@ -37,14 +37,17 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - show what pipeline agents are doing in a window
 - stream visualization of the current message
 - add UI where an agent can query the user for input.
-- taskDone should be changed such that it takes a string which is the final answer to the user. This is displayed to the user. It should contain the final answer to the user.
 - that there is a new background color for each TuiChatMessageType make it hard to understand what is relevant. Instead use only three background colors. 1) user query, 2) all assistant/tool call/tool response 3) final answer from taskDone. For 2) use the prefix `[assistant]/[tool call][tool response]` and change the foreground color. For 2) a somewhat muted background color should be used to de-emphasis that the LLM is working.
 - make it easy to create a simple, straight pipeline from the TUI as a chat message.
+- log messages sent to the TUI should have the severity so the heading can be colored differently
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
 - loading prompts from files
     - with fallback to the general agent prompt.
+- make it possible to configure in more detail how /code and /plan should work. It can still be a pretty hard coded pipeline but:
+1. plan: the review step should be configurable with how many there are and for each one defined it should be possible to configure the prompt.
+2. code: same for the review step as for plan.
 
 ## plan
 - planner
