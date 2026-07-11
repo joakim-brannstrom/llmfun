@@ -580,25 +580,7 @@ LEFT JOIN fts_matches ON TextChunkTbl.id = fts_matches.rowid
 ORDER BY fusion_score DESC;
 `;
 
-        double countTextChunks() {
-            static immutable sql = "SELECT count(*) FROM TextChunkTbl";
-
-            double count = 0.0;
-            auto stmt = db.prepare(sql);
-            foreach (ref r; stmt.get.execute)
-                count = cast(double) r.peek!long(0);
-            return count;
-        }
-
-        double reduceRankBias(double chunkCount, double rank) {
-            import std.math : log;
-
-            immutable k = 60;
-            return 1.0 / (k + rank) * log(chunkCount);
-        }
-
         try {
-            const chunkCount = countTextChunks();
             auto stmt = db.prepare(sql);
             stmt.get.bind(":embedding", embedding.embed);
             stmt.get.bind(":text_query", query.cleanFts5);
@@ -609,8 +591,7 @@ ORDER BY fusion_score DESC;
                 // TODO: this should not be needed
                 if (results[].length >= limit)
                     break;
-                results.put(tuple!("id", "rank")(r.peek!long(0),
-                        reduceRankBias(chunkCount, r.peek!double(1))));
+                results.put(tuple!("id", "rank")(r.peek!long(0), r.peek!double(1)));
             }
             logger.trace("Hits ", results[].length);
 
