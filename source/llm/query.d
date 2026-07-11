@@ -7,7 +7,7 @@ import std.array : empty;
 import std.conv : to, text;
 import std.exception : collectException;
 import std.format : format;
-import std.json : JSONValue, parseJSON, JSONType;
+import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
 import std.stdio : writeln;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable;
@@ -97,7 +97,8 @@ struct LlmRequester {
             if (cfg.verbosity >= 2)
                 logger.trace(jsonReq.toPrettyString);
 
-            auto result = httpPostWithRetry(rq, cfg.chatUrl, jsonReq.toString, rqCfg);
+            auto result = httpPostWithRetry(rq, cfg.chatUrl,
+                    jsonReq.toString(JSONOptions.doNotEscapeSlashes), rqCfg);
 
             return result.match!((HttpResult r) {
                 if (r.statusCode == 200) {
