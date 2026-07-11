@@ -9,7 +9,7 @@ You have a maximum of **10 tool calls** per distinct knowledge-seeking objective
 ## Phase 0: Discovery & First Pass (Call 1 - MANDATORY)
 Execute these **simultaneously** in your very first turn:
 
-1. **Call `queryBestMatch`** with your current objective phrased as a natural question or set of keywords.
+1. **Call `queryBestMatch`** with your current objective phrased as a natural question or set of keywords. For this first query the parameter `textQuery` should only contain one keyword, the most relevant.
 2. **Call `listRAGDatabases`** to discover available database names.
 
 **Why this default?** `queryBestMatch` uses RRF to fuse semantic and FTS5 results. Even if your FTS5 query is poorly crafted, the semantic half will still pull in relevant content. This single call gives you a robust, balanced result set 80% of the time.
