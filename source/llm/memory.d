@@ -146,14 +146,14 @@ If there are no topics to consolidate or remove, output:
     if (parsed) {
         if (mergedCount == 0 && removedCount == 0) {
             sendChatMessage("[system]: Memory consolidation complete. No changes needed.",
-                    TuiChatMessageType_Assistant);
+                    TuiChatMessageType_FinalAnswer);
         } else {
             sendChatMessage(
                     format!"[system]: Memory consolidation complete. Merged %s topics, removed %s obsolete topics."(
-                    mergedCount, removedCount), TuiChatMessageType_Assistant);
+                    mergedCount, removedCount), TuiChatMessageType_FinalAnswer);
         }
     } else {
-        sendChatMessage("[system]: Memory consolidation complete.", TuiChatMessageType_Assistant);
+        sendChatMessage("[system]: Memory consolidation complete.", TuiChatMessageType_FinalAnswer);
     }
 
     logger.infof("Memory consolidation finished: merged=%s, removed=%s", mergedCount, removedCount);
