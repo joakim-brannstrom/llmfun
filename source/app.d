@@ -288,7 +288,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     }
 
     void progressCallback(size_t currentChunk, size_t totalChunks, string status) {
-        send(uiTid, UiChatMessage(format!"Compressing... %s/%s : %s"(currentChunk,
+        send(uiTid, UiChatMessage(format!"[assistant]: Compressing... %s/%s : %s"(currentChunk,
                 totalChunks, status), TuiChatMessageType_Assistant));
     };
 
@@ -419,7 +419,8 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             return AgentStatus.active;
         } else if (query.startsWith("/plan ")) {
             auto q = query["/plan ".length .. $];
-            sendChatMessage("Running plan pipeline: %s", TuiChatMessageType_Assistant, q);
+            sendChatMessage("[assistant]: Running plan pipeline: %s",
+                    TuiChatMessageType_Assistant, q);
             auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
                 return isInterruptTriggered;
             }, llmConf.toolFilter.to());
@@ -427,15 +428,18 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             return AgentStatus.active;
         } else if (query.startsWith("/code ")) {
             auto q = query["/code ".length .. $];
-            sendChatMessage("Running coder pipeline: %s", TuiChatMessageType_Assistant, q);
+            sendChatMessage("[assistant]: Running coder pipeline: %s",
+                    TuiChatMessageType_Assistant, q);
             auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
                 return isInterruptTriggered;
             }, llmConf.toolFilter.to());
             if (result.wasInterrupted) {
-                sendChatMessage("Pipeline interrupted by user.", TuiChatMessageType_Assistant);
+                sendChatMessage("[assistant]: Pipeline interrupted by user.",
+                        TuiChatMessageType_Assistant);
                 return AgentStatus.active;
             }
-            sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
+            sendChatMessage(format!"[assistant]: %s"(prettyPrint(result)),
+                    TuiChatMessageType_Assistant);
             return AgentStatus.active;
         } else if (query.empty) {
             return AgentStatus.active;
