@@ -39,6 +39,8 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - make it easy to create a simple, straight pipeline from the TUI as a chat message.
 - log messages sent to the TUI should have the severity so the heading can be colored differently
 - must remove the logic in runToCompletion that look for an assistant message ending in "?" and the stop. Add a new tool call "userQuestion" which the LLM can call if they want to ask the user a question.
+- when clicking on the Chat in the menu the input field should be focused
+- FinalAnswer is not shown correctly when the chat is re-loaded. There are also a lot of spam in the log for taskDone etc.
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
