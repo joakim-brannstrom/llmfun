@@ -33,61 +33,51 @@ enum class ChatMessageType : uint8_t {
 };
 
 // Color configuration for each chat message type.
-// Default values match the colorblind-safe palette from initializeDefaultColors().
+// 3 background groups (user, system/muted, finalAnswer) + 4 foreground colors for muted group.
 struct ChatMessageStyle {
-    // User message colors (Sky Blue)
-    ImVec4 userColor = ImVec4(0.45f, 0.70f, 0.90f, 1.00f);
-    ImVec4 userColorHover;
-    ImVec4 userColorActive;
-    // Assistant message colors (Soft Green)
-    ImVec4 assistantColor = ImVec4(0.55f, 0.85f, 0.55f, 1.00f);
-    ImVec4 assistantColorHover;
-    ImVec4 assistantColorActive;
-    // ToolCall message colors (Warm Orange)
-    ImVec4 toolCallColor = ImVec4(0.95f, 0.70f, 0.30f, 1.00f);
-    ImVec4 toolCallColorHover;
-    ImVec4 toolCallColorActive;
-    // ToolResponse message colors (Dark Warm Orange)
-    ImVec4 toolResponseColor = ImVec4(0.95f, 0.59f, 0.40f, 1.00f);
-    ImVec4 toolResponseColorHover;
-    ImVec4 toolResponseColorActive;
+    // --- Background colors (3 groups) ---
 
-    // Vision message colors (Purple — distinct from existing types)
-    ImVec4 visionColor = ImVec4(0.70f, 0.50f, 0.90f, 1.00f);
-    ImVec4 visionColorHover;
-    ImVec4 visionColorActive;
+    // User & Vision: Sky Blue background
+    ImVec4 userBg = ImVec4(0.45f, 0.70f, 0.90f, 1.00f);
+    ImVec4 userBgHover;
+    ImVec4 userBgActive;
 
-    // System message colors (Slate Gray — subdued, non-user-facing)
-    ImVec4 systemColor = ImVec4(0.60f, 0.65f, 0.70f, 1.00f);
-    ImVec4 systemColorHover;
-    ImVec4 systemColorActive;
+    // Assistant, ToolCall, ToolResponse, System: Dark Slate Gray background
+    ImVec4 systemBg = ImVec4(0.35f, 0.37f, 0.40f, 1.00f);
+    ImVec4 systemBgHover;
+    ImVec4 systemBgActive;
 
-    // FinalAnswer message colors (Bright Green — distinct from Assistant)
-    ImVec4 finalAnswerColor = ImVec4(0.30f, 0.95f, 0.30f, 1.00f);
-    ImVec4 finalAnswerColorHover;
-    ImVec4 finalAnswerColorActive;
+    // FinalAnswer: Bright Green background
+    ImVec4 finalAnswerBg = ImVec4(0.30f, 0.95f, 0.30f, 1.00f);
+    ImVec4 finalAnswerBgHover;
+    ImVec4 finalAnswerBgActive;
+
+    // --- Foreground/text colors (4 types in muted group) ---
+
+    // Assistant: Soft Green
+    ImVec4 assistantFg = ImVec4(0.55f, 0.85f, 0.55f, 1.00f);
+
+    // ToolCall: Warm Orange
+    ImVec4 toolCallFg = ImVec4(0.95f, 0.70f, 0.30f, 1.00f);
+
+    // ToolResponse: Dark Orange
+    ImVec4 toolResponseFg = ImVec4(0.95f, 0.59f, 0.40f, 1.00f);
+
+    // System: Light Slate Gray
+    ImVec4 systemFg = ImVec4(0.70f, 0.75f, 0.80f, 1.00f);
+
+    // Dark text for User and FinalAnswer (black text on bright backgrounds)
+    ImVec4 darkText{0.0f, 0.0f, 0.0f, 1.0f};
 
     ChatMessageStyle() {
-        userColorHover = lighten(userColor, 0.10f);
-        userColorActive = lighten(userColor, 0.15f);
+        userBgHover = lighten(userBg, 0.10f);
+        userBgActive = lighten(userBg, 0.15f);
 
-        assistantColorHover = lighten(assistantColor, 0.10f);
-        assistantColorActive = lighten(assistantColor, 0.15f);
+        systemBgHover = lighten(systemBg, 0.10f);
+        systemBgActive = lighten(systemBg, 0.15f);
 
-        toolCallColorHover = lighten(toolCallColor, 0.10f);
-        toolCallColorActive = lighten(toolCallColor, 0.15f);
-
-        toolResponseColorHover = lighten(toolResponseColor, 0.10f);
-        toolResponseColorActive = lighten(toolResponseColor, 0.15f);
-
-        visionColorHover = lighten(visionColor, 0.10f);
-        visionColorActive = lighten(visionColor, 0.15f);
-
-        systemColorHover = lighten(systemColor, 0.10f);
-        systemColorActive = lighten(systemColor, 0.15f);
-
-        finalAnswerColorHover = lighten(finalAnswerColor, 0.10f);
-        finalAnswerColorActive = lighten(finalAnswerColor, 0.15f);
+        finalAnswerBgHover = lighten(finalAnswerBg, 0.10f);
+        finalAnswerBgActive = lighten(finalAnswerBg, 0.15f);
     }
 };
 

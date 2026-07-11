@@ -33,11 +33,9 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 
 # ui
 - change the background color for the input field to dark grey
-- support streaming of queries
 - show what pipeline agents are doing in a window
 - stream visualization of the current message
 - add UI where an agent can query the user for input.
-- that there is a new background color for each TuiChatMessageType make it hard to understand what is relevant. Instead use only three background colors. 1) user query, 2) all assistant/tool call/tool response 3) final answer from taskDone. For 2) use the prefix `[assistant]/[tool call][tool response]` and change the foreground color. For 2) a somewhat muted background color should be used to de-emphasis that the LLM is working.
 - make it easy to create a simple, straight pipeline from the TUI as a chat message.
 - log messages sent to the TUI should have the severity so the heading can be colored differently
 

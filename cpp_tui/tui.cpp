@@ -97,31 +97,31 @@ public:
 static constexpr int HEADER_COLOR_COUNT = 4;
 
 struct HeaderColors {
-    ImVec4 base;
-    ImVec4 hovered;
-    ImVec4 active;
+    ImVec4 bgColor;
+    ImVec4 bgHovered;
+    ImVec4 bgActive;
+    ImVec4 textColor;
 };
 
 static HeaderColors getHeaderColors(ChatMessageType type, const ChatMessageStyle& style) {
     switch (type) {
     case ChatMessageType::User:
-        return {style.userColor, style.userColorHover, style.userColorActive};
-    case ChatMessageType::Assistant:
-        return {style.assistantColor, style.assistantColorHover, style.assistantColorActive};
-    case ChatMessageType::ToolCall:
-        return {style.toolCallColor, style.toolCallColorHover, style.toolCallColorActive};
-    case ChatMessageType::ToolResponse:
-        return {style.toolResponseColor, style.toolResponseColorHover,
-                style.toolResponseColorActive};
+        return {style.userBg, style.userBgHover, style.userBgActive, style.darkText};
     case ChatMessageType::Vision:
-        return {style.visionColor, style.visionColorHover, style.visionColorActive};
+        return {style.userBg, style.userBgHover, style.userBgActive, style.darkText};
+    case ChatMessageType::Assistant:
+        return {style.systemBg, style.systemBgHover, style.systemBgActive, style.assistantFg};
+    case ChatMessageType::ToolCall:
+        return {style.systemBg, style.systemBgHover, style.systemBgActive, style.toolCallFg};
+    case ChatMessageType::ToolResponse:
+        return {style.systemBg, style.systemBgHover, style.systemBgActive, style.toolResponseFg};
     case ChatMessageType::System:
-        return {style.systemColor, style.systemColorHover, style.systemColorActive};
+        return {style.systemBg, style.systemBgHover, style.systemBgActive, style.systemFg};
     case ChatMessageType::FinalAnswer:
-        return {style.finalAnswerColor, style.finalAnswerColorHover, style.finalAnswerColorActive};
+        return {style.finalAnswerBg, style.finalAnswerBgHover, style.finalAnswerBgActive,
+                style.darkText};
     default:
-        return {ImVec4(0.90f, 0.90f, 0.90f, 1.00f), ImVec4(0.95f, 0.95f, 0.95f, 1.00f),
-                ImVec4(1.00f, 1.00f, 1.00f, 1.00f)};
+        return {style.systemBg, style.systemBgHover, style.systemBgActive, style.systemFg};
     }
 }
 
@@ -299,15 +299,15 @@ void renderTabChat(TuiState& state, Log& log) {
             const bool showHeader = state.outputLineOpen.count(i) == 0;
 
             // style for CollapsingHeader
-            const auto& colors = getHeaderColors(entry.type, state.chatStyle);
+            const auto colors = getHeaderColors(entry.type, state.chatStyle);
             if (showHeader) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, colors.textColor);
             } else {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
             }
-            ImGui::PushStyleColor(ImGuiCol_Header, colors.base);
-            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, colors.hovered);
-            ImGui::PushStyleColor(ImGuiCol_HeaderActive, colors.active);
+            ImGui::PushStyleColor(ImGuiCol_Header, colors.bgColor);
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, colors.bgHovered);
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, colors.bgActive);
             StyleColorGuard guard{HEADER_COLOR_COUNT};
 
             bool outputLineOpen = ImGui::CollapsingHeader(s.c_str(), flags);
