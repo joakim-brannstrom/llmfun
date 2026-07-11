@@ -471,7 +471,7 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     }
     sendChatMessage(printHelp(), TuiChatMessageType_User);
 
-    if (llmConf.shouldConsolidate) {
+    if (llmConf.beginConsolidation) {
         import llm.memory;
 
         logger.infof("Memory consolidation pending at session #%s", llmConf.sessionCount + 1);
