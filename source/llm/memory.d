@@ -3,7 +3,7 @@ module llm.memory;
 import logger = std.logger;
 
 import core.sync : Condition, Mutex;
-import std.algorithm : splitter, canFind, startsWith;
+import std.algorithm : splitter, canFind, startsWith, map, filter;
 import std.datetime : Clock, dur, SysTime;
 import std.format : format;
 import std.json : parseJSON;
@@ -23,6 +23,7 @@ import llm.utility : backupMemoryFiles, restoreMemoryFiles, removeMemoryBackup;
 import llmfun_tui;
 
 import my.filter : ReFilter;
+import my.optional;
 
 /// Orchestrates automatic memory consolidation.
 void runMemoryConsolidation(LlmConfig llmConf, RAG rag, MetricMonitor monitor,
@@ -41,6 +42,72 @@ void runMemoryConsolidation(LlmConfig llmConf, RAG rag, MetricMonitor monitor,
     }
     logger.trace("Memory backup created");
 
+    bool successfulConsolidation;
+    ProcessResult consolidationResult;
+    runConsolidateAgent(llmConf, rag, monitor, sendChatMessage).match!((ProcessResult a) {
+        successfulConsolidation = true;
+        consolidationResult = a;
+    }, (_) {});
+
+    if (consolidationResult.status == ProcessResult.Status.unknownFailure
+            || !successfulConsolidation) {
+        logger.warning("Memory consolidation agent failed");
+        restoreMemoryFiles(memoryArea);
+        sendChatMessage("[system]: Memory consolidation failed: agent error. Restored previous memory state.",
+                TuiChatMessageType_Assistant);
+        return;
+    }
+
+    long mergedCount = 0;
+    long removedCount = 0;
+    bool parsed = false;
+    foreach (m; consolidationResult.chat.retro) {
+        m.match!((Message msg) {
+            foreach (trimmed; msg.content.splitter("\n").map!(a => a.strip)
+                .filter!(a => a.startsWith("{") && a.canFind("\"consolidation_result\""))) {
+                try {
+                    auto json = parseJSON(trimmed);
+                    if ("consolidation_result" in json) {
+                        auto cr = json["consolidation_result"];
+                        if ("merged" in cr) {
+                            mergedCount = cr["merged"].array.length;
+                        }
+                        if ("removed" in cr) {
+                            removedCount = cr["removed"].array.length;
+                        }
+                        parsed = true;
+                    }
+                } catch (Exception e) {
+                    logger.tracef("Failed to parse consolidation JSON: %s", e.msg);
+                }
+                return;
+            }
+        }, (_) {});
+        if (parsed)
+            break;
+    }
+
+    removeMemoryBackup(memoryArea);
+
+    string finalAnswer = () {
+        if (!parsed) {
+            return "[system]: Memory consolidation complete.";
+        }
+        if (mergedCount == 0 && removedCount == 0) {
+            return "[system]: Memory consolidation complete. No changes needed.";
+        }
+        return format!"[system]: Memory consolidation complete. Merged %s topics, removed %s obsolete topics."(
+                mergedCount, removedCount);
+    }();
+    sendChatMessage(finalAnswer, TuiChatMessageType_FinalAnswer);
+
+    logger.infof("Memory consolidation finished: merged=%s, removed=%s", mergedCount, removedCount);
+}
+
+private:
+
+Optional!ProcessResult runConsolidateAgent(LlmConfig llmConf, RAG rag,
+        MetricMonitor monitor, void delegate(string, TuiChatMessageType) sendChatMessage) {
     string consolidationPrompt = q{Perform memory consolidation. Follow these steps:
 
 1. Call `getMemoryTopics` to review all memory topics and their summaries.
@@ -86,10 +153,9 @@ If there are no topics to consolidate or remove, output:
         pool.submit(consolidationAgent, &callback);
     } catch (Exception e) {
         logger.errorf("Failed to submit consolidation agent: %s", e.msg);
-        restoreMemoryFiles(memoryArea);
         sendChatMessage(format!"[system]: Memory consolidation failed: %s. Restored previous memory state."(e.msg),
                 TuiChatMessageType_Assistant);
-        return;
+        return none!ProcessResult();
     }
 
     doneMutex.lock();
@@ -100,61 +166,5 @@ If there are no topics to consolidate or remove, output:
 
     pool.stop();
 
-    if (consolidationResult.status == ProcessResult.Status.unknownFailure) {
-        logger.warning("Memory consolidation agent failed");
-        restoreMemoryFiles(memoryArea);
-        sendChatMessage("[system]: Memory consolidation failed: agent error. Restored previous memory state.",
-                TuiChatMessageType_Assistant);
-        return;
-    }
-
-    long mergedCount = 0;
-    long removedCount = 0;
-    bool parsed = false;
-
-    foreach (m; consolidationResult.chat.retro) {
-        m.match!((Message msg) {
-            string content = msg.content;
-            foreach (line; content.splitter("\n")) {
-                auto trimmed = line.strip();
-                if (trimmed.startsWith("{") && trimmed.canFind("\"consolidation_result\"")) {
-                    try {
-                        auto json = parseJSON(trimmed);
-                        if ("consolidation_result" in json) {
-                            auto cr = json["consolidation_result"];
-                            if ("merged" in cr) {
-                                mergedCount = cr["merged"].array.length;
-                            }
-                            if ("removed" in cr) {
-                                removedCount = cr["removed"].array.length;
-                            }
-                            parsed = true;
-                        }
-                    } catch (Exception e) {
-                        logger.tracef("Failed to parse consolidation JSON: %s", e.msg);
-                    }
-                    break;
-                }
-            }
-        }, (_) {});
-        if (parsed)
-            break;
-    }
-
-    removeMemoryBackup(memoryArea);
-
-    if (parsed) {
-        if (mergedCount == 0 && removedCount == 0) {
-            sendChatMessage("[system]: Memory consolidation complete. No changes needed.",
-                    TuiChatMessageType_FinalAnswer);
-        } else {
-            sendChatMessage(
-                    format!"[system]: Memory consolidation complete. Merged %s topics, removed %s obsolete topics."(
-                    mergedCount, removedCount), TuiChatMessageType_FinalAnswer);
-        }
-    } else {
-        sendChatMessage("[system]: Memory consolidation complete.", TuiChatMessageType_FinalAnswer);
-    }
-
-    logger.infof("Memory consolidation finished: merged=%s, removed=%s", mergedCount, removedCount);
+    return consolidationResult.some;
 }
