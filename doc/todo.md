@@ -38,6 +38,7 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - add UI where an agent can query the user for input.
 - make it easy to create a simple, straight pipeline from the TUI as a chat message.
 - log messages sent to the TUI should have the severity so the heading can be colored differently
+- must remove the logic in runToCompletion that look for an assistant message ending in "?" and the stop. Add a new tool call "userQuestion" which the LLM can call if they want to ask the user a question.
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
@@ -60,7 +61,6 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - live agent status update in a new imgui window while it is working
 - there should be a mode where the pipeline execute all tasks and then optionally ask the user for input
 - there should be something like /plan update, which goes through the pipeline but with other steering prompt such that the LLM understand that it should fix things in the system design and implementation plan.
-- the output from the query functions should contain the database the chunk came from and then this should be part of the Result that the LLM see so it know which database to search further in.
 
 # rag
 - memories should automatically be synchronized to the RAG so they are always searchable
@@ -72,7 +72,6 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - add a "chunker" for a diff
 - add builtin pdf -> text -> rag
 - add builtin image -> text -> rag. This should probably be stored as "image path", "description".
-- add a date to all sources and then present it to the LLM so it can reason on the age of a source.
 
 # memory
 ## Workflow Improvements
