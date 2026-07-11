@@ -567,9 +567,12 @@ void renderMainWindow(TuiState& state, Log& log) {
     bool showChat{false};
     bool showLog{false};
     if (ImGui::BeginMenuBar()) {
-        if (ImGui::BeginMenu("Tab")) {
-            ImGui::MenuItem("Chat", nullptr, &showChat);
-            ImGui::MenuItem("Log", nullptr, &showLog);
+        if (ImGui::BeginMenu("Chat")) {
+            showChat = true;
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Log")) {
+            showLog = true;
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
