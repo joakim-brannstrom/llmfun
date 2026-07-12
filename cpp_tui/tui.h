@@ -131,8 +131,6 @@ struct ChatTab {
     size_t renderGroupLastId{0};
 };
 
-// Note: This struct is non-copyable and non-movable due to std::mutex.
-// Always pass by reference (TuiState&) to avoid accidental copies.
 struct TuiState {
     bool isLogActive{false};
     std::string iniFilename;
