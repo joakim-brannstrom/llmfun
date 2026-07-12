@@ -1,8 +1,7 @@
 # Design of Best Match
+This describes the algorithm for best match used in the database.
 
-This describe the algorithm for best match used in the database.
-
-FTS5 is a text search algorithm while sqlite-vec is a semanit search. Both have their pro/con. By combining them the result is hopefully better. If there is an exact match then FTS5 find it but also high ranking semantic matches are part of the top-K result. To combine them and avoid e.g. duplication Reciprocal Rank Fusion (RRF) is used.
+FTS5 is a text search algorithm while sqlite-vec is a semantic search. Both have their pro/con. By combining them the result is hopefully better. If there is an exact match then FTS5 find it but also high ranking semantic matches are part of the top-K result. To combine them and avoid e.g. duplication Reciprocal Rank Fusion (RRF) is used.
 
 | Feature           | sqlite-vec (Semantic)                                 | FTS5 (Full-Text Search)                       |
 | ----------------- | ----------------------------------------------------- | --------------------------------------------- |
@@ -77,3 +76,29 @@ B ends up ranked higher, which is sensible because it’s strong in both engines
 - Constant k (60) acts as a tuning knob: lower k makes top ranks more dominant; higher k flattens the influence. 60 is a common default that balances well.
 
 In short, RRF is a fair, data‑driven way to marry the precision of keyword search with the semantic intuition of vector search, without throwing away information or forcing an arbitrary split.
+
+# Shuffle-Based Rank Randomization
+
+After collecting results from the database queries, a Fisher-Yates shuffle (`randomizeRanks()`) is applied to the result array before sorting by rank and truncating to top-K. This eliminates database-order bias: without shuffling, results with identical ranks would always be taken from whichever database returned them first.
+
+How it works:
+1. The raw result array from the database is duplicated.
+2. A Fisher-Yates shuffle randomizes the copy.
+3. The shuffled copy is sorted by rank and truncated to the requested top-K.
+4. The original array is never mutated.
+
+This means that for results with the same or very close RRF scores, the ordering is randomized rather than deterministic. Across repeated queries with the same input, the exact top-K set may vary slightly at the boundary, but the highest-ranking results remain stable.
+
+# Fallback Behavior
+
+`queryBestMatch` requires a valid embedding vector for the combined semantic + text search. If the embedding service fails (HTTP error) or returns an empty vector, the function falls back to `queryTextSearch` with the text query alone. This ensures that a search failure in the embedding layer does not result in zero results.
+
+The fallback chain is:
+1. Attempt combined semantic + text search (RRF) using `queryCombineSemanticText`.
+2. If embedding is empty or fails → fall back to FTS5 text search only.
+
+# Multi-Database Parallel Query
+
+The RAG system supports multiple databases. When `database` parameter is `"*"`, all registered databases are queried in parallel. Results from each database are collected, shuffled via `randomizeRanks()`, sorted by rank, and truncated to top-K. Each result carries a `databaseName` field indicating which database it came from.
+
+For single-database queries (by name), only that database is searched. The parallel execution uses `std.parallelism` and thread-safe SQL access via `spinSql`.
