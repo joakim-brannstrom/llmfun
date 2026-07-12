@@ -189,7 +189,7 @@ struct LlmConfig {
 
         activeCodeModelIndex = matchIndex;
         saveState();
-        return "";
+        return null;
     }
 
     /// List all configured model names with index and active indicator.
@@ -244,7 +244,7 @@ struct LlmConfig {
     }
 
     /// Save state to llmfun/data/state.json. Only saves if directory exists.
-    void saveState() const @safe {
+    void saveState() const @safe nothrow {
         import std.stdio : File;
 
         if (!dataDir.exists) {
@@ -263,28 +263,37 @@ struct LlmConfig {
             File(tempFile, "w").writeln(stateObj.toString);
             rename(tempFile, stateFile);
         } catch (Exception e) {
-            logger.tracef("Failed to save state: %s", e.msg);
+            try {
+                logger.tracef("Failed to save state: %s", e.msg);
+            } catch (Exception e) {
+            }
         }
     }
 
     /// Increments session count and begins consolidation if it should trigger.
     /// Returns true if consolidation was triggered (lock acquired).
     /// Persists state immediately.
-    bool beginConsolidation() @safe {
+    bool beginConsolidation() @safe nothrow {
         long nowSec = Clock.currTime().toUnixTime!long;
         long diff = nowSec - lastSessionCountUpdate;
 
         if (diff < 0) {
+            try {
+                logger.tracef("Session count timestamp appears to be in the future (diff=%s). Resetting timer.",
+                        diff);
+            } catch (Exception e) {
+            }
             // Clock went backwards or timestamp is corrupted; force increment
-            logger.tracef("Session count timestamp appears to be in the future (diff=%s). Resetting timer.",
-                    diff);
             lastSessionCountUpdate = nowSec;
         } else if (diff >= SessionCountMinIntervalSec) {
             sessionCount++;
             lastSessionCountUpdate = nowSec;
         } else {
-            logger.tracef("Skipping session count increment: only %ld seconds since last update (threshold: %d)",
-                    diff, SessionCountMinIntervalSec);
+            try {
+                logger.tracef("Skipping session count increment: only %s seconds since last update (threshold: %s)",
+                        diff, SessionCountMinIntervalSec);
+            } catch (Exception e) {
+            }
         }
 
         bool trigger = shouldConsolidateInternal();
@@ -295,12 +304,12 @@ struct LlmConfig {
         return trigger;
     }
 
-    bool shouldConsolidate() const @safe {
+    bool shouldConsolidate() const @safe nothrow {
         return !isConsolidating && shouldConsolidateInternal;
     }
 
     /// Internal check without the isConsolidating guard (used after increment).
-    private bool shouldConsolidateInternal() const @safe {
+    private bool shouldConsolidateInternal() const @safe nothrow {
         if (consolidationInterval == 0 || sessionCount == 0) {
             return false;
         }
