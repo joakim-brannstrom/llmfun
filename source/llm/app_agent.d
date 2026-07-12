@@ -257,6 +257,10 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
             return AgentStatus.active;
         } else if (query.empty) {
             return AgentStatus.active;
+        } else if (query.startsWith("/")) {
+            sendChatMessage("[system] Unknown command: '%s'. Type /help for available commands.",
+                    TuiChatMessageType_Assistant, query);
+            return AgentStatus.active;
         }
 
         agent.addUserQuery(query);
