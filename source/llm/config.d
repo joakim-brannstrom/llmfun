@@ -283,7 +283,6 @@ struct LlmConfig {
                         diff);
             } catch (Exception e) {
             }
-            // Clock went backwards or timestamp is corrupted; force increment
             lastSessionCountUpdate = nowSec;
         } else if (diff >= SessionCountMinIntervalSec) {
             sessionCount++;
@@ -319,6 +318,7 @@ struct LlmConfig {
     /// Clears consolidation lock after completion (success or failure). Persists immediately.
     void clearConsolidationLock() @safe {
         isConsolidating = false;
+        sessionCount++;
         saveState();
     }
 
@@ -339,7 +339,21 @@ LlmConfig makeLlmConfig() {
     return conf;
 }
 
-void makeFileStructure(LlmConfig conf, bool rag = false) {
+void makeDefaultFileStructure() {
+    import std.file : mkdirRecurse;
+    import my.xdg : xdgDataHome;
+
+    foreach (path; [(xdgDataHome ~ Path(ProgramName) ~ Path("memory"))].filter!(a => !a.exists)) {
+        try {
+            logger.trace("Creating directory ", path);
+            mkdirRecurse(path);
+        } catch (Exception e) {
+            logger.warning(e);
+        }
+    }
+}
+
+void makeLocalSetupFileStructure(LlmConfig conf, bool rag = false) {
     import std.file : mkdirRecurse;
 
     foreach (path; ([conf.scratchArea, conf.workArea] ~ (rag ? [conf.dataDir] : null)).filter!(

@@ -300,8 +300,9 @@ struct AgentApp {
     }
 
     int run(UserConfig uconf, UserConfig.AgentChatConfig conf) {
+        makeDefaultFileStructure;
         if (conf.setupDirs)
-            makeFileStructure(LlmConfig.init);
+            makeLocalSetupFileStructure(LlmConfig.init);
 
         _llmConf = readConfig(uconf.config, !conf.prompt.empty, uconf.noCwdConfig).userToLlmConfig(
                 conf);

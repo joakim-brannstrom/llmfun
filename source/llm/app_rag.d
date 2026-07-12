@@ -19,7 +19,7 @@ import my.filter : ReFilter;
 
 int appMain(UserConfig uconf, UserConfig.Rag conf) {
     if (conf.setupDirs) {
-        makeFileStructure(LlmConfig.init, rag: true);
+        makeLocalSetupFileStructure(LlmConfig.init, rag: true);
     }
     auto llmConf = readConfig(uconf.config, false, uconf.noCwdConfig).userToLlmConfig(conf);
 
