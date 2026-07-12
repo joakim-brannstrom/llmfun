@@ -428,13 +428,13 @@ int InputResizeCallback(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
-void renderTabChat(TuiState& state, Log& log) {
+void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
     auto io = ImGui::GetIO();
     ImVec2 DisplaySize = io.DisplaySize;
     const auto inputBufLines =
         std::min(20, std::max(2, static_cast<int>(countNewLines(state.userQuery.inputBuf))));
 
-    bool focusInput{false};
+    bool focusInput{focusInput_};
 
     auto outputArea = [&state, &log, &inputBufLines, &DisplaySize, &focusInput]() {
         // Clamp height to avoid negative values on very small terminals
@@ -739,7 +739,7 @@ void renderMainWindow(TuiState& state, Log& log) {
 
     switch (activeTab) {
     case 0:
-        renderTabChat(state, log);
+        renderTabChat(state, showChat, log);
         break;
     case 1:
         renderTabLog(state, log);

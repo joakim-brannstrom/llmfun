@@ -39,8 +39,6 @@ FeedbackEngine. When it triggers, such as a tool reaching a high enough threshol
 - add UI where an agent can query the user for input.
 - make it easy to create a simple, straight pipeline from the TUI as a chat message.
 - log messages sent to the TUI should have the severity so the heading can be colored differently
-- when clicking on the Chat in the menu the input field should be focused
-- unknown slash-commands should be discarded
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
