@@ -23,7 +23,6 @@
 - memory directory in ~/.local/share/llmfun should always be created
 - add a /fixcomments <filename> that goes through filename and updates all comments to be relevant to the current code. Those that seem to not match the code should be flagged.
 - add more @safe tags
-- split app.d into smaller files
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 

@@ -11,7 +11,7 @@ import std.exception : collectException;
 import std.file : readText, exists, read, rename;
 import std.format : format;
 import std.json : JSONValue, parseJSON;
-import std.range;
+import std.range : empty;
 import std.regex : Regex, regex;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable, nullable;
