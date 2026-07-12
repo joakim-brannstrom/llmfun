@@ -229,16 +229,6 @@ class Agent : IBasicAgent {
     /// Run the agent until completion (no more tool calls, no more thinking needed)
     override ProcessResult runToCompletion(void delegate(ProcessResult) step = null,
             SummaryAgent.ProgressCallback compressCallback = null, bool delegate() interrupt = null) @trusted {
-        bool isLastResponseQuestion() {
-            import std.string : strip, endsWith;
-
-            foreach (msg; chat.lastResponse) {
-                return msg.match!((Message a) => a.content,
-                        (ToolMessage a) => string.init, (ToolResponse a) => string.init,
-                        (VisionMessage a) => a.content).strip.endsWith("?");
-            }
-            return false;
-        };
         // make sure there is room in the context before doing anything
         this.compress(callback: compressCallback);
 
@@ -255,7 +245,7 @@ class Agent : IBasicAgent {
             result = this.process();
             if (step)
                 step(result);
-            if (taskDone_ || isLastResponseQuestion || (interrupt && interrupt()))
+            if (taskDone_ || (interrupt && interrupt()))
                 break;
             keepRunning = result.hasToolCall;
 
