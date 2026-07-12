@@ -10,10 +10,12 @@ import my.path : Path;
 
 import llmfun_tui;
 
+// Convert a D string to an inbound API `String` (no allocation)
 String toTuiString(string s) {
     return String(s.ptr, s.length);
 }
 
+// Converts an outbound API `String` to a D string (allocates via `idup`, strips trailing null/newline).
 string toString(String s) {
     if (s.len == 0)
         return null;
@@ -24,6 +26,7 @@ string toString(String s) {
     return r;
 }
 
+// Extracts a short summary from a message (strips `#` headers, takes first line up to 100 chars).
 string shortSummary(string msg) nothrow {
     import std.algorithm : until;
     import std.ascii : isASCII, isAlphaNum, isWhite;
@@ -52,6 +55,7 @@ string shortSummary(string msg) nothrow {
         .take(100).array;
 }
 
+// A D `Logger` implementation that captures log entries and drains them for display in the TUI log tab.
 class TuiLogger : Logger {
     import core.sync.mutex;
     import std.format : format;
@@ -89,6 +93,7 @@ class TuiLogger : Logger {
     }
 }
 
+// Swaps the global logger to a `TuiLogger` and restores the previous logger on destruction.
 struct TuiLogSwap {
     private {
         bool isSwapped = false;
