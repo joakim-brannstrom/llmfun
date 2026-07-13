@@ -32,17 +32,17 @@ import my.path : Path;
 
 struct AgentApp {
     private {
-        LlmConfig _llmConf;
-        RAG _rag;
-        Path _agentHistory;
-        MetricMonitor _monitor;
-        Agent _agent;
-        string _systemPrompt;
-        bool _oneShotQuery;
-        Tid _uiTid;
-        double _lastTokensPerSecond;
-        bool _debugMode;
-        UserConfig.AgentChatConfig _conf;
+        LlmConfig llmConf;
+        RAG rag;
+        Path agentHistory;
+        MetricMonitor monitor;
+        Agent agent_;
+        string systemPrompt;
+        bool oneShotQuery;
+        Tid uiTid;
+        double lastTokensPerSecond;
+        bool debugMode;
+        UserConfig.AgentChatConfig conf_;
 
         enum AgentStatus {
             active,
@@ -53,21 +53,21 @@ struct AgentApp {
     @disable this(this);
 
     void dispose() {
-        if (_uiTid != Tid.init) {
+        if (uiTid != Tid.init) {
             try {
-                send(_uiTid, UiTerminate.init);
+                send(uiTid, UiTerminate.init);
             } catch (Exception) {
                 // UI thread may have already terminated
             }
-            _uiTid = Tid.init;
+            uiTid = Tid.init;
         }
-        if (_rag) {
-            _rag.destroy;
-            _rag = null;
+        if (rag) {
+            rag.destroy;
+            rag = null;
         }
-        if (_agent) {
-            _agent.saveHistory(_agentHistory);
-            _agent = null;
+        if (agent_) {
+            agent_.saveHistory(agentHistory);
+            agent_ = null;
         }
     }
 
@@ -102,10 +102,10 @@ struct AgentApp {
         static if (args.length > 0) {
             msg = format(msg, args);
         }
-        if (_oneShotQuery) {
+        if (oneShotQuery) {
             writeln(msg);
         } else {
-            send(_uiTid, UiChatMessage(msg, type));
+            send(uiTid, UiChatMessage(msg, type));
         }
     }
 
@@ -114,39 +114,39 @@ struct AgentApp {
         static if (args.length > 0) {
             msg = format(msg, args);
         }
-        if (_oneShotQuery) {
+        if (oneShotQuery) {
             writeln(msg);
         } else {
-            send(_uiTid, UiChatThinkMessage(msg, thinking, type));
+            send(uiTid, UiChatThinkMessage(msg, thinking, type));
         }
     }
 
     private void progressCallback(size_t currentChunk, size_t totalChunks, string status) {
-        if (!_oneShotQuery) {
-            send(_uiTid, UiChatMessage(format!"[assistant]: Compressing... %s/%s : %s"(currentChunk,
+        if (!oneShotQuery) {
+            send(uiTid, UiChatMessage(format!"[assistant]: Compressing... %s/%s : %s"(currentChunk,
                     totalChunks, status), TuiChatMessageType_Assistant));
         }
     }
 
     private void setStatusText(bool readyState) {
         auto status = format!"Context: %s/%s tokens | %.1f tok/s | Model: '%s' | %s"(
-                _agent.contextUsed, _agent.contextSize,
-                _lastTokensPerSecond, _llmConf.activeModelName(), readyState ? "Ready" : "Busy");
-        send(_uiTid, UiStatusText(status));
+                agent_.contextUsed, agent_.contextSize,
+                lastTokensPerSecond, llmConf.activeModelName(), readyState ? "Ready" : "Busy");
+        send(uiTid, UiStatusText(status));
     }
 
     private void doCompress(bool force) {
-        if (!_agent.needCompression && !force)
+        if (!agent_.needCompression && !force)
             return;
-        const ctxUsed = _agent.contextUsed;
-        if (!_oneShotQuery)
-            send(_uiTid, UiAgentBusy.init);
-        auto res = _agent.compress(force: force, callback: &this.progressCallback);
-        if (!_oneShotQuery) {
-            send(_uiTid, UiChatMessage(compressionResultToString(res.compressed, res.originalLength,
+        const ctxUsed = agent_.contextUsed;
+        if (!oneShotQuery)
+            send(uiTid, UiAgentBusy.init);
+        auto res = agent_.compress(force: force, callback: &this.progressCallback);
+        if (!oneShotQuery) {
+            send(uiTid, UiChatMessage(compressionResultToString(res.compressed, res.originalLength,
                     res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize),
                     TuiChatMessageType_Assistant));
-            send(_uiTid, UiAgentReady.init);
+            send(uiTid, UiAgentReady.init);
         } else {
             writeln(compressionResultToString(res.compressed, res.originalLength,
                     res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize));
@@ -169,8 +169,8 @@ struct AgentApp {
                     TuiChatMessageType_ToolCall, calls.length, calls);
             }
             if (a.isFinalAnswer()) {
-                if (!_oneShotQuery) {
-                    send(_uiTid, UiFinalAnswer(a.getFinalAnswer()));
+                if (!oneShotQuery) {
+                    send(uiTid, UiFinalAnswer(a.getFinalAnswer()));
                 }
             }
         }, (ToolResponse a) {
@@ -187,12 +187,12 @@ struct AgentApp {
         foreach (m; result.chat) {
             this.processChatMessage(m, printUser: false);
         }
-        _agent.saveHistory(_agentHistory);
+        agent_.saveHistory(agentHistory);
         logger.trace(result.status != ProcessResult.Status.ok, result);
 
         try {
             if (auto t = "predicted_per_second" in result.timing)
-                _lastTokensPerSecond = t.floating;
+                lastTokensPerSecond = t.floating;
         } catch (Exception e) {
             logger.trace("Failed to extract predicted_per_second: ", e.msg);
         }
@@ -205,56 +205,56 @@ struct AgentApp {
             this.doCompress(true);
             return AgentStatus.active;
         } else if (query == "/new") {
-            _agent.clearHistory;
-            send(_uiTid, UiClearChat.init);
+            agent_.clearHistory;
+            send(uiTid, UiClearChat.init);
             return AgentStatus.active;
         } else if (query == "/help") {
-            auto helpText = this.printHelp(_conf);
+            auto helpText = this.printHelp(conf_);
             if (helpText !is null) {
                 this.sendChatMessage(helpText, TuiChatMessageType_User);
             }
             return AgentStatus.active;
         } else if (query == "/debug") {
-            _debugMode = !_debugMode;
-            send(_uiTid, UiLogFile(_debugMode));
-            logger.globalLogLevel = _debugMode ? logger.LogLevel.trace : logger.LogLevel.info;
+            debugMode = !debugMode;
+            send(uiTid, UiLogFile(debugMode));
+            logger.globalLogLevel = debugMode ? logger.LogLevel.trace : logger.LogLevel.info;
             this.sendChatMessage("Debug output: %s",
-                    TuiChatMessageType_Assistant, _debugMode ? "ON" : "OFF");
+                    TuiChatMessageType_Assistant, debugMode ? "ON" : "OFF");
             return AgentStatus.active;
         } else if (query == "/model" || query.startsWith("/model ")) {
             auto arg = query == "/model" ? "" : query["/model ".length .. $].strip();
             if (arg.empty) {
                 auto m = "Available models:";
-                foreach (i, model; _llmConf.codeModels) {
-                    auto activeMarker = (i == cast(size_t) _llmConf.activeCodeModelIndex) ? " [active]"
+                foreach (i, model; llmConf.codeModels) {
+                    auto activeMarker = (i == cast(size_t) llmConf.activeCodeModelIndex) ? " [active]"
                         : "";
                     m ~= format("  %s  %s%s\n", i, model.name, activeMarker);
                 }
                 m ~= "Use /model <index> or /model <name> to switch.";
                 this.sendChatMessage(m, TuiChatMessageType_Assistant);
             } else {
-                const oldModel = _llmConf.activeCodeModel.name;
+                const oldModel = llmConf.activeCodeModel.name;
                 bool switched;
                 size_t idx = ifThrown(arg.to!long, -1);
                 if (idx >= 0) {
-                    switched = _llmConf.selectModelByIndex(idx);
+                    switched = llmConf.selectModelByIndex(idx);
                     if (!switched) {
                         this.sendChatMessage("error: Invalid model index '%s'. Valid indices: 0-%s.",
-                                TuiChatMessageType_Assistant, arg, _llmConf.codeModels.length - 1);
+                                TuiChatMessageType_Assistant, arg, llmConf.codeModels.length - 1);
                     }
                 } else {
-                    auto result = _llmConf.selectModelByName(arg);
+                    auto result = llmConf.selectModelByName(arg);
                     switched = result.empty;
                     if (!switched)
                         this.sendChatMessage("failed to switch model: %s",
                                 TuiChatMessageType_Assistant, result);
                 }
                 if (switched) {
-                    _agent.resetModel(_llmConf.activeCodeModel());
+                    agent_.resetModel(llmConf.activeCodeModel());
                     this.sendChatMessage("switched to model: %s\nAgent model reset: %s -> %s, context: %s",
                             TuiChatMessageType_Assistant,
-                            _llmConf.activeModelName(), oldModel,
-                            _agent.modelName, _agent.modelContextSize);
+                            llmConf.activeModelName(), oldModel,
+                            agent_.modelName, agent_.modelContextSize);
                 }
             }
             return AgentStatus.active;
@@ -262,18 +262,18 @@ struct AgentApp {
             auto q = query["/plan ".length .. $];
             this.sendChatMessage("[assistant]: Running plan pipeline: %s",
                     TuiChatMessageType_Assistant, q);
-            auto result = runPlanPipeline(q, _llmConf, _rag, _monitor, () {
+            auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
                 return isInterruptTriggered;
-            }, _llmConf.toolFilter.to());
+            }, llmConf.toolFilter.to());
             this.sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
             return AgentStatus.active;
         } else if (query.startsWith("/code ")) {
             auto q = query["/code ".length .. $];
             this.sendChatMessage("[assistant]: Running coder pipeline: %s",
                     TuiChatMessageType_Assistant, q);
-            auto result = runCoderPipeline(q, _llmConf, _rag, _monitor, () {
+            auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
                 return isInterruptTriggered;
-            }, _llmConf.toolFilter.to());
+            }, llmConf.toolFilter.to());
             if (result.wasInterrupted) {
                 this.sendChatMessage("[assistant]: Pipeline interrupted by user.",
                         TuiChatMessageType_Assistant);
@@ -290,9 +290,9 @@ struct AgentApp {
             return AgentStatus.active;
         }
 
-        _agent.addUserQuery(query);
+        agent_.addUserQuery(query);
         this.doCompress(false);
-        auto result = _agent.runToCompletion(&this.processResult,
+        auto result = agent_.runToCompletion(&this.processResult,
                 compressCallback: &this.progressCallback, interrupt: () {
             return isStopAgentTriggered;
         });
@@ -304,40 +304,40 @@ struct AgentApp {
         if (conf.setupDirs)
             makeLocalSetupFileStructure(LlmConfig.init);
 
-        _llmConf = readConfig(uconf.config, !conf.prompt.empty, uconf.noCwdConfig).userToLlmConfig(
+        llmConf = readConfig(uconf.config, !conf.prompt.empty, uconf.noCwdConfig).userToLlmConfig(
                 conf);
-        _rag = createRag(_llmConf);
-        _agentHistory = _llmConf.scratchArea;
-        _monitor = new MetricMonitor(_llmConf.scratchArea ~ "monitor.jsonl");
-        _agent = new Agent("main", _llmConf, _monitor, _rag, _llmConf.toolFilter.to());
-        _agent.loadHistory(_agentHistory);
-        _systemPrompt = SystemPromptInit(_llmConf.promptToPath(_llmConf.agentPrompt)).toString;
-        _agent.setSystemPrompt(_systemPrompt);
-        _conf = conf;
+        rag = createRag(llmConf);
+        agentHistory = llmConf.scratchArea;
+        monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
+        agent_ = new Agent("main", llmConf, monitor, rag, llmConf.toolFilter.to());
+        agent_.loadHistory(agentHistory);
+        systemPrompt = SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString;
+        agent_.setSystemPrompt(systemPrompt);
+        conf_ = conf;
         scope (exit)
             this.dispose(); // Ensures cleanup on any exception after setup
 
-        _oneShotQuery = !conf.prompt.empty;
+        oneShotQuery = !conf.prompt.empty;
 
-        if (_oneShotQuery) {
+        if (oneShotQuery) {
             this.runAgent(conf.prompt);
             return 0;
         }
 
-        _uiTid = spawn(&spawnUserInterface, thisTid);
-        send(_uiTid, UiSetIniFile(_llmConf.scratchArea ~ "imgui.ini"));
+        uiTid = spawn(&spawnUserInterface, thisTid);
+        send(uiTid, UiSetIniFile(llmConf.scratchArea ~ "imgui.ini"));
 
-        foreach (m; _agent.chat.getMessages()) {
+        foreach (m; agent_.chat.getMessages()) {
             this.processChatMessage(m, printUser: true);
         }
-        auto helpText = this.printHelp(conf);
+        auto helpText = this.printHelp(conf_);
         if (helpText !is null) {
             this.sendChatMessage(helpText, TuiChatMessageType_User);
         }
 
-        if (_llmConf.beginConsolidation) {
-            logger.infof("Memory consolidation pending at session #%s", _llmConf.sessionCount + 1);
-            runMemoryConsolidation(_llmConf, _rag, _monitor, (string msg,
+        if (llmConf.beginConsolidation) {
+            logger.infof("Memory consolidation pending at session #%s", llmConf.sessionCount + 1);
+            runMemoryConsolidation(llmConf, rag, monitor, (string msg,
                     TuiChatMessageType t) => this.sendChatMessage(msg, t));
         }
 
@@ -348,17 +348,17 @@ struct AgentApp {
                 auto query = a.query.strip;
                 if (!query.empty) {
                     this.sendChatMessage(query, TuiChatMessageType_User);
-                    send(_uiTid, UiAgentBusy.init);
+                    send(uiTid, UiAgentBusy.init);
                     clearStopAgent();
                     this.setStatusText(false);
                     final switch (this.runAgent(query)) {
                     case AgentStatus.active:
                         break;
                     case AgentStatus.terminate:
-                        send(_uiTid, UiTerminate.init);
+                        send(uiTid, UiTerminate.init);
                         break;
                     }
-                    send(_uiTid, UiAgentReady.init);
+                    send(uiTid, UiAgentReady.init);
                 }
             }, (UiTerminated _) { running = false; });
         }
