@@ -57,7 +57,7 @@ struct LlmConfig {
 
     Path scratchArea = ProgramName ~ "/data/scratch";
 
-    Path thinkingTemplatesDir = ProgramName ~ "/config/thinking";
+    Path[] thinkingTemplatesDir;
 
     Path promptDir = ProgramName ~ "/config/prompt";
 
@@ -79,6 +79,11 @@ struct LlmConfig {
             dataSearch(ProgramName).resolve("memory".Path).match!((ResourceFile a) {
                 memoryArea ~= a.get;
             }, (_) {});
+        }
+
+        if (thinkingTemplatesDir.empty) {
+            thinkingTemplatesDir ~= (ProgramName ~ "/config/thinking");
+
         }
 
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
