@@ -35,6 +35,9 @@
 - add UI where an agent can query the user for input.
 - make it easy to create a simple, straight pipeline from the TUI as a chat message.
 - log messages sent to the TUI should have the severity so the heading can be colored differently
+- add a tab which show a live stream of tool use
+- add a menu item to open a separate window to show more detailed statistic about LLM such as latency, token use in total etc
+- add a menu item to navigate the RAG database
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
