@@ -295,13 +295,14 @@ class RAG {
     struct DbSource {
         Path name;
         Source[] sources;
+        bool isPrimary;
     }
 
     DbSource[] getSources() {
         assert(databases.length == dbs.length, "databases and dbs arrays are out of sync");
         auto rval = appender!(DbSource[])();
         foreach (idx; 0 .. dbs.length) {
-            rval.put(DbSource(databases[idx].path, dbs[idx].getSources));
+            rval.put(DbSource(databases[idx].path, dbs[idx].getSources, idx == 0));
         }
         return rval[];
     }

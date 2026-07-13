@@ -44,6 +44,13 @@ struct FlatVfs {
         return none!AbsolutePath();
     }
 
+    bool isRoot(AbsolutePath p) {
+        foreach (a; hierarchy.filter!(a => a == p)) {
+            return true;
+        }
+        return false;
+    }
+
     // Scan the hierarchy in from index 0->last and keep only the unique files
     // found. This mean that if file "foo" is found in hierarchy[0] and in
     // hierarchy[2] the one from 0 is used.

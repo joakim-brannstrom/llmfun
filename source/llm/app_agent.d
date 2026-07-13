@@ -298,8 +298,46 @@ struct AgentApp {
         return AgentStatus.active;
     }
 
+    private void updateRagMemory() {
+        import llm.vfs : FlatVfs;
+        import std.path : baseName, stripExtension, dirName;
+        import llm.rag.rag : add, Document, Origin, Offset, Topic;
+        import my.set;
+        import my.path : AbsolutePath;
+
+        // do not slowdown startup if the user only have an in-memory because
+        // then they are indexed every time the user start
+        if (rag is null || rag.isPrimaryInMemory)
+            return;
+
+        auto vfs = FlatVfs(llmConf.memoryArea);
+        Set!string topics;
+        foreach (name; vfs.getAllFiles) {
+            try {
+                vfs.read(name.baseName).match!((string content) {
+                    auto res = rag.add(Document(Origin(cast(Path) name),
+                        content, Offset.init), llmConf.ragConfig);
+                    logger.infof(res.length != 0, "Add memory '%s' to RAG", name);
+                    topics.add(name);
+                }, (_) {});
+            } catch (Exception e) {
+                logger.trace(e.msg);
+            }
+        }
+        logger.trace(topics);
+
+        foreach (src; rag.db.getSources) {
+            src.origin.match!((Path a) {
+                if (a !in topics && vfs.isRoot(a.dirName.AbsolutePath)) {
+                    logger.tracef("Removing memory '%s'", a);
+                    rag.db.removeSource(src.origin);
+                }
+            }, (_) {});
+        }
+    }
+
     int run(UserConfig uconf, UserConfig.AgentChatConfig conf) {
-        makeDefaultFileStructure;
+        makeDefaultFileStructure();
         if (conf.setupDirs)
             makeLocalSetupFileStructure(LlmConfig.init);
 
@@ -321,6 +359,9 @@ struct AgentApp {
             this.runAgent(conf.prompt);
             return 0;
         }
+
+        // only update memory for non-oneshot because it is assumed that oneshot need max speed/low latency
+        updateRagMemory();
 
         uiTid = spawn(&spawnUserInterface, thisTid);
         send(uiTid, UiSetIniFile(llmConf.scratchArea ~ "imgui.ini"));

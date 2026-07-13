@@ -617,7 +617,15 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
         }
 
         override bool saveMemoryFile(string topic, string content) {
-            return memoryVfs.save(topic ~ ".md", content);
+            import llm.rag.rag : add, Document, Origin, Offset;
+
+            auto rval = memoryVfs.save(topic ~ ".md", content);
+            if (rval) {
+                memoryVfs.query(topic ~ ".md").match!((AbsolutePath a) {
+                    rag.add(Document(Origin(a), content, Offset.init), conf.ragConfig);
+                }, (_) {});
+            }
+            return rval;
         }
 
         override Optional!string readMemory(string topic) {
@@ -625,6 +633,12 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
         }
 
         override bool removeMemory(string topic) {
+            import llm.rag.rag : Origin;
+
+            memoryVfs.query(topic ~ ".md").match!((AbsolutePath a) {
+                rag.removeSource(Origin(a));
+            }, (_) {});
+
             return memoryVfs.remove(topic ~ ".md");
         }
 
