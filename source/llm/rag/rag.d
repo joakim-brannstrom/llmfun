@@ -326,6 +326,13 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     import llm.utility : getValue, ApproxTokenSize;
     import core.memory : GC;
 
+    // have to turn off the GC because something in the underlying libraries
+    // try to use a pointer while the GC is freeing. The line that most often
+    // trigger the GC is appending to graphemes.
+    GC.disable();
+    scope (exit)
+        GC.enable();
+
     long toUint(ubyte[4] a) {
         return a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
     }
@@ -414,13 +421,6 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     size_t startLine = 1;
     Grapheme[] graphemes;
     foreach (graphem; doc.data.byGrapheme) {
-        // have to turn off the GC because something in the underlying libraries
-        // try to use a pointer while the GC is freeing. The line that most often
-        // trigger the GC is appending to graphemes.
-        GC.disable();
-        scope (exit)
-            GC.enable();
-
         graphemes ~= graphem;
         if (graphemes.length >= nBatch && graphem[0].isWhite) {
             addChunk(graphemes, startCharPos, startLine, 0);
