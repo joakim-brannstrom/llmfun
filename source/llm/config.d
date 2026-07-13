@@ -61,8 +61,8 @@ struct LlmConfig {
 
     Path promptDir = ProgramName ~ "/config/prompt";
 
-    RagDatabaseConfig ragPrimary = RagDatabaseConfig((ProgramName ~ "/data/rag.sqlite3")
-            .Path, "Read/write database containing temporary data");
+    RagDatabaseConfig ragPrimary = RagDatabaseConfig((ProgramName ~ "/data/rag.sqlite3").Path,
+            "Recent project source code, documentation and files added with tools loadFileToRAG, loadContentToRAG");
     RagDatabaseConfig[][string] ragSecondary;
 
     void resolvePaths() {
