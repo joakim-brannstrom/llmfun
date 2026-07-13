@@ -37,7 +37,6 @@ struct AgentApp {
         Path agentHistory;
         MetricMonitor monitor;
         Agent agent_;
-        string systemPrompt;
         bool oneShotQuery;
         Tid uiTid;
         double lastTokensPerSecond;
@@ -311,8 +310,7 @@ struct AgentApp {
         monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
         agent_ = new Agent("main", llmConf, monitor, rag, llmConf.toolFilter.to());
         agent_.loadHistory(agentHistory);
-        systemPrompt = SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString;
-        agent_.setSystemPrompt(systemPrompt);
+        agent_.setSystemPrompt(llmConf.getPrompt(llmConf.agentPrompt));
         conf_ = conf;
         scope (exit)
             this.dispose(); // Ensures cleanup on any exception after setup

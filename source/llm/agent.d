@@ -15,6 +15,7 @@ import std.range : empty;
 import std.regex : Regex, regex;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable, nullable;
+import std.path : stripExtension, baseName;
 
 import my.filter : ReFilter;
 import my.optional;
@@ -71,7 +72,6 @@ class Agent : IBasicAgent {
 
     this(string name, LlmConfig llmConf, MetricMonitor monitor, RAG rag, ReFilter filter) {
         import llm.tool_call : descAllFunctions, filterToolDescriptions;
-        import llm.utility : SystemPromptInit;
 
         this.name = name;
         this.monitor = monitor;
@@ -82,8 +82,7 @@ class Agent : IBasicAgent {
         resetModel(llmConf.activeCodeModel);
 
         this.summary = SummaryAgent(llmConf.summaryModel);
-        this.summary.setSystemPrompt(SystemPromptInit(
-                llmConf.promptToPath(llmConf.summaryModel.prompt)).toString);
+        this.summary.setSystemPrompt(llmConf.getPrompt(llmConf.summaryModel.prompt));
     }
 
     ~this() @safe {
@@ -514,6 +513,7 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             Agent agent;
             PipelineControlContext pipelineCtx;
             FlatVfs memoryVfs;
+            FlatVfs thinkingVfs;
 
             SysTime nextMetricCalculation;
 
@@ -527,6 +527,7 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             this.agent = agent;
 
             this.memoryVfs = FlatVfs(conf.memoryArea);
+            this.thinkingVfs = FlatVfs(conf.thinkingTemplatesDir);
         }
 
         ~this() {
@@ -607,13 +608,10 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
         }
 
         override string[] getMemoryFileTopics() {
-            import std.file : dirEntries, SpanMode;
-            import std.path : stripExtension, baseName;
-
             try {
                 return memoryVfs.getAllFiles.map!(a => a.baseName.stripExtension).array;
             } catch (Exception e) {
-                logger.warning("unable to read file area for memory topics: ", e.msg);
+                logger.warning("unable to read memory directories: ", e.msg);
             }
             return null;
         }
@@ -630,8 +628,17 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             return memoryVfs.remove(topic ~ ".md");
         }
 
-        override Path getThinkingTemplatesDir() {
-            return conf.thinkingTemplatesDir;
+        override string[] getThinkingTemplates() {
+            try {
+                return thinkingVfs.getAllFiles.map!(a => a.baseName.stripExtension).array;
+            } catch (Exception e) {
+                logger.warning("unable to read thinking directories: ", e.msg);
+            }
+            return null;
+        }
+
+        override Optional!string readThinkingTemplate(string name) {
+            return thinkingVfs.read(name ~ ".md");
         }
 
         override ref MetricsCalculator getCalculator() {

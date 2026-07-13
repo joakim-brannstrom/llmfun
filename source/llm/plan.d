@@ -7,11 +7,10 @@ import std.file : exists, timeLastModified;
 import std.datetime : Clock, dur;
 
 import llm.agent : Agent;
-import llm.config : LlmConfig, promptToPath;
+import llm.config : LlmConfig;
 import llm.pipeline : Pipeline, PipelineResult, pipelineBuilder, NodeConfig;
 import llm.rag.rag : RAG;
 import llm.metric.monitor : MetricMonitor;
-import llm.utility : SystemPromptInit;
 
 /// Runs a two-stage pipeline: System Designer → Implementation Planner
 ///
@@ -92,8 +91,7 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
     Agent codeAnalyser;
     void initCodeAnalyserAgent() {
         codeAnalyser = new Agent("code_analyser", llmConf, monitor, rag, toolFilter);
-        codeAnalyser.setSystemPrompt(
-                SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
+        codeAnalyser.setSystemPrompt(llmConf.getPrompt(llmConf.agentPrompt));
     }
 
     if ((llmConf.workArea ~ "plan/code_analysis.md").exists) {
@@ -110,17 +108,16 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
     }
 
     auto designer = new Agent("system_designer", llmConf, monitor, rag, toolFilter);
-    designer.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
+    designer.setSystemPrompt(llmConf.getPrompt(llmConf.agentPrompt));
     designer.addUserQuery(systemDesignerPrompt);
     designer.addUserQuery(query);
 
     auto designReview = new Agent("system_design_review", llmConf, monitor, rag, toolFilter);
-    designReview.setSystemPrompt(
-            SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
+    designReview.setSystemPrompt(llmConf.getPrompt(llmConf.agentPrompt));
     designReview.addUserQuery(systemDesignerFeedbackPrompt);
 
     auto planner = new Agent("implementation_planner", llmConf, monitor, rag, toolFilter);
-    planner.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
+    planner.setSystemPrompt(llmConf.getPrompt(llmConf.agentPrompt));
     planner.addUserQuery(implPlannerPrompt);
 
     // Wire into a linear pipeline (no loops)

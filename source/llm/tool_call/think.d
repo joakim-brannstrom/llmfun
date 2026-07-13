@@ -5,10 +5,11 @@ import std.algorithm : filter, map, splitter;
 import std.array : appender, array, empty;
 import std.file : exists, readText, dirEntries, SpanMode;
 import std.format : format, formattedWrite;
-import std.path : stripExtension, baseName, extension;
 import std.string : replace, strip, toLower, startsWith;
+import std.sumtype : match;
 
 import my.path : Path;
+import my.optional;
 
 import llm.tool_call;
 import llm.tool_call.utility;
@@ -16,8 +17,8 @@ import llm.tool_call.utility;
 mixin RegisterLlmFunctions!();
 
 interface ThinkingContext : Context {
-    /// Returns the directory where thinking templates are stored.
-    Path getThinkingTemplatesDir();
+    string[] getThinkingTemplates();
+    Optional!string readThinkingTemplate(string name);
     void taskDone(string answer);
 }
 
@@ -30,16 +31,15 @@ ExecuteFuncResult getThinkingTemplate(Context baseCtx, string name) {
         return ExecuteFuncResult(err, success: false);
 
     try {
-        auto template_ = getTemplate(ctx, name);
-
-        if (template_.empty) {
+        return ctx.readThinkingTemplate(name).match!((string a) {
+            return ExecuteFuncResult(a, success: true);
+        }, (_) {
             return ExecuteFuncResult(
-                    format!"error: template '%s' not found. Call listThinkingTemplates for available strategies."(name),
-                    success: false);
-        }
-        return ExecuteFuncResult(template_, success: true);
+                format!"error: template '%s' not found. Call listThinkingTemplates for available strategies."(name),
+                success: false);
+        });
     } catch (Exception e) {
-        logger.tracef("error getting thinking template '%s': %s", name, e.msg);
+        logger.tracef("error retrieving thinking template '%s': %s", name, e.msg);
         return ExecuteFuncResult(format!"error: retrieving template: %s"(e.msg), success: false);
     }
 }
@@ -48,14 +48,19 @@ ExecuteFuncResult getThinkingTemplate(Context baseCtx, string name) {
 ExecuteFuncResult listThinkingTemplates(Context baseCtx) {
     mixin(baseContextToSpecific!ThinkingContext);
 
-    auto dir = ctx.getThinkingTemplatesDir();
+    string getTemplateDescription(string content) {
+        foreach (line; content.splitter('\n'))
+            return line;
+        return null;
+    }
+
     auto buf = appender!string();
     buf.put("Available thinking templates:\n\n");
 
-    foreach (entry; dirEntries(dir, SpanMode.shallow).filter!(a => a.extension == ".md")
-            .map!(a => a.name.baseName.stripExtension)) {
-        const desc = getTemplateDescription(ctx, entry);
-        formattedWrite(buf, "# Template: %s\nDescription: %s\n\n", entry, desc);
+    foreach (name; ctx.getThinkingTemplates) {
+        const desc = ctx.readThinkingTemplate(name)
+            .match!((string a) => getTemplateDescription(a), (_) => "");
+        formattedWrite(buf, "# Template: %s\nDescription: %s\n\n", name, desc);
     }
     return ExecuteFuncResult(buf.data, success: true);
 }
@@ -70,29 +75,4 @@ ExecuteFuncResult taskDone(Context baseCtx, string answer) {
     }
     ctx.taskDone(answer);
     return ExecuteFuncResult("done", success: true);
-}
-
-private:
-
-string getTemplate(ThinkingContext ctx, string name) {
-    auto path = ctx.getThinkingTemplatesDir ~ (name ~ ".md");
-
-    if (!path.exists) {
-        logger.tracef("thinking template not found: %s", path);
-        return null;
-    }
-    return readText(path);
-}
-
-string getTemplateDescription(ThinkingContext ctx, string name) {
-    import std.stdio : File;
-
-    auto path = ctx.getThinkingTemplatesDir ~ (name ~ ".md");
-    if (!path.exists) {
-        logger.tracef("thinking template not found: %s", path);
-        return null;
-    }
-    foreach (line; File(path).byLine)
-        return line.idup;
-    return null;
 }

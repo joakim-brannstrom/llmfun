@@ -6,11 +6,10 @@ import std.file : exists;
 import my.filter : ReFilter;
 
 import llm.agent : Agent;
-import llm.config : LlmConfig, promptToPath;
+import llm.config : LlmConfig;
 import llm.metric.monitor : MetricMonitor;
 import llm.pipeline : Pipeline, PipelineResult, pipelineBuilder;
 import llm.rag.rag : RAG;
-import llm.utility : SystemPromptInit;
 
 /// Runs a coder-reviewer loop pipeline.
 ///
@@ -63,7 +62,7 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
 
     // Create transient agents
     auto coder = new Agent("coder", llmConf, monitor, rag, toolFilter);
-    coder.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
+    coder.setSystemPrompt(llmConf.getPrompt(llmConf.agentPrompt));
     if ((llmConf.workArea ~ "plan/code_analysis.md").exists) {
         codeQuery ~= "Note: an analysis of the source code and project is available via the query tools. Use it when unclear about details in the source code.\n";
     }
@@ -71,7 +70,7 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
     coder.addUserQuery(query);
 
     auto reviewer = new Agent("code_reviewer", llmConf, monitor, rag, toolFilter);
-    reviewer.setSystemPrompt(SystemPromptInit(llmConf.promptToPath(llmConf.agentPrompt)).toString);
+    reviewer.setSystemPrompt(llmConf.getPrompt(llmConf.agentPrompt));
     reviewer.addUserQuery(reviewerQuery);
 
     // Wire into a loop pipeline: coder -> reviewer -> coder (up to 3 coder runs)

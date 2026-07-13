@@ -158,25 +158,6 @@ void playNotification() {
 
 }
 
-struct SystemPromptInit {
-    string promptTemplate;
-
-    this(Path systemPrompt) {
-        import std.file : exists, readText;
-
-        if (systemPrompt.exists) {
-            this.promptTemplate = readText(systemPrompt);
-        } else {
-            logger.warningf("System prompt template file do not exist: %s", systemPrompt);
-            throw new Exception("System prompt template missing");
-        }
-    }
-
-    string toString() @safe const {
-        return promptTemplate;
-    }
-}
-
 private shared bool signalStopAgent;
 
 void stopAgent() nothrow @nogc @system {

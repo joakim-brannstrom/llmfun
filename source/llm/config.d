@@ -59,41 +59,46 @@ struct LlmConfig {
 
     Path[] thinkingTemplatesDir;
 
-    Path promptDir = ProgramName ~ "/config/prompt";
+    Path[] promptDir;
 
     RagDatabaseConfig ragPrimary = RagDatabaseConfig((ProgramName ~ "/data/rag.sqlite3").Path,
             "Recent project source code, documentation and files added with tools loadFileToRAG, loadContentToRAG");
     RagDatabaseConfig[][string] ragSecondary;
 
-    void resolvePaths() {
+    void resolvePaths(bool cwdConfig) {
         import my.resource;
         import my.optional;
 
-        // prio local dirs but VERY important which files are allowed to override
-        // because there could be malicious configs in the cwd path.
-        auto prioDataCwdDirs = AbsolutePath(ProgramName ~ "/data") ~ dataSearch(ProgramName);
-        auto prioConfCwdDirs = AbsolutePath(ProgramName ~ "/config") ~ configSearch(ProgramName);
+        AbsolutePath[] prioDataCwdDirs = dataSearch(ProgramName);
+        AbsolutePath[] prioConfCwdDirs = configSearch(ProgramName);
+        if (cwdConfig) {
+            prioDataCwdDirs = AbsolutePath(ProgramName ~ "/data") ~ prioDataCwdDirs;
+            prioConfCwdDirs = AbsolutePath(ProgramName ~ "/config") ~ prioConfCwdDirs;
+        }
 
+        // only use cwd and closest directory.
+        // This is based on the assumption that if a user create the directory
+        // "memory" on purpose in the llmfun directory they want all memories
+        // to be in that directory and not in any other writable memory
+        // directory.
         if (memoryArea.empty) {
-            memoryArea ~= (ProgramName ~ "/data/memory").Path;
+            if (cwdConfig)
+                memoryArea ~= (ProgramName ~ "/data/memory").Path;
             dataSearch(ProgramName).resolve("memory".Path).match!((ResourceFile a) {
                 memoryArea ~= a.get;
             }, (_) {});
         }
 
         if (thinkingTemplatesDir.empty) {
-            thinkingTemplatesDir ~= (ProgramName ~ "/config/thinking");
+            thinkingTemplatesDir = prioConfCwdDirs.map!(a => cast(Path)(a ~ "thinking")).array;
+        }
 
+        if (promptDir.empty) {
+            promptDir = prioConfCwdDirs.map!(a => cast(Path)(a ~ "prompt")).array;
         }
 
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
             .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;
-
-        thinkingTemplatesDir = prioConfCwdDirs.resolve("thinking".Path)
-            .orElse(ResourceFile(thinkingTemplatesDir.AbsolutePath)).get.Path;
-
-        promptDir = prioConfCwdDirs.resolve("prompt".Path)
-            .orElse(ResourceFile(promptDir.AbsolutePath)).get.Path;
     }
 
     // Directory where the LLM can work with assets, create files etc.
@@ -332,16 +337,17 @@ struct LlmConfig {
 
         return ragSecondary.byValue.joiner.array;
     }
-}
 
-Path promptToPath(LlmConfig conf, string prompt) {
-    return conf.promptDir ~ prompt;
-}
+    string getPrompt(string prompt) {
+        import llm.vfs : FlatVfs;
 
-LlmConfig makeLlmConfig() {
-    LlmConfig conf;
-    conf.resolvePaths;
-    return conf;
+        auto vfs = FlatVfs(promptDir);
+        return vfs.read(prompt).match!((string a) => a, (_) {
+            logger.warningf("Prompt '%s' not found", prompt);
+            throw new Exception("System prompt not found: " ~ prompt);
+            return null;
+        });
+    }
 }
 
 void makeDefaultFileStructure() {
@@ -492,7 +498,7 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
 LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig = false) {
     import std.process : environment;
 
-    auto conf = makeLlmConfig();
+    LlmConfig conf;
     bool loadedAnyFile = false;
 
     // Layer 1: Base config from LLMFUN_DEFAULT_CONFIG
@@ -532,11 +538,11 @@ LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig = false) {
         logger.infof(!silent, "No project configuration found at %s", overlayPath);
     }
 
-    // Validation guard
     if (loadedAnyFile) {
         validateConfig(conf);
     }
 
+    conf.resolvePaths(!noCwdConfig);
     conf.loadState();
     return conf;
 }

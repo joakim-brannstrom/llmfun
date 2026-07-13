@@ -95,8 +95,7 @@ ExecuteFuncResult readMemory(Context baseCtx, string topic) {
         return ExecuteFuncResult(e, success: false);
 
     try {
-        auto memory = ctx.readMemory(topic);
-        return memory.match!((string a) {
+        return ctx.readMemory(topic).match!((string a) {
             return ExecuteFuncResult(a, success: true);
         }, (_) {
             return ExecuteFuncResult(format!"error: no memory topic '%s' exist"(topic),
@@ -104,6 +103,7 @@ ExecuteFuncResult readMemory(Context baseCtx, string topic) {
         });
 
     } catch (Exception e) {
+        logger.tracef("error retrieving memory '%s': %s", topic, e.msg);
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
 }
