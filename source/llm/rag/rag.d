@@ -411,7 +411,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     }
 
     size_t startCharPos;
-    size_t startLine;
+    size_t startLine = 1;
     Grapheme[] graphemes;
     foreach (graphem; doc.data.byGrapheme) {
         // have to turn off the GC because something in the underlying libraries
