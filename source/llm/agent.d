@@ -10,12 +10,12 @@ import std.datetime : Clock, SysTime, Duration;
 import std.exception : collectException;
 import std.file : readText, exists, read, rename;
 import std.format : format;
-import std.json : JSONValue, parseJSON;
+import std.json : JSONValue, parseJSON, JSONType;
+import std.path : stripExtension, baseName;
 import std.range : empty;
 import std.regex : Regex, regex;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable, nullable;
-import std.path : stripExtension, baseName;
 
 import my.filter : ReFilter;
 import my.optional;
@@ -144,60 +144,51 @@ class Agent : IBasicAgent {
                 "You stopped without calling 'taskDone'. Please continue your work, or call 'taskDone' if you're finished."));
     }
 
-    ProcessResult process() @trusted nothrow {
+    ProcessResult process(bool delegate() interrupt) @trusted nothrow {
+        import std.functional : toDelegate;
+
         ProcessResult rval;
 
         try {
+            StreamResponse sp;
+            auto stream = (const(char)[] chunk) { /*logger.trace(chunk);*/ sp.parse(chunk);
+            };
+            rq.setCallbacks(stream: stream.toDelegate, interrupt: interrupt);
+            scope (exit)
+                rq.setCallbacks(null, null);
             auto res = rq.request(chat);
-            res.match!((JSONValue j) {
-                if (!checkResponse(j)) {
-                    logger.warning("Bad response: ", j.toPrettyString);
-                    return;
-                }
-                rval.status = parseResponse(j);
-                if (auto a = "timings" in j)
-                    rval.timing = *a;
-                if (auto a = "usage" in j) {
-                    rval.usage = *a;
-                    contextUsed = (*a)["total_tokens"].integer;
-                }
-            }, (LlamaRequestError e) {
-                if (e.code == 400 && (e.response.canFind("exceed_context_size_error")
-                    || e.response.canFind("exceeds the available context size"))) {
-                    // Try to extract token counts from the error response
-                    string detail = e.response;
-                    try {
-                        auto json = parseJSON(e.response);
-                        if (auto err = "error" in json) {
-                            long promptTokens = 0, ctxSize = 0;
-                            if (auto n = "n_prompt_tokens" in *err)
-                                promptTokens = n.integer;
-                            if (auto n = "n_ctx" in *err)
-                                ctxSize = n.integer;
-                            if (promptTokens || ctxSize) {
-                                detail = format!(
-                                    "Context overflow: %s tokens used, %s tokens available")(promptTokens,
-                                    ctxSize);
-                                rval.status = ProcessResult.Status.needCompression;
-                            }
-                        }
-                    } catch (Exception a) {
-                        logger.warning("Context overflow detected: ", a.msg);
-                    }
-                    logger.warning("Context overflow detected: ", detail);
+
+            // logger.trace("request response: ", res);
+            // logger.trace("stream parse: ", sp);
+
+            contextUsed = sp.stat.context;
+
+            if (sp.hasError) {
+                if (sp.error.codeNr == 400 && sp.error.type == "exceed_context_size_error") {
+                    // llama.cpp
+                    logger.trace("Context overflow detected: ", sp.error);
+                    rval.status = ProcessResult.Status.needCompression;
+                } else if (sp.error.type == "invalid_request_error"
+                        && sp.error.code == "context_length_exceeded") {
+                    // openai
+                    logger.trace("Context overflow detected: ", sp.error);
                     rval.status = ProcessResult.Status.needCompression;
                 } else {
-                    logger.trace(e);
+                    logger.trace("unhandled error: ", sp.error);
+                    rval.status = ProcessResult.Status.unknownFailure;
                 }
-            });
+            } else {
+                rval.stat = sp.stat;
+                contextUsed = sp.stat.context;
+                rval.status = parseResponse(sp);
+            }
+
             rval.chat = chat.lastResponses;
             chat.resetResponseIndex;
 
             if (!rval.chat.empty) {
-                rval.chat[$ - 1].match!((Message a) {}, (ToolMessage a) {
-                    rval.hasToolCall = true;
-                }, (ToolResponse a) { rval.hasToolCall = true; }, (VisionMessage a) {
-                });
+                rval.hasToolCall = rval.chat[$ - 1].match!((ToolMessage _) => true,
+                        (ToolResponse _) => true, (_) => false);
             }
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
@@ -241,7 +232,7 @@ class Agent : IBasicAgent {
         size_t consecutiveNoToolCallOk;
         immutable MaxConsecutiveNoToolCallOk = 5;
         do {
-            result = this.process();
+            result = this.process(interrupt);
             if (step)
                 step(result);
             if (taskDone_ || (interrupt && interrupt()))
@@ -388,33 +379,24 @@ private:
         this.taskDoneMessage_ = answer;
     }
 
-    ProcessResult.Status parseResponse(JSONValue resp) @trusted nothrow {
+    ProcessResult.Status parseResponse(ref StreamResponse sp) @trusted nothrow {
         try {
-            logger.trace(resp.toPrettyString);
-            foreach (choice; resp["choices"].array) {
-                try {
-                    auto msg = choice["message"];
-                    string content = getValue(msg, (v) => v["content"].str, "");
-                    string thinking = getValue(msg, (v) => v["reasoning_content"].str, "");
+            logger.trace(sp);
 
-                    if (!content.empty || !thinking.empty) {
-                        chat.add(Message(Role.assistant, content, thinking));
-                    }
-                    if (auto calls = getValue(msg, (v) => v["tool_calls"].array, null)) {
-                        try {
-                            handleToolCalls(calls);
-                        } catch (Exception e) {
-                        }
-                    }
-                    if (auto reason = getValue(choice, (v) => v["finish_reason"].str, null)) {
-                        if (reason == "length")
-                            return ProcessResult.Status.needCompression;
-                        if (reason == "stop" && content.empty && thinking.empty)
-                            return ProcessResult.Status.needMoreThinking;
-                    }
-                } catch (Exception e) {
-                    logger.trace(e.msg);
-                }
+            if (!sp.message.isEmpty) {
+                chat.add(Message(Role.assistant, sp.message.content, sp.message.reasoning));
+            }
+            if (!sp.toolCalls.empty) {
+                handleToolCalls(sp.toolCalls);
+            }
+            if (!sp.message.finishReason.empty) {
+                if (sp.message.finishReason == "length")
+                    return ProcessResult.Status.needCompression;
+                if (sp.message.finishReason == "stop" && sp.message.isEmpty)
+                    return ProcessResult.Status.needMoreThinking;
+                if (sp.message.finishReason == "tool_calls")
+                    return ProcessResult.Status.ok;
+                logger.tracef("unknown finish reason: %s", sp.message.finishReason);
             }
             return ProcessResult.Status.ok;
         } catch (Exception e) {
@@ -423,11 +405,11 @@ private:
         return ProcessResult.Status.unknownFailure;
     }
 
-    void handleToolCalls(JSONValue[] calls) {
+    void handleToolCalls(ref StreamResponse.ToolCall[long] toolCalls) {
         import llm.tool_call : executeFunc;
 
         JSONValue[] rval;
-        foreach (call; calls) {
+        foreach (call; toolCalls.byValue) {
             // Check for warnings before processing each tool call
             try {
                 if (monitor !is null && lastToolCallWarning >= WarnEveryNthToolCall) {
@@ -443,13 +425,11 @@ private:
             }
             ++lastToolCallWarning;
 
-            const toolName = call["function"]["name"].str;
-            const args = call["function"]["arguments"].str;
-            immutable startTime = Clock.currTime;
+            const startTime = Clock.currTime;
             bool success;
             string result;
             try {
-                auto res = executeFunc(toolCtx, toolName, parseJSON(args), toolFilter);
+                auto res = executeFunc(toolCtx, call.name, parseJSON(call.arguments), toolFilter);
                 result = res.msg;
                 success = res.success;
             } catch (Exception e) {
@@ -458,40 +438,25 @@ private:
             immutable responseTimeMs = (Clock.currTime - startTime).total!"msecs";
             try {
                 if (monitor !is null) {
-                    monitor.record(this.name, toolName, parseJSON(args),
-                            result, success, responseTimeMs);
+                    monitor.record(this.name, call.name,
+                            parseJSON(call.arguments), result, success, responseTimeMs);
                 }
             } catch (Exception e) {
                 logger.tracef("monitor record failed: %s", e.msg);
             }
 
             JSONValue sd = JSONValue.init;
-            if (toolName == "taskDone" && taskDone_ && !taskDoneMessage_.empty) {
+            if (call.name == "taskDone" && taskDone_ && !taskDoneMessage_.empty) {
                 sd["taskDoneAnswer"] = JSONValue(taskDoneMessage_);
             }
-            chat.add(ToolMessage(JSONValue([call]), JSONValue.init, sd));
-            chat.add(ToolResponse(content: result, toolCallId: call["id"].str, toolName: toolName));
+            chat.add(ToolMessage(JSONValue([call.toJson]), JSONValue.init, sd));
+            chat.add(ToolResponse(content: result, toolCallId: call.id, toolName: call.name));
             if (auto image = toolCtx.drainVisionImage) {
                 chat.add(VisionMessage(image.query, image.data));
                 waitingForVisionResponse = true;
             }
         }
     }
-}
-
-private bool checkResponse(JSONValue j) @trusted {
-    import std.json : JSONType;
-
-    immutable key = "choices";
-    if (j.type != JSONType.object)
-        return false;
-    if (key !in j.object)
-        return false;
-    if (j[key].type != JSONType.array)
-        return false;
-    if (j[key].array.empty)
-        return false;
-    return true;
 }
 
 struct VisionImage {
@@ -682,3 +647,239 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             }
         }
     }
+
+    public:
+
+struct StreamResponse {
+    import std.datetime : Clock;
+    import llm.types : ServerStat;
+
+    // TODO: maybe this should be in llm/chat.d instead?
+    struct ToolCall {
+        string id;
+        string name;
+        string arguments;
+
+        JSONValue toJson() @safe {
+            JSONValue j;
+            j["name"] = name;
+            j["arguments"] = arguments;
+
+            JSONValue rval;
+            rval["function"] = j;
+            rval["id"] = id;
+            rval["type"] = "function";
+
+            return rval;
+        }
+
+        string toString() @safe const {
+            return format!"ToolCall(id:%s name:%s arguments:'%s')"(id, name, arguments);
+        }
+    }
+
+    struct ErrorMessage {
+        string type;
+        string message;
+        string code;
+        // only llama-server set this
+        long codeNr = -1;
+
+        string toString() @safe const {
+            return format!"ErrorMessage(type:%s message:%s code:%s codeNr:%s)"(type,
+                    message, code, codeNr);
+        }
+    }
+
+    struct Message {
+        string role;
+        string content;
+        string reasoning;
+        string finishReason;
+
+        bool isEmpty() @safe pure nothrow const @nogc {
+            return content.empty && reasoning.empty;
+        }
+
+        string toString() @safe const {
+            return format!`Message(role:%s content:"%s" reasoning:"%s" finishReason:"%s")`(role,
+                    content, reasoning, finishReason);
+        }
+    }
+
+    bool isDone;
+    bool hasError;
+    Message message;
+    ToolCall[long] toolCalls;
+    ServerStat stat;
+    ErrorMessage error;
+
+    private {
+        SysTime start;
+        long tokens;
+    }
+
+    import std.range : isOutputRange;
+
+    string toString() @safe const {
+        import std.array : appender;
+
+        auto buf = appender!string;
+        toString(buf);
+        return buf.data;
+    }
+
+    void toString(Writer)(ref Writer w) const if (isOutputRange!(Writer, char)) {
+        import std.format : formattedWrite;
+
+        formattedWrite(w, "StreamResponse(isDone:%s%s %s %s %s)", isDone, hasError
+                ? format!"ErrorMessage(%s)"(error) : "", stat, message, toolCalls);
+    }
+
+    void parse(const(char)[] response) {
+        import std.string : strip;
+
+        if (start == SysTime.init) {
+            start = Clock.currTime;
+        }
+
+        immutable prefix = "data: ";
+        immutable llamaErrorPrefix = "error: ";
+
+        response = response.strip;
+        if (response.startsWith(llamaErrorPrefix)) {
+            response = response[llamaErrorPrefix.length .. $];
+            parseLlamaCppError(response);
+            return;
+        } else if (response.startsWith(prefix)) {
+            response = response[prefix.length .. $];
+        } else {
+            return;
+        }
+        if (response == "[DONE]" || isDone || hasError) {
+            isDone = true;
+            return;
+        }
+
+        try {
+            auto rootj = parseJSON(response);
+
+            if (auto e = "error" in rootj) {
+                parseOpenAiError(*e);
+                return;
+            }
+
+            auto choices = getValue(rootj, (v) => v["choices"].array, null);
+            foreach (choice; choices) {
+                auto delta = choice["delta"];
+                if (auto j = "tool_calls" in delta) {
+                    parseToolCall(*j);
+                } else if ("content" in delta) {
+                    parseMessage(delta);
+                } else if (auto j = "reasoning_content" in delta) {
+                    parseReasoning(*j);
+                } else if (auto reason = "finish_reason" in choice) {
+                    // data: {"choices":[{"finish_reason":"tool_calls","index":0,"delta":{}}],"created":1784060897,"id":"chatcmpl-HPewiQRRMdrJz3CIV6PcoZKgXpwGB4GL","model":"qwen3.6-27b-code","system_fingerprint":"b9998-c036959df","object":"chat.completion.chunk","timings":{"cache_n":6151,"prompt_n":4,"prompt_ms":196.08,"prompt_per_token_ms":49.02,"prompt_per_second":20.39983680130559,"predicted_n":244,"predicted_ms":8121.839,"predicted_per_token_ms":33.286225409836064,"predicted_per_second":30.042457133168977,"draft_n":165,"draft_n_accepted":147}} [llm.agent.Agent.process.__lambda_L154_C27:154]
+                    message.finishReason = getValue(*reason, (v) => v.str, null);
+                } else {
+                    logger.trace("unknown JSON response from server: ", delta);
+                }
+            }
+            parseStat(rootj);
+        } catch (Exception e) {
+            logger.trace(e.msg);
+        }
+    }
+
+    void parseStat(ref JSONValue json) @safe nothrow {
+        try {
+            if (auto timings = "timings" in json) {
+                stat.predictedPerSecond = getValue(*timings,
+                        (v) => v["predicted_per_second"].floating, stat.predictedPerSecond);
+                stat.promptPerSecond = getValue(*timings,
+                        (v) => v["prompt_per_second"].floating, stat.promptPerSecond);
+                stat.context = getValue(*timings, (v) => v["cache_n"].integer, stat.context);
+            } else {
+                stat.predictedPerSecond = cast(double) tokens / cast(double)(Clock.currTime - start)
+                    .total!"seconds";
+            }
+        } catch (Exception e) {
+            try {
+                logger.tracef("unknown timings structure '%s': %s", json, e.msg);
+            } catch (Exception e) {
+            }
+        }
+    }
+
+    void parseToolCall(ref JSONValue jtoolCalls) {
+        // {"choices":[{"finish_reason":null,"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"."}}]}}],"created":1783954301,"id":"chatcmpl-24rJM2FM6BcQPngWA5ktQh5TNzsIwLkD","model":"qwen3.6-27b-code","system_fingerprint":"b9992-348ed0017","object":"chat.completion.chunk"}
+        // {"choices":[{"finish_reason":"tool_calls","index":0,"delta":{}}],"created":1783954301,"id":"chatcmpl-24rJM2FM6BcQPngWA5ktQh5TNzsIwLkD","model":"qwen3.6-27b-code","system_fingerprint":"b9992-348ed0017","object":"chat.completion.chunk","timings":{"cache_n":6150,"prompt_n":4,"prompt_ms":194.782,"prompt_per_token_ms":48.6955,"prompt_per_second":20.53 5778460021973,"predicted_n":254,"predicted_ms":8251.368,"predicted_per_token_ms":32.485700787401576,"predicted_per_second":30.782774444189133,"draft_n":198,"draft_n_accepted":165}}
+        foreach (jcall; getValue(jtoolCalls, (v) => v.array, null)) {
+            try {
+                long index = jcall["index"].integer;
+                if (auto a = index in toolCalls) {
+                    (*a).arguments ~= jcall["function"]["arguments"].str;
+                    tokens++;
+                } else {
+                    toolCalls[index] = ToolCall(id: jcall["id"].str, name: jcall["function"]["name"].str,
+                            arguments: jcall["function"]["arguments"].str);
+                }
+            } catch (Exception e) {
+                logger.tracef("invalid tool call structure '%s': %s", jcall, e.msg);
+            }
+        }
+    }
+
+    void parseMessage(ref JSONValue delta) {
+        // {"choices":[{"finish_reason":null,"index":0,"delta":{"role":"assistant","content":null}}],"created":1784015079,"id":"chatcmpl-EOriRpn903HuGe6xeo72PiY4ntCQXKP8","model":"qwen3.6-27b-code","system_fingerprint":"b9998-c036959d f","object":"chat.completion.chunk"}
+        try {
+            if (auto role = "role" in delta) {
+                message.role = role.str;
+            }
+            if (auto content = "content" in delta) {
+                if (content.type == JSONType.string) {
+                    message.content ~= content.str;
+                    tokens++;
+                }
+            }
+        } catch (Exception e) {
+            logger.tracef("invalid message structure '%s': %s", delta, e.msg);
+        }
+    }
+
+    void parseReasoning(ref JSONValue json) {
+        // data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"The"}}],"created":1784060211,"id":"chatcmpl-TdH6AzIJTEArEd3CrH7pmnsPrHOELHuo","model":"qwen3.6-27b-code","system_fingerprint":"b9998-c036959df","object":"chat.completion.chunk"}
+        try {
+            if (json.type != JSONType.null_) {
+                // if it isn't null then it must be a string or something is wrong
+                message.reasoning ~= json.str;
+                tokens++;
+            }
+        } catch (Exception e) {
+            logger.tracef("invalid reasoning structure '%s': %s", json, e.msg);
+        }
+    }
+
+    void parseLlamaCppError(const(char)[] raw) {
+        hasError = true;
+        try {
+            auto json = parseJSON(raw);
+            error.type = json["type"].str;
+            error.message = json["message"].str;
+            error.codeNr = json["code"].integer;
+        } catch (Exception e) {
+            logger.tracef("invalid error structure '%s': %s", raw, e.msg);
+        }
+    }
+
+    void parseOpenAiError(ref JSONValue json) {
+        hasError = true;
+        try {
+            error.type = json["error"]["type"].str;
+            error.message = json["error"]["message"].str;
+            error.code = json["error"]["code"].str;
+        } catch (Exception e) {
+            logger.tracef("invalid error structure '%s': %s", json, e.msg);
+        }
+    }
+}

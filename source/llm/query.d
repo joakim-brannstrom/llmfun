@@ -86,7 +86,12 @@ struct LlmRequester {
                 verbosity: cfg.verbosity, keepAlive: cfg.keepAlive);
     }
 
-    SumType!(JSONValue, LlamaRequestError) request(Chat chat) nothrow {
+    void setCallbacks(void delegate(const(char)[]) stream, bool delegate() interrupt) {
+        rqCfg.stream = stream;
+        rqCfg.interrupt = interrupt;
+    }
+
+    SumType!(HttpResult, HttpError) request(Chat chat) nothrow {
         alias ReturnT = typeof(return);
 
         try {
@@ -94,28 +99,39 @@ struct LlmRequester {
             if (!tools.isNull) {
                 jsonReq["tools"] = tools.get;
             }
+            if (rqCfg.stream !is null) {
+                jsonReq["stream"] = true;
+            }
             if (cfg.verbosity >= 2)
                 logger.trace(jsonReq.toPrettyString);
 
-            auto result = httpPostWithRetry(rq, cfg.chatUrl,
+            return httpPostWithRetry(rq, cfg.chatUrl,
                     jsonReq.toString(JSONOptions.doNotEscapeSlashes), rqCfg);
-
-            return result.match!((HttpResult r) {
-                if (r.statusCode == 200) {
-                    return ReturnT(parseJSON(r.body));
-                }
-                return ReturnT(LlamaRequestError(r.statusCode, r.body));
-            }, (HttpError e) {
-                if (e.statusCode == 0) {
-                    logger.trace(e.errorMsg);
-                }
-                return ReturnT(LlamaRequestError(e.statusCode, e.body));
-            });
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
-        return ReturnT(LlamaRequestError(404, "exception thrown"));
+        return ReturnT(HttpError(statusCode: 404, body: "", errorMsg: "exception thrown"));
     }
+}
+
+SumType!(JSONValue, LlamaRequestError) toJson(SumType!(HttpResult, HttpError) result) {
+    alias ReturnT = typeof(return);
+    try {
+        return result.match!((HttpResult r) {
+            if (r.statusCode == 200) {
+                return ReturnT(parseJSON(r.body));
+            }
+            return ReturnT(LlamaRequestError(r.statusCode, r.body));
+        }, (HttpError e) {
+            if (e.statusCode == 0) {
+                logger.trace(e.errorMsg);
+            }
+            return ReturnT(LlamaRequestError(e.statusCode, e.body));
+        });
+    } catch (Exception e) {
+        logger.trace(e.msg).collectException;
+    }
+    return ReturnT(LlamaRequestError(404, "exception thrown"));
 }
 
 long[string] LlmSlotRequesterCache;
@@ -219,6 +235,9 @@ JSONValue addConfig(JSONValue j, RequestConfig.Chat cfg) {
 }
 
 struct LibRequestConfig {
+    bool delegate() interrupt;
+    void delegate(const(char)[] data) stream;
+
     string[string] headers;
     long maxRetries = 3;
     Duration timeout = 3600.dur!"seconds";
@@ -242,6 +261,7 @@ struct LibRequestConfig {
         rq.sslSetVerifyPeer = sslSetVerifyPeer;
         rq.verbosity = cast(uint) verbosity;
         rq.keepAlive = keepAlive;
+        rq.useStreaming = true;
         isConfigured = true;
     }
 }
@@ -250,7 +270,9 @@ struct LibRequestConfig {
 SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(ref Request rq,
         string url, string body, ref LibRequestConfig cfg) {
     import std.algorithm : canFind;
+    import std.array : appender;
     import std.conv : to;
+    import std.utf : validate;
     import llm.utility : isSignalSIGPIPETriggered, clearSignalSIGPIPE;
 
     alias ReturnT = typeof(return);
@@ -280,8 +302,34 @@ SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(ref Request rq
                 auto rs = rq.exec!HttpReqType(url);
             else
                 static assert(0, "Unknown request type: " ~ HttpReqType);
-            auto response = (cast(const(char)[])(rs.responseBody)).byUTF!char.text;
-            int code = rs.code;
+            const int code = rs.code;
+
+            auto streamData = appender!(const(ubyte)[])();
+            StreamByLine sbl;
+            sbl.receive(rs, (const(ubyte)[] chunk) {
+                if (cfg.interrupt !is null && cfg.interrupt()) {
+                    logger.trace("user interrupted stream");
+                    return false;
+                }
+                if (chunk.empty) {
+                    return true;
+                }
+                if (cfg.stream is null) {
+                    streamData.put(chunk);
+                } else {
+                    const(char)[] str;
+                    try {
+                        validate(cast(const(char)[]) chunk);
+                        str = cast(const(char)[]) chunk;
+                    } catch (Exception e) {
+                    }
+                    if (!str.empty)
+                        cfg.stream(str);
+                }
+                return true;
+
+            });
+            auto response = (cast(const(char)[])(streamData[])).byUTF!char.text;
 
             if (code >= 500) {
                 lastError = HttpError(code, response,
@@ -312,4 +360,42 @@ SumType!(HttpResult, HttpError) httpPostWithRetry(ref Request rq, string url,
 SumType!(HttpResult, HttpError) httpGetWithRetry(ref Request rq, string url,
         ref LibRequestConfig cfg) {
     return httpWithRetry!"GET"(rq, url, "", cfg);
+}
+
+private:
+
+struct StreamByLine {
+    const(ubyte)[] app;
+
+    void receive(ref Response rs, bool delegate(const(ubyte)[] data) callback) {
+        auto stream = rs.receiveAsRange();
+        try {
+            while (!stream.empty) {
+                app ~= stream.front;
+                stream.popFront;
+
+                for (size_t pos; pos < app.length; ++pos) {
+                    if (app[pos] == '\n') {
+                        if (!callback(app[0 .. pos])) {
+                            return;
+                        }
+                        app = app[pos + 1 .. $];
+                        pos = 0;
+                    }
+                }
+            }
+        } catch (Exception e) {
+        }
+
+        for (size_t pos; pos < app.length; ++pos) {
+            if (app[pos] == '\n') {
+                callback(app[0 .. pos]);
+                app = app[pos + 1 .. $];
+                pos = 0;
+            }
+        }
+        if (!app.empty) {
+            callback(app);
+        }
+    }
 }

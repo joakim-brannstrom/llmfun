@@ -188,13 +188,7 @@ struct AgentApp {
         }
         agent_.saveHistory(agentHistory);
         logger.trace(result.status != ProcessResult.Status.ok, result);
-
-        try {
-            if (auto t = "predicted_per_second" in result.timing)
-                lastTokensPerSecond = t.floating;
-        } catch (Exception e) {
-            logger.trace("Failed to extract predicted_per_second: ", e.msg);
-        }
+        lastTokensPerSecond = result.stat.predictedPerSecond;
     }
 
     private AgentStatus runAgent(string query) {

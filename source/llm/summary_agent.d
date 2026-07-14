@@ -556,7 +556,7 @@ Tuple!(string, "response", bool, "gotResponse") request(ref LlmRequester rq, ref
     auto response = rq.request(chat);
     string responseMsg;
     bool gotResponse;
-    response.match!((JSONValue j) {
+    response.toJson.match!((JSONValue j) {
         try {
             foreach (choice; j["choices"].array) {
                 responseMsg = choice["message"]["content"].str.strip;

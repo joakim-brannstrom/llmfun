@@ -21,6 +21,19 @@ interface IBasicAgent : IAgent {
     void setPipelineContext(PipelineControlContext ctx);
 }
 
+struct ServerStat {
+    long context;
+    double predictedPerSecond = 0;
+    double promptPerSecond = 0;
+
+    string toString() @safe const {
+        import std.format : format;
+
+        return format("ServerStat(contextUsed:%s predictedPerSecond:%s promptPerSecond:%s",
+                context, predictedPerSecond, promptPerSecond);
+    }
+}
+
 struct ProcessResult {
     enum Status {
         ok,
@@ -34,15 +47,9 @@ struct ProcessResult {
     Chat.MessageT[] chat;
     bool hasToolCall;
 
-    JSONValue timing;
-    JSONValue usage;
+    ServerStat stat;
 
     long totalTokens() @safe pure nothrow const {
-        try {
-            if (auto a = "total_tokens" in usage)
-                return a.integer;
-        } catch (Exception e) {
-        }
-        return 0;
+        return stat.context;
     }
 }
