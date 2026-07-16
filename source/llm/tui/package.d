@@ -181,12 +181,28 @@ struct TextUserInterface {
         statusText = s;
     }
 
-    void setUiAsStdLogger() {
-        logSwap = swapToTuiLogger();
+    void setReadyStatus(bool x) {
+        tuiReadyStatus(tuiState, x ? 1 : 0);
+    }
+
+    void streamChat(string msg, string thinking) {
+        auto s = String(null, 0);
+        auto q = String(msg.ptr, msg.length);
+        auto t = String(thinking.ptr, thinking.length);
+        tuiUpdateStreamChatMessage(tuiState, ChatMessageParam(s, q, t,
+                TuiChatMessageType_Assistant));
+    }
+
+    void streamChatDone() {
+        tuiStreamChatMessageClear(tuiState);
     }
 
     void useUiLogFile(bool useFile) {
         tuiSetLogging(tuiState, useFile);
+    }
+
+    void setUiAsStdLogger() {
+        logSwap = swapToTuiLogger();
     }
 
     string userQuery() @safe {
@@ -222,10 +238,6 @@ struct TextUserInterface {
 
         tuiBackendRender(tuiScreen);
     }
-
-    void setReadyStatus(bool x) {
-        tuiReadyStatus(tuiState, x ? 1 : 0);
-    }
 }
 
 auto makeTui() {
@@ -248,6 +260,14 @@ struct UiChatThinkMessage {
     string msg;
     string thinking;
     TuiChatMessageType type = TuiChatMessageType_Assistant;
+}
+
+struct UiStreamChatMessage {
+    string msg;
+    string thinking;
+}
+
+struct UiStreamChatDone {
 }
 
 struct UiFinalAnswer {
@@ -309,7 +329,9 @@ void spawnUserInterface(Tid ownerTid) {
                 (UiLogFile a) { ui.useUiLogFile(a.useFile); },
                 (UiTerminate _) { running = false; },
                 (UiAgentBusy _) { ui.setReadyStatus(false); },
-                (UiAgentReady _) { ui.setReadyStatus(true); playNotification(); }
+                (UiAgentReady _) { ui.setReadyStatus(true); playNotification(); },
+                (UiStreamChatMessage a) { ui.streamChat(a.msg, a.thinking); },
+                (UiStreamChatDone _) { ui.streamChatDone; }
             );
             // dfmt on
 

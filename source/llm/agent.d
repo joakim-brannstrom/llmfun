@@ -40,7 +40,7 @@ import llm.tool_call.think : ThinkingContext;
 import llm.utility : getValue;
 import llm.workarea;
 
-public import llm.types : IBasicAgent, IAgent, ProcessResult;
+public import llm.types : IBasicAgent, IAgent, ProcessResult, IStreamCallback, ServerStat;
 
 class Agent : IBasicAgent {
     string name;
@@ -57,6 +57,7 @@ class Agent : IBasicAgent {
         SummaryAgent summary;
         MetricsCalculator calculator;
         FeedbackEngine feedbackEngine;
+        IStreamCallback streamCallback;
         bool taskDone_;
         string taskDoneMessage_;
         int lastToolCallWarning;
@@ -64,6 +65,7 @@ class Agent : IBasicAgent {
         static immutable string[] ExcludedTools = ["taskDone"];
         ReFilter toolFilter;
         bool waitingForVisionResponse;
+        ServerStat prevStat;
     }
 
     this(string name, LlmConfig llmConf, MetricMonitor monitor, RAG rag = null) {
@@ -127,6 +129,10 @@ class Agent : IBasicAgent {
         chat.setSystemPrompt(x);
     }
 
+    void setStreamUpdate(IStreamCallback callback) {
+        this.streamCallback = callback;
+    }
+
     void setPipelineContext(PipelineControlContext ctx) @trusted {
         toolCtx.pipelineCtx = ctx;
     }
@@ -150,18 +156,23 @@ class Agent : IBasicAgent {
         ProcessResult rval;
 
         try {
-            StreamResponse sp;
+            auto sp = StreamResponse(prevStat);
             auto stream = (const(char)[] chunk) { /*logger.trace(chunk);*/ sp.parse(chunk);
+                if (streamCallback !is null) {
+                    streamCallback.messageUpdate(sp.message, sp.stat);
+                }
             };
             rq.setCallbacks(stream: stream.toDelegate, interrupt: interrupt);
             scope (exit)
                 rq.setCallbacks(null, null);
+            scope (exit) {
+                if (streamCallback !is null) {
+                    streamCallback.streamMessageDone();
+                }
+            };
+
             auto res = rq.request(chat);
-
-            // logger.trace("request response: ", res);
-            // logger.trace("stream parse: ", sp);
-
-            contextUsed = sp.stat.context;
+            prevStat = sp.stat;
 
             if (sp.hasError) {
                 if (sp.error.codeNr == 400 && sp.error.type == "exceed_context_size_error") {
@@ -179,7 +190,6 @@ class Agent : IBasicAgent {
                 }
             } else {
                 rval.stat = sp.stat;
-                contextUsed = sp.stat.context;
                 rval.status = parseResponse(sp);
             }
 
@@ -199,19 +209,19 @@ class Agent : IBasicAgent {
     }
 
     bool needCompression(double threshold = 0.9) {
-        return contextUsed > contextSize * threshold;
+        return prevStat.context > contextSize * threshold;
     }
 
     SummaryAgent.CompressResult compress(double threshold = 0.9, bool force = false,
             SummaryAgent.ProgressCallback callback = null) {
-        if (contextUsed < contextSize * threshold && !force)
+        if (prevStat.context < contextSize * threshold && !force)
             return typeof(return)(compressed: true);
-        long oldContextSize = contextUsed;
+        long oldContextSize = prevStat.context;
         auto result = summary.compress(chat, callback, ExcludedTools.dup);
-        contextUsed = result.newContextSize;
+        prevStat.context = result.newContextSize;
         if (force) {
             logger.infof("Forced compression: context %s -> %s tokens (saved %s)",
-                    oldContextSize, contextUsed, oldContextSize - contextUsed);
+                    oldContextSize, prevStat.context, oldContextSize - prevStat.context);
         }
         return result;
     }
@@ -331,7 +341,7 @@ class Agent : IBasicAgent {
 
     void clearHistory() @safe {
         chat.clear;
-        contextUsed = chat.approxContextSize;
+        prevStat.context = chat.approxContextSize;
     }
 
     /// Save chat history to dir / name_history.json
@@ -361,7 +371,7 @@ class Agent : IBasicAgent {
             auto j = readText(historyPath.toString).parseJSON;
             chat.load(j);
             chat.resetResponseIndex;
-            contextUsed = chat.approxContextSize;
+            prevStat.context = chat.approxContextSize;
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
@@ -651,8 +661,11 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
     public:
 
 struct StreamResponse {
+    import std.range : isOutputRange;
     import std.datetime : Clock;
-    import llm.types : ServerStat;
+    import llm.types : ServerStat, StreamMessage;
+
+    alias Message = StreamMessage;
 
     // TODO: maybe this should be in llm/chat.d instead?
     struct ToolCall {
@@ -691,22 +704,6 @@ struct StreamResponse {
         }
     }
 
-    struct Message {
-        string role;
-        string content;
-        string reasoning;
-        string finishReason;
-
-        bool isEmpty() @safe pure nothrow const @nogc {
-            return content.empty && reasoning.empty;
-        }
-
-        string toString() @safe const {
-            return format!`Message(role:%s content:"%s" reasoning:"%s" finishReason:"%s")`(role,
-                    content, reasoning, finishReason);
-        }
-    }
-
     bool isDone;
     bool hasError;
     Message message;
@@ -719,7 +716,9 @@ struct StreamResponse {
         long tokens;
     }
 
-    import std.range : isOutputRange;
+    this(ServerStat prevStat) {
+        stat = prevStat;
+    }
 
     string toString() @safe const {
         import std.array : appender;
@@ -800,8 +799,10 @@ struct StreamResponse {
                         (v) => v["prompt_per_second"].floating, stat.promptPerSecond);
                 stat.context = getValue(*timings, (v) => v["cache_n"].integer, stat.context);
             } else {
-                stat.predictedPerSecond = cast(double) tokens / cast(double)(Clock.currTime - start)
-                    .total!"seconds";
+                if (Clock.currTime > start && tokens != 0) {
+                    stat.predictedPerSecond = cast(double) tokens / cast(double)(Clock.currTime - start)
+                        .total!"seconds";
+                }
             }
         } catch (Exception e) {
             try {

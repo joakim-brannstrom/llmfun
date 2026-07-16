@@ -250,10 +250,6 @@ void tuiAddLogMessage(TuiState* state, String summary, String text);
  * Strings — their data is copied internally, so the caller's buffers can be
  * freed or reused immediately after this call returns.
  *
- * The `type` field in `param` specifies the message type (User, Assistant,
- * ToolCall, ToolResponse) and is used to color-code the message header in
- * the TUI. The `thinking` field is optional and may be {NULL, 0}.
- *
  * Null-safe: no-op if state is NULL.
  */
 void tuiAddChatMessage(TuiState* state, ChatMessageParam param);
@@ -267,7 +263,22 @@ void tuiAddChatMessage(TuiState* state, ChatMessageParam param);
  */
 void tuiClearChatMessages(TuiState* state);
 
-/* ---- Status ---- */
+/* Update the message that display what the LLM is currently producing.
+ *
+ * Only one such message can be displayed on the assumption that the LLM can
+ * only work on one message at a time.
+ *
+ * The summary and type field in param is ignored
+ *
+ * Null-safe: no-op if state is NULL.
+ */
+void tuiUpdateStreamChatMessage(TuiState* state, ChatMessageParam param);
+
+/* Clear the stream message and stop displaying it.
+ *
+ * Null-safe: no-op if state is NULL.
+ */
+void tuiStreamChatMessageClear(TuiState* state);
 
 /* Set the text displayed in the status line at the bottom of the terminal.
  *

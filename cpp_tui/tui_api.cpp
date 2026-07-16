@@ -239,6 +239,25 @@ void tuiClearChatMessages(TuiState* state) {
     ::llmfun::tui::tuiClearOutput(*state->inner);
 }
 
+void tuiUpdateStreamChatMessage(TuiState* state, ChatMessageParam param) {
+    if (!state || !state->inner)
+        return;
+    std::string summary_;
+    std::string text_(param.text.data ? param.text.data : "", param.text.data ? param.text.len : 0);
+    std::string thinking_(param.thinking.data ? param.thinking.data : "",
+                          param.thinking.data ? param.thinking.len : 0);
+    auto cppType = ::llmfun::tui::ChatMessageType::Assistant;
+    ::llmfun::tui::tuiUpdateStreamChatMessage(
+        *state->inner, ::llmfun::tui::ChatMessage{summary_, text_, thinking_, cppType,
+                                                  state->inner->chat.StreamChatMessageId});
+}
+
+void tuiStreamChatMessageClear(TuiState* state) {
+    if (!state || !state->inner)
+        return;
+    ::llmfun::tui::tuiStreamChatMessageClear(*state->inner);
+}
+
 void tuiSetStatusText(TuiState* state, String text) {
     if (!state || !state->inner)
         return;

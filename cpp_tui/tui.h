@@ -123,12 +123,16 @@ struct ChatTab {
     ChatMessageStyle style;
     std::set<size_t> outputLineOpen;
     std::deque<ChatMessage> outputLines;
-    std::size_t outputLineNextId;
+    std::size_t outputLineNextId{1};
     static constexpr size_t MaxChatMessages = 1000;
 
     std::vector<RenderGroup> renderGroups;
     size_t renderGroupFirstId{0};
     size_t renderGroupLastId{0};
+
+    static constexpr size_t StreamChatMessageId = 0;
+    bool hasStreamMsg;
+    ChatMessage streamMsg;
 };
 
 struct TuiState {
@@ -189,6 +193,10 @@ void tuiAddOutputLine(TuiState& state, const ChatMessage& msg);
 
 /// Clear all output lines.
 void tuiClearOutput(TuiState& state);
+
+void tuiUpdateStreamChatMessage(TuiState& state, const ChatMessage& msg);
+
+void tuiStreamChatMessageClear(TuiState& state);
 
 /// Set the status line text.
 void tuiSetStatusText(TuiState& state, const std::string& text);

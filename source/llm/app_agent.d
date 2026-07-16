@@ -26,6 +26,7 @@ import llm.query;
 import llm.rag.rag : RAG;
 import llm.tui;
 import llm.utility;
+import llm.types : ServerStat, StreamMessage;
 import llmfun_tui;
 
 import my.path : Path;
@@ -39,9 +40,10 @@ struct AgentApp {
         Agent agent_;
         bool oneShotQuery;
         Tid uiTid;
-        double lastTokensPerSecond;
+        ServerStat lastServerStat;
         bool debugMode;
         UserConfig.AgentChatConfig conf_;
+        UiMessenger uiMsg;
 
         enum AgentStatus {
             active,
@@ -50,6 +52,10 @@ struct AgentApp {
     }
 
     @disable this(this);
+
+    this(UserConfig.AgentChatConfig conf) {
+        conf_ = conf;
+    }
 
     void dispose() {
         if (uiTid != Tid.init) {
@@ -128,28 +134,25 @@ struct AgentApp {
     }
 
     private void setStatusText(bool readyState) {
-        auto status = format!"Context: %s/%s tokens | %.1f tok/s | Model: '%s' | %s"(
-                agent_.contextUsed, agent_.contextSize,
-                lastTokensPerSecond, llmConf.activeModelName(), readyState ? "Ready" : "Busy");
-        send(uiTid, UiStatusText(status));
+        send(uiTid, UiStatusText(formatStatusText(readyState,
+                agent_.contextSize, lastServerStat, llmConf.activeModelName())));
     }
 
     private void doCompress(bool force) {
         if (!agent_.needCompression && !force)
             return;
         const ctxUsed = agent_.contextUsed;
-        if (!oneShotQuery)
-            send(uiTid, UiAgentBusy.init);
+        uiMsg.busy;
         auto res = agent_.compress(force: force, callback: &this.progressCallback);
         if (!oneShotQuery) {
             send(uiTid, UiChatMessage(compressionResultToString(res.compressed, res.originalLength,
                     res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize),
                     TuiChatMessageType_Assistant));
-            send(uiTid, UiAgentReady.init);
         } else {
             writeln(compressionResultToString(res.compressed, res.originalLength,
                     res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize));
         }
+        uiMsg.ready;
     }
 
     private void processChatMessage(Chat.MessageT m, bool printUser) {
@@ -188,7 +191,7 @@ struct AgentApp {
         }
         agent_.saveHistory(agentHistory);
         logger.trace(result.status != ProcessResult.Status.ok, result);
-        lastTokensPerSecond = result.stat.predictedPerSecond;
+        lastServerStat = result.stat;
     }
 
     private AgentStatus runAgent(string query) {
@@ -244,6 +247,8 @@ struct AgentApp {
                 }
                 if (switched) {
                     agent_.resetModel(llmConf.activeCodeModel());
+                    agent_.setStreamUpdate(new StreamMessageUpdater(uiTid,
+                            agent_.contextSize, llmConf.activeModelName));
                     this.sendChatMessage("switched to model: %s\nAgent model reset: %s -> %s, context: %s",
                             TuiChatMessageType_Assistant,
                             llmConf.activeModelName(), oldModel,
@@ -330,27 +335,28 @@ struct AgentApp {
         }
     }
 
-    int run(UserConfig uconf, UserConfig.AgentChatConfig conf) {
+    int run(UserConfig uconf) {
         makeDefaultFileStructure();
-        if (conf.setupDirs)
+        if (conf_.setupDirs)
             makeLocalSetupFileStructure(LlmConfig.init);
 
-        llmConf = readConfig(uconf.config, !conf.prompt.empty, uconf.noCwdConfig).userToLlmConfig(
-                conf);
+        llmConf = readConfig(uconf.config, !conf_.prompt.empty, uconf.noCwdConfig).userToLlmConfig(
+                conf_);
         rag = createRag(llmConf);
         agentHistory = llmConf.scratchArea;
         monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
         agent_ = new Agent("main", llmConf, monitor, rag, llmConf.toolFilter.to());
         agent_.loadHistory(agentHistory);
         agent_.setSystemPrompt(llmConf.getPrompt(llmConf.agentPrompt));
-        conf_ = conf;
+        lastServerStat.context = agent_.chat.approxContextSize;
         scope (exit)
             this.dispose(); // Ensures cleanup on any exception after setup
 
-        oneShotQuery = !conf.prompt.empty;
+        oneShotQuery = !conf_.prompt.empty;
 
         if (oneShotQuery) {
-            this.runAgent(conf.prompt);
+            uiMsg = UiMessenger(uiTid: Tid.init, blocked: true);
+            this.runAgent(conf_.prompt);
             return 0;
         }
 
@@ -358,7 +364,10 @@ struct AgentApp {
         updateRagMemory();
 
         uiTid = spawn(&spawnUserInterface, thisTid);
+        uiMsg = UiMessenger(uiTid: uiTid, blocked: false);
         send(uiTid, UiSetIniFile(llmConf.scratchArea ~ "imgui.ini"));
+        agent_.setStreamUpdate(new StreamMessageUpdater(uiTid,
+                agent_.contextSize, llmConf.activeModelName));
 
         foreach (m; agent_.chat.getMessages()) {
             this.processChatMessage(m, printUser: true);
@@ -401,7 +410,58 @@ struct AgentApp {
     }
 }
 
+struct UiMessenger {
+    Tid uiTid;
+    bool blocked;
+
+    bool isActive() {
+        return !blocked;
+    }
+
+    void setActive(bool onOff) {
+        blocked = !onOff;
+    }
+
+    void ready() {
+        if (blocked)
+            return;
+        send(uiTid, UiAgentReady.init);
+    }
+
+    void busy() {
+        if (blocked)
+            return;
+        send(uiTid, UiAgentBusy.init);
+    }
+}
+
+string formatStatusText(bool readyState, long contextSize, ServerStat stat, string model) {
+    return format!"Context: %s/%s tokens | %.1f tok/s | Model: '%s' | %s"(stat.context,
+            contextSize, stat.predictedPerSecond, model, readyState ? "Ready" : "Busy");
+}
+
+class StreamMessageUpdater : IStreamCallback {
+    Tid uiTid;
+    long contextSize;
+    string modelName;
+
+    this(Tid ui, long contextSize, string modelName) {
+        this.uiTid = ui;
+        this.contextSize = contextSize;
+        this.modelName = modelName;
+    }
+
+    override void messageUpdate(StreamMessage msg, ServerStat stat) {
+        send(uiTid, UiStatusText(formatStatusText(false, contextSize, stat, modelName)));
+        send(uiTid, UiStreamChatMessage(msg: msg.content, thinking: msg.reasoning));
+    }
+
+    override void streamMessageDone() {
+        send(uiTid, UiStreamChatDone.init);
+    }
+}
+
 int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
-    AgentApp app;
-    return app.run(uconf, conf);
+    auto app = AgentApp(conf);
+    return app.run(uconf);
 }

@@ -14,11 +14,38 @@ interface IAgent {
 }
 
 interface IBasicAgent : IAgent {
-    /// Feed a user query/input to the agent.
+    // Feed a user query/input to the agent.
     void addUserQuery(string query);
 
-    /// Set the pipeline control context for tool call coordination.
+    // Set the pipeline control context for tool call coordination.
     void setPipelineContext(PipelineControlContext ctx);
+}
+
+struct StreamMessage {
+    import std.array : empty;
+    import std.format : format;
+
+    string role;
+    string content;
+    string reasoning;
+    string finishReason;
+
+    bool isEmpty() @safe pure nothrow const @nogc {
+        return content.empty && reasoning.empty;
+    }
+
+    string toString() @safe const {
+        return format!`Message(role:%s content:"%s" reasoning:"%s" finishReason:"%s")`(role,
+                content, reasoning, finishReason);
+    }
+}
+
+interface IStreamCallback {
+    // Called while a message is being updated.
+    void messageUpdate(StreamMessage, ServerStat);
+
+    // Called when the message is done and a final answer has been produced.
+    void streamMessageDone();
 }
 
 struct ServerStat {

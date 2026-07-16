@@ -223,24 +223,13 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
     ImGui::TreePop();
 }
 
-static void renderSingleHeader(TuiState& state, size_t i, ImVec2 displaySize,
-                               bool forceOpen = false, bool lastMsgIsTool = false) {
-    if (i >= state.chat.outputLines.size())
-        return;
-
-    const auto& entry = state.chat.outputLines[i];
-
-    // Determine flags: AlwaysOpen for FinalAnswer, DefaultOpen for recent messages
+// @return true if the user has openend the header
+static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2 displaySize,
+                               bool forceOpen, bool showHeader, bool showThinking) {
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_None;
     if (forceOpen) {
         flags = ImGuiTreeNodeFlags_DefaultOpen;
-    } else {
-        const bool isRecent =
-            (static_cast<int>(i) >= static_cast<int>(state.chat.outputLines.size()) - 10);
-        flags = isRecent ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
     }
-
-    const bool showHeader = state.chat.outputLineOpen.count(i) == 0;
 
     const auto colors = getHeaderColors(entry.type, state.chat.style);
     if (showHeader) {
@@ -254,42 +243,55 @@ static void renderSingleHeader(TuiState& state, size_t i, ImVec2 displaySize,
     StyleColorGuard guard{HEADER_COLOR_COUNT};
 
     const auto headerId = makeUniqueId(entry.summary, "msg_header", entry.id);
-    bool headerOpened = ImGui::CollapsingHeader(headerId.c_str(), flags);
 
-    if (headerOpened) {
-        state.chat.outputLineOpen.insert(i);
-
+    if (ImGui::CollapsingHeader(headerId.c_str(), flags)) {
         guard.pop();
+
         ImGui::PushTextWrapPos(displaySize.x - 4);
         ImGui::TextUnformatted(entry.text.data(), entry.text.data() + entry.text.size());
         ImGui::PopTextWrapPos();
 
         if (!entry.thinking.empty()) {
-            std::string thinkId = makeUniqueId("Model reasoning", "_primary_think_", i);
-            bool isLastMsg = (i == state.chat.outputLines.size() - 1);
-            auto thinkFlags = (isLastMsg && lastMsgIsTool) ? ImGuiTreeNodeFlags_DefaultOpen
-                                                           : ImGuiTreeNodeFlags_None;
+            std::string thinkId = makeUniqueId("Model reasoning", "_primary_think_", entry.id);
+            auto thinkFlags =
+                showThinking ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
 
             ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.2f, 0.25f, 0.8f));
             StyleColorGuard thinkGuard{1};
-            const bool thinkOpened = ImGui::CollapsingHeader(thinkId.c_str(), thinkFlags);
-            if (thinkOpened) {
+            if (ImGui::CollapsingHeader(thinkId.c_str(), thinkFlags)) {
                 ImGui::PushTextWrapPos(0.0f);
                 ImGui::TextUnformatted(entry.thinking.c_str());
                 ImGui::PopTextWrapPos();
             }
         }
 
-        // Copy button for main content
-        std::string buttonId = " [c] ##" + std::to_string(i);
+        std::string buttonId = " [c] ##" + std::to_string(entry.id);
         if (ImGui::Button(buttonId.c_str())) {
             ImGui::SetClipboardText(entry.text.c_str());
-            ImGui::SetTooltip("Copied");
         } else if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
             ImGui::Text("Copy to clipboard");
             ImGui::EndTooltip();
         }
+        return true;
+    }
+    return false;
+}
+
+static void renderSingleHeader(TuiState& state, size_t i, ImVec2 displaySize,
+                               bool forceOpen = false, bool lastMsgIsTool = false) {
+    if (i >= state.chat.outputLines.size())
+        return;
+
+    const auto& entry = state.chat.outputLines[i];
+    const bool isRecent =
+        (static_cast<int>(i) >= static_cast<int>(state.chat.outputLines.size()) - 10);
+    const bool showHeader = state.chat.outputLineOpen.count(i) == 0;
+    const bool isLastMsg = (i == state.chat.outputLines.size() - 1);
+
+    if (renderSingleHeader(state, entry, displaySize, forceOpen || isRecent, showHeader,
+                           isLastMsg)) {
+        state.chat.outputLineOpen.insert(i);
     } else {
         state.chat.outputLineOpen.erase(i);
     }
@@ -300,6 +302,7 @@ void tuiAddOutputLine(TuiState& state, const ChatMessage& msg) {
     if (state.chat.outputLines.size() > state.chat.MaxChatMessages) {
         state.chat.outputLines.pop_front();
     }
+    tuiStreamChatMessageClear(state);
 }
 
 void tuiAddLogMessage(TuiState& state, const LogMessage& msg) {
@@ -310,6 +313,16 @@ void tuiAddLogMessage(TuiState& state, const LogMessage& msg) {
 }
 
 void tuiClearOutput(TuiState& state) { state.chat.outputLines.clear(); }
+
+void tuiUpdateStreamChatMessage(TuiState& state, const ChatMessage& msg) {
+    state.chat.streamMsg = msg;
+    state.chat.hasStreamMsg = true;
+}
+
+void tuiStreamChatMessageClear(TuiState& state) {
+    state.chat.streamMsg = ChatMessage{};
+    state.chat.hasStreamMsg = false;
+}
 
 void tuiSetStatusText(TuiState& state, const std::string& text) { state.statusText = text; }
 
@@ -511,6 +524,11 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
             }
             }
         }
+
+        if (state.chat.hasStreamMsg) {
+            renderSingleHeader(state, state.chat.streamMsg, DisplaySize, true, false, true);
+        }
+
         if (state.readyStatus) {
             state.startProcesssingTime = std::chrono::system_clock::now();
         } else {
