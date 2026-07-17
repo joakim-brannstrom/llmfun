@@ -38,6 +38,38 @@ Index of this file:
 #include "misc/freetype/imgui_freetype.h"
 #endif
 
+// LLMFUN PATCH: UTF-8 support via IMTUI vertex color encoding
+#ifdef IMTUI
+// Simplified mk_wcwidth: returns display width of a Unicode codepoint (0, 1, or 2)
+static int imtui_wcwidth(unsigned int ucs)
+{
+    if (ucs == 0) return 0;
+    if (ucs < 32 || (ucs >= 0x7F && ucs < 0xA0)) return 0;
+    if (ucs >= 0x1100 && ucs <= 0x115F) return 2;
+    if (ucs >= 0x2329 && ucs <= 0x232A) return 2;
+    if (ucs >= 0x2E80 && ucs <= 0xA4CF) return 2;
+    if (ucs >= 0xA960 && ucs <= 0xA97C) return 2;
+    if (ucs >= 0xAC00 && ucs <= 0xD7A3) return 2;
+    if (ucs >= 0xF900 && ucs <= 0xFAFF) return 2;
+    if (ucs >= 0xFE10 && ucs <= 0xFE19) return 2;
+    if (ucs >= 0xFE30 && ucs <= 0xFE6F) return 2;
+    if (ucs >= 0xFF01 && ucs <= 0xFF60) return 2;
+    if (ucs >= 0xFFE0 && ucs <= 0xFFE6) return 2;
+    if (ucs >= 0x1F000 && ucs <= 0x1F644) return 2;
+    if (ucs >= 0x20000 && ucs <= 0x2FFFD) return 2;
+    if (ucs >= 0x30000 && ucs <= 0x3FFFD) return 2;
+    return 1;
+}
+static float ImFontIMTuiCellWidth(unsigned int cp)
+{
+    int w = imtui_wcwidth(cp);
+    if (w < 0) w = 1;
+    if (w > 2) w = 2;
+    return (float)w;
+}
+#endif
+// END LLMFUN PATCH
+
 #include <stdio.h>      // vsnprintf, sscanf, printf
 #if !defined(alloca)
 #if defined(__GLIBC__) || defined(__sun) || defined(__APPLE__) || defined(__NEWLIB__)
@@ -2532,7 +2564,7 @@ static void ImFontAtlasBuildRenderLinesTexData(ImFontAtlas* atlas)
             unsigned char* write_ptr = &atlas->TexPixelsAlpha8[r->X + ((r->Y + y) * atlas->TexWidth)];
             for (unsigned int i = 0; i < pad_left; i++)
                 *(write_ptr + i) = 0x00;
-            
+
             for (unsigned int i = 0; i < line_width; i++)
                 *(write_ptr + pad_left + i) = 0xFF;
 
@@ -2544,7 +2576,7 @@ static void ImFontAtlasBuildRenderLinesTexData(ImFontAtlas* atlas)
             unsigned int* write_ptr = &atlas->TexPixelsRGBA32[r->X + ((r->Y + y) * atlas->TexWidth)];
             for (unsigned int i = 0; i < pad_left; i++)
                 *(write_ptr + i) = IM_COL32_BLACK_TRANS;
-            
+
             for (unsigned int i = 0; i < line_width; i++)
                 *(write_ptr + pad_left + i) = IM_COL32_WHITE;
 
@@ -3174,7 +3206,11 @@ const char* ImFont::CalcWordWrapPositionA(float scale, const char* text, const c
             }
         }
 
+#ifdef IMTUI
+        const float char_width = ImFontIMTuiCellWidth(c);
+#else
         const float char_width = ((int)c < IndexAdvanceX.Size ? IndexAdvanceX.Data[c] : FallbackAdvanceX);
+#endif
         if (ImCharIsBlankW(c))
         {
             if (inside_word)
@@ -3291,7 +3327,11 @@ ImVec2 ImFont::CalcTextSizeA(float size, float max_width, float wrap_width, cons
                 continue;
         }
 
+#ifdef IMTUI
+        const float char_width = ImFontIMTuiCellWidth(c) * scale;
+#else
         const float char_width = ((int)c < IndexAdvanceX.Size ? IndexAdvanceX.Data[c] : FallbackAdvanceX) * scale;
+#endif
         if (line_width + char_width >= max_width)
         {
             s = prev_s;
@@ -3440,10 +3480,25 @@ void ImFont::RenderText(ImDrawList* draw_list, float size, ImVec2 pos, ImU32 col
         }
 
         const ImFontGlyph* glyph = FindGlyph((ImWchar)c);
+#ifdef IMTUI
+        // IMTUI: use FallbackGlyph for characters missing from the font atlas
+        // (e.g. SMP characters > U+FFFF that get truncated to 16-bit ImWchar).
+        // This preserves the character for later vertex-color encoding.
+        if (glyph == NULL) {
+            glyph = FallbackGlyph;
+            if (glyph == NULL)
+                continue;
+        }
+#else
         if (glyph == NULL)
             continue;
+#endif
 
+#ifdef IMTUI
+        float char_width = ImFontIMTuiCellWidth(c) * scale;
+#else
         float char_width = glyph->AdvanceX * scale;
+#endif
         if (glyph->Visible)
         {
             // We don't do a second finer clipping test on the Y axis as we've already skipped anything before clip_rect.y and exit once we pass clip_rect.w
@@ -3502,6 +3557,11 @@ void ImFont::RenderText(ImDrawList* draw_list, float size, ImVec2 pos, ImU32 col
                     vtx_write[1].pos.x = x2; vtx_write[1].pos.y = y1; vtx_write[1].col = glyph_col; vtx_write[1].uv.x = u2; vtx_write[1].uv.y = v1;
                     vtx_write[2].pos.x = x2; vtx_write[2].pos.y = y2; vtx_write[2].col = glyph_col; vtx_write[2].uv.x = u2; vtx_write[2].uv.y = v2;
                     vtx_write[3].pos.x = x1; vtx_write[3].pos.y = y2; vtx_write[3].col = glyph_col; vtx_write[3].uv.x = u1; vtx_write[3].uv.y = v2;
+                    // LLMFUN PATCH: encode character code and width into vertex colors
+#ifdef IMTUI
+                    vtx_write[1].col = (ImU32)c;
+                    vtx_write[2].col = (ImU32)ImFontIMTuiCellWidth(c);
+#endif
                     vtx_write += 4;
                     vtx_current_idx += 4;
                     idx_write += 6;

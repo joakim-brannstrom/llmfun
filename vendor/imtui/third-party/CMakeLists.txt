@@ -28,6 +28,9 @@ target_include_directories(imgui-for-imtui PRIVATE
     imgui/imgui
     )
 
+target_compile_definitions(imgui-for-imtui PUBLIC IMGUI_USE_WCHAR32)
+target_compile_definitions(imgui-for-imtui PRIVATE IMTUI)
+
 target_link_libraries(imgui-for-imtui PRIVATE
     ${ADDITIONAL_LIBRARIES}
     )

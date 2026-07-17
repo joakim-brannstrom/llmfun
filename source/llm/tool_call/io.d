@@ -634,6 +634,6 @@ string validateLineRange(long startLine, long count, long maxLines) {
     if (count < 1)
         return format!"error: parameter count %s must be > 0"(count);
     if (count > maxLines)
-        return format!"error: tried to read %s lines but %s is max"(count, maxLines);
+        return format!"error: tried to access %s lines but %s is max"(count, maxLines);
     return null;
 }
