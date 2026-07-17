@@ -9,7 +9,7 @@ import std.conv : to;
 import std.datetime : Clock, SysTime, Duration;
 import std.exception : collectException;
 import std.file : readText, exists, read, rename;
-import std.format : format;
+import std.format : format, formattedWrite;
 import std.json : JSONValue, parseJSON, JSONType;
 import std.path : stripExtension, baseName;
 import std.range : empty;
@@ -689,6 +689,19 @@ struct StreamResponse {
         string toString() @safe const {
             return format!"ToolCall(id:%s name:%s arguments:'%s')"(id, name, arguments);
         }
+
+        string toPrettyString() {
+            auto buf = appender!string;
+
+            try {
+                formattedWrite(buf, "%s(%s)", name, parseJSON(arguments));
+            } catch (Exception e) {
+                formattedWrite(buf, "%s(%s)", name, arguments);
+            }
+
+            formattedWrite(buf, "%s(%s)", name, arguments);
+            return buf[];
+        }
     }
 
     struct ErrorMessage {
@@ -729,8 +742,6 @@ struct StreamResponse {
     }
 
     void toString(Writer)(ref Writer w) const if (isOutputRange!(Writer, char)) {
-        import std.format : formattedWrite;
-
         formattedWrite(w, "StreamResponse(isDone:%s%s %s %s %s)", isDone, hasError
                 ? format!"ErrorMessage(%s)"(error) : "", stat, message, toolCalls);
     }
