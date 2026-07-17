@@ -38,6 +38,7 @@
 - add a tab which show a live stream of tool use
 - add a menu item to open a separate window to show more detailed statistic about LLM such as latency, token use in total etc
 - add a menu item to navigate the RAG database
+- move all "send" messages to UiMessenger struct in agent.d
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
