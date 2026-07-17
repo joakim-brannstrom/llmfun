@@ -799,9 +799,9 @@ struct StreamResponse {
                         (v) => v["prompt_per_second"].floating, stat.promptPerSecond);
                 stat.context = getValue(*timings, (v) => v["cache_n"].integer, stat.context);
             } else {
-                if (Clock.currTime > start && tokens != 0) {
-                    stat.predictedPerSecond = cast(double) tokens / cast(double)(Clock.currTime - start)
-                        .total!"seconds";
+                const s = (Clock.currTime - start).total!"seconds";
+                if (s > 0 && tokens > 0) {
+                    stat.predictedPerSecond = cast(double) tokens / cast(double)(s);
                 }
             }
         } catch (Exception e) {
