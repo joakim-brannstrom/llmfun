@@ -43,9 +43,13 @@ struct StreamMessage {
     }
 }
 
+struct StreamToolCall {
+    string content;
+}
+
 interface IStreamCallback {
     // Called while a message is being updated.
-    void messageUpdate(StreamMessage, ServerStat);
+    void messageUpdate(StreamMessage, StreamToolCall[], ServerStat);
 
     // Called when the message is done and a final answer has been produced.
     void streamMessageDone();

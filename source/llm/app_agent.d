@@ -26,7 +26,7 @@ import llm.query;
 import llm.rag.rag : RAG;
 import llm.tui;
 import llm.utility;
-import llm.types : ServerStat, StreamMessage;
+import llm.types : ServerStat, StreamMessage, StreamToolCall;
 import llmfun_tui;
 
 import my.path : Path;
@@ -526,9 +526,19 @@ class StreamMessageUpdater : IStreamCallback {
         this.modelName = modelName;
     }
 
-    override void messageUpdate(StreamMessage msg, ServerStat stat) {
+    override void messageUpdate(StreamMessage msg, StreamToolCall[] tools, ServerStat stat) {
+        string content = msg.content;
+        if (!tools.empty) {
+            content ~= "------------------\n";
+            foreach (tool; tools) {
+                content ~= "--- Tool ---\n";
+                content ~= tool.content;
+                content ~= "\n\n";
+            }
+        }
+
         uiMsg.streamStatusText(formatStatusText(false, contextSize, stat, modelName));
-        uiMsg.streamChatMessage(msg.content, msg.reasoning);
+        uiMsg.streamChatMessage(content, msg.reasoning);
     }
 
     override void streamMessageDone() {

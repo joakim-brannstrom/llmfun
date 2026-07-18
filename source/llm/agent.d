@@ -40,7 +40,8 @@ import llm.tool_call.think : ThinkingContext;
 import llm.utility : getValue;
 import llm.workarea;
 
-public import llm.types : IBasicAgent, IAgent, ProcessResult, IStreamCallback, ServerStat;
+public import llm.types : IBasicAgent, IAgent, ProcessResult, IStreamCallback,
+    ServerStat, StreamToolCall;
 
 class Agent : IBasicAgent {
     string name;
@@ -163,7 +164,8 @@ class Agent : IBasicAgent {
             auto sp = StreamResponse(prevStat);
             auto stream = (const(char)[] chunk) { /*logger.trace(chunk);*/ sp.parse(chunk);
                 if (streamCallback !is null) {
-                    streamCallback.messageUpdate(sp.message, sp.stat);
+                    streamCallback.messageUpdate(sp.message,
+                            sp.toolCalls.byValue.map!(a => a.toStream).array, sp.stat);
                 }
             };
             rq.setCallbacks(stream: stream.toDelegate, interrupt: interrupt);
@@ -671,11 +673,10 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
 struct StreamResponse {
     import std.range : isOutputRange;
     import std.datetime : Clock;
-    import llm.types : ServerStat, StreamMessage;
+    import llm.types : ServerStat, StreamMessage, StreamToolCall;
 
     alias Message = StreamMessage;
 
-    // TODO: maybe this should be in llm/chat.d instead?
     struct ToolCall {
         string id;
         string name;
@@ -698,17 +699,26 @@ struct StreamResponse {
             return format!"ToolCall(id:%s name:%s arguments:'%s')"(id, name, arguments);
         }
 
-        string toPrettyString() {
-            auto buf = appender!string;
+        StreamToolCall toStream() @safe nothrow const {
+            return StreamToolCall(toPrettyString);
+        }
+
+        string toPrettyString() @safe nothrow const {
+            auto buf = appender!(char[])();
 
             try {
-                formattedWrite(buf, "%s(%s)", name, parseJSON(arguments));
+                if (!arguments.empty && arguments[$ - 1] == '}') {
+                    formattedWrite(buf, "%s(%s)", name, parseJSON(arguments));
+                    return buf[].idup;
+                }
             } catch (Exception e) {
-                formattedWrite(buf, "%s(%s)", name, arguments);
             }
 
-            formattedWrite(buf, "%s(%s)", name, arguments);
-            return buf[];
+            try {
+                formattedWrite(buf, "%s(%s)", name, arguments);
+            } catch (Exception e) {
+            }
+            return buf[].idup;
         }
     }
 
