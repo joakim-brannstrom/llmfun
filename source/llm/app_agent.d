@@ -261,7 +261,7 @@ struct AgentApp {
             this.sendChatMessage("[assistant]: Running plan pipeline: %s",
                     TuiChatMessageType_Assistant, q);
             auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
-                return isInterruptTriggered;
+                return isStopAgentTriggered;
             }, llmConf.toolFilter.to(), makeStreamCallback);
             this.sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
             return AgentStatus.active;
@@ -270,7 +270,7 @@ struct AgentApp {
             this.sendChatMessage("[assistant]: Running coder pipeline: %s",
                     TuiChatMessageType_Assistant, q);
             auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
-                return isInterruptTriggered;
+                return isStopAgentTriggered;
             }, llmConf.toolFilter.to(), makeStreamCallback);
             if (result.wasInterrupted) {
                 this.sendChatMessage("[assistant]: Pipeline interrupted by user.",
