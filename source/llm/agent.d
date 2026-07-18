@@ -406,6 +406,8 @@ private:
                     return ProcessResult.Status.needMoreThinking;
                 if (sp.message.finishReason == "tool_calls")
                     return ProcessResult.Status.ok;
+                if (sp.message.finishReason == "stop")
+                    return ProcessResult.Status.ok;
                 logger.tracef("unknown finish reason: %s", sp.message.finishReason);
             }
             return ProcessResult.Status.ok;
