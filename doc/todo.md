@@ -38,8 +38,6 @@
 - add a tab which show a live stream of tool use
 - add a menu item to open a separate window to show more detailed statistic about LLM such as latency, token use in total etc
 - add a menu item to navigate the RAG database
-- move all "send" messages to UiMessenger struct in agent.d
-- in the "Model Thinking" TreeNode end it with a horizontal "- - - - -" to clearly separate it from the answer
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
