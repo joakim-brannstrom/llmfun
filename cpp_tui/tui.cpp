@@ -846,4 +846,9 @@ void tuiSetIniFilename(TuiState& state, const std::string& filename) {
     // ImGui::GetIO().IniFilename = state.iniFilename.c_str();
 }
 
+void tuiInitQueryHistory(TuiState& state, const std::vector<std::string>& history) {
+    state.userQuery.inputHistory = history;
+    state.userQuery.historyPos = -1;
+}
+
 } // namespace llmfun::tui

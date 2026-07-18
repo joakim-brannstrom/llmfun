@@ -188,6 +188,8 @@ void tuiSetLogging(TuiState& state, bool onOff);
 /// `ImGui::NewFrame()`.
 void tuiSetIniFilename(TuiState& state, const std::string& filename);
 
+void tuiInitQueryHistory(TuiState& state, const std::vector<std::string>& history);
+
 /// Add a log message with FIFO eviction if bound exceeded.
 void tuiAddLogMessage(TuiState& state, const LogMessage& msg);
 

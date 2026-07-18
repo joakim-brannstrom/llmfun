@@ -365,6 +365,7 @@ struct AgentApp {
 
         uiTid = spawn(&spawnUserInterface, thisTid);
         uiMsg = UiMessenger(uiTid: uiTid, blocked: false);
+        send(uiTid, UiInitHistory(agent_.getUserQueries.map!(a => a.content).array.idup));
         send(uiTid, UiSetIniFile(llmConf.scratchArea ~ "imgui.ini"));
         agent_.setStreamUpdate(new StreamMessageUpdater(uiTid,
                 agent_.contextSize, llmConf.activeModelName));

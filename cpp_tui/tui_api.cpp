@@ -323,6 +323,30 @@ void tuiReadyStatus(TuiState* state, int ready) {
     state->inner->readyStatus = ready == 1;
 }
 
+void tuiInitQueryHistory(TuiState* state, const String* history, size_t count) {
+    if (!state || !state->inner)
+        return;
+    std::vector<std::string> vec;
+    if (history && count > 0) {
+        const size_t maxEntries = state->inner->userQuery.MAX_HISTORY;
+        const size_t n = count < maxEntries ? count : maxEntries;
+        const size_t startAt = count < maxEntries ? 0 : (count - maxEntries);
+        vec.reserve(n);
+        for (size_t i = startAt; i < n; ++i) {
+            const String* s = &history[i];
+            if (s->data) {
+                vec.emplace_back(s->data, s->len);
+            } else {
+                vec.emplace_back();
+            }
+            if (vec.size() > maxEntries) {
+                vec.erase(vec.begin());
+            }
+        }
+    }
+    ::llmfun::tui::tuiInitQueryHistory(*state->inner, vec);
+}
+
 #ifdef __cplusplus
 }
 #endif

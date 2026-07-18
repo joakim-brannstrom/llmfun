@@ -232,6 +232,9 @@ void tuiSetLogging(TuiState* state, int onOff);
  */
 void tuiSetIniFilename(TuiState* state, String filename);
 
+/* Initialize the history in the input field */
+void tuiInitQueryHistory(TuiState* state, const String* history, size_t count);
+
 /* Append a line to the scrollable output display area.
  *
  * The output area has a maximum capacity (10000 lines). When exceeded, the

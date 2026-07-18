@@ -87,7 +87,6 @@ struct Chat {
     }
 
     long approxContextSize() @safe nothrow {
-
         long ctx;
         try {
             foreach (msg; history) {
@@ -111,6 +110,10 @@ struct Chat {
 
     void load(JSONValue json) @trusted nothrow {
         try {
+            if (history.empty) {
+                setSystemPrompt(null);
+            }
+
             const startLen = history.length;
             foreach (entry; json["messages"].array) {
                 const role = entry["role"].str.to!Role;
@@ -268,6 +271,7 @@ struct Message {
         this.content = content;
         this.thinking = thinking;
         this.metadata = metaData;
+        this.saveData = saveData;
 
         try {
             if (userQuery) {
@@ -282,8 +286,8 @@ struct Message {
     }
 
     string toString() @safe const {
-        return format!"Message(role:%s user:%s content:%s thinking:%.80s)"(role,
-                isUserQuery, content, thinking);
+        return format!"Message(role:%s user:%s content:%s thinking:%.80s saveData:%s)"(role,
+                isUserQuery, content, thinking, saveData);
     }
 
     bool isUserQuery() @safe const nothrow {
@@ -313,9 +317,9 @@ struct Message {
         return j;
     }
 
-    // thinking intentionally NOT loaded (transient, session-only)
     void fromJson(JSONValue j) @trusted nothrow {
-        this.thinking = "";
+        // thinking intentionally NOT loaded (transient, session-only)
+        this.thinking = null;
         try {
             this.role = j["role"].str.to!Role;
             this.content = j["content"].str;

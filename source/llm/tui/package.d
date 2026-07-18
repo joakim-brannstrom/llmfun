@@ -211,6 +211,16 @@ struct TextUserInterface {
         return tmp;
     }
 
+    void setHistory(immutable(string)[] history) {
+        if (history.empty)
+            return;
+        auto app = appender!(String[])();
+        foreach (a; history) {
+            app.put(String(a.ptr, a.length));
+        }
+        tuiInitQueryHistory(tuiState, app[].ptr, app[].length);
+    }
+
     bool hasUserTerminated() @safe {
         return userTerminated_;
     }
@@ -249,6 +259,10 @@ struct UiShutdown {
 
 struct UiSetIniFile {
     Path path;
+}
+
+struct UiInitHistory {
+    immutable(string)[] queries;
 }
 
 struct UiChatMessage {
@@ -331,7 +345,8 @@ void spawnUserInterface(Tid ownerTid) {
                 (UiAgentBusy _) { ui.setReadyStatus(false); },
                 (UiAgentReady _) { ui.setReadyStatus(true); playNotification(); },
                 (UiStreamChatMessage a) { ui.streamChat(a.msg, a.thinking); },
-                (UiStreamChatDone _) { ui.streamChatDone; }
+                (UiStreamChatDone _) { ui.streamChatDone; },
+                (UiInitHistory a) { ui.setHistory(a.queries); }
             );
             // dfmt on
 
