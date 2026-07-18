@@ -31,7 +31,7 @@ struct Log {
     }
 };
 
-std::string makeUniqueId(const std::string& base, const std::string& suffix, int i) {
+static std::string makeUniqueId(const std::string& base, const std::string& suffix, int i) {
     auto s = base;
     s.append("##");
     s.append(suffix);
@@ -39,11 +39,30 @@ std::string makeUniqueId(const std::string& base, const std::string& suffix, int
     return s;
 }
 
-bool isWayland() {
+static bool isWayland() {
     const char* wayland = std::getenv("WAYLAND_DISPLAY");
     const char* session = std::getenv("XDG_SESSION_TYPE");
     return wayland != nullptr && wayland[0] != '\0' ||
            (session != nullptr && strcmp(session, "wayland") == 0);
+}
+
+static void renderSeparator(const std::string& prefix, std::string_view ch, int n, bool disabled) {
+    static char buf[256];
+    if (n > 255)
+        n = 255;
+    if (n < 0)
+        n = 0;
+    if (n > prefix.size())
+        n -= prefix.size();
+    for (int i = 0; i < n; i++) {
+        buf[i] = ch[0];
+    }
+    buf[n] = 0;
+    if (disabled) {
+        ImGui::TextDisabled("%s%s", prefix.c_str(), buf);
+    } else {
+        ImGui::Text("%s%s", prefix.c_str(), buf);
+    }
 }
 
 static void SetClipboardText(void*, const char* text) {
@@ -220,6 +239,7 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
             ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
             textUnformattedMultiline(entry.thinking);
             ImGui::PopTextWrapPos();
+            renderSeparator("End ", "-", ImGui::GetContentRegionMax().x - 4, true);
             ImGui::TreePop();
         }
     }
@@ -278,6 +298,7 @@ static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2
                 ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
                 textUnformattedMultiline(entry.thinking);
                 ImGui::PopTextWrapPos();
+                renderSeparator("End ", "-", ImGui::GetContentRegionMax().x - 4, true);
                 ImGui::TreePop();
             }
         }
@@ -431,24 +452,6 @@ void tuiRenderFrame(ImTui::TScreen* screen) {
     ImGui::Render();
     ImTui_ImplText_RenderDrawData(ImGui::GetDrawData(), screen);
     ImTui_ImplNcurses_DrawScreen();
-}
-
-static void renderSeparator(const char* prefix, const char* ch, const char* suffix, int n,
-                            bool disabled) {
-    static char buf[256];
-    if (n > 255)
-        n = 255;
-    if (n < 0)
-        n = 0;
-    for (int i = 0; i < n; i++) {
-        buf[i] = ch[0];
-    }
-    buf[n] = 0;
-    if (disabled) {
-        ImGui::TextDisabled("%s%s%s", prefix, buf, suffix);
-    } else {
-        ImGui::Text("%s%s%s", prefix, buf, suffix);
-    }
 }
 
 int InputResizeCallback(ImGuiInputTextCallbackData* data) {
