@@ -809,6 +809,11 @@ struct StreamResponse {
         }
     }
 
+    void incrToken() @safe nothrow {
+        tokens++;
+        stat.context++;
+    }
+
     void parseStat(ref JSONValue json) @safe nothrow {
         try {
             if (auto timings = "timings" in json) {
@@ -839,7 +844,7 @@ struct StreamResponse {
                 long index = jcall["index"].integer;
                 if (auto a = index in toolCalls) {
                     (*a).arguments ~= jcall["function"]["arguments"].str;
-                    tokens++;
+                    incrToken;
                 } else {
                     toolCalls[index] = ToolCall(id: jcall["id"].str, name: jcall["function"]["name"].str,
                             arguments: jcall["function"]["arguments"].str);
@@ -859,7 +864,7 @@ struct StreamResponse {
             if (auto content = "content" in delta) {
                 if (content.type == JSONType.string) {
                     message.content ~= content.str;
-                    tokens++;
+                    incrToken;
                 }
             }
         } catch (Exception e) {
@@ -873,7 +878,7 @@ struct StreamResponse {
             if (json.type != JSONType.null_) {
                 // if it isn't null then it must be a string or something is wrong
                 message.reasoning ~= json.str;
-                tokens++;
+                incrToken;
             }
         } catch (Exception e) {
             logger.tracef("invalid reasoning structure '%s': %s", json, e.msg);
