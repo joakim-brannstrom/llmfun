@@ -9,7 +9,9 @@
 #include <clocale>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <string>
+#include <string_view>
 
 namespace llmfun::tui {
 
@@ -76,6 +78,16 @@ bool isWhitespaceOnly(const std::string& s) {
         allTrue = allTrue && (std::isspace(c) || c == '\0');
     }
     return allTrue;
+}
+
+void textUnformattedMultiline(std::string_view text) {
+    auto begin = text.begin();
+    auto end = text.end();
+    while (begin != end) {
+        auto next = std::find(begin, end, '\n');
+        ImGui::TextUnformatted(begin, next);
+        begin = (next != end) ? next + 1 : end;
+    }
 }
 
 size_t countNewLines(const std::string& str) { return std::count(str.begin(), str.end(), '\n'); }
@@ -190,25 +202,31 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
 
     const bool isLastMessage = state.chat.outputLines.size() - 1 == i;
     auto treeId = makeUniqueId(entry.summary, "", entry.id);
-    if (!ImGui::TreeNodeEx(treeId.c_str(), isLastMessage ? ImGuiTreeNodeFlags_DefaultOpen
-                                                         : ImGuiTreeNodeFlags_None)) {
+    ImGui::PushStyleColor(ImGuiCol_Header, state.chat.nestedAssistNodeBg);
+    StyleColorGuard topNodeGuard{1};
+    if (!ImGui::TreeNodeEx(treeId.c_str(), ImGuiTreeNodeFlags_Framed |
+                                               (isLastMessage ? ImGuiTreeNodeFlags_DefaultOpen
+                                                              : ImGuiTreeNodeFlags_None))) {
         return;
     }
-
-    ImGui::PushTextWrapPos(displaySize.x - 4);
-    ImGui::TextUnformatted(entry.text.data(), entry.text.data() + entry.text.size());
-    ImGui::PopTextWrapPos();
+    topNodeGuard.pop();
 
     if (!entry.thinking.empty()) {
         auto thinkId = makeUniqueId("Model reasoning", "_assist_think_", entry.id);
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.2f, 0.25f, 0.8f));
+        ImGui::PushStyleColor(ImGuiCol_Header, state.chat.thinkingNodeBg);
         StyleColorGuard thinkGuard{1};
-        if (ImGui::CollapsingHeader(thinkId.c_str(), ImGuiTreeNodeFlags_None)) {
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::TextUnformatted(entry.thinking.c_str());
+        if (ImGui::TreeNodeEx(thinkId.c_str(), ImGuiTreeNodeFlags_Framed)) {
+            thinkGuard.pop();
+            ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
+            textUnformattedMultiline(entry.thinking);
             ImGui::PopTextWrapPos();
+            ImGui::TreePop();
         }
     }
+
+    ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
+    textUnformattedMultiline(entry.text);
+    ImGui::PopTextWrapPos();
 
     // offset to avoid collision with thinking ID
     ImGui::PushID((int)(i + state.chat.outputLines.size()));
@@ -231,6 +249,7 @@ static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2
         flags = ImGuiTreeNodeFlags_DefaultOpen;
     }
 
+    const auto headerId = makeUniqueId(entry.summary, "msg_header", entry.id);
     const auto colors = getHeaderColors(entry.type, state.chat.style);
     if (showHeader) {
         ImGui::PushStyleColor(ImGuiCol_Text, colors.textColor);
@@ -241,29 +260,31 @@ static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, colors.bgHovered);
     ImGui::PushStyleColor(ImGuiCol_HeaderActive, colors.bgActive);
     StyleColorGuard guard{HEADER_COLOR_COUNT};
-
-    const auto headerId = makeUniqueId(entry.summary, "msg_header", entry.id);
-
-    if (ImGui::CollapsingHeader(headerId.c_str(), flags)) {
+    const bool userOpen = ImGui::CollapsingHeader(headerId.c_str(), flags);
+    if (userOpen) {
         guard.pop();
-
-        ImGui::PushTextWrapPos(displaySize.x - 4);
-        ImGui::TextUnformatted(entry.text.data(), entry.text.data() + entry.text.size());
-        ImGui::PopTextWrapPos();
+        ImGui::Indent();
 
         if (!entry.thinking.empty()) {
             std::string thinkId = makeUniqueId("Model reasoning", "_primary_think_", entry.id);
             auto thinkFlags =
-                showThinking ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
+                ImGuiTreeNodeFlags_Framed |
+                (showThinking ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None);
 
-            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.2f, 0.25f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_Header, state.chat.thinkingNodeBg);
             StyleColorGuard thinkGuard{1};
-            if (ImGui::CollapsingHeader(thinkId.c_str(), thinkFlags)) {
-                ImGui::PushTextWrapPos(0.0f);
-                ImGui::TextUnformatted(entry.thinking.c_str());
+            if (ImGui::TreeNodeEx(thinkId.c_str(), thinkFlags)) {
+                thinkGuard.pop();
+                ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
+                textUnformattedMultiline(entry.thinking);
                 ImGui::PopTextWrapPos();
+                ImGui::TreePop();
             }
         }
+
+        ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
+        textUnformattedMultiline(entry.text);
+        ImGui::PopTextWrapPos();
 
         std::string buttonId = " [c] ##" + std::to_string(entry.id);
         if (ImGui::Button(buttonId.c_str())) {
@@ -273,9 +294,9 @@ static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2
             ImGui::Text("Copy to clipboard");
             ImGui::EndTooltip();
         }
-        return true;
+        ImGui::Unindent();
     }
-    return false;
+    return userOpen;
 }
 
 static void renderSingleHeader(TuiState& state, size_t i, ImVec2 displaySize,

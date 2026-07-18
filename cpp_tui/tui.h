@@ -120,6 +120,9 @@ struct RenderGroup {
 };
 
 struct ChatTab {
+    ImVec4 nestedAssistNodeBg = ImVec4(0.25f, 0.25f, 0.25f, 1.0f);
+    ImVec4 thinkingNodeBg = ImVec4(0.2f, 0.2f, 0.2f, 1.0f);
+
     ChatMessageStyle style;
     std::set<size_t> outputLineOpen;
     std::deque<ChatMessage> outputLines;
