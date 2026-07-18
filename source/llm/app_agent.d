@@ -203,6 +203,7 @@ struct AgentApp {
         } else if (query == "/new") {
             agent_.clearHistory;
             send(uiTid, UiClearChat.init);
+            lastServerStat.context = 0;
             return AgentStatus.active;
         } else if (query == "/help") {
             auto helpText = this.printHelp(conf_);
