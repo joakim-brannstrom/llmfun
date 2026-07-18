@@ -54,13 +54,14 @@ struct AgentApp {
     @disable this(this);
 
     this(UserConfig.AgentChatConfig conf) {
-        conf_ = conf;
+        this.conf_ = conf;
+        this.uiMsg = new UiMessenger(Tid.init, true);
     }
 
     void dispose() {
         if (uiTid != Tid.init) {
             try {
-                send(uiTid, UiTerminate.init);
+                uiMsg.terminate();
             } catch (Exception) {
                 // UI thread may have already terminated
             }
@@ -107,11 +108,7 @@ struct AgentApp {
         static if (args.length > 0) {
             msg = format(msg, args);
         }
-        if (oneShotQuery) {
-            writeln(msg);
-        } else {
-            send(uiTid, UiChatMessage(msg, type));
-        }
+        uiMsg.chatMessage(msg, type);
     }
 
     private void sendChatThinkMessage(Args...)(string msg, string thinking,
@@ -119,23 +116,17 @@ struct AgentApp {
         static if (args.length > 0) {
             msg = format(msg, args);
         }
-        if (oneShotQuery) {
-            writeln(msg);
-        } else {
-            send(uiTid, UiChatThinkMessage(msg, thinking, type));
-        }
+        uiMsg.chatThinkMessage(msg, thinking, type);
     }
 
     private void progressCallback(size_t currentChunk, size_t totalChunks, string status) {
-        if (!oneShotQuery) {
-            send(uiTid, UiChatMessage(format!"[assistant]: Compressing... %s/%s : %s"(currentChunk,
-                    totalChunks, status), TuiChatMessageType_Assistant));
-        }
+        uiMsg.chatMessage(format!"[assistant]: Compressing... %s/%s : %s"(currentChunk,
+                totalChunks, status), TuiChatMessageType_Assistant);
     }
 
     private void setStatusText(bool readyState) {
-        send(uiTid, UiStatusText(formatStatusText(readyState,
-                agent_.contextSize, lastServerStat, llmConf.activeModelName())));
+        uiMsg.statusText(formatStatusText(readyState, agent_.contextSize,
+                lastServerStat, llmConf.activeModelName()));
     }
 
     private void doCompress(bool force) {
@@ -144,14 +135,9 @@ struct AgentApp {
         const ctxUsed = agent_.contextUsed;
         uiMsg.busy;
         auto res = agent_.compress(force: force, callback: &this.progressCallback);
-        if (!oneShotQuery) {
-            send(uiTid, UiChatMessage(compressionResultToString(res.compressed, res.originalLength,
-                    res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize),
-                    TuiChatMessageType_Assistant));
-        } else {
-            writeln(compressionResultToString(res.compressed, res.originalLength,
-                    res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize));
-        }
+        uiMsg.chatMessage(compressionResultToString(res.compressed, res.originalLength,
+                res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize),
+                TuiChatMessageType_Assistant);
         uiMsg.ready;
     }
 
@@ -171,9 +157,7 @@ struct AgentApp {
                     TuiChatMessageType_ToolCall, calls.length, calls);
             }
             if (a.isFinalAnswer()) {
-                if (!oneShotQuery) {
-                    send(uiTid, UiFinalAnswer(a.getFinalAnswer()));
-                }
+                uiMsg.finalAnswer(a.getFinalAnswer());
             }
         }, (ToolResponse a) {
             if (!isHiddenToolResponse(a.toolName)) {
@@ -202,7 +186,7 @@ struct AgentApp {
             return AgentStatus.active;
         } else if (query == "/new") {
             agent_.clearHistory;
-            send(uiTid, UiClearChat.init);
+            uiMsg.clearChat();
             lastServerStat.context = 0;
             return AgentStatus.active;
         } else if (query == "/help") {
@@ -213,7 +197,7 @@ struct AgentApp {
             return AgentStatus.active;
         } else if (query == "/debug") {
             debugMode = !debugMode;
-            send(uiTid, UiLogFile(debugMode));
+            uiMsg.logFile(debugMode);
             logger.globalLogLevel = debugMode ? logger.LogLevel.trace : logger.LogLevel.info;
             this.sendChatMessage("Debug output: %s",
                     TuiChatMessageType_Assistant, debugMode ? "ON" : "OFF");
@@ -298,7 +282,7 @@ struct AgentApp {
     }
 
     private IStreamCallback makeStreamCallback() {
-        return new StreamMessageUpdater(uiTid, agent_.contextSize, llmConf.activeModelName);
+        return new StreamMessageUpdater(uiMsg, agent_.contextSize, llmConf.activeModelName);
     }
 
     private void updateRagMemory() {
@@ -356,10 +340,12 @@ struct AgentApp {
         scope (exit)
             this.dispose(); // Ensures cleanup on any exception after setup
 
+        // oneShotQuery: true  = CLI prompt mode (no UI thread, UiMessenger blocked)
+        //                 false = full UI mode (UI thread spawned, UiMessenger active)
         oneShotQuery = !conf_.prompt.empty;
 
         if (oneShotQuery) {
-            uiMsg = UiMessenger(uiTid: Tid.init, blocked: true);
+            uiMsg = new UiMessenger(Tid.init, true);
             this.runAgent(conf_.prompt);
             return 0;
         }
@@ -368,7 +354,8 @@ struct AgentApp {
         updateRagMemory();
 
         uiTid = spawn(&spawnUserInterface, thisTid);
-        uiMsg = UiMessenger(uiTid: uiTid, blocked: false);
+        uiMsg = new UiMessenger(uiTid, false);
+        uiMsg.setIniFile(llmConf.scratchArea ~ "imgui.ini");
         send(uiTid, UiInitHistory(agent_.getUserQueries.map!(a => a.content).array.idup));
         send(uiTid, UiSetIniFile(llmConf.scratchArea ~ "imgui.ini"));
         agent_.setStreamUpdate(makeStreamCallback);
@@ -394,17 +381,17 @@ struct AgentApp {
                 auto query = a.query.strip;
                 if (!query.empty) {
                     this.sendChatMessage(query, TuiChatMessageType_User);
-                    send(uiTid, UiAgentBusy.init);
+                    uiMsg.busy();
                     clearStopAgent();
                     this.setStatusText(false);
                     final switch (this.runAgent(query)) {
                     case AgentStatus.active:
                         break;
                     case AgentStatus.terminate:
-                        send(uiTid, UiTerminate.init);
+                        uiMsg.terminate();
                         break;
                     }
-                    send(uiTid, UiAgentReady.init);
+                    uiMsg.ready();
                 }
             }, (UiTerminated _) { running = false; });
         }
@@ -414,9 +401,14 @@ struct AgentApp {
     }
 }
 
-struct UiMessenger {
+class UiMessenger {
     Tid uiTid;
     bool blocked;
+
+    this(Tid t, bool b = false) {
+        uiTid = t;
+        blocked = b;
+    }
 
     bool isActive() {
         return !blocked;
@@ -437,6 +429,84 @@ struct UiMessenger {
             return;
         send(uiTid, UiAgentBusy.init);
     }
+
+    void terminate() {
+        if (blocked)
+            return;
+        if (uiTid == Tid.init)
+            return; // safety: no UI thread to terminate
+        send(uiTid, UiTerminate.init);
+    }
+
+    void chatMessage(string msg, TuiChatMessageType type) {
+        if (blocked) {
+            writeln(msg);
+        } else {
+            send(uiTid, UiChatMessage(msg, type));
+        }
+    }
+
+    void chatThinkMessage(string msg, string thinking, TuiChatMessageType type) {
+        if (blocked) {
+            if (!thinking.empty) {
+                writeln("Thinking: ", thinking);
+            }
+            writeln(msg);
+        } else {
+            send(uiTid, UiChatThinkMessage(msg, thinking, type));
+        }
+    }
+
+    void statusText(string status) {
+        if (blocked)
+            return;
+        send(uiTid, UiStatusText(status));
+    }
+
+    void finalAnswer(string msg) {
+        if (blocked) {
+            writeln(msg);
+        } else {
+            send(uiTid, UiFinalAnswer(msg));
+        }
+    }
+
+    void clearChat() {
+        if (blocked)
+            return;
+        send(uiTid, UiClearChat.init);
+    }
+
+    void logFile(bool useFile) {
+        if (blocked)
+            return;
+        send(uiTid, UiLogFile(useFile));
+    }
+
+    void setIniFile(string path) {
+        if (blocked)
+            return;
+        send(uiTid, UiSetIniFile(Path(path)));
+    }
+
+    // Streaming methods — silently skipped in blocked (one-shot) mode.
+    // One-shot mode produces final output via writeln in chatMessage/finalAnswer;
+    // incremental streaming feedback is not needed.
+    void streamStatusText(string status) {
+        statusText(status); // delegate to canonical method
+    }
+
+    void streamChatMessage(string msg, string thinking) {
+        if (blocked)
+            return;
+        send(uiTid, UiStreamChatMessage(msg: msg, thinking: thinking));
+    }
+
+    void streamChatDone() {
+        if (blocked)
+            return;
+        send(uiTid, UiStreamChatDone.init);
+    }
 }
 
 string formatStatusText(bool readyState, long contextSize, ServerStat stat, string model) {
@@ -445,23 +515,26 @@ string formatStatusText(bool readyState, long contextSize, ServerStat stat, stri
 }
 
 class StreamMessageUpdater : IStreamCallback {
-    Tid uiTid;
+    UiMessenger uiMsg;
     long contextSize;
     string modelName;
 
-    this(Tid ui, long contextSize, string modelName) {
-        this.uiTid = ui;
+    this(UiMessenger messenger, long contextSize, string modelName)
+    in (messenger !is null, "UiMessenger must not be null") {
+        this.uiMsg = messenger;
         this.contextSize = contextSize;
         this.modelName = modelName;
     }
 
     override void messageUpdate(StreamMessage msg, ServerStat stat) {
-        send(uiTid, UiStatusText(formatStatusText(false, contextSize, stat, modelName)));
-        send(uiTid, UiStreamChatMessage(msg: msg.content, thinking: msg.reasoning));
+        uiMsg.streamStatusText(formatStatusText(false, contextSize, stat, modelName));
+        uiMsg.streamChatMessage(msg.content, msg.reasoning);
     }
 
     override void streamMessageDone() {
-        send(uiTid, UiStreamChatDone.init);
+        // Delegates to UiMessenger which checks blocked flag.
+        // In one-shot mode, this is silently dropped (consistent with other streaming methods).
+        uiMsg.streamChatDone();
     }
 }
 

@@ -291,10 +291,10 @@ struct Message {
     }
 
     bool isUserQuery() @safe const nothrow {
+        if (saveData.type != JSONType.object)
+            return false;
         try {
-            if ("user" in saveData) {
-                return true;
-            }
+            return ("user" in saveData) !is null;
         } catch (Exception e) {
         }
         return false;
@@ -396,10 +396,14 @@ struct ToolMessage {
     }
 
     /// Returns true if this ToolMessage represents a final answer.
-    bool isFinalAnswer() const @safe {
+    bool isFinalAnswer() const @safe nothrow {
         if (saveData.type != JSONType.object)
             return false;
-        return ("taskDoneAnswer" in saveData) !is null;
+        try {
+            return ("taskDoneAnswer" in saveData) !is null;
+        } catch (Exception e) {
+        }
+        return false;
     }
 
     /// Returns: the final answer text or empty string.
