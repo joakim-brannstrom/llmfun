@@ -8,9 +8,10 @@ import std.datetime : Clock, dur;
 
 import llm.agent : Agent;
 import llm.config : LlmConfig;
+import llm.metric.monitor : MetricMonitor;
 import llm.pipeline : Pipeline, PipelineResult, pipelineBuilder, NodeConfig;
 import llm.rag.rag : RAG;
-import llm.metric.monitor : MetricMonitor;
+import llm.types : IStreamCallback;
 
 /// Runs a two-stage pipeline: System Designer → Implementation Planner
 ///
@@ -23,8 +24,8 @@ import llm.metric.monitor : MetricMonitor;
 ///     individual tasks, and saves it to plan/implementation_plan.md via writeFile.
 ///
 /// Both agents are transient and only exist for the duration of the pipeline.
-PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
-        MetricMonitor monitor, bool delegate() interrupt = null, ReFilter toolFilter) {
+PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricMonitor monitor,
+        bool delegate() interrupt, ReFilter toolFilter, IStreamCallback callback) {
 
     // dfmt off
     // Agent 1: Code Analyser
@@ -123,6 +124,7 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag,
     // Wire into a linear pipeline (no loops)
     // dfmt off
     auto pipelineBuilder = pipelineBuilder
+        .streamCallback(callback)
         .addNode("system_design", designer)
         .addNode("system_design_review", designReview)
         .addNode("impl_planner", planner)

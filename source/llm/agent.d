@@ -133,7 +133,7 @@ class Agent : IBasicAgent {
         chat.setSystemPrompt(x);
     }
 
-    void setStreamUpdate(IStreamCallback callback) {
+    override void setStreamUpdate(IStreamCallback callback) {
         this.streamCallback = callback;
     }
 

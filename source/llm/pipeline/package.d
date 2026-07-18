@@ -20,7 +20,7 @@ import llm.pipeline.graph;
 import llm.rag.rag : RAG;
 import llm.summary_agent : SummaryAgent;
 import llm.tool_call.pipeline : PipelineControlContext;
-import llm.types : IBasicAgent, IAgent, ProcessResult;
+import llm.types : IBasicAgent, IAgent, ProcessResult, IStreamCallback;
 
 public import llm.pipeline.graph;
 
@@ -41,6 +41,7 @@ struct NodeConfig {
 
 /// Node in the pipeline graph; wraps an agent and tracks execution state.
 class PipelineNode : Node {
+    // TODO: isn't this unnecessary? Can't agent.id be used instead?
     string id_;
     IBasicAgent agent;
     bool executed;
@@ -57,6 +58,10 @@ class PipelineNode : Node {
 
     override string id() const {
         return id_;
+    }
+
+    void setStreamUpdate(IStreamCallback callback) {
+        agent.setStreamUpdate(callback);
     }
 
     void addUserQuery(string query) {
@@ -95,6 +100,10 @@ class PipelineAgent : IBasicAgent {
 
     override string id() {
         return wrappedAgent.id();
+    }
+
+    override void setStreamUpdate(IStreamCallback callback) {
+        wrappedAgent.setStreamUpdate(callback);
     }
 
     override void addUserQuery(string query) {
@@ -674,11 +683,17 @@ struct PipelineBuilder {
     string startId;
     string stopId;
     size_t workerThreads_ = 1;
+    IStreamCallback streamCallback_;
 
     /// Set the number of worker threads for pool-based execution.
     /// Returns the builder for fluent chaining.
     PipelineBuilder workerThreads(size_t n) {
         workerThreads_ = n;
+        return this;
+    }
+
+    PipelineBuilder streamCallback(IStreamCallback a) {
+        streamCallback_ = a;
         return this;
     }
 
@@ -784,6 +799,7 @@ struct PipelineBuilder {
         }
 
         foreach (n; nodes) {
+            n.setStreamUpdate(streamCallback_);
             g.add(n);
         }
         foreach (e; edges) {

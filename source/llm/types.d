@@ -19,6 +19,9 @@ interface IBasicAgent : IAgent {
 
     // Set the pipeline control context for tool call coordination.
     void setPipelineContext(PipelineControlContext ctx);
+
+    // If set `callback` is called when the agent receive a token.
+    void setStreamUpdate(IStreamCallback callback);
 }
 
 struct StreamMessage {

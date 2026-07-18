@@ -10,6 +10,7 @@ import llm.config : LlmConfig;
 import llm.metric.monitor : MetricMonitor;
 import llm.pipeline : Pipeline, PipelineResult, pipelineBuilder;
 import llm.rag.rag : RAG;
+import llm.types : IStreamCallback;
 
 /// Runs a coder-reviewer loop pipeline.
 ///
@@ -27,11 +28,10 @@ import llm.rag.rag : RAG;
 ///   3. Coder finalizes (pipeline stops)
 ///
 /// Both agents are transient and only exist for the duration of the pipeline.
-PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
-        MetricMonitor monitor, bool delegate() interrupt = null, ReFilter toolFilter) {
+PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, MetricMonitor monitor,
+        bool delegate() interrupt, ReFilter toolFilter, IStreamCallback callback) {
 
     // dfmt off
-
     // Agent 1: Coder
     auto codeQuery =
         "You are a Coder. Your job is to implement working code based on the user's request.\n\n" ~
@@ -78,6 +78,7 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag,
     // at most 2 times, resulting in 3 total coder executions.
     // dfmt off
     auto pipelineBuilder = pipelineBuilder
+        .streamCallback(callback)
         .addNode("coder", coder)
         .addNode("reviewer", reviewer)
         .addEdge("coder", "reviewer")

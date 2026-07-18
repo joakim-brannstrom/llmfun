@@ -248,8 +248,7 @@ struct AgentApp {
                 }
                 if (switched) {
                     agent_.resetModel(llmConf.activeCodeModel());
-                    agent_.setStreamUpdate(new StreamMessageUpdater(uiTid,
-                            agent_.contextSize, llmConf.activeModelName));
+                    agent_.setStreamUpdate(makeStreamCallback);
                     this.sendChatMessage("switched to model: %s\nAgent model reset: %s -> %s, context: %s",
                             TuiChatMessageType_Assistant,
                             llmConf.activeModelName(), oldModel,
@@ -263,7 +262,7 @@ struct AgentApp {
                     TuiChatMessageType_Assistant, q);
             auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
                 return isInterruptTriggered;
-            }, llmConf.toolFilter.to());
+            }, llmConf.toolFilter.to(), makeStreamCallback);
             this.sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
             return AgentStatus.active;
         } else if (query.startsWith("/code ")) {
@@ -272,7 +271,7 @@ struct AgentApp {
                     TuiChatMessageType_Assistant, q);
             auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
                 return isInterruptTriggered;
-            }, llmConf.toolFilter.to());
+            }, llmConf.toolFilter.to(), makeStreamCallback);
             if (result.wasInterrupted) {
                 this.sendChatMessage("[assistant]: Pipeline interrupted by user.",
                         TuiChatMessageType_Assistant);
@@ -296,6 +295,10 @@ struct AgentApp {
             return isStopAgentTriggered;
         });
         return AgentStatus.active;
+    }
+
+    private IStreamCallback makeStreamCallback() {
+        return new StreamMessageUpdater(uiTid, agent_.contextSize, llmConf.activeModelName);
     }
 
     private void updateRagMemory() {
@@ -368,8 +371,7 @@ struct AgentApp {
         uiMsg = UiMessenger(uiTid: uiTid, blocked: false);
         send(uiTid, UiInitHistory(agent_.getUserQueries.map!(a => a.content).array.idup));
         send(uiTid, UiSetIniFile(llmConf.scratchArea ~ "imgui.ini"));
-        agent_.setStreamUpdate(new StreamMessageUpdater(uiTid,
-                agent_.contextSize, llmConf.activeModelName));
+        agent_.setStreamUpdate(makeStreamCallback);
 
         foreach (m; agent_.chat.getMessages()) {
             this.processChatMessage(m, printUser: true);
