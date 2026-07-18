@@ -529,7 +529,6 @@ class StreamMessageUpdater : IStreamCallback {
     override void messageUpdate(StreamMessage msg, StreamToolCall[] tools, ServerStat stat) {
         string content = msg.content;
         if (!tools.empty) {
-            content ~= "------------------\n";
             foreach (tool; tools) {
                 content ~= "--- Tool ---\n";
                 content ~= tool.content;
