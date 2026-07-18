@@ -125,6 +125,10 @@ class Agent : IBasicAgent {
                 modelConfig.name, this.contextSize);
     }
 
+    Message[] getUserQueries() @safe nothrow {
+        return chat.getUserQueries;
+    }
+
     void setSystemPrompt(string x) {
         chat.setSystemPrompt(x);
     }
@@ -138,16 +142,16 @@ class Agent : IBasicAgent {
     }
 
     void addUserQuery(string query) nothrow {
-        chat.add(Message(Role.user, query));
+        chat.add(Message(Role.user, userQuery: true, content: query, thinking: null));
     }
 
     void addKeepReasoning() @safe nothrow {
-        chat.add(Message(Role.user, "Please continue"));
+        chat.add(Message(Role.user, userQuery: false, content: "Please continue", thinking: null));
     }
 
     void addContinue() @safe nothrow {
-        chat.add(Message(Role.user,
-                "You stopped without calling 'taskDone'. Please continue your work, or call 'taskDone' if you're finished."));
+        chat.add(Message(Role.user, userQuery: false, content: "You stopped without calling 'taskDone'. Please continue your work, or call 'taskDone' if you're finished.",
+                thinking: null));
     }
 
     ProcessResult process(bool delegate() interrupt) @trusted nothrow {
@@ -394,7 +398,8 @@ private:
             logger.trace(sp);
 
             if (!sp.message.isEmpty) {
-                chat.add(Message(Role.assistant, sp.message.content, sp.message.reasoning));
+                chat.add(Message(Role.assistant, userQuery: false, content: sp.message.content,
+                        thinking: sp.message.reasoning));
             }
             if (!sp.toolCalls.empty) {
                 handleToolCalls(sp.toolCalls);
@@ -429,7 +434,8 @@ private:
                     feedbackEngine.setEvents(monitor.getRecentEvents(100));
                     auto warnings = feedbackEngine.getWarnings();
                     foreach (warning; warnings) {
-                        chat.add(Message(Role.system, "warning: " ~ warning));
+                        chat.add(Message(Role.system, userQuery: false,
+                                content: "warning: " ~ warning, thinking: null));
                     }
                 }
             } catch (Exception e) {

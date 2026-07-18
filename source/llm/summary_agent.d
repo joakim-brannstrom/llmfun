@@ -231,8 +231,8 @@ struct SummaryAgent {
                     chunkCount, successfulChunks, failedChunks);
 
             if (!result.summaries.empty) {
-                newHistory ~= Chat.MessageT(Message(Role.assistant,
-                        mergeSummary(result.summaries)));
+                newHistory ~= Chat.MessageT(Message(Role.assistant, userQuery: false,
+                        content: mergeSummary(result.summaries), thinking: null));
             } else {
                 logger.warning("All chunks failed to produce summaries");
             }
@@ -291,23 +291,24 @@ struct SummaryAgent {
 
         // Build a minimal chat with system prompt and the message to summarize
         Chat summaryChat;
-        summaryChat.add(Message(Role.system, "You are a helpful assistant that summarizes text. "
+        summaryChat.add(Message(Role.system, userQuery: false, content: "You are a helpful assistant that summarizes text. "
                 ~ "Condense the following message while preserving all key information. "
-                ~ "Keep the summary concise but complete."));
-        summaryChat.add(Message(role, content));
+                ~ "Keep the summary concise but complete.", thinking: null));
+        summaryChat.add(Message(role, userQuery: false, content: content, thinking: null));
 
         auto response = request(rqSummary, summaryChat);
         if (response.gotResponse && !response.response.empty) {
             logger.tracef("Summarized oversized message: %s -> %s chars",
                     content.length, response.response.length);
-            return Chat.MessageT(Message(role, response.response));
+            return Chat.MessageT(Message(role, userQuery: false, content: response.response,
+                    thinking: null));
         }
 
         if (content.length / ApproxTokenSize > TokenBudget) {
             content = content[0 .. TokenBudget];
             logger.warningf("Failed to summarize single message, returning trunkated (%s chars)",
                     content.length);
-            return Chat.MessageT(Message(role, content));
+            return Chat.MessageT(Message(role, userQuery: false, content: content, thinking: null));
         }
         logger.warningf("Failed to summarize single message, returning original (%s chars)",
                 content.length);
@@ -388,8 +389,9 @@ Now summarize the next %s messages, noting any changes, reversals, or continuati
             }
 
             Chat summaryChat;
-            summaryChat.add(Message(Role.system, summaryPrompt));
-            summaryChat.add(Message(Role.user, query));
+            summaryChat.add(Message(Role.system, userQuery: false, content: summaryPrompt,
+                    thinking: null));
+            summaryChat.add(Message(Role.user, userQuery: false, content: query, thinking: null));
 
             auto resp = request(rqSummary, summaryChat);
             if (resp.gotResponse) {
@@ -467,8 +469,9 @@ Respond ONLY with a single line of valid JSON.
         auto query = buildValidationPrompt(summaryText, preservedText, lastText);
 
         Chat validationChat;
-        validationChat.add(Message(Role.system, summaryPrompt));
-        validationChat.add(Message(Role.user, query));
+        validationChat.add(Message(Role.system, userQuery: false, content: summaryPrompt,
+                thinking: null));
+        validationChat.add(Message(Role.user, userQuery: false, content: query, thinking: null));
 
         auto response = request(rqSummary, validationChat);
         string answerStr = response.response.strip.toUpper;
@@ -494,8 +497,8 @@ Respond ONLY with a single line of valid JSON.
         auto query = buildFixPrompt(brokenSummary, preservedText, lastText);
 
         Chat fixChat;
-        fixChat.add(Message(Role.system, summaryPrompt));
-        fixChat.add(Message(Role.user, query));
+        fixChat.add(Message(Role.system, userQuery: false, content: summaryPrompt, thinking: null));
+        fixChat.add(Message(Role.user, userQuery: false, content: query, thinking: null));
 
         auto fixResponse = request(rqSummary, fixChat);
         if (fixResponse.gotResponse && !fixResponse.response.empty) {

@@ -21,7 +21,7 @@ struct Chat {
     }
 
     void setSystemPrompt(string x) {
-        auto m = Message(Role.system, x);
+        auto m = Message(Role.system, userQuery: false, content: x, thinking: null);
         if (history.empty)
             history ~= MessageT(m);
         else
@@ -73,6 +73,19 @@ struct Chat {
         return history;
     }
 
+    Message[] getUserQueries() @safe nothrow {
+        auto app = appender!(Message[])();
+
+        foreach (msg; history) {
+            msg.match!((Message m) {
+                if (m.role == Role.user && m.isUserQuery) {
+                    app.put(m);
+                }
+            }, (_) {});
+        }
+        return app[];
+    }
+
     long approxContextSize() @safe nothrow {
 
         long ctx;
@@ -111,7 +124,8 @@ struct Chat {
                     if ("tool_calls" in entry) {
                         history ~= MessageT(ToolMessage(entry["tool_calls"], metadata, saveData));
                     } else {
-                        history ~= MessageT(Message(role, entry["content"].str, "", metadata));
+                        history ~= MessageT(Message(role, userQuery: false, content: entry["content"].str,
+                                thinking: null, metaData: metadata, saveData: saveData));
                     }
                     break;
                 case Role.tool:
@@ -138,10 +152,12 @@ struct Chat {
                         if (imageDataUrl) {
                             history ~= MessageT(VisionMessage(text, imageDataUrl, metadata));
                         } else {
-                            history ~= MessageT(Message(role, text, "", metadata));
+                            history ~= MessageT(Message(role, userQuery: false, content: text,
+                                    thinking: null, metaData: metadata, saveData: saveData));
                         }
                     } else {
-                        history ~= MessageT(Message(role, entry["content"].str, "", metadata));
+                        history ~= MessageT(Message(role, userQuery: false, content: entry["content"].str,
+                                thinking: null, metaData: metadata, saveData: saveData));
                     }
                     break;
                 }
@@ -243,13 +259,22 @@ struct Message {
     Role role;
     string content;
     string thinking; // TUI-only, transient, not persisted, not sent to LLM
-    JSONValue metadata;
+    JSONValue metadata; // for external tools only
+    JSONValue saveData; // for llmfun internal use
 
-    this(Role role, string content, string thinking = "", JSONValue metadata = JSONValue.init) @safe nothrow {
+    this(Role role, bool userQuery, string content, string thinking,
+            JSONValue metaData = JSONValue.init, JSONValue saveData = JSONValue.init) @safe nothrow {
         this.role = role;
         this.content = content;
         this.thinking = thinking;
-        this.metadata = metadata;
+        this.metadata = metaData;
+
+        try {
+            if (userQuery) {
+                this.saveData["user"] = true;
+            }
+        } catch (Exception e) {
+        }
     }
 
     size_t length() @safe const nothrow {
@@ -257,7 +282,18 @@ struct Message {
     }
 
     string toString() @safe const {
-        return format!"Message(role:%s content:%s thinking:%.80s)"(role, content, thinking);
+        return format!"Message(role:%s user:%s content:%s thinking:%.80s)"(role,
+                isUserQuery, content, thinking);
+    }
+
+    bool isUserQuery() @safe const nothrow {
+        try {
+            if ("user" in saveData) {
+                return true;
+            }
+        } catch (Exception e) {
+        }
+        return false;
     }
 
     // toJson — REST API: does NOT include thinking (no change needed)
@@ -271,6 +307,9 @@ struct Message {
         if (metadata != JSONValue.init) {
             j["metadata"] = metadata;
         }
+        if (saveData != JSONValue.init) {
+            j["save_data"] = saveData;
+        }
         return j;
     }
 
@@ -280,6 +319,12 @@ struct Message {
         try {
             this.role = j["role"].str.to!Role;
             this.content = j["content"].str;
+            if (auto m = "metadata" in j) {
+                this.metadata = *m;
+            }
+            if (auto s = "save_data" in j) {
+                this.saveData = *s;
+            }
             // NOTE: thinking field is intentionally NOT loaded from JSON.
             // Thinking content is session-only and extracted at parse time.
         } catch (Exception e) {
