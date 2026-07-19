@@ -799,7 +799,9 @@ struct PipelineBuilder {
         }
 
         foreach (n; nodes) {
-            n.setStreamUpdate(streamCallback_);
+            auto s = streamCallback_.clone;
+            s.setId(n.id);
+            n.setStreamUpdate(s);
             g.add(n);
         }
         foreach (e; edges) {

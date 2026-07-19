@@ -119,6 +119,13 @@ typedef struct ChatMessageParam {
     TuiChatMessageType type; /* offset 48, size 4 */
 } ChatMessageParam;          /* total size: 52 bytes (+ 4-byte tail padding) */
 
+typedef struct PipelineChatMessage {
+    String content;
+    String reasoning;
+    String role;
+    String finishReason;
+} PipelineChatMessage;
+
 /* TuiState — Opaque handle to the internal TUI state.
  * Created via tuiCreateState(), destroyed via tuiDestroyState().
  */
@@ -282,6 +289,33 @@ void tuiUpdateStreamChatMessage(TuiState* state, ChatMessageParam param);
  * Null-safe: no-op if state is NULL.
  */
 void tuiStreamChatMessageClear(TuiState* state);
+
+/* Update the streaming message for a specific pipeline agent.
+ * If agent is not yet registered, it is auto-registered as the latest
+ * discovered agent. If MaxPipelineAgents is exceeded, the agent with
+ * the oldest lastUpdate time is silently dropped.
+ * Updates content, reasoning, role, and finishReason for the agent
+ * identified by agentId. All String parameters are inbound — their data
+ * is copied internally.
+ * Null-safe: no-op if state is NULL or agentId is empty.
+ */
+void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage msg);
+
+/* Mark a pipeline agent's current message as done.
+ * Moves the current streaming content/reasoning/role to `finished`
+ * and clears the streaming content. The lastUpdate timestamp is NOT
+ * refreshed — done agents are evicted first (LRU policy) if capacity
+ * is exceeded. This allows the TUI to display both the last finished
+ * message and any new streaming content.
+ * Null-safe: no-op if state is NULL or agentId is empty.
+ */
+void tuiPipelineAgentDone(TuiState* state, String agentId);
+
+/* Clear all pipeline agent stream messages.
+ * Called when the entire pipeline completes.
+ * Null-safe: no-op if state is NULL.
+ */
+void tuiPipelineClear(TuiState* state);
 
 /* Set the text displayed in the status line at the bottom of the terminal.
  *

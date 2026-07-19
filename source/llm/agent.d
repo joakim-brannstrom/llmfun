@@ -144,16 +144,16 @@ class Agent : IBasicAgent {
     }
 
     void addUserQuery(string query) nothrow {
-        chat.add(Message(Role.user, userQuery: true, content: query, thinking: null));
+        chat.add(Message(role: Role.user, userQuery: true, content: query, thinking: null));
     }
 
     void addKeepReasoning() @safe nothrow {
-        chat.add(Message(Role.user, userQuery: false, content: "Please continue or call taskDone if you are finished",
+        chat.add(Message(role: Role.user, userQuery: false, content: "Please continue or call taskDone if you are finished",
                 thinking: null));
     }
 
     void addContinue() @safe nothrow {
-        chat.add(Message(Role.user, userQuery: false, content: "You stopped without calling 'taskDone'. Please continue your work, or call 'taskDone' if you're finished.",
+        chat.add(Message(role: Role.user, userQuery: false, content: "You stopped without calling 'taskDone'. Please continue your work, or call 'taskDone' if you're finished.",
                 thinking: null));
     }
 
@@ -675,8 +675,6 @@ struct StreamResponse {
     import std.datetime : Clock;
     import llm.types : ServerStat, StreamMessage, StreamToolCall;
 
-    alias Message = StreamMessage;
-
     struct ToolCall {
         string id;
         string name;
@@ -737,7 +735,7 @@ struct StreamResponse {
 
     bool isDone;
     bool hasError;
-    Message message;
+    StreamMessage message;
     ToolCall[long] toolCalls;
     ServerStat stat;
     ErrorMessage error;

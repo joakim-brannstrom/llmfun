@@ -48,11 +48,17 @@ struct StreamToolCall {
 }
 
 interface IStreamCallback {
+    // Set the identifier for the stream.
+    void setId(string v);
+
     // Called while a message is being updated.
     void messageUpdate(StreamMessage, StreamToolCall[], ServerStat);
 
     // Called when the message is done and a final answer has been produced.
     void streamMessageDone();
+
+    // Make a thread safe clone that can be used by a single thread and do not share anything with parent.
+    IStreamCallback clone();
 }
 
 struct ServerStat {

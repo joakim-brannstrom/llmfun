@@ -119,6 +119,33 @@ struct RenderGroup {
     GroupKind kind;
 };
 
+struct AgentStreamMessage {
+    std::string content;
+    std::string thinking;
+    std::string role;
+    std::string finishReason;
+};
+
+struct AgentStream {
+    std::string agentId;
+    AgentStreamMessage stream;
+    AgentStreamMessage finished;
+    std::chrono::system_clock::time_point lastUpdate = std::chrono::system_clock::now();
+    int64_t updateCnt{1};
+};
+
+struct ChatTabLeftPanel {
+    ImVec4 thinkingNodeBg = ImVec4(0.2f, 0.2f, 0.2f, 1.0f);
+    ImVec4 activeButton = ImVec4(0.4f, 0.4f, 0.45f, 1.0f);
+    int panelW = 0;
+    static constexpr int PanelWActivated = 30;
+
+    std::vector<AgentStream> agents;
+    static constexpr size_t MaxAgents = 16;
+
+    int activeAgent{-1};
+};
+
 struct ChatTab {
     ImVec4 nestedAssistNodeBg = ImVec4(0.25f, 0.25f, 0.25f, 1.0f);
     ImVec4 thinkingNodeBg = ImVec4(0.2f, 0.2f, 0.2f, 1.0f);
@@ -138,6 +165,8 @@ struct ChatTab {
     ChatMessage streamMsg;
 };
 
+enum class ActiveTab { chat, log, agentStream };
+
 struct TuiState {
     bool isLogActive{false};
     std::string iniFilename;
@@ -146,19 +175,20 @@ struct TuiState {
     std::chrono::system_clock::time_point startProcesssingTime;
 
     ChatTab chat;
+    ChatTabLeftPanel left;
 
     std::deque<LogMessage> logMessages;
     static constexpr size_t MaxLogMessages = 1000;
 
     ImGui::MarkdownConfig mdConfig;
 
-    // Auto-scroll flag
     bool autoScroll = true;
 
     UserQueryState userQuery;
 
-    // Status line text
     std::string statusText;
+
+    ActiveTab activeTab = ActiveTab::chat;
 
     TuiState() { startProcesssingTime = std::chrono::system_clock::now(); }
 };

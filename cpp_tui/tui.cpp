@@ -31,6 +31,28 @@ struct Log {
     }
 };
 
+bool renderButton(const std::string& label, int width, bool active, ImVec4 colorActive) {
+    bool result = false;
+
+    ImGui::PushID(label.c_str());
+    const auto p0 = ImGui::GetCursorScreenPos();
+    if (ImGui::Button("##but", ImVec2(width, 1))) {
+        result = true;
+    }
+
+    int npop = 0;
+    if (ImGui::IsItemHovered() || active) {
+        ImGui::PushStyleColor(ImGuiCol_Text, colorActive);
+        ++npop;
+    }
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::Text("%s", label.c_str());
+    ImGui::PopStyleColor(npop);
+    ImGui::PopID();
+
+    return result;
+}
+
 static std::string makeUniqueId(const std::string& base, const std::string& suffix, int i) {
     auto s = base;
     s.append("##");
@@ -214,6 +236,48 @@ static bool isAssistantGroupOpen(const RenderGroup& grp, const std::vector<Rende
     return index == groups.size() - 1;
 }
 
+static void renderAgentStream(TuiState& state, const int agentIndex, const int64_t updateCount,
+                              const std::string agentId, const AgentStreamMessage& msg) {
+    auto headerTmp = agentId;
+    headerTmp.append(" [");
+    headerTmp.append(msg.role);
+    headerTmp.append("] [");
+    headerTmp.append(std::to_string(updateCount));
+    headerTmp.append("]");
+
+    const auto headerId = makeUniqueId(headerTmp, "streamagent_msg_header", agentIndex);
+    const auto colors = getHeaderColors(ChatMessageType::Assistant, state.chat.style);
+    ImGui::PushStyleColor(ImGuiCol_Text, colors.textColor);
+    StyleColorGuard guard{1};
+    if (ImGui::CollapsingHeader(headerId.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+        guard.pop();
+        ImGui::Indent();
+
+        if (!msg.thinking.empty()) {
+            std::string thinkId =
+                makeUniqueId("Model reasoning", "_agent_stream_think_", agentIndex);
+            auto thinkFlags = ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_DefaultOpen;
+
+            ImGui::PushStyleColor(ImGuiCol_Header, state.left.thinkingNodeBg);
+            StyleColorGuard thinkGuard{1};
+            if (ImGui::TreeNodeEx(thinkId.c_str(), thinkFlags)) {
+                thinkGuard.pop();
+                ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
+                textUnformattedMultiline(msg.thinking);
+                ImGui::PopTextWrapPos();
+                renderSeparator("End ", "-", ImGui::GetContentRegionMax().x - 4, true);
+                ImGui::TreePop();
+            }
+        }
+
+        ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
+        textUnformattedMultiline(msg.content);
+        ImGui::PopTextWrapPos();
+
+        ImGui::Unindent();
+    }
+}
+
 static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
     if (i >= state.chat.outputLines.size())
         return;
@@ -261,7 +325,6 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
     ImGui::TreePop();
 }
 
-// @return true if the user has openend the header
 static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2 displaySize,
                                bool forceOpen, bool showHeader, bool showThinking) {
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_None;
@@ -465,18 +528,51 @@ int InputResizeCallback(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
+void renderTabAgentStream(TuiState& state, Log& log) {
+    auto& panel = state.left;
+
+    if (panel.activeAgent < 0) {
+        return;
+    }
+}
+
+void renderTabChatLeftPanel(ChatTabLeftPanel& panel) {
+    if (panel.agents.empty()) {
+        panel.panelW = 0;
+        return;
+    }
+    if (panel.panelW == 0)
+        panel.panelW = panel.PanelWActivated;
+
+    ImGui::BeginChild("Child window", ImVec2(panel.panelW - 1, 0), true);
+    if (renderButton("Main Agent", ImGui::GetContentRegionMax().x, false, panel.activeButton)) {
+        panel.activeAgent = -1;
+    }
+    renderSeparator("Pipeline ", "-", ImGui::GetContentRegionMax().x, true);
+    for (size_t i; i < panel.agents.size(); ++i) {
+        if (renderButton(panel.agents[i].agentId.c_str(), ImGui::GetContentRegionMax().x, false,
+                         panel.activeButton)) {
+            panel.activeAgent = i;
+        }
+    }
+    ImGui::EndChild();
+}
+
 void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
     auto io = ImGui::GetIO();
     ImVec2 DisplaySize = io.DisplaySize;
     const auto inputBufLines =
         std::min(20, std::max(2, static_cast<int>(countNewLines(state.userQuery.inputBuf))));
 
+    if (state.readyStatus)
+        state.startProcesssingTime = std::chrono::system_clock::now();
     bool focusInput{focusInput_};
 
     auto outputArea = [&state, &log, &inputBufLines, &DisplaySize, &focusInput]() {
         // Clamp height to avoid negative values on very small terminals
-        ImVec2 outPos(0, 1.0f);
-        ImVec2 outSize(DisplaySize.x, std::max(1.0f, DisplaySize.y - 3 - inputBufLines));
+        ImVec2 outPos(state.left.panelW, 1.0f);
+        ImVec2 outSize(DisplaySize.x - state.left.panelW - 1,
+                       std::max(1.0f, DisplaySize.y - 3 - inputBufLines));
         ImGui::SetCursorPos(outPos);
         ImGuiWindowFlags outFlags = ImGuiWindowFlags_HorizontalScrollbar;
 
@@ -553,9 +649,13 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
             renderSingleHeader(state, state.chat.streamMsg, DisplaySize, true, false, true);
         }
 
-        if (state.readyStatus) {
-            state.startProcesssingTime = std::chrono::system_clock::now();
-        } else {
+        if (state.left.activeAgent != -1 && state.left.activeAgent < state.left.agents.size()) {
+            auto& agent = state.left.agents[state.left.activeAgent];
+            renderAgentStream(state, 0, agent.updateCnt, agent.agentId, agent.finished);
+            renderAgentStream(state, 1, agent.updateCnt + 1, agent.agentId, agent.stream);
+        }
+
+        if (!state.readyStatus) {
             ImGui::Text("%s%ds", "Thinking ",
                         (std::chrono::system_clock::now() - state.startProcesssingTime).count() /
                             1000000000);
@@ -714,6 +814,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
     };
 
+    renderTabChatLeftPanel(state.left);
     outputArea();
     inputArea();
     statusLine();
@@ -757,34 +858,29 @@ void renderTabLog(TuiState& state, Log& log) {
 void renderMainWindow(TuiState& state, Log& log) {
     ImVec2 DisplaySize = ImGui::GetIO().DisplaySize;
 
-    static int activeTab = 0;
-
-    bool showChat{false};
-    bool showLog{false};
+    bool activateInputField = false;
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("Chat")) {
-            showChat = true;
+            activateInputField = true;
+            state.activeTab = ActiveTab::chat;
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Log")) {
-            showLog = true;
+            state.activeTab = ActiveTab::log;
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
     }
-    if (showChat) {
-        activeTab = 0;
-    }
-    if (showLog) {
-        activeTab = 1;
-    }
 
-    switch (activeTab) {
-    case 0:
-        renderTabChat(state, showChat, log);
+    switch (state.activeTab) {
+    case ActiveTab::chat:
+        renderTabChat(state, activateInputField, log);
         break;
-    case 1:
+    case ActiveTab::log:
         renderTabLog(state, log);
+        break;
+    case ActiveTab::agentStream:
+        renderTabAgentStream(state, log);
         break;
     }
 }

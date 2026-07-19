@@ -197,6 +197,21 @@ struct TextUserInterface {
         tuiStreamChatMessageClear(tuiState);
     }
 
+    void pipelineMessage(UiPipelineStreamChatMessage msg) {
+        auto id = msg.agentId.toTuiString;
+        auto content = msg.content.toTuiString;
+        auto reasoning = msg.thinking.toTuiString;
+        auto role = msg.role.toTuiString;
+        String finish;
+        tuiPipelineAgentUpdate(tuiState, id, PipelineChatMessage(content: content,
+                reasoning: reasoning, role: role, finishReason: finish));
+    }
+
+    void pipelineMessage(UiPipelineStreamDone msg) {
+        auto id = msg.agentId.toTuiString;
+        tuiPipelineAgentDone(tuiState, id);
+    }
+
     void useUiLogFile(bool useFile) {
         tuiSetLogging(tuiState, useFile);
     }
@@ -315,6 +330,17 @@ struct UiAgentBusy {
 struct UiAgentReady {
 }
 
+struct UiPipelineStreamChatMessage {
+    string agentId;
+    string content;
+    string thinking;
+    string role;
+}
+
+struct UiPipelineStreamDone {
+    string agentId;
+}
+
 void spawnUserInterface(Tid ownerTid) {
     import std.string : strip;
     import std.datetime : dur, Clock, Duration;
@@ -346,7 +372,9 @@ void spawnUserInterface(Tid ownerTid) {
                 (UiAgentReady _) { ui.setReadyStatus(true); playNotification(); },
                 (UiStreamChatMessage a) { ui.streamChat(a.msg, a.thinking); },
                 (UiStreamChatDone _) { ui.streamChatDone; },
-                (UiInitHistory a) { ui.setHistory(a.queries); }
+                (UiInitHistory a) { ui.setHistory(a.queries); },
+                (UiPipelineStreamChatMessage a) { ui.pipelineMessage(a); },
+                (UiPipelineStreamDone a) { ui.pipelineMessage(a); },
             );
             // dfmt on
 

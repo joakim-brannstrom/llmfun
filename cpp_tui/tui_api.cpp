@@ -4,7 +4,9 @@
 #include "imtui/imtui-impl-ncurses.h"
 #include "imtui/imtui-impl-text.h"
 
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <new>
@@ -345,6 +347,76 @@ void tuiInitQueryHistory(TuiState* state, const String* history, size_t count) {
         }
     }
     ::llmfun::tui::tuiInitQueryHistory(*state->inner, vec);
+}
+
+void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage msg) {
+    if (!state || !state->inner)
+        return;
+    std::string id(agentId.data ? agentId.data : "", agentId.data ? agentId.len : 0);
+    if (id.empty())
+        return;
+    std::string c(msg.content.data ? msg.content.data : "", msg.content.data ? msg.content.len : 0);
+    std::string r(msg.reasoning.data ? msg.reasoning.data : "",
+                  msg.reasoning.data ? msg.reasoning.len : 0);
+    std::string role_(msg.role.data ? msg.role.data : "", msg.role.data ? msg.role.len : 0);
+    std::string fr(msg.finishReason.data ? msg.finishReason.data : "",
+                   msg.finishReason.data ? msg.finishReason.len : 0);
+
+    auto& agents = state->inner->left.agents;
+    for (auto& agent : agents) {
+        if (agent.agentId == id) {
+            agent.stream.content = c;
+            agent.stream.thinking = r;
+            agent.stream.role = role_;
+            agent.stream.finishReason = fr;
+            agent.lastUpdate = std::chrono::system_clock::now();
+            return;
+        }
+    }
+
+    // Not found - auto-register
+    // If at capacity, evict the agent with the oldest lastUpdate
+    if (agents.size() >= state->inner->left.MaxAgents) {
+        auto oldestIt = std::min_element(
+            agents.begin(), agents.end(),
+            [](const ::llmfun::tui::AgentStream& a, const ::llmfun::tui::AgentStream& b) {
+                return a.lastUpdate < b.lastUpdate;
+            });
+        agents.erase(oldestIt);
+    }
+
+    agents.emplace_back(::llmfun::tui::AgentStream{
+        id, ::llmfun::tui::AgentStreamMessage{c, r, role_, fr}, ::llmfun::tui::AgentStreamMessage{},
+        std::chrono::system_clock::now(), 1});
+}
+
+void tuiPipelineAgentDone(TuiState* state, String agentId) {
+    if (!state || !state->inner)
+        return;
+    std::string id(agentId.data ? agentId.data : "", agentId.data ? agentId.len : 0);
+    if (id.empty())
+        return;
+
+    auto& agents = state->inner->left.agents;
+    for (auto& agent : agents) {
+        if (agent.agentId == id) {
+            agent.finished = agent.stream;
+            agent.stream.content.clear();
+            agent.stream.thinking.clear();
+            agent.stream.role.clear();
+            agent.stream.finishReason.clear();
+            agent.updateCnt++;
+            // Note: lastUpdate is NOT refreshed — done agents are evicted
+            // first (LRU policy) if capacity is exceeded.
+            return;
+        }
+    }
+}
+
+void tuiPipelineClear(TuiState* state) {
+    if (!state || !state->inner)
+        return;
+    state->inner->left.agents.clear();
 }
 
 #ifdef __cplusplus

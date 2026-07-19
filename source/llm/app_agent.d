@@ -246,7 +246,7 @@ struct AgentApp {
                     TuiChatMessageType_Assistant, q);
             auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
                 return isStopAgentTriggered;
-            }, llmConf.toolFilter.to(), makeStreamCallback);
+            }, llmConf.toolFilter.to(), makePipelineStreamCallback);
             this.sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
             return AgentStatus.active;
         } else if (query.startsWith("/code ")) {
@@ -255,7 +255,7 @@ struct AgentApp {
                     TuiChatMessageType_Assistant, q);
             auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
                 return isStopAgentTriggered;
-            }, llmConf.toolFilter.to(), makeStreamCallback);
+            }, llmConf.toolFilter.to(), makePipelineStreamCallback);
             if (result.wasInterrupted) {
                 this.sendChatMessage("[assistant]: Pipeline interrupted by user.",
                         TuiChatMessageType_Assistant);
@@ -283,6 +283,11 @@ struct AgentApp {
 
     private IStreamCallback makeStreamCallback() {
         return new StreamMessageUpdater(uiMsg, agent_.contextSize, llmConf.activeModelName);
+    }
+
+    private IStreamCallback makePipelineStreamCallback() {
+        return new PipelineStreamMessageUpdater(uiMsg, agent_.contextSize,
+                llmConf.activeModelName);
     }
 
     private void updateRagMemory() {
@@ -511,6 +516,19 @@ class UiMessenger {
             return;
         send(uiTid, UiStreamChatDone.init);
     }
+
+    void pipelineStreamChatMessage(string agentId, string content, string thinking, string role) {
+        if (blocked)
+            return;
+        send(uiTid, UiPipelineStreamChatMessage(agentId: agentId, content: content,
+                thinking: thinking, role: role));
+    }
+
+    void pipelineStreamDone(string agentId) {
+        if (blocked)
+            return;
+        send(uiTid, UiPipelineStreamDone(agentId));
+    }
 }
 
 string formatStatusText(bool readyState, long contextSize, ServerStat stat, string model) {
@@ -545,9 +563,54 @@ class StreamMessageUpdater : IStreamCallback {
     }
 
     override void streamMessageDone() {
-        // Delegates to UiMessenger which checks blocked flag.
-        // In one-shot mode, this is silently dropped (consistent with other streaming methods).
         uiMsg.streamChatDone();
+    }
+
+    override void setId(string id) {
+    }
+
+    override IStreamCallback clone() {
+        return new StreamMessageUpdater(uiMsg, contextSize, modelName);
+    }
+}
+
+class PipelineStreamMessageUpdater : IStreamCallback {
+    UiMessenger uiMsg;
+    long contextSize;
+    string modelName;
+    string agentId;
+
+    this(UiMessenger messenger, long contextSize, string modelName)
+    in (messenger !is null, "UiMessenger must not be null") {
+        this.uiMsg = messenger;
+        this.contextSize = contextSize;
+        this.modelName = modelName;
+    }
+
+    override void messageUpdate(StreamMessage msg, StreamToolCall[] tools, ServerStat stat) {
+        string content = msg.content;
+        if (!tools.empty) {
+            foreach (tool; tools) {
+                content ~= "\n--- Tool ---\n";
+                content ~= tool.content;
+                content ~= "\n\n";
+            }
+        }
+
+        uiMsg.pipelineStreamChatMessage(agentId: agentId, content: content,
+                thinking: msg.reasoning, role: msg.role);
+    }
+
+    override void streamMessageDone() {
+        uiMsg.pipelineStreamDone(agentId);
+    }
+
+    override void setId(string id) {
+        agentId = id;
+    }
+
+    override IStreamCallback clone() {
+        return new PipelineStreamMessageUpdater(uiMsg, contextSize, modelName);
     }
 }
 
