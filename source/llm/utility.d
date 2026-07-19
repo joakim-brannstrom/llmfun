@@ -14,26 +14,6 @@ import llm.chat : Role, ToolResponse;
 /// Approximate number of characters per token. Used for estimating token counts from string lengths.
 immutable ApproxTokenSize = 2;
 
-/// Display compression progress from SummaryAgent.ProgressCallback
-/// Each update is printed on its own line with [PROGRESS] prefix.
-void displayProgress(size_t currentChunk, size_t totalChunks, string status) {
-    if (totalChunks == 0)
-        return;
-
-    // Build simple progress bar
-    string bar;
-    const barWidth = 10;
-    const filled = (currentChunk * barWidth) / totalChunks;
-    foreach (i; 0 .. barWidth) {
-        bar ~= (i < filled) ? "█" : "░";
-    }
-
-    const pct = currentChunk * 100 / totalChunks;
-
-    writef("[PROGRESS] Chunk %s/%s: %s  %s  %d%%\n", currentChunk, totalChunks, status, bar, pct);
-    stdout.flush;
-}
-
 /// Display compression result
 string compressionResultToString(bool compressed, size_t originalLength,
         size_t newLength, size_t keptXCount, long keptXTokens, long ctxUsed, long newContextSize) {
