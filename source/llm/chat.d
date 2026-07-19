@@ -90,14 +90,18 @@ struct Chat {
         long ctx;
         try {
             foreach (msg; history) {
-                ctx += msg.match!((Message a) {
-                    return a.content.length / ApproxTokenSize;
+                // dfmt off
+                ctx += msg.match!(
+                (Message a) {
+                    return (a.content.length + a.thinking.length) / ApproxTokenSize;
                 }, (ToolMessage a) {
                     return a.toolCalls.toString.length / ApproxTokenSize;
-                }, (ToolResponse a) { return a.content.length / ApproxTokenSize; },
-                        (VisionMessage a) {
+                }, (ToolResponse a) {
+                    return a.content.length / ApproxTokenSize;
+                }, (VisionMessage a) {
                     return a.content.length / ApproxTokenSize;
                 });
+                // dfmt on
             }
         } catch (Exception e) {
         }
@@ -117,51 +121,29 @@ struct Chat {
             const startLen = history.length;
             foreach (entry; json["messages"].array) {
                 const role = entry["role"].str.to!Role;
-                JSONValue metadata = getValue(entry, (v) => v["metadata"], JSONValue.init);
-                JSONValue saveData = getValue(entry, (v) => v["save_data"], JSONValue.init);
 
                 final switch (role) {
                 case Role.system:
                     break;
                 case Role.assistant:
                     if ("tool_calls" in entry) {
-                        history ~= MessageT(ToolMessage(entry["tool_calls"], metadata, saveData));
+                        ToolMessage m;
+                        m.fromJson(entry);
+                        history ~= MessageT(m);
                     } else {
-                        history ~= MessageT(Message(role, userQuery: false, content: entry["content"].str,
-                                thinking: null, metaData: metadata, saveData: saveData));
+                        Message m;
+                        m.fromJson(entry);
+                        history ~= MessageT(m);
                     }
                     break;
-                case Role.tool:
-                    history ~= MessageT(ToolResponse(content: entry["content"].str,
-                            toolCallId: entry["tool_call_id"].str, toolName: entry["name"].str,
-                            metadata));
+                case Role.tool: {
+                        ToolResponse m;
+                        m.fromJson(entry);
+                        history ~= MessageT(m);
+                    }
                     break;
                 case Role.user:
-                    if (entry["content"].type == JSONType.array) {
-                        // Multi-modal content (VisionMessage)
-                        string text;
-                        string imageDataUrl;
-                        foreach (item; entry["content"].array) {
-                            if (item["type"].str == "text") {
-                                text = item["text"].str;
-                            } else if (item["type"].str == "image_url") {
-                                if (item["image_url"].type == JSONType.object) {
-                                    imageDataUrl = item["image_url"]["url"].str;
-                                } else {
-                                    imageDataUrl = item["image_url"].str;
-                                }
-                            }
-                        }
-                        if (imageDataUrl) {
-                            history ~= MessageT(VisionMessage(text, imageDataUrl, metadata));
-                        } else {
-                            history ~= MessageT(Message(role, userQuery: false, content: text,
-                                    thinking: null, metaData: metadata, saveData: saveData));
-                        }
-                    } else {
-                        history ~= MessageT(Message(role, userQuery: false, content: entry["content"].str,
-                                thinking: null, metaData: metadata, saveData: saveData));
-                    }
+                    history ~= fromUser(entry);
                     break;
                 }
             }
@@ -246,6 +228,27 @@ struct VisionMessage {
         return j;
     }
 
+    void fromJson(JSONValue entry) @trusted nothrow {
+        try {
+            string text;
+            string imageDataUrl;
+            foreach (item; entry["content"].array) {
+                if (item["type"].str == "text") {
+                    text = item["text"].str;
+                } else if (item["type"].str == "image_url") {
+                    if (item["image_url"].type == JSONType.object) {
+                        imageDataUrl = item["image_url"]["url"].str;
+                    } else {
+                        imageDataUrl = item["image_url"].str;
+                    }
+                }
+            }
+
+        } catch (Exception e) {
+            logger.trace(e.msg).collectException;
+        }
+    }
+
     string toString() @safe const {
         string imgPreview;
         if (imageDataUrl.length > 60) {
@@ -261,7 +264,7 @@ struct Message {
 @safe:
     Role role;
     string content;
-    string thinking; // TUI-only, transient, not persisted, not sent to LLM
+    string thinking;
     JSONValue metadata; // for external tools only
     JSONValue saveData; // for llmfun internal use
 
@@ -302,7 +305,11 @@ struct Message {
 
     // toJson — REST API: does NOT include thinking (no change needed)
     JSONValue toJson() @safe {
-        return JSONValue(["role": role.to!string, "content": content]);
+        auto j = JSONValue(["role": role.to!string, "content": content]);
+        if (!thinking.empty) {
+            j["reasoning_content"] = thinking;
+        }
+        return j;
     }
 
     // disk persistence: does NOT include thinking
@@ -318,23 +325,59 @@ struct Message {
     }
 
     void fromJson(JSONValue j) @trusted nothrow {
-        // thinking intentionally NOT loaded (transient, session-only)
         this.thinking = null;
         try {
             this.role = j["role"].str.to!Role;
             this.content = j["content"].str;
+            if (auto r = "reasoning_content" in j) {
+                this.thinking = r.str;
+            }
             if (auto m = "metadata" in j) {
                 this.metadata = *m;
             }
             if (auto s = "save_data" in j) {
                 this.saveData = *s;
             }
-            // NOTE: thinking field is intentionally NOT loaded from JSON.
-            // Thinking content is session-only and extracted at parse time.
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
     }
+}
+
+// Convert a JSON object to VisionMessage or Message
+Chat.MessageT fromUser(JSONValue entry) {
+    Chat.MessageT rval;
+    if (entry["content"].type == JSONType.array) {
+        // Multi-modal content (VisionMessage)
+        string text;
+        string imageDataUrl;
+        foreach (item; entry["content"].array) {
+            if (item["type"].str == "text") {
+                text = item["text"].str;
+            } else if (item["type"].str == "image_url") {
+                if (item["image_url"].type == JSONType.object) {
+                    imageDataUrl = item["image_url"]["url"].str;
+                } else {
+                    imageDataUrl = item["image_url"].str;
+                }
+            }
+        }
+        if (imageDataUrl) {
+            auto metadata = getValue(entry, (v) => v["metadata"], JSONValue.init);
+            rval = VisionMessage(text, imageDataUrl, metadata);
+        } else {
+            string thinking = getValue(entry, (v) => v["reasoning_content"].str, null);
+            auto metadata = getValue(entry, (v) => v["metadata"], JSONValue.init);
+            auto saveData = getValue(entry, (v) => v["save_data"], JSONValue.init);
+            rval = Message(Role.user, userQuery: false, content: text,
+                    thinking: thinking, metaData: metadata, saveData: saveData);
+        }
+    } else {
+        Message m;
+        m.fromJson(entry);
+        rval = m;
+    }
+    return rval;
 }
 
 struct ToolMessage {
@@ -501,6 +544,11 @@ struct ToolResponse {
         try {
             this.role = j["role"].str.to!Role;
             this.content = j["content"].str;
+            this.toolCallId = j["tool_call_id"].str;
+            this.toolName = j["name"].str;
+            if (auto m = "metadata" in j) {
+                this.metadata = *m;
+            }
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
