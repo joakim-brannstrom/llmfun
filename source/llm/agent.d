@@ -800,11 +800,14 @@ struct StreamResponse {
                 auto delta = choice["delta"];
                 if (auto j = "tool_calls" in delta) {
                     parseToolCall(*j);
-                } else if ("content" in delta) {
+                }
+                if ("content" in delta) {
                     parseMessage(delta);
-                } else if (auto j = "reasoning_content" in delta) {
+                }
+                if (auto j = "reasoning_content" in delta) {
                     parseReasoning(*j);
-                } else if (auto reason = "finish_reason" in choice) {
+                }
+                if (auto reason = "finish_reason" in choice) {
                     // data: {"choices":[{"finish_reason":"tool_calls","index":0,"delta":{}}],"created":1784060897,"id":"chatcmpl-HPewiQRRMdrJz3CIV6PcoZKgXpwGB4GL","model":"qwen3.6-27b-code","system_fingerprint":"b9998-c036959df","object":"chat.completion.chunk","timings":{"cache_n":6151,"prompt_n":4,"prompt_ms":196.08,"prompt_per_token_ms":49.02,"prompt_per_second":20.39983680130559,"predicted_n":244,"predicted_ms":8121.839,"predicted_per_token_ms":33.286225409836064,"predicted_per_second":30.042457133168977,"draft_n":165,"draft_n_accepted":147}} [llm.agent.Agent.process.__lambda_L154_C27:154]
                     message.finishReason = getValue(*reason, (v) => v.str, null);
                 } else {
