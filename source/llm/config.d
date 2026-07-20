@@ -528,9 +528,9 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
                 j["thinking"]["type"] = "enabled";
             }
             if (conf.reasoningBudget >= 4096) {
-                j["reasoning_effort"] = "high";
+                j["reasoning_effort"] = "max";
             } else if (conf.reasoningBudget >= 2048) {
-                j["reasoning_effort"] = "medium";
+                j["reasoning_effort"] = "high";
             }
             if (maxTokens == -1)
                 j["max_tokens"] = null;
