@@ -306,9 +306,7 @@ struct Message {
     // toJson — REST API: does NOT include thinking (no change needed)
     JSONValue toJson() @safe {
         auto j = JSONValue(["role": role.to!string, "content": content]);
-        if (!thinking.empty) {
-            j["reasoning_content"] = thinking;
-        }
+        j["reasoning_content"] = thinking;
         return j;
     }
 
@@ -383,12 +381,14 @@ Chat.MessageT fromUser(JSONValue entry) {
 struct ToolMessage {
 @safe:
     Role role;
+    string thinking;
     JSONValue toolCalls;
     JSONValue metadata; // for external tools only
     JSONValue saveData; // for llmfun internal use
 
-    this(JSONValue toolCalls, JSONValue metadata = JSONValue.init,
+    this(string thinking, JSONValue toolCalls, JSONValue metadata = JSONValue.init,
             JSONValue saveData = JSONValue.init) @safe nothrow {
+        this.thinking = thinking;
         this.role = Role.assistant;
         this.toolCalls = toolCalls;
         this.metadata = metadata;
@@ -408,7 +408,8 @@ struct ToolMessage {
         return JSONValue([
             "role": JSONValue(role.to!string),
             "content": JSONValue(null),
-            "tool_calls": toolCalls
+            "tool_calls": toolCalls,
+            "reasoning_content": JSONValue(thinking)
         ]);
     }
 
@@ -427,6 +428,9 @@ struct ToolMessage {
         try {
             this.role = j["role"].str.to!Role;
             this.toolCalls = j["tool_calls"];
+            if (auto r = "reasoning_content" in j) {
+                this.thinking = r.str;
+            }
             if (auto m = "metadata" in j) {
                 this.metadata = *m;
             }

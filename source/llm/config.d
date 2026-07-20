@@ -400,6 +400,12 @@ struct RagFilter {
     }
 }
 
+enum EndpointType {
+    unknown,
+    llamaCpp,
+    deepseek
+}
+
 struct ServerConfig {
     string url;
     string promptUrl = "v1/completion";
@@ -417,6 +423,18 @@ struct ServerConfig {
     /// If empty, the OPENAI_API_KEY environment variable is checked as fallback.
     /// Leave empty for servers that do not require authentication (e.g. local llama.cpp).
     string apiKey;
+
+    // Type of end point
+    string type;
+
+    EndpointType toType() {
+        try {
+            return type.to!EndpointType;
+        } catch (Exception e) {
+            logger.warningf("Unknown type '%s' for server url '%s'", type, url);
+        }
+        return EndpointType.unknown;
+    }
 
     string toChatUrl() {
         return format!"%s/%s"(url, chatUrl);
@@ -477,6 +495,49 @@ struct RemoteEmbedConfig {
 alias EmbedConfig = SumType!(RemoteEmbedConfig, LocalEmbedConfig);
 
 RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
+    JSONValue makeHeader(string model, double temp, long maxTokens, ServerConfig cfg) {
+        import std.math : isNaN;
+        import std.array : empty;
+
+        JSONValue j;
+
+        if (!model.empty)
+            j["model"] = model;
+        if (!temp.isNaN)
+            j["temperature"] = temp;
+        if (maxTokens != 0)
+            j["max_tokens"] = maxTokens;
+
+        final switch (cfg.toType) {
+        case EndpointType.unknown:
+            break;
+        case EndpointType.llamaCpp:
+            if (conf.reasoningBudget != 0 || conf.preserveThinking) {
+                j["chat_template_kwargs"] = JSONValue.emptyObject;
+                if (conf.reasoningBudget != 0)
+                    j["chat_template_kwargs"]["reasoning_budget"] = conf.reasoningBudget;
+                if (conf.preserveThinking)
+                    j["chat_template_kwargs"]["preserve_thinking"] = true;
+            }
+            break;
+        case EndpointType.deepseek:
+            if (conf.reasoningBudget != 0 || conf.preserveThinking) {
+                j["thinking"] = JSONValue.emptyObject;
+                j["thinking"]["type"] = "enabled";
+            }
+            if (conf.reasoningBudget >= 4096) {
+                j["reasoning_effort"] = "high";
+            } else if (conf.reasoningBudget >= 2048) {
+                j["reasoning_effort"] = "medium";
+            }
+            if (maxTokens == -1)
+                j["max_tokens"] = null;
+            break;
+        }
+
+        return j;
+    }
+
     // dfmt off
     return RequestConfig(
          chatUrl: conf.server.toChatUrl,
@@ -487,11 +548,7 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
          keepAlive: conf.server.keepAlive,
          verbosity: cast(int) conf.server.httpVerbosity,
          apiKey: conf.server.apiKey.empty ? getEnvApiKey() : conf.server.apiKey,
-         chat: RequestConfig.Chat(model: conf.name,
-                                  max_tokens: conf.maxTokens,
-                                  temperature: conf.temp,
-                                  reasoning_budget: conf.reasoningBudget,
-                                  preserve_thinking: conf.preserveThinking));
+         header: makeHeader(conf.name, conf.temp, conf.maxTokens, conf.server));
     // dfmt on
 }
 

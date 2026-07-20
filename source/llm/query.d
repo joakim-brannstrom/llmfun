@@ -27,15 +27,7 @@ struct RequestConfig {
     bool verifySslCert = true;
     string apiKey;
 
-    struct Chat {
-        string model;
-        long max_tokens;
-        double temperature;
-        long reasoning_budget;
-        bool preserve_thinking;
-    }
-
-    Chat chat;
+    JSONValue header;
 
     /// Maximum number of retry attempts for HTTP requests (default: 3)
     int maxRetries = 3;
@@ -95,7 +87,7 @@ struct LlmRequester {
         alias ReturnT = typeof(return);
 
         try {
-            auto jsonReq = chat.toJson.addConfig(cfg.chat);
+            auto jsonReq = chat.toJson.merge(cfg.header);
             if (!tools.isNull) {
                 jsonReq["tools"] = tools.get;
             }
@@ -159,8 +151,8 @@ struct LlmSlotRequester {
 
         try {
             auto url = cfg.slotUrl;
-            if (!cfg.chat.model.empty)
-                url ~= format!"?model=%s"(cfg.chat.model);
+            if (auto model = "model" in cfg.header)
+                url ~= format!"?model=%s"(model.str);
 
             auto result = httpGetWithRetry(rq, url, rqCfg);
 
@@ -182,7 +174,13 @@ struct LlmSlotRequester {
     }
 
     long request(long fallbackContext) nothrow {
-        if (auto v = cfg.chat.model in LlmSlotRequesterCache) {
+        string model;
+        try {
+            if (auto a = "model" in cfg.header)
+                model = a.str;
+        } catch (Exception e) {
+        }
+        if (auto v = model in LlmSlotRequesterCache) {
             return *v;
         }
 
@@ -192,11 +190,11 @@ struct LlmSlotRequester {
                     logger.trace(j.toPrettyString);
                 if (j.type == JSONType.array) {
                     const v = j[0]["n_ctx"].integer;
-                    LlmSlotRequesterCache[cfg.chat.model] = v;
+                    LlmSlotRequesterCache[model] = v;
                     return v;
                 } else if ("n_ctx" in j) {
                     const v = j["n_ctx"].integer;
-                    LlmSlotRequesterCache[cfg.chat.model] = v;
+                    LlmSlotRequesterCache[model] = v;
                     return v;
                 }
                 return fallbackContext;
@@ -211,27 +209,6 @@ struct LlmSlotRequester {
         }
         return fallbackContext;
     }
-}
-
-JSONValue addConfig(JSONValue j, RequestConfig.Chat cfg) {
-    import std.math : isNaN;
-    import std.array : empty;
-
-    if (!cfg.model.empty)
-        j["model"] = cfg.model;
-    if (!cfg.temperature.isNaN)
-        j["temperature"] = cfg.temperature;
-    if (cfg.max_tokens != 0)
-        j["max_tokens"] = cfg.max_tokens;
-    if (cfg.reasoning_budget != 0 || cfg.preserve_thinking) {
-        j["chat_template_kwargs"] = JSONValue.emptyObject;
-        if (cfg.reasoning_budget != 0)
-            j["chat_template_kwargs"]["reasoning_budget"] = cfg.reasoning_budget;
-        if (cfg.preserve_thinking)
-            j["chat_template_kwargs"]["preserve_thinking"] = true;
-    }
-
-    return j;
 }
 
 struct LibRequestConfig {
@@ -398,4 +375,12 @@ struct StreamByLine {
             callback(app);
         }
     }
+}
+
+/// Merge y into x and return the result
+JSONValue merge(JSONValue x, JSONValue y) {
+    foreach (kv; y.object.byKeyValue) {
+        x[kv.key] = kv.value;
+    }
+    return x;
 }

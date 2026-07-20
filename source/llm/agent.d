@@ -399,12 +399,11 @@ private:
         try {
             logger.trace(sp);
 
-            if (!sp.message.isEmpty) {
+            if (!sp.toolCalls.empty) {
+                handleToolCalls(sp.message.reasoning, sp.toolCalls);
+            } else if (!sp.message.isEmpty) {
                 chat.add(Message(Role.assistant, userQuery: false, content: sp.message.content,
                         thinking: sp.message.reasoning));
-            }
-            if (!sp.toolCalls.empty) {
-                handleToolCalls(sp.toolCalls);
             }
             if (!sp.message.finishReason.empty) {
                 if (sp.message.finishReason == "length")
@@ -424,10 +423,9 @@ private:
         return ProcessResult.Status.unknownFailure;
     }
 
-    void handleToolCalls(ref StreamResponse.ToolCall[long] toolCalls) {
+    void handleToolCalls(string thinking, ref StreamResponse.ToolCall[long] toolCalls) {
         import llm.tool_call : executeFunc;
 
-        JSONValue[] rval;
         foreach (call; toolCalls.byValue) {
             // Check for warnings before processing each tool call
             try {
@@ -469,7 +467,7 @@ private:
             if (call.name == "taskDone" && taskDone_ && !taskDoneMessage_.empty) {
                 sd["taskDoneAnswer"] = JSONValue(taskDoneMessage_);
             }
-            chat.add(ToolMessage(JSONValue([call.toJson]), JSONValue.init, sd));
+            chat.add(ToolMessage(thinking, JSONValue([call.toJson]), JSONValue.init, sd));
             chat.add(ToolResponse(content: result, toolCallId: call.id, toolName: call.name));
             if (auto image = toolCtx.drainVisionImage) {
                 chat.add(VisionMessage(image.query, image.data));
@@ -827,11 +825,23 @@ struct StreamResponse {
     void parseStat(ref JSONValue json) @safe nothrow {
         try {
             if (auto timings = "timings" in json) {
+                // llama.cpp and maybe others
                 stat.predictedPerSecond = getValue(*timings,
                         (v) => v["predicted_per_second"].floating, stat.predictedPerSecond);
                 stat.promptPerSecond = getValue(*timings,
                         (v) => v["prompt_per_second"].floating, stat.promptPerSecond);
                 stat.context = getValue(*timings, (v) => v["cache_n"].integer, stat.context);
+            } else if (auto usage = "usage" in json) {
+                // deepseek and maybe others
+                stat.context = getValue(*usage, (v) => v["total_tokens"].integer, stat.context);
+                const s = (Clock.currTime - start).total!"seconds";
+
+                const cTokens = getValue(*usage, (v) => v["completion_tokens"].integer, 0);
+                if (s > 0 && cTokens > 0)
+                    stat.predictedPerSecond = cast(double) cTokens / cast(double)(s);
+                const pTokens = getValue(*usage, (v) => v["prompt_tokens"].integer, 0);
+                if (s > 0 && pTokens > 0)
+                    stat.promptPerSecond = cast(double) pTokens / cast(double)(s);
             } else {
                 const s = (Clock.currTime - start).total!"seconds";
                 if (s > 0 && tokens > 0) {
