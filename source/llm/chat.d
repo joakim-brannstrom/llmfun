@@ -310,7 +310,6 @@ struct Message {
         return j;
     }
 
-    // disk persistence: does NOT include thinking
     JSONValue toSaveJson() @safe {
         auto j = toJson();
         if (metadata != JSONValue.init) {
