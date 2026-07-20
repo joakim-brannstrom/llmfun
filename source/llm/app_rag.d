@@ -18,12 +18,21 @@ import miniorm : spinSql;
 import my.filter : ReFilter;
 
 int appMain(UserConfig uconf, UserConfig.Rag conf) {
+    import llm.subsystem : initLlmfunLocalModel, deinitLlmfunLocalModel;
+
+    initLlmfunLocalModel();
+    scope (exit)
+        deinitLlmfunLocalModel();
+
     if (conf.setupDirs) {
         makeLocalSetupFileStructure(LlmConfig.init, rag: true);
     }
     auto llmConf = readConfig(uconf.config, false, uconf.noCwdConfig).userToLlmConfig(conf);
 
     auto rag = createRag(llmConf);
+    if (rag is null)
+        return 1;
+
     scope (exit) {
         rag.destroy;
     }

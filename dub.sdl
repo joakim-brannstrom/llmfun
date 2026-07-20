@@ -10,6 +10,7 @@ dependency "argparse" version="~>2.0.2"
 dependency "requests" version="~>2.2.0"
 dependency "miniorm" version="~>0.0.10"
 subConfiguration "miniorm" "without-lib"
+dependency "llmfun_common" path="common"
 
 targetPath "build"
 targetType "executable"
@@ -21,9 +22,18 @@ dflags "-P-I./vendor/imtui/include" "-P-I./cpp_tui/" "-L-lstdc++" "-L-lncursesw"
 
 sourceFiles "build/sqlite3.o" "build/sqlite-vec.o" "build/tui/libllmfun_tui_all_lib.a"
 
-configuration "default" {
+configuration "application" {
     mainSourceFile "source/app.d"
     excludeSourceFiles "source/utility_app.d"
+}
+
+configuration "application-with-local-model" {
+    mainSourceFile "source/app.d"
+    excludeSourceFiles "source/utility_app.d"
+
+    versions "llmfun_local_model"
+    dependency "llmfun_local_model" path="local_model" default=true
+    lflags "-rpath=$$ORIGIN" "-L$PACKAGE_DIR/build" "-lllama" platform="linux"
 }
 
 configuration "llmfun_test" {

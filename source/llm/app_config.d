@@ -180,16 +180,21 @@ LlmConfigT userToLlmConfig(LlmConfigT, ConfigT)(LlmConfigT llm, ConfigT conf) {
 
 /// Create a RAG instance with fallback to default embedder on failure.
 RAG createRag(LlmConfig conf) {
-    import llm.rag.embedder : createEmbedder;
+    import llm.common.embedder : createEmbedder;
     import llm.rag.rag;
 
     try {
         auto embed = createEmbedder(conf.embedConfig);
-        return new RAG(embed, conf.ragPrimary, conf.getRagSecondary);
+        if (embed is null) {
+            logger.warningf("Unable to create an embedder from the configuration: %s",
+                    conf.embedConfig);
+        } else {
+            return new RAG(embed, conf.ragPrimary, conf.getRagSecondary);
+        }
     } catch (Exception e) {
-        logger.warningf(
-                "Failed to create embedder with configured settings: %s. Falling back to default remote embedder.",
-                e.msg);
+        logger.warningf("Failed to create embedder with configured settings: %s", e.msg);
+        return null;
     }
-    return new RAG(createEmbedder(EmbedConfig(RemoteEmbedConfig.init)), conf.ragPrimary, null);
+
+    return null;
 }

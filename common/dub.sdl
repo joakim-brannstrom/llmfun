@@ -1,0 +1,10 @@
+name "llmfun_common"
+description "Shared types and functionality"
+authors "Joakim Brännström"
+copyright "Copyright © 2026, Joakim Brännström"
+license "MPL-2.0"
+
+dependency "mylib" version="~>0.0.49"
+
+targetPath "build"
+targetType "library"

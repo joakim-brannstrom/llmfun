@@ -330,7 +330,11 @@ struct AgentApp {
 
         llmConf = readConfig(uconf.config, !conf_.prompt.empty, uconf.noCwdConfig).userToLlmConfig(
                 conf_);
+
         rag = createRag(llmConf);
+        if (rag is null)
+            return 1;
+
         agentHistory = llmConf.scratchArea;
         monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
         agent_ = new Agent("main", llmConf, monitor, rag, llmConf.toolFilter.to());
@@ -548,6 +552,17 @@ class StreamMessageUpdater : IStreamCallback {
 }
 
 int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
-    auto app = AgentApp(conf);
-    return app.run(uconf);
+    import llm.subsystem : initLlmfunLocalModel, deinitLlmfunLocalModel;
+
+    initLlmfunLocalModel();
+    scope (exit)
+        deinitLlmfunLocalModel();
+
+    try {
+        auto app = AgentApp(conf);
+        return app.run(uconf);
+    } catch (Exception e) {
+        logger.warning(e.msg);
+    }
+    return 1;
 }

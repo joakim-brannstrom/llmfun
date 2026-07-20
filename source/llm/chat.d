@@ -7,10 +7,12 @@ import std.conv : to;
 import std.exception : collectException;
 import std.format : format;
 import std.json : JSONValue, JSONOptions, parseJSON, JSONType;
-import std.typecons : Tuple, tuple;
 import std.range : enumerate, isOutputRange, empty;
 import std.sumtype : SumType, match;
-import llm.utility : ApproxTokenSize, getValue;
+import std.typecons : Tuple, tuple;
+
+import llm.common.config : ApproxTokenSize;
+import llm.utility : getValue;
 
 struct Chat {
     alias MessageT = SumType!(Message, ToolMessage, ToolResponse, VisionMessage);

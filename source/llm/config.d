@@ -14,6 +14,8 @@ import std.string : toLower, startsWith;
 import my.path;
 
 import llm.query : RequestConfig;
+public import llm.common.embedder;
+public import llm.common.config;
 
 immutable ProgramName = "llmfun";
 
@@ -402,59 +404,6 @@ struct RagFilter {
     }
 }
 
-enum EndpointType {
-    unknown,
-    llamaCpp,
-    deepseek
-}
-
-struct ServerConfig {
-    string url;
-    string promptUrl = "v1/completion";
-    string chatUrl = "v1/chat/completions";
-    string slotUrl = "slots";
-    string embedUrl = "v1/embeddings";
-    long timeoutSeconds;
-    long httpVerbosity;
-    bool verifySslCert = true;
-    bool keepAlive = true;
-    long maxRetries = 3; // maximum number of retries for transient failures
-    long backoffMs = 500; // initial backoff in milliseconds (exponential)
-
-    /// API key for Bearer token authentication (e.g. OpenAI API key).
-    /// If empty, the OPENAI_API_KEY environment variable is checked as fallback.
-    /// Leave empty for servers that do not require authentication (e.g. local llama.cpp).
-    string apiKey;
-
-    // Type of end point
-    string type;
-
-    EndpointType toType() {
-        try {
-            return type.to!EndpointType;
-        } catch (Exception e) {
-            logger.warningf("Unknown type '%s' for server url '%s'", type, url);
-        }
-        return EndpointType.unknown;
-    }
-
-    string toChatUrl() {
-        return format!"%s/%s"(url, chatUrl);
-    }
-
-    string toPromptUrl() {
-        return format!"%s/%s"(url, promptUrl);
-    }
-
-    string toSlotUrl() {
-        return format!"%s/%s"(url, slotUrl);
-    }
-
-    string toEmbedUrl() {
-        return format!"%s/%s"(url, embedUrl);
-    }
-}
-
 struct CodeModelConfig {
     ServerConfig server;
     string name;
@@ -476,25 +425,6 @@ struct SummaryModelConfig {
     bool preserveThinking;
     long maxTokens;
 }
-
-/// Configuration for a local embedding backend (llama.cpp).
-struct LocalEmbedConfig {
-    Path modelPath;
-    long context;
-    long nBatch = 512;
-    long dimensions = 768;
-}
-
-/// Configuration for a remote embedding backend (HTTP API).
-struct RemoteEmbedConfig {
-    ServerConfig server;
-    string name;
-    long nBatch = 512;
-    long dimensions = 768;
-}
-
-/// Union type for embedding backend configuration.
-alias EmbedConfig = SumType!(RemoteEmbedConfig, LocalEmbedConfig);
 
 RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
     JSONValue makeHeader(string model, double temp, long maxTokens, ServerConfig cfg) {

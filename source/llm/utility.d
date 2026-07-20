@@ -11,9 +11,6 @@ import my.path;
 
 import llm.chat : Role, ToolResponse;
 
-/// Approximate number of characters per token. Used for estimating token counts from string lengths.
-immutable ApproxTokenSize = 2;
-
 /// Display compression result
 string compressionResultToString(bool compressed, size_t originalLength,
         size_t newLength, size_t keptXCount, long keptXTokens, long ctxUsed, long newContextSize) {
@@ -98,7 +95,6 @@ string[] summarizeToolCalls(JSONValue calls, size_t maxLength) {
     foreach (call; calls.array) {
         rval.put(process(call));
     }
-    logger.trace(rval[]);
 
     return rval[];
 }

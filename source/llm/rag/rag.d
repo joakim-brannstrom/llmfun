@@ -33,9 +33,9 @@ import miniorm : spinSql;
 import my.path;
 public import my.path : Path;
 
+import llm.common.embedder;
 import llm.config : RagDatabaseConfig, RagConfig;
 import llm.rag.database : SourceMatch;
-import llm.rag.embedder;
 
 struct Topic {
     string name;
@@ -128,7 +128,8 @@ class RAG {
 
     alias db this;
 
-    this(Embedder embedder, RagDatabaseConfig primary, RagDatabaseConfig[] secondary) {
+    this(Embedder embedder, RagDatabaseConfig primary, RagDatabaseConfig[] secondary)
+    in (embedder !is null) {
         import my.optional;
         import llm.rag.database : openDatabase;
 
@@ -161,7 +162,6 @@ class RAG {
     }
 
     void destroy() {
-        embedder.destroy();
         foreach (ref a; dbs)
             a.destroy;
         dbs.clear;
@@ -221,10 +221,10 @@ class RAG {
                     databaseName: databases[a.dbIndex].name)).array;
         }
 
-        return embedder.embed(query).match!((float[] a) => runMatch(a), (HttpError e) {
+        return embedder.embed(query).match!((float[] a) => runMatch(a), (EmbedError e) {
             logger.warning(e.errorMsg);
             return null;
-        }, (string errMsg) { logger.warning(errMsg); return null; });
+        });
     }
 
     Document[] queryTextSearch(string query, long getTopK, string database) {
@@ -259,11 +259,8 @@ class RAG {
                 return queryTextSearch(textQuery, getTopK, database);
             }
             return runMatch(embed);
-        }, (HttpError e) {
+        }, (EmbedError e) {
             logger.tracef(e.errorMsg);
-            return queryTextSearch(textQuery, getTopK, database);
-        }, (string errMsg) {
-            logger.tracef(errMsg);
             return queryTextSearch(textQuery, getTopK, database);
         });
     }
@@ -322,9 +319,10 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     import std.json : parseJSON;
     import std.uni : byCodePoint, byGrapheme, isWhite;
     import std.utf : toUTF8;
-    import llm.rag.database;
-    import llm.utility : getValue, ApproxTokenSize;
     import core.memory : GC;
+    import llm.common.config : ApproxTokenSize;
+    import llm.rag.database;
+    import llm.utility : getValue;
 
     // have to turn off the GC because something in the underlying libraries
     // try to use a pointer while the GC is freeing. The line that most often
@@ -363,23 +361,18 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
         auto data = graphemes.byCodePoint.toUTF8;
 
         float[] emb;
-        rag.embedder.embed(data).match!((float[] embed) { emb = embed; }, (HttpError e) {
+        rag.embedder.embed(data).match!((float[] embed) { emb = embed; }, (EmbedError e) {
             logger.tracef("Failed to generate embedding '%s' (len:%s): %s",
                 e.errorMsg, graphemes.length, data);
             try {
                 const old = nBatch;
-                const serverNCtx = getValue(parseJSON(e.body),
-                    (v) => v["error"]["n_ctx"].integer * ApproxTokenSize, nBatch);
-                ServerNBatch = max(nBatchStep, min(ServerNBatch, serverNCtx));
+                ServerNBatch = max(nBatchStep, ServerNBatch);
                 nBatch = max(nBatchStep, min(nBatch, ServerNBatch));
-                logger.tracef(old != nBatch, "Changed nBatch (serverNCtx:%s ServerNBatch:%s) from %s->%s",
-                    serverNCtx, ServerNBatch, old, nBatch);
+                logger.tracef(old != nBatch, "Changed nBatch (ServerNBatch:%s) from %s->%s",
+                    ServerNBatch, old, nBatch);
             } catch (Exception e) {
                 logger.trace(e.msg);
             }
-        }, (string e) {
-            logger.tracef("Failed to generate embedding '%s' (len:%s): %s", e,
-                graphemes.length, data);
         });
 
         if (emb.empty) {

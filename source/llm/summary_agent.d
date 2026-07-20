@@ -18,9 +18,10 @@ import my.path;
 import my.set;
 
 import llm.chat;
+import llm.common.config : ApproxTokenSize;
 import llm.config : SummaryModelConfig, toRequestConfig, getEnvApiKey;
-import llm.utility : ApproxTokenSize, summarizeToolCalls, summarizeToolResponse;
 import llm.query : LlmRequester, toJson, LlamaRequestError;
+import llm.utility : summarizeToolCalls, summarizeToolResponse;
 
 struct SummaryAgent {
     private {

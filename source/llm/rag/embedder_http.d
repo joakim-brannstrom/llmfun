@@ -13,7 +13,7 @@ import core.time : dur;
 
 import requests;
 
-import llm.rag.embedder;
+import llm.common.embedder;
 import llm.query;
 import llm.config : RemoteEmbedConfig;
 
@@ -108,7 +108,7 @@ class RemoteEmbedder : Embedder {
             auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, rqCfg);
             result.match!((HttpResult r) { rval = parseHttp(r); }, (HttpError e) {
                 hasError = true;
-                rval = EmbedResult(e);
+                rval = EmbedResult(EmbedError(e.errorMsg));
             });
         }
 
@@ -116,7 +116,7 @@ class RemoteEmbedder : Embedder {
     }
 
     override int batchSize() {
-        import llm.utility : ApproxTokenSize;
+        import llm.common.config : ApproxTokenSize;
 
         return cast(int) cfg.nBatch * ApproxTokenSize;
     }

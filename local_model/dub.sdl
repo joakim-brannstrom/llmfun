@@ -1,0 +1,32 @@
+name "llmfun_local_model"
+description "Run model locally"
+authors "Joakim Brännström"
+copyright "Copyright © 2026, Joakim Brännström"
+license "MPL-2.0"
+
+dependency "mylib" version="~>0.0.49"
+dependency "llmfun_common" path="../common"
+
+targetPath "build"
+targetType "library"
+
+preBuildCommands "make -C $PACKAGE_DIR -f llamacpp.mak" platform="posix"
+// $PACKAGE_DIR/../vendor/... resolves from the sub-package (local_model/) to the top-level vendor dir
+dflags "-P-I$PACKAGE_DIR/../vendor/llama.cpp/include" "-P-I$PACKAGE_DIR/../vendor/llama.cpp/ggml/include" platform="posix"
+
+configuration "library" {
+}
+
+configuration "integration_test" {
+    name "integration_test"
+    targetType "executable"
+    sourceFiles "./integration_tests.d"
+    lflags "-rpath=$$ORIGIN" "-L$PACKAGE_DIR/build" "-lllama" platform="linux"
+}
+
+configuration "benchmark" {
+    name "benchmark"
+    targetType "executable"
+    sourceFiles "./benchmarks.d"
+    lflags "-rpath=$$ORIGIN" "-L$PACKAGE_DIR/build" "-lllama" platform="linux"
+}
