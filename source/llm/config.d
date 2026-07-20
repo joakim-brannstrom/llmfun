@@ -55,6 +55,8 @@ struct LlmConfig {
     // LLM save a memory to this file which is used between runs.
     Path[] memoryArea;
 
+    bool noMemory;
+
     Path scratchArea = ProgramName ~ "/data/scratch";
 
     Path[] thinkingTemplatesDir;

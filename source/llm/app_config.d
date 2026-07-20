@@ -50,6 +50,9 @@ struct UserConfig {
 
         @(NamedArgument("prompt", "p").Description("One shot prompt for the agent"))
         string prompt;
+
+        @(NamedArgument("no-memory").Description("Deactivate the persistent read/write memory"))
+        bool noMemory;
     }
 
     @(Command("rag"))
@@ -154,6 +157,11 @@ LlmConfigT userToLlmConfig(LlmConfigT, ConfigT)(LlmConfigT llm, ConfigT conf) {
                         }
                     } else static if (is(Type : string)) {
                         if (!__traits(getMember, conf, confMemberName).empty) {
+                            __traits(getMember, llm, llmMemberName) = __traits(getMember,
+                                    conf, confMemberName);
+                        }
+                    } else static if (is(Type : bool)) {
+                        if (__traits(getMember, conf, confMemberName)) {
                             __traits(getMember, llm, llmMemberName) = __traits(getMember,
                                     conf, confMemberName);
                         }

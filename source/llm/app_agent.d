@@ -294,7 +294,7 @@ struct AgentApp {
 
         // do not slowdown startup if the user only have an in-memory because
         // then they are indexed every time the user start
-        if (rag is null || rag.isPrimaryInMemory)
+        if (rag is null || rag.isPrimaryInMemory || llmConf.noMemory)
             return;
 
         auto vfs = FlatVfs(llmConf.memoryArea);
