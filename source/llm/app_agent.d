@@ -530,7 +530,7 @@ class StreamMessageUpdater : IStreamCallback {
         string content = msg.content;
         if (!tools.empty) {
             foreach (tool; tools) {
-                content ~= "--- Tool ---\n";
+                content ~= "\n--- Tool ---\n";
                 content ~= tool.content;
                 content ~= "\n\n";
             }
