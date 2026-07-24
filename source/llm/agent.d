@@ -147,7 +147,8 @@ class Agent : IBasicAgent {
     }
 
     void addKeepReasoning() @safe nothrow {
-        chat.add(Message(Role.user, userQuery: false, content: "Please continue", thinking: null));
+        chat.add(Message(Role.user, userQuery: false, content: "Please continue or call taskDone if you are finished",
+                thinking: null));
     }
 
     void addContinue() @safe nothrow {
