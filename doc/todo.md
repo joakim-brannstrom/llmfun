@@ -23,6 +23,7 @@
 - add a /fixcomments <filename> that goes through filename and updates all comments to be relevant to the current code. Those that seem to not match the code should be flagged.
 - add more @safe tags
 - workarea is not allowed to be a symlink. Security reasons
+- the 'answer' parameter in taskDone is almost a summary of everything between it and the previous user query. Maybe the summary algorithm should be updated to only keep final answers?
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
