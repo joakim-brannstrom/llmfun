@@ -161,11 +161,12 @@ class RAG {
         }
     }
 
-    void destroy() {
+    void destroy() @trusted {
         foreach (ref a; dbs)
             a.destroy;
         dbs.clear;
         databases.length = 0;
+        embedder.destroy;
     }
 
     bool isPrimaryInMemory() {

@@ -11,13 +11,15 @@ import llm.llama.model : Model;
 
 private:
 
-shared Mutex mtx;
+shared Mutex createEmbedder;
+
+shared Mutex modelIndex;
 shared Model[string] models;
 
 Model getModel(string name) nothrow {
-    mtx.lock_nothrow();
+    modelIndex.lock_nothrow();
     scope (exit)
-        mtx.unlock_nothrow();
+        modelIndex.unlock_nothrow();
 
     if (auto m = name in models) {
         return cast()*m;
@@ -26,9 +28,9 @@ Model getModel(string name) nothrow {
 }
 
 void addModel(string name, Model model) nothrow {
-    mtx.lock_nothrow();
+    modelIndex.lock_nothrow();
     scope (exit)
-        mtx.unlock_nothrow();
+        modelIndex.unlock_nothrow();
 
     models[name] = cast(shared) model;
 }
@@ -48,11 +50,12 @@ Embedder createLocalEmbedder(EmbedConfig config) {
         import llm.llama.model : Model, LlamaParams, contextEmbedding, onlyCpu;
         import llm.local.llama_embedder : LlamaEmbedder;
 
-        if (mtx is null)
-            mtx = cast(shared) new Mutex;
+        createEmbedder.lock_nothrow();
+        scope (exit)
+            createEmbedder.unlock_nothrow();
 
         if (auto m = getModel(local.name)) {
-            return new LlamaEmbedder(local.name, m);
+            return new LlamaEmbedder(local.name, new Model(m), destroyModel: true);
         }
 
         auto params = contextEmbedding(LlamaParams.make(), cast(uint) local.nBatch);
@@ -62,12 +65,15 @@ Embedder createLocalEmbedder(EmbedConfig config) {
         auto model = new Model(local.modelPath, params);
         addModel(local.name, model);
 
-        return new LlamaEmbedder(local.name, model);
+        return new LlamaEmbedder(local.name, model, destroyModel: false);
     });
 }
 
 void llamaInit() nothrow {
     import llm.llama.llama_import : llama_backend_init, llama_log_set, ggml_log_level;
+
+    createEmbedder = cast(shared) new Mutex;
+    modelIndex = cast(shared) new Mutex;
 
     static struct LlamaLog {
         string buf;
@@ -124,9 +130,9 @@ void llamaInit() nothrow {
 void llamaDeinit() nothrow {
     import llm.llama.llama_import : llama_backend_free;
 
-    mtx.lock_nothrow();
+    modelIndex.lock_nothrow();
     scope (exit)
-        mtx.unlock_nothrow();
+        modelIndex.unlock_nothrow();
 
     try {
         foreach (m; (cast() models).byValue.map!(a => cast() a)) {

@@ -88,6 +88,8 @@ class Agent : IBasicAgent {
     }
 
     ~this() @safe {
+        if (rag !is null)
+            rag.destroy;
     }
 
     override string id() {

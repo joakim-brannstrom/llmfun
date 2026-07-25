@@ -31,6 +31,28 @@ class Model {
         llama_model* _model;
         llama_context* _ctx;
         llama_vocab* _vocab;
+
+        Model cloneOf;
+        LlamaParams params;
+    }
+
+    // Make a clone of the model which reuse the model but have its own ctx and vocab.
+    this(Model model) {
+        cloneOf = model;
+        params = model.params;
+        _model = model.model;
+
+        _ctx = llama_init_from_model(_model, params._ctxParams);
+        if (_ctx is null) {
+            throw new Exception("Failed to create context from model");
+        }
+
+        _vocab = llama_model_get_vocab(_model);
+        if (_vocab is null) {
+            llama_free(_ctx);
+            _ctx = null;
+            throw new Exception("Failed to retrieve vocabulary from model");
+        }
     }
 
     /**
@@ -41,6 +63,7 @@ class Model {
      *         cleaned up before throwing.
      */
     this(string modelPath, LlamaParams params) {
+        this.params = params;
         _model = llama_model_load_from_file(modelPath.toStringz, params._modelParams);
         if (_model is null) {
             throw new Exception("Failed to load model: " ~ modelPath);
@@ -75,7 +98,7 @@ class Model {
             llama_free(_ctx);
             _ctx = null;
         }
-        if (_model !is null) {
+        if (_model !is null && cloneOf is null) {
             llama_model_free(_model);
             _model = null;
         }

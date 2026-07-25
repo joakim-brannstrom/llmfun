@@ -48,6 +48,7 @@ class LlamaEmbedder : Embedder {
     private {
         string name;
         Model _model;
+        bool destroyModel;
         llama_token[] _smallTokens;
         int _smallTokenSize;
         llama_token[] _batchTokens;
@@ -75,7 +76,7 @@ class LlamaEmbedder : Embedder {
      *   Exception if model is null, or if the underlying context, vocabulary,
      *   or embedding dimension are invalid, or if smallTokenSize is invalid.
      */
-    this(string name, Model model, int smallTokenSize = 0) {
+    this(string name, Model model, bool destroyModel, int smallTokenSize = 0) {
         if (model is null)
             throw new Exception("LlamaEmbedder: model must not be null");
         if (model.model is null)
@@ -89,6 +90,7 @@ class LlamaEmbedder : Embedder {
 
         this.name = name;
         this._model = model;
+        this.destroyModel = destroyModel;
 
         if (smallTokenSize <= 0) {
             smallTokenSize = max(128, cast(int)(llama_n_ctx(model.ctx) / 8));
@@ -190,7 +192,9 @@ class LlamaEmbedder : Embedder {
         _batch.n_seq_id = null;
         _batch.seq_id = null;
         _batch.n_tokens = 0;
-        _model.destroy;
+
+        if (destroyModel)
+            _model.destroy;
     }
 
     /**
