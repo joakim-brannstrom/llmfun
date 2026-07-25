@@ -20,7 +20,7 @@ import my.set;
 import llm.chat;
 import llm.config : SummaryModelConfig, toRequestConfig, getEnvApiKey;
 import llm.utility : ApproxTokenSize, summarizeToolCalls, summarizeToolResponse;
-import llm.query;
+import llm.query : LlmRequester, toJson, LlamaRequestError;
 
 struct SummaryAgent {
     private {
@@ -54,10 +54,11 @@ struct SummaryAgent {
     }
 
     this(SummaryModelConfig confSummary) {
+        import llm.endpoint : getContextSize;
+
         this.rqSummary = LlmRequester(confSummary.toRequestConfig);
 
-        auto slot = LlmSlotRequester(confSummary.toRequestConfig);
-        this.contextSize = slot.request(min(confSummary.contextSize, confSummary.contextChunkSize));
+        this.contextSize = min(confSummary.getContextSize, confSummary.contextChunkSize);
     }
 
     void setSystemPrompt(string x) {

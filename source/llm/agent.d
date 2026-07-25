@@ -26,7 +26,7 @@ import llm.config;
 import llm.metric.calculator : MetricsCalculator;
 import llm.metric.feedback : FeedbackEngine;
 import llm.metric.monitor : MetricMonitor, ToolCallEvent;
-import llm.query;
+import llm.query : LlmRequester;
 import llm.rag.rag : RAG;
 import llm.summary_agent;
 import llm.tool_call : FunctionCall, Context;
@@ -107,6 +107,7 @@ class Agent : IBasicAgent {
     /// Does NOT modify chat history or SummaryAgent.
     void resetModel(CodeModelConfig modelConfig) {
         import llm.tool_call : descAllFunctions, filterToolDescriptions;
+        import llm.endpoint : getContextSize;
 
         if (modelConfig.name == "") {
             throw new Exception("Cannot reset to empty model config");
@@ -117,8 +118,7 @@ class Agent : IBasicAgent {
         auto tools = filterToolDescriptions(descAllFunctions(), toolFilter);
         this.rq = LlmRequester(modelConfig.toRequestConfig, tools.nullable);
 
-        auto slot = LlmSlotRequester(modelConfig.toRequestConfig);
-        this.contextSize = slot.request(modelConfig.contextSize);
+        this.contextSize = modelConfig.getContextSize;
 
         this.modelName_ = modelConfig.name;
 
