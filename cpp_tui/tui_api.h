@@ -124,6 +124,7 @@ typedef struct PipelineChatMessage {
     String reasoning;
     String role;
     String finishReason;
+    String status;
 } PipelineChatMessage;
 
 /* TuiState — Opaque handle to the internal TUI state.

@@ -517,11 +517,12 @@ class UiMessenger {
         send(uiTid, UiStreamChatDone.init);
     }
 
-    void pipelineStreamChatMessage(string agentId, string content, string thinking, string role) {
+    void pipelineStreamChatMessage(string agentId, string content,
+            string thinking, string role, string status) {
         if (blocked)
             return;
         send(uiTid, UiPipelineStreamChatMessage(agentId: agentId, content: content,
-                thinking: thinking, role: role));
+                thinking: thinking, role: role, status: status));
     }
 
     void pipelineStreamDone(string agentId) {
@@ -597,8 +598,11 @@ class PipelineStreamMessageUpdater : IStreamCallback {
             }
         }
 
+        string status = format!"Context %s/%s tokens | %.1f tok/s"(stat.context,
+                contextSize, stat.predictedPerSecond);
+
         uiMsg.pipelineStreamChatMessage(agentId: agentId, content: content,
-                thinking: msg.reasoning, role: msg.role);
+                thinking: msg.reasoning, role: msg.role, status: status);
     }
 
     override void streamMessageDone() {

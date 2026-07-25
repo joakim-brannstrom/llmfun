@@ -202,9 +202,10 @@ struct TextUserInterface {
         auto content = msg.content.toTuiString;
         auto reasoning = msg.thinking.toTuiString;
         auto role = msg.role.toTuiString;
+        auto status = msg.status.toTuiString;
         String finish;
         tuiPipelineAgentUpdate(tuiState, id, PipelineChatMessage(content: content,
-                reasoning: reasoning, role: role, finishReason: finish));
+                reasoning: reasoning, role: role, finishReason: finish, status: status));
     }
 
     void pipelineMessage(UiPipelineStreamDone msg) {
@@ -335,6 +336,7 @@ struct UiPipelineStreamChatMessage {
     string content;
     string thinking;
     string role;
+    string status;
 }
 
 struct UiPipelineStreamDone {

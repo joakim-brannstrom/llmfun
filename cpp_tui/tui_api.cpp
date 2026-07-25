@@ -361,6 +361,7 @@ void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage
     std::string role_(msg.role.data ? msg.role.data : "", msg.role.data ? msg.role.len : 0);
     std::string fr(msg.finishReason.data ? msg.finishReason.data : "",
                    msg.finishReason.data ? msg.finishReason.len : 0);
+    std::string st(msg.status.data ? msg.status.data : "", msg.status.data ? msg.status.len : 0);
 
     auto& agents = state->inner->left.agents;
     for (auto& agent : agents) {
@@ -369,6 +370,7 @@ void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage
             agent.stream.thinking = r;
             agent.stream.role = role_;
             agent.stream.finishReason = fr;
+            agent.stream.status = st;
             agent.lastUpdate = std::chrono::system_clock::now();
             return;
         }
@@ -405,6 +407,7 @@ void tuiPipelineAgentDone(TuiState* state, String agentId) {
             agent.stream.thinking.clear();
             agent.stream.role.clear();
             agent.stream.finishReason.clear();
+            agent.stream.status.clear();
             agent.updateCnt++;
             // Note: lastUpdate is NOT refreshed — done agents are evicted
             // first (LRU policy) if capacity is exceeded.

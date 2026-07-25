@@ -124,6 +124,7 @@ struct AgentStreamMessage {
     std::string thinking;
     std::string role;
     std::string finishReason;
+    std::string status;
 };
 
 struct AgentStream {
@@ -139,6 +140,7 @@ struct ChatTabLeftPanel {
     ImVec4 activeButton = ImVec4(0.4f, 0.4f, 0.45f, 1.0f);
     int panelW = 0;
     static constexpr int PanelWActivated = 30;
+    bool panelOpen{true};
 
     std::vector<AgentStream> agents;
     static constexpr size_t MaxAgents = 16;

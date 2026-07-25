@@ -242,6 +242,8 @@ static void renderAgentStream(TuiState& state, const int agentIndex, const int64
     headerTmp.append(" [");
     headerTmp.append(msg.role);
     headerTmp.append("] [");
+    headerTmp.append(msg.status);
+    headerTmp.append("] [");
     headerTmp.append(std::to_string(updateCount));
     headerTmp.append("]");
 
@@ -536,22 +538,49 @@ void renderTabAgentStream(TuiState& state, Log& log) {
     }
 }
 
-void renderTabChatLeftPanel(ChatTabLeftPanel& panel) {
+void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
     if (panel.agents.empty()) {
         panel.panelW = 0;
         return;
-    }
-    if (panel.panelW == 0)
+    } else if (panel.panelW == 0) {
         panel.panelW = panel.PanelWActivated;
+    }
 
     ImGui::BeginChild("Child window", ImVec2(panel.panelW - 1, 0), true);
+    const auto panelWClosed = 8;
+    if (panel.panelOpen) {
+        if (renderButton("Close", panelWClosed, false, panel.activeButton)) {
+            panel.activeAgent = -1;
+            panel.panelOpen = false;
+            panel.panelW = panelWClosed;
+        }
+        ImGui::SameLine();
+        if (renderButton("Clear", 5, false, panel.activeButton)) {
+            panel.agents.clear();
+            panel.activeAgent = -1;
+            panel.panelW = 0;
+        }
+    } else {
+        panel.panelW = panelWClosed;
+        if (renderButton("Open", panelWClosed, false, panel.activeButton)) {
+            panel.activeAgent = -1;
+            panel.panelOpen = true;
+            panel.panelW = panel.PanelWActivated;
+        }
+        ImGui::EndChild();
+        return;
+    }
+
     if (renderButton("Main Agent", ImGui::GetContentRegionMax().x, false, panel.activeButton)) {
         panel.activeAgent = -1;
     }
     renderSeparator("Pipeline ", "-", ImGui::GetContentRegionMax().x, true);
     for (size_t i; i < panel.agents.size(); ++i) {
-        if (renderButton(panel.agents[i].agentId.c_str(), ImGui::GetContentRegionMax().x, false,
-                         panel.activeButton)) {
+        auto s = panel.agents[i].agentId;
+        s.append(" [");
+        s.append(std::to_string(panel.agents[i].updateCnt));
+        s.append("]");
+        if (renderButton(s.c_str(), ImGui::GetContentRegionMax().x, false, panel.activeButton)) {
             panel.activeAgent = i;
         }
     }
@@ -814,7 +843,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
     };
 
-    renderTabChatLeftPanel(state.left);
+    renderTabChatLeftPanel(state.left, log);
     outputArea();
     inputArea();
     statusLine();
