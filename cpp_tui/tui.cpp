@@ -21,6 +21,20 @@ static constexpr int KEY_CTRL_1 = 0x11; // Ctrl+1
 static constexpr int KEY_CTRL_2 = 0x12; // Ctrl+2
 static constexpr int KEY_CTRL_3 = 0x13; // Ctrl+3
 
+void AgentStream::finished() {
+    if (stream.content.empty() && stream.thinking.empty()) {
+        stream = AgentStreamMessage{};
+        return;
+    }
+
+    updateCnt++;
+    messages.emplace_back(stream);
+    if (messages.size() > MaxMessages) {
+        messages.erase(messages.begin());
+    }
+    stream = AgentStreamMessage{};
+}
+
 struct Log {
     FILE* logFile;
 
@@ -580,8 +594,10 @@ void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
         s.append(" [");
         s.append(std::to_string(panel.agents[i].updateCnt));
         s.append("]");
-        if (renderButton(s.c_str(), ImGui::GetContentRegionMax().x, false, panel.activeButton)) {
+        if (renderButton(s.c_str(), ImGui::GetContentRegionMax().x, !panel.agents[i].activity,
+                         panel.activeButton)) {
             panel.activeAgent = i;
+            panel.agents[i].activity = false;
         }
     }
     ImGui::EndChild();
@@ -680,8 +696,13 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
 
         if (state.left.activeAgent != -1 && state.left.activeAgent < state.left.agents.size()) {
             auto& agent = state.left.agents[state.left.activeAgent];
-            renderAgentStream(state, 0, agent.updateCnt, agent.agentId, agent.finished);
-            renderAgentStream(state, 1, agent.updateCnt + 1, agent.agentId, agent.stream);
+            size_t count{1};
+            for (auto& msg : agent.messages) {
+                renderAgentStream(state, count, agent.updateCnt + count - agent.messages.size(),
+                                  agent.agentId, msg);
+                ++count;
+            }
+            renderAgentStream(state, count, agent.updateCnt + 1, agent.agentId, agent.stream);
         }
 
         if (!state.readyStatus) {

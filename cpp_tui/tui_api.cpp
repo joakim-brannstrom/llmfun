@@ -372,6 +372,7 @@ void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage
             agent.stream.finishReason = fr;
             agent.stream.status = st;
             agent.lastUpdate = std::chrono::system_clock::now();
+            agent.activity = true;
             return;
         }
     }
@@ -388,8 +389,13 @@ void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage
     }
 
     agents.emplace_back(::llmfun::tui::AgentStream{
-        id, ::llmfun::tui::AgentStreamMessage{c, r, role_, fr}, ::llmfun::tui::AgentStreamMessage{},
-        std::chrono::system_clock::now(), 1});
+        id,
+        ::llmfun::tui::AgentStreamMessage{c, r, role_, fr},
+        std::chrono::system_clock::now(),
+        1,
+        true,
+        std::vector<::llmfun::tui::AgentStreamMessage>{},
+    });
 }
 
 void tuiPipelineAgentDone(TuiState* state, String agentId) {
@@ -402,13 +408,7 @@ void tuiPipelineAgentDone(TuiState* state, String agentId) {
     auto& agents = state->inner->left.agents;
     for (auto& agent : agents) {
         if (agent.agentId == id) {
-            agent.finished = agent.stream;
-            agent.stream.content.clear();
-            agent.stream.thinking.clear();
-            agent.stream.role.clear();
-            agent.stream.finishReason.clear();
-            agent.stream.status.clear();
-            agent.updateCnt++;
+            agent.finished();
             // Note: lastUpdate is NOT refreshed — done agents are evicted
             // first (LRU policy) if capacity is exceeded.
             return;

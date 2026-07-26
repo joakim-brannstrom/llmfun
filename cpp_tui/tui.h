@@ -130,9 +130,16 @@ struct AgentStreamMessage {
 struct AgentStream {
     std::string agentId;
     AgentStreamMessage stream;
-    AgentStreamMessage finished;
     std::chrono::system_clock::time_point lastUpdate = std::chrono::system_clock::now();
+
     int64_t updateCnt{1};
+    // each time updateCnt is incremented activity is set to true
+    bool activity{false};
+
+    std::vector<AgentStreamMessage> messages;
+    static constexpr size_t MaxMessages = 10;
+
+    void finished();
 };
 
 struct ChatTabLeftPanel {
