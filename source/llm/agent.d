@@ -87,11 +87,6 @@ class Agent : IBasicAgent {
         this.summary.setSystemPrompt(llmConf.getPrompt(llmConf.summaryModel.prompt));
     }
 
-    ~this() @safe {
-        if (rag !is null)
-            rag.destroy;
-    }
-
     override string id() {
         return name;
     }

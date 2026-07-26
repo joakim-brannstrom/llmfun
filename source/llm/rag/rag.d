@@ -197,7 +197,7 @@ class RAG {
         return resolveDatabaseIndices(databaseName).length > 0;
     }
 
-    bool validateDatabase(string databaseName, ref size_t[] indices) {
+    private bool validateDatabase(string databaseName, ref size_t[] indices) {
         indices = resolveDatabaseIndices(databaseName);
         if (indices.empty) {
             logger.tracef("no database found with name '%s'. Available: [%-(%s, %)]",
