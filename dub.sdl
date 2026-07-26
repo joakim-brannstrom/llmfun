@@ -8,8 +8,11 @@ dependency "colorlog" version="~>0.0.10"
 dependency "mylib" version="~>0.0.49"
 dependency "argparse" version="~>2.0.2"
 dependency "requests" version="~>2.2.0"
+dependency "dyaml" version="~>0.10.0"
+
 dependency "miniorm" version="~>0.0.10"
 subConfiguration "miniorm" "without-lib"
+
 dependency "llmfun_common" path="common"
 
 targetPath "build"
