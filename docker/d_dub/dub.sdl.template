@@ -1,0 +1,8 @@
+name "dummy"
+description "LLM agent harness"
+authors "Joakim Brännström"
+copyright "Copyright © 2026, Joakim Brännström"
+license "MPL-2.0"
+
+targetPath "build"
+targetType "executable"

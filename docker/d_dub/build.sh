@@ -1,6 +1,8 @@
 #!/bin/bash
 
-cp ../../dub.sdl .
+cp dub.sdl.template dub.sdl
+
+grep dependency ../../dub.sdl | grep -v "path" >> dub.sdl
 
 podman build -t dlang/llmfun:1.0 .
 

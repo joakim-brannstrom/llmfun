@@ -1,19 +1,20 @@
 FROM ubuntu:resolute
 LABEL authors="Joakim Brännström <joakim.brannstrom@gmx.com>"
 
-RUN apt-get update && \
+RUN apt update && \
     DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends install \
         ca-certificates
 
-RUN apt-get -y --no-install-recommends install \
+RUN apt upgrade -y
+
+RUN apt install -y --no-install-recommends \
         git \
         make cmake ninja-build \
-        vulkan-tools libvulkan-dev vulkan-validationlayers glslc \
         gcc g++ \
         curl \
-        xz-utils \
-        spirv-headers pkg-config
+        xz-utils
 
+        # vulkan-tools libvulkan-dev vulkan-validationlayers glslc spirv-headers pkg-config
 WORKDIR /opt
 
 ENV LDC_VERSION=1.42.0
