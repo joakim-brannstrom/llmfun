@@ -24,12 +24,13 @@ import llm.pipeline : prettyPrint;
 import llm.plan;
 import llm.query;
 import llm.rag.rag : RAG;
+import llm.skill : SkillManager, buildAlwaysApplyBlock;
 import llm.tui;
 import llm.utility;
 import llm.types : ServerStat, StreamMessage, StreamToolCall;
 import llmfun_tui;
 
-import my.path : Path;
+import my.path : Path, AbsolutePath;
 
 struct AgentApp {
     private {
@@ -44,6 +45,7 @@ struct AgentApp {
         bool debugMode;
         UserConfig.AgentChatConfig conf_;
         UiMessenger uiMsg;
+        SkillManager skillManager_;
 
         enum AgentStatus {
             active,
@@ -101,7 +103,35 @@ struct AgentApp {
         s ~= "   /plan <query>      Run the plan pipeline";
         s ~= "   /code <query>      Run the coder pipeline";
         s ~= "   /debug             Toggle verbose debug output";
+        s ~= "   /skills            List available skills";
         return s.join("\n");
+    }
+
+    private string formatSkillsList() {
+        if (skillManager_ is null) {
+            return "No skill manager initialized.";
+        }
+
+        auto skills = skillManager_.getManifest();
+        if (skills.empty) {
+            return "No skills are currently loaded.";
+        }
+
+        auto alwaysApplyCount = skills.filter!(skill => skill.alwaysApply).array.length;
+        string[] lines;
+        lines ~= "Available skills:";
+        lines ~= "";
+
+        foreach (skill; skills) {
+            auto tag = skill.alwaysApply ? " [always-apply]" : "";
+            auto desc = skill.description.length > 80
+                ? skill.description[0 .. 77] ~ "..." : skill.description;
+            lines ~= format("  %-25s %s", skill.name ~ tag, desc);
+        }
+
+        lines ~= "";
+        lines ~= format("%s skills available, %s always-apply", skills.length, alwaysApplyCount);
+        return lines.join("\n");
     }
 
     private void sendChatMessage(Args...)(string msg, TuiChatMessageType type, Args args) {
@@ -267,6 +297,9 @@ struct AgentApp {
             this.sendChatMessage(format!"[assistant]: %s"(prettyPrint(result)),
                     TuiChatMessageType_Assistant);
             return AgentStatus.active;
+        } else if (query == "/skills") {
+            this.sendChatMessage(this.formatSkillsList(), TuiChatMessageType_Assistant);
+            return AgentStatus.active;
         } else if (query.empty) {
             return AgentStatus.active;
         } else if (query.startsWith("/")) {
@@ -331,6 +364,47 @@ struct AgentApp {
         }
     }
 
+    SkillManager makeSkillManager(ref LlmConfig llmConf) {
+        SkillManager rval;
+        if (!llmConf.disableSkills) {
+            try {
+                rval = new SkillManager();
+                rval.discover(llmConf.skillPaths.map!(a => AbsolutePath(a)).array);
+            } catch (Exception e) {
+                logger.errorf("Skill discovery failed: %s. Continuing without skills.", e.msg);
+                rval = new SkillManager();
+            }
+        } else {
+            rval = new SkillManager();
+        }
+        return rval;
+    }
+
+    // Compose system prompt with skills
+    string makePrompt(SkillManager skillManager, string basePrompt) {
+        string fullPrompt;
+
+        if (!llmConf.disableSkills) {
+            // Always-apply block: prepend
+            string alwaysApplyBlock = buildAlwaysApplyBlock(skillManager.getAlwaysApplySkills(),
+                    llmConf.maxAlwaysApplyTokens);
+
+            // Manifest: append
+            string manifestXml = skillManager.getManifestXml(llmConf.maxManifestSkills);
+
+            if (!alwaysApplyBlock.empty || !manifestXml.empty) {
+                fullPrompt = alwaysApplyBlock ~ (alwaysApplyBlock.empty
+                        ? "" : "\n") ~ basePrompt ~ "\n\n" ~ manifestXml;
+            } else {
+                fullPrompt = basePrompt;
+            }
+        } else {
+            fullPrompt = basePrompt;
+        }
+
+        return fullPrompt;
+    }
+
     int run(UserConfig uconf) {
         makeDefaultFileStructure();
         if (conf_.setupDirs)
@@ -347,7 +421,12 @@ struct AgentApp {
         monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
         agent_ = new Agent("main", llmConf, monitor, rag, llmConf.toolFilter.to());
         agent_.loadHistory(agentHistory);
-        agent_.setSystemPrompt(llmConf.getPrompt(llmConf.agentPrompt));
+
+        // Skill discovery
+        skillManager_ = makeSkillManager(llmConf);
+        agent_.setSystemPrompt(makePrompt(skillManager_, llmConf.getPrompt(llmConf.agentPrompt)));
+        agent_.setSkillManager(skillManager_);
+
         lastServerStat.context = agent_.chat.approxContextSize;
         scope (exit)
             this.dispose(); // Ensures cleanup on any exception after setup

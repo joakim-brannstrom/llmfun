@@ -65,6 +65,11 @@ struct LlmConfig {
 
     Path[] promptDir;
 
+    Path[] skillPaths;
+    long maxManifestSkills = 200;
+    long maxAlwaysApplyTokens = 4000;
+    bool disableSkills = false;
+
     RagDatabaseConfig ragPrimary = RagDatabaseConfig((ProgramName ~ "/data/rag.sqlite3").Path,
             "Recent project source code, documentation and files added with tools loadFileToRAG, loadContentToRAG");
     RagDatabaseConfig[][string] ragSecondary;
@@ -101,6 +106,14 @@ struct LlmConfig {
             promptDir = prioConfCwdDirs.map!(a => cast(Path)(a ~ "prompt")).array;
         }
 
+        if (skillPaths.empty) {
+            if (cwdConfig)
+                skillPaths ~= (ProgramName ~ "/skills").Path;
+            dataSearch(ProgramName).resolve("skills".Path).match!((ResourceFile a) {
+                skillPaths ~= a.get;
+            }, (_) {});
+        }
+
         scratchArea = prioDataCwdDirs.resolve("scratch".Path)
             .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;
     }
@@ -123,19 +136,27 @@ struct LlmConfig {
     CodeModelConfig[] codeModels;
     long activeCodeModelIndex = 0;
 
-    /// Tracks total session starts (incremented at the beginning of each session).
+    // Tracks total session starts (incremented at the beginning of each session).
     uint sessionCount = 0;
-    /// Prevents concurrent or crash-retry consolidation. Cleared on load if stale.
+    // Prevents concurrent or crash-retry consolidation. Cleared on load if stale.
     bool isConsolidating = false;
-    /// Default trigger threshold (every N sessions). 0 means disabled.
+    // Default trigger threshold (every N sessions). 0 means disabled.
     uint consolidationInterval = 10;
-    /// Unix epoch seconds of the last session count increment. 0 means never incremented.
+    // Unix epoch seconds of the last session count increment. 0 means never incremented.
     long lastSessionCountUpdate = 0;
 
     SummaryModelConfig summaryModel;
 
-    /// If true, emit a warning when no API key is configured for a model server. Defaults to true.
+    // If true, emit a warning when no API key is configured for a model server. Defaults to true.
     bool warnIfNoApiKey = true;
+
+    invariant {
+        assert(maxManifestSkills > 0,
+                "maxManifestSkills must be positive, got " ~ maxManifestSkills.to!string);
+        assert(maxAlwaysApplyTokens >= 0,
+                "maxAlwaysApplyTokens must be non-negative (0 = unlimited), got "
+                ~ maxAlwaysApplyTokens.to!string);
+    }
 
     EmbedConfig embedConfig;
     long embedDimensions() const @safe {
@@ -143,9 +164,7 @@ struct LlmConfig {
                 (RemoteEmbedConfig a) => a.dimensions);
     }
 
-    // --- Multi-model methods ---
-
-    /// Return the currently active code model config (value copy, no mutex needed).
+    /// Return: the currently active code model config (value copy, no mutex needed).
     CodeModelConfig activeCodeModel() const @safe {
         if (codeModels.length == 0)
             throw new Exception("No code models configured");
@@ -155,7 +174,7 @@ struct LlmConfig {
         return codeModels[activeCodeModelIndex];
     }
 
-    /// Return the name of the active model.
+    /// Return: the name of the active model.
     string activeModelName() @safe const {
         return activeCodeModel().name;
     }
@@ -358,7 +377,10 @@ void makeDefaultFileStructure() {
     import std.file : mkdirRecurse;
     import my.xdg : xdgDataHome;
 
-    foreach (path; [(xdgDataHome ~ Path(ProgramName) ~ Path("memory"))].filter!(a => !a.exists)) {
+    foreach (path; [
+        (xdgDataHome ~ Path(ProgramName) ~ Path("memory")),
+        (xdgDataHome ~ Path(ProgramName) ~ Path("skills"))
+    ].filter!(a => !a.exists)) {
         try {
             logger.trace("Creating directory ", path);
             mkdirRecurse(path);
@@ -486,12 +508,14 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
 
 LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig = false) {
     import std.process : environment;
+    import my.xdg : xdgConfigHome;
 
     LlmConfig conf;
     bool loadedAnyFile = false;
 
     // Layer 1: Base config from LLMFUN_DEFAULT_CONFIG
-    auto basePath = environment.get("LLMFUN_DEFAULT_CONFIG", "").Path;
+    auto basePath = environment.get("LLMFUN_DEFAULT_CONFIG",
+            (xdgConfigHome ~ Path(ProgramName) ~ Path("config.json")).toString).Path;
     if (basePath.exists) {
         logger.infof(!silent, "Reading base configuration from %s", basePath);
         try {

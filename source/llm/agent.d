@@ -28,6 +28,7 @@ import llm.metric.feedback : FeedbackEngine;
 import llm.metric.monitor : MetricMonitor, ToolCallEvent;
 import llm.query : LlmRequester;
 import llm.rag.rag : RAG;
+import llm.skill : SkillManager;
 import llm.summary_agent;
 import llm.tool_call : FunctionCall, Context;
 import llm.tool_call.io : FileContext, VisionContext;
@@ -36,6 +37,7 @@ import llm.tool_call.metrics : MetricsContext;
 import llm.tool_call.pipeline : PipelineControlContext;
 import llm.tool_call.rag : RAGContext;
 import llm.tool_call.sandbox : SandboxContext;
+import llm.tool_call.skill : SkillContext;
 import llm.tool_call.think : ThinkingContext;
 import llm.utility : getValue;
 import llm.workarea;
@@ -136,6 +138,10 @@ class Agent : IBasicAgent {
 
     void setPipelineContext(PipelineControlContext ctx) @trusted {
         toolCtx.pipelineCtx = ctx;
+    }
+
+    void setSkillManager(SkillManager mgr) @safe {
+        toolCtx.skillManager = mgr;
     }
 
     void addUserQuery(string query) nothrow {
@@ -483,7 +489,7 @@ struct VisionImage {
 }
 
 class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryContext,
-    ThinkingContext, MetricsContext, PipelineControlContext, VisionContext {
+    ThinkingContext, MetricsContext, PipelineControlContext, VisionContext, SkillContext {
         import llm.vfs : FlatVfs;
 
         private {
@@ -498,6 +504,8 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             SysTime nextMetricCalculation;
 
             VisionImage pendingVisionImage;
+
+            SkillManager skillManager;
         }
 
         this(Agent agent, LlmConfig conf) {
@@ -511,6 +519,10 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
         }
 
         ~this() {
+        }
+
+        override SkillManager getSkillManager() {
+            return skillManager;
         }
 
         VisionImage drainVisionImage() nothrow {
