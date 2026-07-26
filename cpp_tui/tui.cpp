@@ -15,12 +15,6 @@
 
 namespace llmfun::tui {
 
-// Named key codes for Ctrl shortcuts (ncurses raw key codes)
-static constexpr int KEY_CTRL_D = 4;    // Ctrl+D exit
-static constexpr int KEY_CTRL_1 = 0x11; // Ctrl+1
-static constexpr int KEY_CTRL_2 = 0x12; // Ctrl+2
-static constexpr int KEY_CTRL_3 = 0x13; // Ctrl+3
-
 void AgentStream::finished() {
     if (stream.content.empty() && stream.thinking.empty()) {
         stream = AgentStreamMessage{};
