@@ -120,4 +120,20 @@ class RemoteEmbedder : Embedder {
 
         return cast(int) cfg.nBatch * ApproxTokenSize;
     }
+
+    override bool supportsTokenization() @safe {
+        return false;
+    }
+
+    override int[] tokenize(string txt) @safe {
+        return null;
+    }
+
+    override string detokenize(int[] tokens) @safe {
+        return null;
+    }
+
+    override EmbedResult embed(int[] tokens) @safe {
+        return EmbedResult(EmbedError("Embedder do not support tokens"));
+    }
 }

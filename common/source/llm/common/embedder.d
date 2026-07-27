@@ -23,6 +23,18 @@ interface Embedder {
     /// Produce an embedding vector for the given text.
     EmbedResult embed(string text);
 
+    bool supportsTokenization();
+
+    /// Produce an embedding vector for the given tokens.
+    /// Only available if supportsTokenization is true.
+    EmbedResult embed(int[] tokens);
+
+    /// Only available if supportsTokenization is true.
+    int[] tokenize(string text);
+
+    /// Only available if supportsTokenization is true.
+    string detokenize(int[] tokens);
+
     /// Maximum number of tokens that can be processed in one batch.
     /// Used by RAG.add() to determine chunk size.
     int batchSize();

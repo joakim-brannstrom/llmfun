@@ -317,20 +317,13 @@ size_t ServerNBatch = 0;
 // Add a document to the RAG.
 RagAddResult add(RAG rag, Document doc, RagConfig config) {
     import std.algorithm : max, min, countUntil;
+    import std.array : Appender;
     import std.json : parseJSON;
     import std.uni : byCodePoint, byGrapheme, isWhite;
     import std.utf : toUTF8;
-    import core.memory : GC;
     import llm.common.config : ApproxTokenSize;
     import llm.rag.database;
     import llm.utility : getValue;
-
-    // have to turn off the GC because something in the underlying libraries
-    // try to use a pointer while the GC is freeing. The line that most often
-    // trigger the GC is appending to graphemes.
-    GC.disable();
-    scope (exit)
-        GC.enable();
 
     long toUint(ubyte[4] a) {
         return a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
@@ -343,110 +336,206 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
         return RagAddResult(doc.data.length, 0);
     }
 
-    if (ServerNBatch == 0)
-        ServerNBatch = rag.embedder.batchSize();
+    void runOnText(ref size_t chunks, ref Appender!(Embedding[]) embeddings) {
+        import core.memory : GC;
 
-    immutable nBatchStep = 128;
-    immutable MaxIterations = 8;
-    size_t nBatch = ServerNBatch;
+        // have to turn off the GC because something in the underlying libraries
+        // try to use a pointer while the GC is freeing. The line that most often
+        // trigger the GC is appending to graphemes.
+        GC.disable();
+        scope (exit)
+            GC.enable();
 
-    auto embeddings = appender!(Embedding[])();
-    size_t nChunks;
-    // used to detect if the fallback mode where nBatch is halfed always used.
-    // If it has been used for 5 consecutive turns the nBatch is probably just
-    // too high and should be adjusted down.
-    int failureCount;
-    // detect if we have successfully generated embeddings and then adjust up nBatch if it has been previously lowered
-    int successCount;
-    void addChunk(Grapheme[] graphemes, size_t startCharPos, size_t startLine, int iteration) {
-        auto data = graphemes.byCodePoint.toUTF8;
+        if (ServerNBatch == 0)
+            ServerNBatch = rag.embedder.batchSize();
 
-        float[] emb;
-        rag.embedder.embed(data).match!((float[] embed) { emb = embed; }, (EmbedError e) {
-            logger.tracef("Failed to generate embedding '%s' (len:%s): %s",
-                e.errorMsg, graphemes.length, data);
-            try {
-                const old = nBatch;
-                ServerNBatch = max(nBatchStep, ServerNBatch);
-                nBatch = max(nBatchStep, min(nBatch, ServerNBatch));
-                logger.tracef(old != nBatch, "Changed nBatch (ServerNBatch:%s) from %s->%s",
-                    ServerNBatch, old, nBatch);
-            } catch (Exception e) {
-                logger.trace(e.msg);
+        immutable nBatchStep = 128;
+        immutable MaxIterations = 8;
+        size_t nBatch = ServerNBatch;
+
+        // used to detect if the fallback mode where nBatch is halfed always used.
+        // If it has been used for 5 consecutive turns the nBatch is probably just
+        // too high and should be adjusted down.
+        int failureCount;
+        // detect if we have successfully generated embeddings and then adjust up nBatch if it has been previously lowered
+        int successCount;
+        void addChunk(Grapheme[] graphemes, size_t startCharPos, size_t startLine, int iteration) {
+            auto data = graphemes.byCodePoint.toUTF8;
+
+            float[] emb;
+            rag.embedder.embed(data).match!((float[] embed) { emb = embed; }, (EmbedError e) {
+                logger.tracef("Failed to generate embedding '%s' (len:%s): %s",
+                    e.errorMsg, graphemes.length, data);
+                try {
+                    const old = nBatch;
+                    ServerNBatch = max(nBatchStep, ServerNBatch);
+                    nBatch = max(nBatchStep, min(nBatch, ServerNBatch));
+                    logger.tracef(old != nBatch, "Changed nBatch (ServerNBatch:%s) from %s->%s",
+                        ServerNBatch, old, nBatch);
+                } catch (Exception e) {
+                    logger.trace(e.msg);
+                }
+            });
+
+            if (emb.empty) {
+                ++failureCount;
+                successCount = 0;
             }
-        });
 
-        if (emb.empty) {
-            ++failureCount;
-            successCount = 0;
+            if (graphemes.length < 4 && emb.empty) {
+                logger.tracef("Failed to generate embedding after %s iterations using batch size %s '%s'",
+                        iteration, graphemes.length, data);
+                return;
+            }
+            if (emb.empty && iteration < MaxIterations) {
+                logger.tracef("%s too large for embedding model. Trying half with nBatch %s",
+                        graphemes.length, graphemes.length / 2);
+                addChunk(graphemes[0 .. $ / 2], startCharPos, startLine, iteration + 1);
+                auto p1 = graphemes[$ / 2 .. $];
+                addChunk(p1, startCharPos + p1.length, startLine + countLines(p1), iteration + 1);
+                return;
+            }
+            if (emb.empty && iteration >= MaxIterations) {
+                logger.warningf("Failed to generate embedding after %s iterations using batch size %s '%s'",
+                        iteration, graphemes.length, data);
+                return;
+            }
+            if (iteration == 0) {
+                ++successCount;
+            }
+
+            embeddings.put(Embedding(Offset(startCharPos, startCharPos + graphemes.length),
+                    Line(startLine, startLine + countLines(graphemes)), data, emb));
+
+            logger.tracef("add chunk length:%s line(%s-%s) offset(%s-%s)", data.length, startLine,
+                    startLine + countLines(graphemes), startCharPos,
+                    startCharPos + graphemes.length);
+            ++chunks;
         }
 
-        if (graphemes.length < 4 && emb.empty) {
-            logger.tracef("Failed to generate embedding after %s iterations using batch size %s '%s'",
-                    iteration, graphemes.length, data);
-            return;
+        size_t startCharPos;
+        size_t startLine = 1;
+        Grapheme[] graphemes;
+        foreach (graphem; doc.data.byGrapheme) {
+            graphemes ~= graphem;
+            if (graphemes.length >= nBatch && graphem[0].isWhite) {
+                addChunk(graphemes, startCharPos, startLine, 0);
+                const size_t advance = max(cast(size_t) 1,
+                        cast(size_t)(graphemes.length * (100.0 - config.windowOverlapPercent) / 100.0));
+                const size_t endOfWord = max(0, min(50,
+                        graphemes[advance .. $].countUntil!(a => a[0].isWhite))); // assuming a word is never longer than 50
+                startCharPos += advance + endOfWord;
+                startLine += countLines(graphemes[0 .. advance + endOfWord]);
+                if (advance + endOfWord < graphemes.length) {
+                    graphemes = graphemes[advance + endOfWord .. $];
+                } else {
+                    graphemes = null;
+                }
+            }
+            if (failureCount > 2 && nBatch >= nBatchStep * 2) {
+                logger.tracef("Adjusting down nBatch %s -> %s", nBatch, nBatch - nBatchStep);
+                nBatch -= nBatchStep;
+                failureCount = 0;
+                failureCount = max(0, failureCount - 1);
+                // trim the server down so future RAG chunking on other documents work better
+                ServerNBatch = nBatch;
+            } else if (successCount > 5 && nBatch < rag.embedder.batchSize) {
+                logger.tracef("Adjusting up nBatch %s -> %s", nBatch, nBatch + nBatchStep);
+                nBatch = min(nBatch + nBatchStep, rag.embedder.batchSize);
+                successCount = 0;
+                // up the server so future RAG chunking on other documents work better
+                ServerNBatch = nBatch;
+            }
         }
-        if (emb.empty && iteration < MaxIterations) {
-            logger.tracef("%s too large for embedding model. Trying half with nBatch %s",
-                    graphemes.length, graphemes.length / 2);
-            addChunk(graphemes[0 .. $ / 2], startCharPos, startLine, iteration + 1);
-            auto p1 = graphemes[$ / 2 .. $];
-            addChunk(p1, startCharPos + p1.length, startLine + countLines(p1), iteration + 1);
-            return;
-        }
-        if (emb.empty && iteration >= MaxIterations) {
-            logger.warningf("Failed to generate embedding after %s iterations using batch size %s '%s'",
-                    iteration, graphemes.length, data);
-            return;
-        }
-        if (iteration == 0) {
-            ++successCount;
-        }
-
-        embeddings.put(Embedding(Offset(startCharPos, startCharPos + graphemes.length),
-                Line(startLine, startLine + countLines(graphemes)), data, emb));
-
-        logger.tracef("add chunk length:%s line(%s-%s) offset(%s-%s)", data.length, startLine,
-                startLine + countLines(graphemes), startCharPos, startCharPos + graphemes.length);
-        ++nChunks;
-    }
-
-    size_t startCharPos;
-    size_t startLine = 1;
-    Grapheme[] graphemes;
-    foreach (graphem; doc.data.byGrapheme) {
-        graphemes ~= graphem;
-        if (graphemes.length >= nBatch && graphem[0].isWhite) {
+        if (!graphemes.empty) {
             addChunk(graphemes, startCharPos, startLine, 0);
-            const size_t advance = max(cast(size_t) 1,
-                    cast(size_t)(graphemes.length * (100.0 - config.windowOverlapPercent) / 100.0));
-            const size_t endOfWord = max(0, min(50,
-                    graphemes[advance .. $].countUntil!(a => a[0].isWhite))); // assuming a word is never longer than 50
-            startCharPos += advance + endOfWord;
-            startLine += countLines(graphemes[0 .. advance + endOfWord]);
-            if (advance + endOfWord < graphemes.length) {
-                graphemes = graphemes[advance + endOfWord .. $];
-            } else {
-                graphemes = null;
-            }
-        }
-        if (failureCount > 2 && nBatch >= nBatchStep * 2) {
-            logger.tracef("Adjusting down nBatch %s -> %s", nBatch, nBatch - nBatchStep);
-            nBatch -= nBatchStep;
-            failureCount = 0;
-            failureCount = max(0, failureCount - 1);
-            // trim the server down so future RAG chunking on other documents work better
-            ServerNBatch = nBatch;
-        } else if (successCount > 5 && nBatch < rag.embedder.batchSize) {
-            logger.tracef("Adjusting up nBatch %s -> %s", nBatch, nBatch + nBatchStep);
-            nBatch = min(nBatch + nBatchStep, rag.embedder.batchSize);
-            successCount = 0;
-            // up the server so future RAG chunking on other documents work better
-            ServerNBatch = nBatch;
         }
     }
-    if (!graphemes.empty) {
-        addChunk(graphemes, startCharPos, startLine, 0);
+
+    void runOnTokens(ref size_t chunks, ref Appender!(Embedding[]) embeddings) {
+        const nBatch = rag.embedder.batchSize;
+        const size_t advance = max(cast(size_t) 1,
+                cast(size_t)(nBatch * (100.0 - config.windowOverlapPercent) / 100.0));
+
+        size_t startCharPos;
+        size_t startLine = 1;
+        size_t halfIndex;
+        int[] tokens;
+
+        Grapheme[] textChunk;
+        Grapheme[] currentWord;
+
+        void addChunk() {
+            assert(tokens.length <= nBatch, "something is wrong");
+
+            auto text = textChunk.byCodePoint.toUTF8;
+            const lines = countLines(textChunk);
+
+            float[] emb;
+            rag.embedder.embed(tokens).match!((float[] embed) { emb = embed; }, (EmbedError e) {
+                logger.tracef("Failed to generate embedding '%s' (toks:%s text:%s%s): %s",
+                    e.errorMsg, tokens.length, text.length, text);
+            });
+
+            if (!emb.empty) {
+                embeddings.put(Embedding(Offset(startCharPos, startCharPos + textChunk.length),
+                        Line(startLine, startLine + lines), text, emb));
+
+                logger.tracef("add chunk length:%s line(%s-%s) offset(%s-%s) tokens:%s",
+                        text.length, startLine, startLine + lines,
+                        startCharPos, startCharPos + textChunk.length, tokens.length);
+                ++chunks;
+            }
+
+            Grapheme[] advStep = textChunk[0 .. min(halfIndex, textChunk.length)];
+            textChunk = textChunk[advStep.length .. $];
+
+            startCharPos += advStep.length;
+            startLine += countLines(advStep);
+            halfIndex = 0;
+            tokens = rag.embedder.tokenize(textChunk.byCodePoint.toUTF8);
+        }
+
+        foreach (graphem; doc.data.byGrapheme) {
+            currentWord ~= graphem;
+
+            if (halfIndex == 0 && textChunk.length > advance) {
+                halfIndex = textChunk.length;
+            }
+
+            // assuming that no sane word is larger than 50 characters
+            if (graphem[0].isWhite || currentWord.length > 50) {
+                auto wordTokens = rag.embedder.tokenize(currentWord.byCodePoint.toUTF8);
+                // logger.tracef("%s %s %s %s", tokens.length, textChunk.length, currentWord.length, wordTokens.length);
+                if (tokens.length + wordTokens.length > nBatch) {
+                    addChunk;
+                }
+                textChunk ~= currentWord;
+                tokens ~= wordTokens;
+                currentWord = null;
+            }
+        }
+
+        if (!currentWord.empty) {
+            auto wordTokens = rag.embedder.tokenize(currentWord.byCodePoint.toUTF8);
+            if (tokens.length + wordTokens.length > nBatch) {
+                addChunk;
+            }
+            textChunk ~= currentWord;
+            tokens ~= wordTokens;
+        }
+        if (!textChunk.empty) {
+            addChunk();
+        }
+    }
+
+    size_t chunks;
+    auto embeddings = appender!(Embedding[])();
+
+    if (rag.embedder.supportsTokenization) {
+        runOnTokens(chunks, embeddings);
+    } else {
+        runOnText(chunks, embeddings);
     }
 
     spinSql!(() {
@@ -460,15 +549,18 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
         trans.commit;
     });
 
-    return RagAddResult(doc.data.length, nChunks);
+    return RagAddResult(doc.data.length, chunks);
 }
 
 private:
 
 size_t countLines(Grapheme[] graphemes) {
     immutable newline = Grapheme('\n');
-
     return graphemes.filter!(a => a == newline).count;
+}
+
+size_t countLines(string s) {
+    return s.filter!(a => a == '\n').count;
 }
 
 /// Eliminates database-order bias among results with identical ranks.

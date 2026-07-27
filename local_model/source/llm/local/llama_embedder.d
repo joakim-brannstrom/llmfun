@@ -21,7 +21,7 @@
 module llm.local.llama_embedder;
 
 import llm.llama.model;
-import std.algorithm : max, min;
+import std.algorithm : max, min, among;
 import std.array : appender;
 import std.conv : to;
 import std.sumtype : SumType;
@@ -61,6 +61,7 @@ class LlamaEmbedder : Embedder {
         llama_seq_id*[] _seqIdPtrs;
         llama_batch _batch;
         bool _destroyed = false;
+        char[] detokenizeBuf;
     }
 
     /**
@@ -134,6 +135,14 @@ class LlamaEmbedder : Embedder {
         this._batch.n_seq_id = this._nSeqIdValues.ptr;
         this._batch.seq_id = this._seqIdPtrs.ptr;
         this._batch.logits = null;
+
+        this.detokenizeBuf = new char[256];
+
+        // see llama documentation for why the pooling is important. It affects
+        // the return value of llama_get_embeddings_seq.
+        const pooling = llama_pooling_type(_model.ctx);
+        assert(!pooling.among(LLAMA_POOLING_TYPE_UNSPECIFIED,
+                LLAMA_POOLING_TYPE_NONE, LLAMA_POOLING_TYPE_RANK));
     }
 
     override string modelName() {
@@ -167,7 +176,7 @@ class LlamaEmbedder : Embedder {
 
         if (_destroyed)
             return 0;
-        return cast(int) llama_n_batch(_model.ctx) * ApproxTokenSize;
+        return cast(int) llama_n_batch(_model.ctx);
     }
 
     /**
@@ -197,6 +206,10 @@ class LlamaEmbedder : Embedder {
             _model.destroy;
     }
 
+    override bool supportsTokenization() @safe {
+        return true;
+    }
+
     /**
      * Tokenize text using the model's vocabulary.
      *
@@ -219,22 +232,19 @@ class LlamaEmbedder : Embedder {
      * Throws:
      *   Exception if llama_tokenize fails (e.g. invalid UTF-8).
      */
-    private llama_token[] tokenize(string text) @trusted
+    override int[] tokenize(string text) @trusted
     in (text !is null) {
-        auto vocab = _model.vocab;
-
         // query required buffer size
-        int needed = llama_tokenize(vocab, text.ptr, to!int(text.length), null, 0, false, // add_special = false
-                true); // parse_special = true
+        int needed = llama_tokenize(_model.vocab, text.ptr, cast(int) text.length,
+                null, 0, add_special: false, parse_special: true);
         if (needed < 0)
             needed = -needed;
 
         llama_token[] buf = (needed <= _smallTokens.length) ? _smallTokens : new llama_token[needed];
 
         // actual tokenization into the buffer
-        int actual = llama_tokenize(vocab, text.ptr, to!int(text.length),
-                buf.ptr, to!int(buf.length), false, // add_special = false
-                true); // parse_special = true
+        int actual = llama_tokenize(_model.vocab, text.ptr, cast(int) text.length,
+                buf.ptr, cast(int) buf.length, add_special: false, parse_special: true);
         if (actual < 0)
             throw new Exception(
                     "LlamaEmbedder.tokenize: llama_tokenize failed (code: " ~ to!string(
@@ -257,26 +267,28 @@ class LlamaEmbedder : Embedder {
      *   The reconstructed text string, or empty string if the
      *   embedder has been destroyed.
      */
-    private string detokenize(llama_token[] tokens) {
+    override string detokenize(int[] tokens) {
         if (_destroyed)
             return "";
-        auto result = appender!string;
-        char[256] buf = '\0';
+        auto result = appender!string();
+        char[] buf = detokenizeBuf;
         foreach (token; tokens) {
-            int len = llama_token_to_piece(_model.vocab, token, buf.ptr, buf.sizeof, 0, true);
+            int len = llama_token_to_piece(_model.vocab, token, buf.ptr,
+                    cast(int) buf.length, 0, special: false);
             if (len > 0) {
                 result.put(buf[0 .. len]);
             } else if (len < 0) {
                 // Buffer too small; retry with required size
                 int needed = -len;
-                char[] bigBuf = new char[needed];
-                int actual = llama_token_to_piece(_model.vocab, token,
-                        bigBuf.ptr, needed, 0, true);
+                buf = new char[needed];
+                int actual = llama_token_to_piece(_model.vocab, token, buf.ptr,
+                        needed, 0, special: false);
                 if (actual > 0)
-                    result.put(bigBuf[0 .. actual]);
+                    result.put(buf[0 .. actual]);
+            } else {
             }
         }
-        return result.data;
+        return result[];
     }
 
     /**
@@ -309,10 +321,13 @@ class LlamaEmbedder : Embedder {
         } catch (Exception e) {
             return EmbedResult(EmbedError("Tokenization failed: " ~ e.msg));
         }
+        return embed(tokens);
+    }
 
-        // Guard against empty input — zero-token batch produces undefined
-        // behaviour in llama_encode (may succeed silently, return garbage,
-        // or crash).
+    override EmbedResult embed(int[] tokens) {
+        if (_destroyed)
+            return EmbedResult(EmbedError("Embedder has been destroyed"));
+
         if (tokens.length == 0) {
             return EmbedResult(EmbedError("Empty input produced zero tokens"));
         }
