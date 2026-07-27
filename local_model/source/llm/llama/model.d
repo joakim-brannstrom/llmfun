@@ -42,7 +42,7 @@ class Model {
         params = model.params;
         _model = model.model;
 
-        _ctx = llama_init_from_model(_model, params._ctxParams);
+        _ctx = llama_init_from_model(_model, params.ctxParams);
         if (_ctx is null) {
             throw new Exception("Failed to create context from model");
         }
@@ -64,12 +64,12 @@ class Model {
      */
     this(string modelPath, LlamaParams params) {
         this.params = params;
-        _model = llama_model_load_from_file(modelPath.toStringz, params._modelParams);
+        _model = llama_model_load_from_file(modelPath.toStringz, params.modelParams);
         if (_model is null) {
             throw new Exception("Failed to load model: " ~ modelPath);
         }
 
-        _ctx = llama_init_from_model(_model, params._ctxParams);
+        _ctx = llama_init_from_model(_model, params.ctxParams);
         if (_ctx is null) {
             llama_model_free(_model);
             _model = null;
@@ -124,23 +124,23 @@ class Model {
  * Use `LlamaParams.make()` to obtain default model and context parameters,
  * then customise them before passing to the `Model` constructor.
  *
- * The `_modelParams` and `_ctxParams` fields are package-visible within
+ * The `modelParams` and `ctxParams` fields are package-visible within
  * `llm.llama` so that helper functions like `contextEmbedding` and the
  * `Model` constructor can access them directly.
  */
 struct LlamaParams {
-    package(llm.llama) llama_model_params _modelParams;
-    package(llm.llama) llama_context_params _ctxParams;
+    llama_model_params modelParams;
+    llama_context_params ctxParams;
 
     static LlamaParams make() {
         LlamaParams p;
-        p._modelParams = llama_model_default_params();
-        p._ctxParams = llama_context_default_params();
+        p.modelParams = llama_model_default_params();
+        p.ctxParams = llama_context_default_params();
         return p;
     }
 
     ref llama_context_params ctx() {
-        return _ctxParams;
+        return ctxParams;
     }
 }
 
@@ -157,29 +157,26 @@ struct LlamaParams {
 LlamaParams contextEmbedding(LlamaParams params, uint nBatch) {
     import std.parallelism : totalCPUs;
 
-    params._ctxParams.n_threads = totalCPUs;
-    params._ctxParams.n_threads_batch = totalCPUs;
+    params.ctxParams.n_threads = totalCPUs;
+    params.ctxParams.n_threads_batch = totalCPUs;
 
-    params._ctxParams.no_perf = true;
-    params._ctxParams.embeddings = true;
-    params._ctxParams.op_offload = true;
-    params._ctxParams.offload_kqv = true;
-    params._ctxParams.pooling_type = LLAMA_POOLING_TYPE_CLS;
-    params._ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+    params.ctxParams.no_perf = true;
+    params.ctxParams.embeddings = true;
+    params.ctxParams.op_offload = true;
+    params.ctxParams.offload_kqv = true;
+    params.ctxParams.pooling_type = LLAMA_POOLING_TYPE_CLS;
+    params.ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
 
-    params._ctxParams.type_k = GGML_TYPE_Q8_0;
-    params._ctxParams.type_v = GGML_TYPE_Q8_0;
-
-    params._ctxParams.n_ctx = nBatch;
-    params._ctxParams.n_batch = nBatch;
-    params._ctxParams.n_ubatch = nBatch;
+    params.ctxParams.n_ctx = nBatch;
+    params.ctxParams.n_batch = nBatch;
+    params.ctxParams.n_ubatch = nBatch;
 
     return params;
 }
 
 LlamaParams onlyCpu(LlamaParams p) {
-    p._modelParams.n_gpu_layers = 0;
-    p._ctxParams.offload_kqv = false;
+    p.modelParams.n_gpu_layers = 0;
+    p.ctxParams.offload_kqv = false;
     return p;
 }
 
@@ -205,21 +202,21 @@ unittest {
     auto p = LlamaParams.make();
 
     // Model params: n_gpu_layers defaults to 0 (CPU only)
-    assert(p._modelParams.n_gpu_layers == 0, "Default n_gpu_layers should be 0");
+    assert(p.modelParams.n_gpu_layers == 0, "Default n_gpu_layers should be 0");
 
     // Context params: n_ctx defaults to 0 (use model's value)
-    assert(p._ctxParams.n_ctx == 0, "Default n_ctx should be 0 (from model)");
+    assert(p.ctxParams.n_ctx == 0, "Default n_ctx should be 0 (from model)");
 
     // Context params: embeddings defaults to false
-    assert(p._ctxParams.embeddings == false, "Default embeddings should be false");
+    assert(p.ctxParams.embeddings == false, "Default embeddings should be false");
 
     // --- contextEmbedding() ---
     auto ep = contextEmbedding(p, 512);
 
-    assert(ep._ctxParams.embeddings == true, "embeddings should be true after contextEmbedding");
+    assert(ep.ctxParams.embeddings == true, "embeddings should be true after contextEmbedding");
 
-    assert(ep._ctxParams.pooling_type == LLAMA_POOLING_TYPE_CLS,
+    assert(ep.ctxParams.pooling_type == LLAMA_POOLING_TYPE_CLS,
             "pooling_type should be LLAMA_POOLING_TYPE_CLS after contextEmbedding");
 
-    assert(ep._ctxParams.n_batch == 512, "n_batch should be 512 after contextEmbedding");
+    assert(ep.ctxParams.n_batch == 512, "n_batch should be 512 after contextEmbedding");
 }
