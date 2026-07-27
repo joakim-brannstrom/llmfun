@@ -213,6 +213,10 @@ struct TextUserInterface {
         tuiPipelineAgentDone(tuiState, id);
     }
 
+    void pipelineClear() {
+        tuiPipelineClear(tuiState);
+    }
+
     void useUiLogFile(bool useFile) {
         tuiSetLogging(tuiState, useFile);
     }
@@ -343,6 +347,9 @@ struct UiPipelineStreamDone {
     string agentId;
 }
 
+struct UiPipelineClear {
+}
+
 void spawnUserInterface(Tid ownerTid) {
     import std.string : strip;
     import std.datetime : dur, Clock, Duration;
@@ -377,6 +384,7 @@ void spawnUserInterface(Tid ownerTid) {
                 (UiInitHistory a) { ui.setHistory(a.queries); },
                 (UiPipelineStreamChatMessage a) { ui.pipelineMessage(a); },
                 (UiPipelineStreamDone a) { ui.pipelineMessage(a); },
+                (UiPipelineClear _) { ui.pipelineClear; }
             );
             // dfmt on
 

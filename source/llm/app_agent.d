@@ -188,6 +188,7 @@ struct AgentApp {
             agent_.clearHistory;
             uiMsg.clearChat();
             lastServerStat.context = 0;
+            uiMsg.pipelineClear;
             return AgentStatus.active;
         } else if (query == "/help") {
             auto helpText = this.printHelp(conf_);
@@ -241,17 +242,19 @@ struct AgentApp {
             }
             return AgentStatus.active;
         } else if (query.startsWith("/plan ")) {
+            uiMsg.pipelineClear;
             auto q = query["/plan ".length .. $];
-            this.sendChatMessage("[assistant]: Running plan pipeline: %s",
+            sendChatMessage("[assistant]: Running plan pipeline: %s",
                     TuiChatMessageType_Assistant, q);
             auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
                 return isStopAgentTriggered;
             }, llmConf.toolFilter.to(), makePipelineStreamCallback);
-            this.sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
+            sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
             return AgentStatus.active;
         } else if (query.startsWith("/code ")) {
+            uiMsg.pipelineClear;
             auto q = query["/code ".length .. $];
-            this.sendChatMessage("[assistant]: Running coder pipeline: %s",
+            sendChatMessage("[assistant]: Running coder pipeline: %s",
                     TuiChatMessageType_Assistant, q);
             auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
                 return isStopAgentTriggered;
@@ -529,6 +532,12 @@ class UiMessenger {
         if (blocked)
             return;
         send(uiTid, UiPipelineStreamDone(agentId));
+    }
+
+    void pipelineClear() {
+        if (blocked)
+            return;
+        send(uiTid, UiPipelineClear.init);
     }
 }
 
