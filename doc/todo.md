@@ -26,6 +26,7 @@
 - the 'answer' parameter in taskDone is almost a summary of everything between it and the previous user query. Maybe the summary algorithm should be updated to only keep final answers?
 - the self improvement of how to use tools should always be injected directly after the system prompt on startup if the chat is empty
 - editFile when using append or replace seems to prefix with an empty newline
+- editFile remove and replace is hard for an LLM to use incrementally because it changes the line numbers. Start by requiring that "content" contains the first line of the text that is to be removed.
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -76,6 +77,13 @@
 - add a "chunker" for a diff
 - add builtin pdf -> text -> rag
 - add builtin image -> text -> rag. This should probably be stored as "image path", "description".
+
+# skills
+- Consider adding a `skill.load` metric event (tracked by `MetricMonitor`) to identify most-used skills. Deferred to P2 — requires designing the metric schema.
+- If a skill-related bug prevents agent startup, users can set `"disableSkills": true` in their JSON config to bypass all skill logic. This is the primary rollback mechanism.
+- Glob-Triggered Skill Activation (P2)
+- `allowed-tools` Permission Bypass (P2)
+- the check if a skill should be copied should also check the version and loadSkill should have a flag "overwrite". So if the skill match but is newer than the one in sandbox it should overwrite the sandbox.
 
 # memory
 ## Workflow Improvements
