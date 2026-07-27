@@ -25,6 +25,7 @@
 - workarea is not allowed to be a symlink. Security reasons
 - the 'answer' parameter in taskDone is almost a summary of everything between it and the previous user query. Maybe the summary algorithm should be updated to only keep final answers?
 - the self improvement of how to use tools should always be injected directly after the system prompt on startup if the chat is empty
+- editFile when using append or replace seems to prefix with an empty newline
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
@@ -41,6 +42,7 @@
 - add a menu item to open a separate window to show more detailed statistic about LLM such as latency, token use in total etc
 - add a menu item to navigate the RAG database
 - taskDone is displayed incorrectly when reading the database. Should be FinalAnswer
+- send a "clear pipeline" when starting a new pipeline task
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
