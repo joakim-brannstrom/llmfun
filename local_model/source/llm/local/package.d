@@ -47,7 +47,7 @@ extern (C) void deinitLlmfunLocalModel() {
 Embedder createLocalEmbedder(EmbedConfig config) {
     return config.match!((RemoteEmbedConfig _) => null, // not our type
             (LocalEmbedConfig local) {
-        import llm.llama.model : Model, LlamaParams, contextEmbedding, onlyCpu;
+        import llm.llama.model : Model, LlamaParams, contextEmbedding, onlyCpu, onlyGpu;
         import llm.local.llama_embedder : LlamaEmbedder;
 
         createEmbedder.lock_nothrow();
@@ -59,8 +59,11 @@ Embedder createLocalEmbedder(EmbedConfig config) {
         }
 
         auto params = contextEmbedding(LlamaParams.make(), cast(uint) local.nBatch);
-        if (local.onlyCpu)
+        if (local.onlyCpu) {
             params = params.onlyCpu;
+        } else {
+            params = params.onlyGpu;
+        }
 
         auto model = new Model(local.modelPath, params);
         addModel(local.name, model);

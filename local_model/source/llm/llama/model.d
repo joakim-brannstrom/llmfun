@@ -183,6 +183,12 @@ LlamaParams onlyCpu(LlamaParams p) {
     return p;
 }
 
+LlamaParams onlyGpu(LlamaParams p) {
+    p.modelParams.n_gpu_layers = -1;
+    p.ctxParams.offload_kqv = true;
+    return p;
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
