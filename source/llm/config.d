@@ -59,7 +59,7 @@ struct LlmConfig {
 
     bool noMemory;
 
-    Path scratchArea = ProgramName ~ "/data/scratch";
+    Path scratchArea;
 
     Path[] thinkingTemplatesDir;
 
@@ -97,6 +97,8 @@ struct LlmConfig {
             dataSearch(ProgramName).resolve("memory".Path).match!((ResourceFile a) {
                 memoryArea ~= a.get;
             }, (_) {});
+        } else {
+            memoryArea = memoryArea.map!(a => replaceMagicWord(a)).array;
         }
 
         if (thinkingTemplatesDir.empty) {
@@ -105,6 +107,8 @@ struct LlmConfig {
 
         if (promptDir.empty) {
             promptDir = prioConfCwdDirs.map!(a => cast(Path)(a ~ "prompt")).array;
+        } else {
+            promptDir = promptDir.map!(a => replaceMagicWord(a)).array;
         }
 
         if (skillPathsSystem.empty) {
@@ -113,10 +117,15 @@ struct LlmConfig {
             dataSearch(ProgramName).resolve("skills".Path).match!((ResourceFile a) {
                 skillPathsSystem ~= a.get;
             }, (_) {});
+        } else {
+            skillPathsSystem = skillPathsSystem.map!(a => replaceMagicWord(a)).array;
         }
+        skillPathsUser = skillPathsUser.map!(a => replaceMagicWord(a)).array;
 
-        scratchArea = prioDataCwdDirs.resolve("scratch".Path)
-            .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;
+        if (scratchArea == Path.init) {
+            scratchArea = prioDataCwdDirs.resolve("scratch".Path)
+                .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;
+        }
     }
 
     // Directory where the LLM can work with assets, create files etc.
@@ -766,4 +775,17 @@ string getEnvApiKey() {
     import std.process : environment;
 
     return environment.get("OPENAI_API_KEY", null);
+}
+
+auto replaceMagicWord(T)(T variable) {
+    import std.string : replace;
+    import std.file : thisExePath;
+
+    immutable BinaryMagic = "@{llmfun}";
+
+    static if (is(T == Path) || is(T == AbsolutePath)) {
+        return T(variable.toString.replace(BinaryMagic, thisExePath));
+    } else {
+        return variable.replace(BinaryMagic, thisExePath);
+    }
 }
