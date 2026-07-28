@@ -84,6 +84,8 @@
 - Glob-Triggered Skill Activation (P2)
 - `allowed-tools` Permission Bypass (P2)
 - the check if a skill should be copied should also check the version and loadSkill should have a flag "overwrite". So if the skill match but is newer than the one in sandbox it should overwrite the sandbox.
+- skills should be part of the metrics that are collected. How often they are loaded etc
+- when copying/overwriting a skill it must not only check the name but also the version
 
 # memory
 ## Workflow Improvements
