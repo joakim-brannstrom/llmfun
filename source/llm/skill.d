@@ -220,6 +220,7 @@ class SkillManager {
 
         try {
             foreach (path; searchPaths.filter!(a => a.exists && a.isDir)) {
+                logger.tracef("Scanning '%s' for skills", path);
                 scanDirectory(path);
             }
 
