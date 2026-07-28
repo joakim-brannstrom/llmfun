@@ -112,7 +112,7 @@ ExecuteFuncResult readFile(Context baseCtx, string path, long startLine, long co
         foreach (line; File(path_).byLine.enumerate.filter!(a => a.index >= firstIdx
                 && a.index < lastIndex)) {
             if (appendLoc == 1) {
-                formattedWrite(buf, "%s→ ", line.index + 1);
+                formattedWrite(buf, "%s→", line.index + 1);
             }
             buf.put(line.value);
             buf.put('\n');
