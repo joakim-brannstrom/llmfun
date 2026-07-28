@@ -149,7 +149,7 @@ class Agent : IBasicAgent {
     }
 
     void addKeepReasoning() @safe nothrow {
-        chat.add(Message(role: Role.user, userQuery: false, content: "Please continue or call taskDone if you are finished",
+        chat.add(Message(role: Role.user, userQuery: false, content: "Did you stop because you asked the user a question? Then call taskDone with your question. Are you done with the current task? Then call taskDone. But if you do have more work to perfom to finish the current task then please continue.",
                 thinking: null));
     }
 
