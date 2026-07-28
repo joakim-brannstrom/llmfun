@@ -27,7 +27,7 @@ We deliberately **forego** a static reranker. Here is why:
 | **Strategy Switching** | Only looks at the *original* query. | If semantic search yields high-level fluff, the agent pivots to exact keyword search (FTS5) to find function names. |
 | **"Lost Treasure"** | If the answer isn't in the Top-50, it is missed forever. | The agent refines search terms and retries until it finds the data or exhausts its budget. |
 
-**Trade-off:** We trade *predictable latency* (fixed ~500ms for a reranker) for *higher accuracy*. To prevent infinite loops, the LLM is instructed via the thinking template to limit itself to 10 tool calls per objective, with a "Partial Answer" safety valve at 6-7 calls. Code-enforced limits (consecutive-failure detection) provide a last-resort safety net.
+**Trade-off:** We trade *predictable latency* (fixed ~500ms for a reranker) for *higher accuracy*. To prevent infinite loops, the LLM is instructed via the skill to limit itself to 10 tool calls per objective, with a "Partial Answer" safety valve at 6-7 calls. Code-enforced limits (consecutive-failure detection) provide a last-resort safety net.
 
 *(Note: While we don't have a Cross-Encoder, the LLM's internal reasoning effectively acts as a dynamic, multi-pass reranker, discarding irrelevant chunks as it reads them).*
 
@@ -52,7 +52,7 @@ The system exposes five core tools to the LLM. All search tools support a `datab
 The retrieval strategy is engineered to mitigate the specific cognitive weaknesses of LLMs—particularly poor keyword extraction, suboptimal query planning, and a tendency toward "random walk" behavior—while exploiting their strengths in contextual synthesis and iterative reasoning.
 
 ### A. Parallel Discovery Over Sequential Guessing
-The thinking template instructs the LLM to execute `queryBestMatch` and `listRAGDatabases` simultaneously on the first turn (Phase 0).
+The skill instructs the LLM to execute `queryBestMatch` and `listRAGDatabases` simultaneously on the first turn (Phase 0).
 
 - **Rationale:** In a sequential system, the LLM would guess a database scope, receive results (or none), guess another scope, and waste calls. By resolving the "search space" (`listRAGDatabases`) and the "content" (`queryBestMatch`) in parallel, the LLM eliminates two variables in a single turn. This immediately reduces the `"*"` wildcard noise problem (by providing concrete database names) without sacrificing broad recall.
 
@@ -75,17 +75,17 @@ Instead of allowing the LLM to cycle through `queryTextSearch` → `querySemanti
 
 ## 5. Design Rationale: Safety Mechanisms and Cost Control
 
-The safety mechanisms operate at two levels: **prompt engineering constraints** (instructed to the LLM via the thinking template) and **code-enforced limits** (hard stops in the agent loop). This dual-layer approach provides both graceful guidance and catastrophic failure protection.
+The safety mechanisms operate at two levels: **prompt engineering constraints** (instructed to the LLM via the skill) and **code-enforced limits** (hard stops in the agent loop). This dual-layer approach provides both graceful guidance and catastrophic failure protection.
 
 ### A. The 10-Call Budget (Prompt Engineering Constraint)
-The thinking template (`knowledge_retrieval`) instructs the LLM to use a maximum of **10 tool calls** per distinct knowledge-seeking objective. This includes `listRAGDatabases`, `queryTextSearch`, `querySemantic`, `queryBestMatch`, and `queryReadFile`.
+The skill (`knowledge-retrieval`) instructs the LLM to use a maximum of **10 tool calls** per distinct knowledge-seeking objective. This includes `listRAGDatabases`, `queryTextSearch`, `querySemantic`, `queryBestMatch`, and `queryReadFile`.
 
-- **Implementation:** This is a soft limit enforced by prompt instructions, not by code. The LLM is told to "STOP" after call 10 and synthesize its answer. The thinking template divides the budget into phases: Phase 0 (Call 1: discovery), Phase 1 (Calls 2-4: pivot), Phase 2 (Calls 5-8: dig/read), Phase 3 (Calls 9-10: verify).
+- **Implementation:** This is a soft limit enforced by prompt instructions, not by code. The LLM is told to "STOP" after call 10 and synthesize its answer. The skill divides the budget into phases: Phase 0 (Call 1: discovery), Phase 1 (Calls 2-4: pivot), Phase 2 (Calls 5-8: dig/read), Phase 3 (Calls 9-10: verify).
 - **Rationale (The Calculus):** Internal telemetry indicates that approximately 50% of all FTS5-based searches return zero results due to the implicit `AND` issue. A budget of 5 would leave the LLM with only 2 to 3 successful reads—insufficient for complex coding queries. A budget of 20 would push latency beyond acceptable thresholds (often exceeding 45-60 seconds) and bloat the context window with failed searches, confusing the model.
 - **The Sweet Spot (10):** With 10 calls, the LLM can afford 2 discovery probes, 3 to 4 targeted searches (absorbing the 50% failure rate), 2 to 3 individual line reads (`queryReadFile`), and 2 verification calls. This keeps total execution time under approximately 25-30 seconds while providing enough runway to dig through fragmented documentation.
 
 ### B. The Confidence Check (Prompt Engineering Constraint)
-The thinking template instructs the LLM that if, after **6-7 calls**, it does not have a complete answer, it should stop generating new search strategies and reserve the remaining calls exclusively for verification.
+The skill instructs the LLM that if, after **6-7 calls**, it does not have a complete answer, it should stop generating new search strategies and reserve the remaining calls exclusively for verification.
 
 - **Implementation:** This is a soft limit enforced by prompt instructions. The LLM is told to respond transparently: *"I found [X] (e.g., line 42 of auth.py), but [Y] was not found. Proceeding with [X]."*
 - **Rationale:** The law of diminishing returns applies sharply to RAG retrieval. If the core answer hasn't been found in the first 6 attempts, it is unlikely to be found in the 7th or 8th. Continuing to search at that point merely delays the inevitable. By forcing a shift to verification, we change the failure mode. Instead of timing out with an empty context, the LLM uses the final calls to validate the partial evidence it *does* have. This guarantees that even a "failed" retrieval results in a defensible, partially informed answer rather than a hallucination.
@@ -124,8 +124,8 @@ The LLM operates on its **Current Objective**, not the user's literal original u
 
 To optimize token usage and avoid "Lost-in-the-Middle" syndrome, we use a layered prompt approach:
 
-1. **System Prompt (Base Layer):** Contains only the tool definitions and the mandatory trigger (`getThinkingTemplate`).
-2. **Thinking Template (Dynamic Layer):** Contains the 10-call budget strategy, phase breakdown (Phase 0-3), FTS5 syntax warnings, and failure diagnosis scenarios. This is loaded *only* when the RAG system is about to be used, keeping the initial context window lean.
+1. **System Prompt (Base Layer):** Contains only the tool definitions and the mandatory trigger (`loadSkill`).
+2. **Skill (Dynamic Layer):** Contains the 10-call budget strategy, phase breakdown (Phase 0-3), FTS5 syntax warnings, and failure diagnosis scenarios. This is loaded *only* when the RAG system is about to be used, keeping the initial context window lean.
 
 ---
 
@@ -135,4 +135,4 @@ If you are new to this system, remember these three golden rules:
 
 1. **Do not add a Cross-Encoder reranker.** The agentic loop already handles relevance sorting dynamically via the LLM's reasoning and is far more flexible for multi-document stitching.
 2. **Never hard-code a search type.** Always let the LLM diagnose the failure (Noise vs. Zero-Result vs. Conceptual) before pivoting. `queryBestMatch` is the safe default.
- 3. **Respect the 10-Call Budget.** The thinking template instructs the LLM to limit itself to 10 tool calls per objective. If the LLM exceeds this (it can, since it's a prompt instruction, not a code limit), it is a sign we need better RAG index quality, not a larger budget. Raising the budget drastically increases latency and context confusion.
+ 3. **Respect the 10-Call Budget.** The skill instructs the LLM to limit itself to 10 tool calls per objective. If the LLM exceeds this (it can, since it's a prompt instruction, not a code limit), it is a sign we need better RAG index quality, not a larger budget. Raising the budget drastically increases latency and context confusion.
