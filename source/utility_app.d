@@ -200,7 +200,7 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
     import llm.tool_call.io;
     import llm.tool_call.sandbox;
     import llm.tool_call.memory;
-    import llm.tool_call.think;
+    import llm.tool_call.completion : CompletionContext;
     import llm.config;
 
     auto llmConf = readConfig(Path(), false, true).userToLlmConfig(conf);
@@ -210,7 +210,7 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
     class DummyCtx : Context {
     }
 
-    static class DummyContext : SandboxContext, FileContext, MemoryContext, ThinkingContext {
+    static class DummyContext : SandboxContext, FileContext, MemoryContext, CompletionContext {
         override bool isPathInsideWorkArea(AbsolutePath p) {
             return true;
         }
@@ -240,10 +240,6 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
             return Path("scratch/memory") ~ (topic ~ ".md");
         }
 
-        override Path getThinkingTemplatesDir() {
-            return Path("scratch/thinking");
-        }
-
         override ToolLimits getToolLimits() {
             return ToolLimits();
         }
@@ -255,8 +251,6 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
     auto ctx = new DummyContext;
 
     // writeln(getMemoryTopics(ctx));
-    writeln(listThinkingTemplates(ctx));
-    // writeln(getThinkingTemplate(ctx, "system_design"));
 
     return 0;
 }

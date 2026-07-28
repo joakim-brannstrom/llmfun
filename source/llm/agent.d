@@ -28,7 +28,7 @@ import llm.metric.feedback : FeedbackEngine;
 import llm.metric.monitor : MetricMonitor, ToolCallEvent;
 import llm.query : LlmRequester;
 import llm.rag.rag : RAG;
-import llm.skill : SkillManager;
+import llm.skill : SkillManager, makeSkillManager;
 import llm.summary_agent;
 import llm.tool_call : FunctionCall, Context;
 import llm.tool_call.io : FileContext, VisionContext;
@@ -38,7 +38,7 @@ import llm.tool_call.pipeline : PipelineControlContext;
 import llm.tool_call.rag : RAGContext;
 import llm.tool_call.sandbox : SandboxContext;
 import llm.tool_call.skill : SkillContext;
-import llm.tool_call.think : ThinkingContext;
+import llm.tool_call.completion : CompletionContext;
 import llm.utility : getValue;
 import llm.workarea;
 
@@ -71,10 +71,15 @@ class Agent : IBasicAgent {
     }
 
     this(string name, LlmConfig llmConf, MetricMonitor monitor, RAG rag = null) {
-        this(name, llmConf, monitor, rag, ReFilter.init);
+        this(name, llmConf, makeSkillManager(llmConf), monitor, rag, ReFilter.init);
     }
 
     this(string name, LlmConfig llmConf, MetricMonitor monitor, RAG rag, ReFilter filter) {
+        this(name, llmConf, makeSkillManager(llmConf), monitor, rag, filter);
+    }
+
+    this(string name, LlmConfig llmConf, SkillManager mgr, MetricMonitor monitor,
+            RAG rag, ReFilter filter) {
         import llm.tool_call : descAllFunctions, filterToolDescriptions;
 
         this.name = name;
@@ -82,11 +87,13 @@ class Agent : IBasicAgent {
         this.rag = rag;
         this.toolFilter = filter;
         this.toolCtx = new AgentContext(this, llmConf);
+        toolCtx.skillManager = mgr;
 
         resetModel(llmConf.activeCodeModel);
 
         this.summary = SummaryAgent(llmConf.summaryModel);
-        this.summary.setSystemPrompt(llmConf.getPrompt(llmConf.summaryModel.prompt));
+        this.summary.setSystemPrompt(llmConf.getPrompt(skillManager: null,
+                promptName: llmConf.summaryModel.prompt, addSkills: false));
     }
 
     override string id() {
@@ -138,10 +145,6 @@ class Agent : IBasicAgent {
 
     void setPipelineContext(PipelineControlContext ctx) @trusted {
         toolCtx.pipelineCtx = ctx;
-    }
-
-    void setSkillManager(SkillManager mgr) @safe {
-        toolCtx.skillManager = mgr;
     }
 
     void addUserQuery(string query) nothrow {
@@ -489,7 +492,7 @@ struct VisionImage {
 }
 
 class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryContext,
-    ThinkingContext, MetricsContext, PipelineControlContext, VisionContext, SkillContext {
+    CompletionContext, MetricsContext, PipelineControlContext, VisionContext, SkillContext {
         import llm.vfs : FlatVfs;
 
         private {
@@ -499,7 +502,6 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             Agent agent;
             PipelineControlContext pipelineCtx;
             FlatVfs memoryVfs;
-            FlatVfs thinkingVfs;
 
             SysTime nextMetricCalculation;
 
@@ -515,7 +517,6 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             this.agent = agent;
 
             this.memoryVfs = FlatVfs(conf.memoryArea);
-            this.thinkingVfs = FlatVfs(conf.thinkingTemplatesDir);
         }
 
         ~this() {
@@ -632,19 +633,6 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             }, (_) {});
 
             return memoryVfs.remove(topic ~ ".md");
-        }
-
-        override string[] getThinkingTemplates() {
-            try {
-                return thinkingVfs.getAllFiles.map!(a => a.baseName.stripExtension).array;
-            } catch (Exception e) {
-                logger.warning("unable to read thinking directories: ", e.msg);
-            }
-            return null;
-        }
-
-        override Optional!string readThinkingTemplate(string name) {
-            return thinkingVfs.read(name ~ ".md");
         }
 
         override ref MetricsCalculator getCalculator() {

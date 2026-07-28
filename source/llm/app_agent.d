@@ -24,7 +24,7 @@ import llm.pipeline : prettyPrint;
 import llm.plan;
 import llm.query;
 import llm.rag.rag : RAG;
-import llm.skill : SkillManager, buildAlwaysApplyBlock;
+import llm.skill : SkillManager, buildAlwaysApplyBlock, makeSkillManager;
 import llm.tui;
 import llm.utility;
 import llm.types : ServerStat, StreamMessage, StreamToolCall;
@@ -363,47 +363,6 @@ struct AgentApp {
         }
     }
 
-    SkillManager makeSkillManager(ref LlmConfig llmConf) {
-        SkillManager rval;
-        if (!llmConf.disableSkills) {
-            try {
-                rval = new SkillManager();
-                rval.discover(llmConf.skillPaths.map!(a => AbsolutePath(a)).array);
-            } catch (Exception e) {
-                logger.errorf("Skill discovery failed: %s. Continuing without skills.", e.msg);
-                rval = new SkillManager();
-            }
-        } else {
-            rval = new SkillManager();
-        }
-        return rval;
-    }
-
-    // Compose system prompt with skills
-    string makePrompt(SkillManager skillManager, string basePrompt) {
-        string fullPrompt;
-
-        if (!llmConf.disableSkills) {
-            // Always-apply block: prepend
-            string alwaysApplyBlock = buildAlwaysApplyBlock(skillManager.getAlwaysApplySkills(),
-                    llmConf.maxAlwaysApplyTokens);
-
-            // Manifest: append
-            string manifestXml = skillManager.getManifestXml(llmConf.maxManifestSkills);
-
-            if (!alwaysApplyBlock.empty || !manifestXml.empty) {
-                fullPrompt = alwaysApplyBlock ~ (alwaysApplyBlock.empty
-                        ? "" : "\n") ~ basePrompt ~ "\n\n" ~ manifestXml;
-            } else {
-                fullPrompt = basePrompt;
-            }
-        } else {
-            fullPrompt = basePrompt;
-        }
-
-        return fullPrompt;
-    }
-
     int run(UserConfig uconf) {
         makeDefaultFileStructure();
         if (conf_.setupDirs)
@@ -416,15 +375,15 @@ struct AgentApp {
         if (rag is null)
             return 1;
 
-        agentHistory = llmConf.scratchArea;
-        monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
-        agent_ = new Agent("main", llmConf, monitor, rag, llmConf.toolFilter.to());
-        agent_.loadHistory(agentHistory);
-
         // Skill discovery
         skillManager_ = makeSkillManager(llmConf);
-        agent_.setSystemPrompt(makePrompt(skillManager_, llmConf.getPrompt(llmConf.agentPrompt)));
-        agent_.setSkillManager(skillManager_);
+
+        agentHistory = llmConf.scratchArea;
+        monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
+        agent_ = new Agent("main", llmConf, skillManager_, monitor, rag, llmConf.toolFilter.to());
+        agent_.loadHistory(agentHistory);
+        agent_.setSystemPrompt(llmConf.getPrompt(skillManager: skillManager_,
+                promptName: llmConf.agentPrompt, addSkills: true));
 
         lastServerStat.context = agent_.chat.approxContextSize;
         scope (exit)

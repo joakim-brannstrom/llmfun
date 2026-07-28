@@ -128,7 +128,7 @@ If there are no topics to consolidate or remove, output:
 {"consolidation_result": {"merged": [], "removed": [], "new_topics": []}}
 };
 
-    auto consolidationAgent = new Agent("consolidation", llmConf, monitor, rag, ReFilter.init);
+    auto consolidationAgent = new Agent("consolidation", llmConf, monitor, rag);
     consolidationAgent.addUserQuery(consolidationPrompt);
 
     sendChatMessage(format!"[system]: Running memory consolidation (session #%d)..."(

@@ -62,7 +62,7 @@ ExecuteFuncResult executeCode(Context baseCtx, string path, string language) {
     }
 }
 
-@Function("Execute d code with dub in sandbox. Parameter command: build or test. See getThinkingTemplate('dlang_dub') for more information. Returns JSON with exit_code and output")
+@Function("Execute d code with dub in sandbox. Parameter command: build or test. See loadSkill('dlang', ...) for more information. Returns JSON with exit_code and output")
 ExecuteFuncResult executeDCodeWithDub(Context baseCtx, string path, string command) {
     mixin(baseContextToSpecific!SandboxContext);
 

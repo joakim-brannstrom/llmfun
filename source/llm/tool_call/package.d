@@ -41,6 +41,10 @@ FunctionDesc[] getFunctions() @trusted nothrow @nogc {
 
 // only called at program start single threaded.
 void addFunction(FunctionDesc f) {
+    if (registeredFunc.canFind!(fd => fd.name == f.name)) {
+        logger.warningf("Duplicate tool function '%s' registered, ignoring", f.name);
+        return;
+    }
     registeredFunc ~= cast(shared) f;
 }
 

@@ -13,8 +13,25 @@ import std.typecons : Nullable, nullable;
 
 import my.file : copyRecurse;
 import my.path : AbsolutePath, Path;
-
 import dyaml;
+
+import llm.config : LlmConfig;
+
+SkillManager makeSkillManager(ref LlmConfig llmConf) {
+    SkillManager rval;
+    if (!llmConf.disableSkills) {
+        try {
+            rval = new SkillManager();
+            rval.discover(llmConf.skillPaths.map!(a => AbsolutePath(a)).array);
+        } catch (Exception e) {
+            logger.errorf("Skill discovery failed: %s. Continuing without skills.", e.msg);
+            rval = new SkillManager();
+        }
+    } else {
+        rval = new SkillManager();
+    }
+    return rval;
+}
 
 struct Skill {
     string name;

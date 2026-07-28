@@ -14,6 +14,7 @@ import std.string : toLower, startsWith;
 import my.path;
 
 import llm.query : RequestConfig;
+import llm.skill : SkillManager;
 public import llm.common.embedder;
 public import llm.common.config;
 
@@ -61,8 +62,6 @@ struct LlmConfig {
 
     Path scratchArea;
 
-    Path[] thinkingTemplatesDir;
-
     Path[] promptDir;
 
     Path[] skillPathsUser;
@@ -99,10 +98,6 @@ struct LlmConfig {
             }, (_) {});
         } else {
             memoryArea = memoryArea.map!(a => replaceMagicWord(a)).array;
-        }
-
-        if (thinkingTemplatesDir.empty) {
-            thinkingTemplatesDir = prioConfCwdDirs.map!(a => cast(Path)(a ~ "thinking")).array;
         }
 
         if (promptDir.empty) {
@@ -371,7 +366,7 @@ struct LlmConfig {
         return ragSecondary.byValue.joiner.array;
     }
 
-    string getPrompt(string prompt) {
+    private string getBasePrompt(string prompt) {
         import llm.vfs : FlatVfs;
 
         auto vfs = FlatVfs(promptDir);
@@ -380,6 +375,36 @@ struct LlmConfig {
             throw new Exception("System prompt not found: " ~ prompt);
             return null;
         });
+    }
+
+    // Compose system prompt with skills
+    string getPrompt(SkillManager skillManager, string promptName = null, bool addSkills = true) {
+        import llm.skill : buildAlwaysApplyBlock;
+
+        string basePrompt = promptName.empty ? getBasePrompt(agentPrompt) : getBasePrompt(
+                promptName);
+
+        string fullPrompt;
+
+        if (!disableSkills && addSkills) {
+            // Always-apply block: prepend
+            string alwaysApplyBlock = buildAlwaysApplyBlock(skillManager.getAlwaysApplySkills(),
+                    maxAlwaysApplyTokens);
+
+            // Manifest: append
+            string manifestXml = skillManager.getManifestXml(maxManifestSkills);
+
+            if (!alwaysApplyBlock.empty || !manifestXml.empty) {
+                fullPrompt = alwaysApplyBlock ~ (alwaysApplyBlock.empty
+                        ? "" : "\n") ~ basePrompt ~ "\n\n" ~ manifestXml;
+            } else {
+                fullPrompt = basePrompt;
+            }
+        } else {
+            fullPrompt = basePrompt;
+        }
+
+        return fullPrompt;
     }
 
     Path[] skillPaths() @safe {
