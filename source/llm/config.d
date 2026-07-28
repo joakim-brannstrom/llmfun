@@ -65,7 +65,8 @@ struct LlmConfig {
 
     Path[] promptDir;
 
-    Path[] skillPaths;
+    Path[] skillPathsUser;
+    Path[] skillPathsSystem;
     long maxManifestSkills = 200;
     long maxAlwaysApplyTokens = 4000;
     bool disableSkills = false;
@@ -106,11 +107,11 @@ struct LlmConfig {
             promptDir = prioConfCwdDirs.map!(a => cast(Path)(a ~ "prompt")).array;
         }
 
-        if (skillPaths.empty) {
+        if (skillPathsSystem.empty) {
             if (cwdConfig)
-                skillPaths ~= (ProgramName ~ "/skills").Path;
+                skillPathsSystem ~= (ProgramName ~ "/skills").Path;
             dataSearch(ProgramName).resolve("skills".Path).match!((ResourceFile a) {
-                skillPaths ~= a.get;
+                skillPathsSystem ~= a.get;
             }, (_) {});
         }
 
@@ -370,6 +371,10 @@ struct LlmConfig {
             throw new Exception("System prompt not found: " ~ prompt);
             return null;
         });
+    }
+
+    Path[] skillPaths() @safe {
+        return skillPathsUser ~ skillPathsSystem;
     }
 }
 
