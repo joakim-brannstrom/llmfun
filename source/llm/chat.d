@@ -64,10 +64,12 @@ struct Chat {
     }
 
     MessageT[] lastResponses() @safe nothrow {
-        if (history.empty || prevIndex == history.length)
+        // nothing has happend in the history
+        if (history.length <= 1 || prevIndex == history.length)
             return null;
+        // after a compression
         if (prevIndex >= history.length)
-            prevIndex = min(history.length, 1);
+            prevIndex = 1;
         return history[prevIndex .. $];
     }
 
