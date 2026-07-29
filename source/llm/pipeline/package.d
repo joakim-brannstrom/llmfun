@@ -842,6 +842,9 @@ version (unittest) {
             return _id;
         }
 
+        override void setStreamUpdate(IStreamCallback _) {
+        }
+
         override void addUserQuery(string query) {
             _hasQuery = true;
         }
@@ -853,13 +856,7 @@ version (unittest) {
                 SummaryAgent.ProgressCallback compressCallback = null,
                 bool delegate() interrupt = null) {
             Thread.sleep(_sleepDuration);
-            ProcessResult result;
-            result.status = ProcessResult.Status.ok;
-            result.chat = [];
-            result.hasToolCall = false;
-            result.timing = JSONValue(null);
-            result.usage = JSONValue(null);
-            return result;
+            return ProcessResult.init;
         }
     }
 
@@ -880,6 +877,9 @@ version (unittest) {
             return _id;
         }
 
+        override void setStreamUpdate(IStreamCallback _) {
+        }
+
         override void addUserQuery(string query) {
             _receivedQueries ~= query;
         }
@@ -895,13 +895,7 @@ version (unittest) {
             if (_ctx)
                 _ctx.setPipelineOutput(_outputToSet);
 
-            ProcessResult result;
-            result.status = ProcessResult.Status.ok;
-            result.chat = [];
-            result.hasToolCall = false;
-            result.timing = JSONValue(null);
-            result.usage = JSONValue(null);
-            return result;
+            return ProcessResult.init;
         }
     }
 
@@ -921,6 +915,9 @@ version (unittest) {
 
         override string id() {
             return _id;
+        }
+
+        override void setStreamUpdate(IStreamCallback _) {
         }
 
         override void addUserQuery(string query) {
@@ -943,13 +940,7 @@ version (unittest) {
                 }
             }
 
-            ProcessResult result;
-            result.status = ProcessResult.Status.ok;
-            result.chat = [];
-            result.hasToolCall = false;
-            result.timing = JSONValue(null);
-            result.usage = JSONValue(null);
-            return result;
+            return ProcessResult.init;
         }
     }
 

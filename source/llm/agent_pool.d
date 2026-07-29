@@ -159,12 +159,8 @@ version (unittest) {
         override ProcessResult runToCompletion(void delegate(ProcessResult) step = null,
                 SummaryAgent.ProgressCallback compressCallback = null,
                 bool delegate() interrupt = null) {
-            auto result = ProcessResult();
+            ProcessResult result;
             result.status = status;
-            result.chat = [];
-            result.hasToolCall = false;
-            result.timing = JSONValue(null);
-            result.usage = JSONValue(null);
             return result;
         }
     }
