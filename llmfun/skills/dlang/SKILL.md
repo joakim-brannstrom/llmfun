@@ -19,6 +19,8 @@ Use this skill when:
 - Working with D source code files
 - Configuring dub project files (dub.sdl or dub.json)
 - Compiling or running D programs
+- Diagnosing build environment issues
+- Checking D source syntax or brace balance
 
 ## Key Concepts
 
@@ -28,10 +30,10 @@ Use this skill when:
 
 ## Rules
 
-- **Always use dub**: Build and test D projects through dub, not manual compilation.
-- **Use executeDCodeWithDub**: Prefer this tool over generic code execution for D projects.
+- **Always use dub**: Build and test through dub, not manual compilation.
+- **Prefer executeDCodeWithDub**: Use this tool over generic code execution.
 - **Check dub config first**: Read `dub.sdl` or `dub.json` before building to understand project structure.
-- **Verify build output**: Check the `targetPath` directory (default: `build/`) for compiled artifacts.
+- **Verify build output**: Check the `targetPath` directory (default: `./`) for compiled artifacts.
 
 ## Workflow
 
@@ -41,18 +43,32 @@ Use this skill when:
 4. **Execute with dub**: Call `executeDCodeWithDub` with the project path and command.
 5. **Verify results**: Check output for errors or test results.
 
+## Utility Scripts
+
+See `scripts/README.md` for full documentation. Quick reference:
+
+| Script | Purpose |
+|--------|---------|
+| `find_d_toolchain.py` | Find ldc2, dmd, gdc, dub |
+| `check_d_syntax.py` | Syntax-check .d files via ldc2 |
+| `dub_build.py` | Build/test dub projects |
+| `count_d_loc.py` | Count LOC in D source |
+| `check_braces.py` / `.d` | Verify brace balance |
+| `check_build_tools.py` | Verify build environment |
+| `find_c_libs.py` | Find C/C++ library dependencies |
+| `gen_dub_deps.py` | Generate dub.sdl dependency entries |
+
 ## Minimal dub.sdl Configuration
 
 ```sdl
 name "program"
-description "A minimal D application."
-
 targetPath "build"
 targetType "executable"
 ```
 
-This minimal config reads and compiles all files in the source directory. For more configuration options, see `references/dub-config.md`.
+This minimal config reads and compiles all files in the source directory.
 
 ## References
 
 - Dub configuration guide: `references/dub-config.md`
+- Scripts: `scripts/README.md`
