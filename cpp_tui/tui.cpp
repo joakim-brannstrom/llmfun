@@ -129,14 +129,8 @@ bool isWhitespaceOnly(const std::string& s) {
     return allTrue;
 }
 
-void textUnformattedMultiline(std::string_view text) {
-    auto begin = text.begin();
-    auto end = text.end();
-    while (begin != end) {
-        auto next = std::find(begin, end, '\n');
-        ImGui::TextUnformatted(begin, next);
-        begin = (next != end) ? next + 1 : end;
-    }
+void textUnformattedMultiline(ImGui::MarkdownConfig& mdConfig, std::string_view text) {
+    ImGui::Markdown(text.data(), text.length(), mdConfig);
 }
 
 size_t countNewLines(const std::string& str) { return std::count(str.begin(), str.end(), '\n'); }
@@ -273,7 +267,7 @@ static void renderAgentStream(TuiState& state, const int agentIndex, const int64
             if (ImGui::TreeNodeEx(thinkId.c_str(), thinkFlags)) {
                 thinkGuard.pop();
                 ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-                textUnformattedMultiline(msg.thinking);
+                textUnformattedMultiline(state.mdConfig, msg.thinking);
                 ImGui::PopTextWrapPos();
                 renderSeparator("End ", "-", ImGui::GetContentRegionMax().x - 4, true);
                 ImGui::TreePop();
@@ -281,7 +275,7 @@ static void renderAgentStream(TuiState& state, const int agentIndex, const int64
         }
 
         ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-        textUnformattedMultiline(msg.content);
+        textUnformattedMultiline(state.mdConfig, msg.content);
         ImGui::PopTextWrapPos();
 
         ImGui::Unindent();
@@ -311,7 +305,7 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
         if (ImGui::TreeNodeEx(thinkId.c_str(), ImGuiTreeNodeFlags_Framed)) {
             thinkGuard.pop();
             ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-            textUnformattedMultiline(entry.thinking);
+            textUnformattedMultiline(state.mdConfig, entry.thinking);
             ImGui::PopTextWrapPos();
             renderSeparator("End ", "-", ImGui::GetContentRegionMax().x - 4, true);
             ImGui::TreePop();
@@ -319,7 +313,7 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
     }
 
     ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-    textUnformattedMultiline(entry.text);
+    textUnformattedMultiline(state.mdConfig, entry.text);
     ImGui::PopTextWrapPos();
 
     // offset to avoid collision with thinking ID
@@ -369,7 +363,7 @@ static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2
             if (ImGui::TreeNodeEx(thinkId.c_str(), thinkFlags)) {
                 thinkGuard.pop();
                 ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-                textUnformattedMultiline(entry.thinking);
+                textUnformattedMultiline(state.mdConfig, entry.thinking);
                 ImGui::PopTextWrapPos();
                 renderSeparator("End ", "-", ImGui::GetContentRegionMax().x - 4, true);
                 ImGui::TreePop();
@@ -377,7 +371,7 @@ static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2
         }
 
         ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-        textUnformattedMultiline(entry.text);
+        textUnformattedMultiline(state.mdConfig, entry.text);
         ImGui::PopTextWrapPos();
 
         std::string buttonId = " [c] ##" + std::to_string(entry.id);

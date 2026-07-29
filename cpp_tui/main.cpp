@@ -56,6 +56,15 @@ int main() {
         // }
     }
 
+    tuiAddChatMessage(
+        state, ChatMessageParam{
+                   makeStr("a code block"),
+                   makeStr("Some content before.\n\n```json\n{\"key\": \"value\", \"nested\": [1, "
+                           "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n"),
+                   makeStr("Some thinking before.\n\n```json\n{\"key\": \"value\", \"nested\": [1, "
+                           "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n"),
+                   TuiChatMessageType_Assistant});
+
     auto addPipelineAgents = [&state]() {
         for (int ii = 0; ii < 40; ++ii) {
             const auto i = ii % 16;
