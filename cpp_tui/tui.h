@@ -176,6 +176,15 @@ struct ChatTab {
 
 enum class ActiveTab { chat, log, agentStream };
 
+struct MarkdownStyle {
+    ImVec4 heading[4] = {ImVec4(1.0f, 0.9f, 0.2f, 1.0f), ImVec4(0.2f, 1.0f, 1.0f, 1.0f),
+                         ImVec4(0.5f, 1.0f, 0.2f, 1.0f), ImVec4(0.8f, 0.8f, 0.8f, 1.0f)};
+    std::string headingPrefix[4] = {"# ", "## ", "### ", "> "};
+
+    ImVec4 strong = ImVec4(1.0f, 1.0f, 0.8f, 1.0f);
+    ImVec4 italic = ImVec4(0.3f, 0.9f, 0.9f, 1.0f);
+};
+
 struct TuiState {
     bool isLogActive{false};
     std::string iniFilename;
@@ -189,6 +198,7 @@ struct TuiState {
     std::deque<LogMessage> logMessages;
     static constexpr size_t MaxLogMessages = 1000;
 
+    MarkdownStyle mdStyle;
     ImGui::MarkdownConfig mdConfig;
 
     bool autoScroll = true;

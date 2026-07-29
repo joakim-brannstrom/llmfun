@@ -57,13 +57,16 @@ int main() {
     }
 
     tuiAddChatMessage(
-        state, ChatMessageParam{
-                   makeStr("a code block"),
-                   makeStr("Some content before.\n\n```json\n{\"key\": \"value\", \"nested\": [1, "
-                           "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n"),
-                   makeStr("Some thinking before.\n\n```json\n{\"key\": \"value\", \"nested\": [1, "
-                           "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n"),
-                   TuiChatMessageType_Assistant});
+        state,
+        ChatMessageParam{
+            makeStr("a code block"),
+            makeStr(
+                "# Heading1\nsmurf\n\n## Heading2\nsmurf\n\n### Heading 3\nsmurf\n\nSome content "
+                "before.\n**bold**\n*italic*\n\n```json\n{\"key\": \"value\", \"nested\": [1, "
+                "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n"),
+            makeStr("Some thinking before.\n\n```json\n{\"key\": \"value\", \"nested\": [1, "
+                    "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n"),
+            TuiChatMessageType_Assistant});
 
     auto addPipelineAgents = [&state]() {
         for (int ii = 0; ii < 40; ++ii) {
