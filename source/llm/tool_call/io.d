@@ -301,14 +301,16 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
         auto newRange = parts[1];
         enforce(newRange.startsWith("+"), format!"New range must start with '+': %s"(line));
         newRange = newRange[1 .. $];
+        long newStart;
         size_t newCount;
         if (newRange.indexOf(',') != -1) {
-            newCount = newRange.split(",")[1].to!size_t;
+            auto rp = newRange.split(",");
+            newStart = rp[0].to!long;
+            newCount = rp[1].to!size_t;
         } else {
+            newStart = newRange.to!long;
             newCount = 1;
         }
-
-        // Hunks must apply sequentially to the original file
         if (oldPos < fileIdx)
             throw new Exception(format!"Hunk tries to go backward (oldStart=%d, current file position=%d)"(oldStart,
                     fileIdx + 1));
@@ -326,7 +328,7 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
 
         lineIdx++; // consume the '@@' line
         size_t processedOld = 0; // count of '-' and ' ' lines in this hunk
-        size_t processedNew = 0; // count of '+' lines
+        size_t processedNew = 0; // count of '+' and ' ' lines in this hunk
 
         // Process hunk body lines
         while (lineIdx < diffLines.length && !diffLines[lineIdx].startsWith("@@")
@@ -342,7 +344,7 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
             auto content = hunkLine[1 .. $];
 
             switch (firstChar) {
-            case ' ': // context line
+            case ' ': // context line - present in both old and new
                 enforce(fileIdx < fileLines.length,
                         format!"Unexpected end of file at line %d (hunk context)"(fileIdx + 1));
                 enforce(fileLines[fileIdx] == content,
@@ -351,12 +353,13 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
                 result ~= fileLines[fileIdx];
                 fileIdx++;
                 processedOld++;
+                processedNew++;
                 break;
-            case '-': // removal line (part of original file)
+            case '-': // removal line (consumed from old file, not added to result)
                 fileIdx++;
                 processedOld++;
                 break;
-            case '+': // addition line (goes into result, does not consume file line)
+            case '+': // addition line (goes into result, does not consume old file line)
                 result ~= content;
                 processedNew++;
                 break;
@@ -370,13 +373,13 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
         // Validate the counts declared in the header
         enforce(processedOld == oldCount,
                 format!"Hunk @@ -%d,%d +%d,%d @@ consumes %d old lines but header declares %d"(oldStart,
-                    oldCount, cast(long) oldStart, newCount, processedOld, oldCount));
+                    oldCount, newStart, newCount, processedOld, oldCount));
         enforce(processedNew == newCount,
                 format!"Hunk @@ -%d,%d +%d,%d @@ produces %d new lines but header declares %d"(oldStart,
-                    oldCount, cast(long) oldStart, newCount, processedNew, newCount));
+                    oldCount, newStart, newCount, processedNew, newCount));
     }
 
-    // Append remaining file lines
+    // Append remaining file lines after the last hunk
     while (fileIdx < fileLines.length) {
         result ~= fileLines[fileIdx];
         fileIdx++;
@@ -420,6 +423,96 @@ unittest {
     assert(result2[7] == `writeln("Line 88");`);
     assert(result2[8] == `writeln("Line 9");`);
     assert(result2[9] == `writeln("Line 10");`);
+}
+
+// Test: context lines with additions (Bug #1: processedNew must count context lines)
+unittest {
+    // dfmt off
+    auto content = [
+        "int main() {",
+        "    int a = 1;",
+        "    int b = 2;",
+        "    int c = 3;",
+        "    return 0;",
+        "}"
+    ];
+
+    // Patch from @@ -1,6 +1,6 @@ — only one line changed, rest is context
+    auto diff = [
+        "--- a/test.c",
+        "+++ b/test.c",
+        "@@ -1,6 +1,6 @@",
+        " int main() {",
+        "-    int a = 1;",
+        "+    int a = 10;",
+        "     int b = 2;",
+        "     int c = 3;",
+        "     return 0;",
+        " }",
+    ];
+    // dfmt on
+
+    auto result = applyDiffMemory(content, diff);
+    assert(result.length == 6,
+            "Context+additions: expected 6 lines but got " ~ result.length.to!string);
+    assert(result[0] == "int main() {");
+    assert(result[1] == "    int a = 10;");
+    assert(result[2] == "    int b = 2;");
+    assert(result[3] == "    int c = 3;");
+    assert(result[4] == "    return 0;");
+    assert(result[5] == "}");
+}
+
+// Test: context lines with removals
+unittest {
+    // dfmt off
+    auto content = [
+        "int main() {",
+        "    int a = 1;",
+        "    int b = 2;",
+        "    int c = 3;",
+        "    return 0;",
+        "}"
+    ];
+
+    // Remove one line, rest is context
+    auto diff = [
+        "--- a/test.c",
+        "+++ b/test.c",
+        "@@ -1,6 +1,5 @@",
+        " int main() {",
+        "-    int a = 1;",
+        "     int b = 2;",
+        "     int c = 3;",
+        "     return 0;",
+        " }",
+    ];
+    // dfmt on
+
+    auto result = applyDiffMemory(content, diff);
+    assert(result.length == 5,
+            "Context+removals: expected 5 lines but got " ~ result.length.to!string);
+    assert(result[0] == "int main() {");
+    assert(result[1] == "    int b = 2;");
+    assert(result[2] == "    int c = 3;");
+    assert(result[3] == "    return 0;");
+    assert(result[4] == "}");
+}
+
+// Test: context-only patch (no additions or removals, just verifying context matches)
+unittest {
+    auto content = ["line1", "line2", "line3",];
+
+    auto diff = [
+        "--- a/test.txt", "+++ b/test.txt", "@@ -1,3 +1,3 @@", " line1", " line2",
+        " line3",
+    ];
+
+    auto result = applyDiffMemory(content, diff);
+    assert(result.length == 3, "Context-only: expected 3 lines but got " ~ result.length.to!string);
+    assert(result[0] == "line1");
+    assert(result[1] == "line2");
+    assert(result[2] == "line3");
 }
 
 unittest {
