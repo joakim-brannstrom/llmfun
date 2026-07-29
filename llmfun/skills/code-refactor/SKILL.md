@@ -63,3 +63,16 @@ Report refactoring tasks using the structure in `references/output-format.md`.
 
 - Detailed workflow: `references/workflow.md`
 - Output format template: `references/output-format.md`
+- Utility scripts: `scripts/README.md`
+
+## Utility Scripts
+
+See `scripts\/README.md` for full documentation. Quick reference:
+
+| Script | Purpose |
+|--------|---------|
+| `fix_escaping.py` | Fix string escaping issues (regex, cross-language) |
+| `rename_ident.py` | Safely rename identifiers with word boundaries |
+| `revert_changes.py` | Revert changes using backup files |
+| `fix_indent.py` | Fix indentation (tabs/spaces, alignment) |
+
