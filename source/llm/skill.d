@@ -236,9 +236,14 @@ class SkillManager {
         skippedCount = 0;
 
         try {
+            bool[string] scanned;
+
             foreach (path; searchPaths.filter!(a => a.exists && a.isDir)) {
-                logger.tracef("Scanning '%s' for skills", path);
-                scanDirectory(path);
+                if (path !in scanned) {
+                    logger.tracef("Scanning '%s' for skills", path);
+                    scanDirectory(path);
+                    scanned[path] = true;
+                }
             }
 
             foreach (path; searchPaths.filter!(a => !a.exists || !a.isDir)) {
