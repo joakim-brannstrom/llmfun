@@ -123,78 +123,13 @@ void tuiShutdown(TuiScreen* screen) {
     backendInitialized = false;
 }
 
-void markdownFormatCallback(const ImGui::MarkdownFormatInfo& markdownFormatInfo_, bool start_) {
-#ifdef IMGUI_HAS_TEXTURES
-    ImGui::defaultMarkdownFormatCallback(markdownFormatInfo_, start_);
-#else
-    auto* userData =
-        reinterpret_cast<::llmfun::tui::TuiState*>(markdownFormatInfo_.config->userData);
-    auto& style = userData->mdStyle;
-
-    switch (markdownFormatInfo_.type) {
-    case ImGui::MarkdownFormatType::HEADING:
-        if (start_) {
-            const auto idx =
-                std::min((markdownFormatInfo_.level > 0 ? markdownFormatInfo_.level : 1) - 1, 3);
-            ImGui::PushStyleColor(ImGuiCol_Text, style.heading[idx]);
-            ImGui::TextUnformatted(style.headingPrefix[idx].c_str());
-            ImGui::SameLine(0.0f, 0.0f);
-        } else {
-            ImGui::PopStyleColor();
-        }
-        break;
-    case ImGui::MarkdownFormatType::EMPHASIS: {
-        const char* marker;
-        ImVec4 color;
-        if (markdownFormatInfo_.level == 1) {
-            marker = "_";
-            color = style.italic;
-        } else {
-            marker = "**";
-            color = style.strong;
-        }
-        if (start_) {
-            ImGui::PushStyleColor(ImGuiCol_Text, color);
-            ImGui::TextUnformatted(marker);
-            ImGui::SameLine(0.0f, 0.0f);
-        } else {
-            ImGui::SameLine(0.0f, 0.0f);
-            ImGui::TextUnformatted(marker);
-            ImGui::PopStyleColor();
-        }
-    } break;
-    default:
-        ImGui::defaultMarkdownFormatCallback(markdownFormatInfo_, start_);
-        break;
-    }
-#endif
-}
-
 TuiState* tuiCreateState(void) {
     ::llmfun::tui::TuiState* inner = nullptr;
-
-    auto initMdConfig = [](ImGui::MarkdownConfig& mdConfig, ::llmfun::tui::TuiState* userData) {
-    // mdConfig.linkCallback =         nullptr;
-    // mdConfig.tooltipCallback =      nullptr;
-    // mdConfig.imageCallback =        nullptr;
-    // mdConfig.linkIcon =             "";
-#ifdef IMGUI_HAS_TEXTURES // used to detect dynamic font capability
-        mdConfig.headingFormats[0] = {nullptr, true, fontSize * 1.1f};
-        mdConfig.headingFormats[1] = {nullptr, true, fontSize};
-        mdConfig.headingFormats[2] = {nullptr, false, fontSize};
-#else
-        mdConfig.headingFormats[0] = {nullptr, true};
-        mdConfig.headingFormats[1] = {nullptr, true};
-        mdConfig.headingFormats[2] = {nullptr, false};
-#endif
-        mdConfig.userData = userData;
-        mdConfig.formatCallback = &markdownFormatCallback;
-    };
 
     try {
         inner = new ::llmfun::tui::TuiState();
         TuiState* state = new TuiState{inner};
-        initMdConfig(inner->mdConfig, inner);
+        ::llmfun::tui::initMarkdownConfig(*state->inner);
         return state;
     } catch (const std::bad_alloc&) {
         delete inner;

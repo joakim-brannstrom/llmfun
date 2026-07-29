@@ -212,6 +212,8 @@ struct TuiState {
     TuiState() { startProcesssingTime = std::chrono::system_clock::now(); }
 };
 
+void initMarkdownConfig(TuiState& state);
+
 /// Initialize terminal and create TScreen.
 /// Returns true on success, false on failure.
 bool tuiInit(ImTui::TScreen** screen);
