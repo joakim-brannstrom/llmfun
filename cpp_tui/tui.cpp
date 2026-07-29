@@ -351,7 +351,8 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
 }
 
 static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2 displaySize,
-                               bool forceOpen, bool showHeader, bool showThinking) {
+                               bool forceOpen, bool showHeader, bool showThinking,
+                               bool allowMarkdown = true) {
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_None;
     if (forceOpen) {
         flags = ImGuiTreeNodeFlags_DefaultOpen;
@@ -392,7 +393,8 @@ static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2
         }
 
         ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-        textUnformattedMultiline(state.mdConfig, entry.text, renderAsMarkdown(entry.type));
+        textUnformattedMultiline(state.mdConfig, entry.text,
+                                 allowMarkdown && renderAsMarkdown(entry.type));
         ImGui::PopTextWrapPos();
 
         std::string buttonId = " [c] ##" + std::to_string(entry.id);
@@ -787,7 +789,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
 
         if (state.chat.hasStreamMsg) {
-            renderSingleHeader(state, state.chat.streamMsg, DisplaySize, true, false, true);
+            renderSingleHeader(state, state.chat.streamMsg, DisplaySize, true, false, true, false);
         }
 
         if (state.left.activeAgent != -1 && state.left.activeAgent < state.left.agents.size()) {
