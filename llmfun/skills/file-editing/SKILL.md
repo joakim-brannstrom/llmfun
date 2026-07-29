@@ -48,3 +48,15 @@ Structured protocol for editing files safely and correctly.
 ## References
 
 - Detailed pitfalls and edge cases: `references/pitfalls.md`
+- Utility scripts: `scripts/README.md`
+
+## Utility Scripts
+
+See `scripts/README.md` for full documentation. Quick reference:
+
+| Script | Purpose |
+|--------|---------|
+| `insert_code.py` | Insert code blocks at specific locations |
+| `swap_code.py` | Replace code blocks with new code |
+| `apply_patch.py` | Apply patches to source files |
+
