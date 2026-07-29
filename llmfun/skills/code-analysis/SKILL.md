@@ -74,3 +74,15 @@ Produce a structured markdown report at `plan/code_analysis.md`. See `references
 
 - Full output format template: `references/output_format.md`
 - Completeness checklist: `references/checklist.md`
+- Utility scripts: `scripts/README.md`
+
+## Utility Scripts
+
+See `scripts/README.md` for full documentation. Quick reference:
+
+| Script | Purpose |
+|--------|---------|
+| `check_braces.py` | Verify brace balance in source files |
+| `count_loc.py` | Count LOC, language presets, brace analysis |
+| `file_integrity.py` | Compute\/verify MD5 hashes |
+
