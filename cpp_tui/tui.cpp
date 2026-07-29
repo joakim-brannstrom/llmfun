@@ -129,8 +129,29 @@ bool isWhitespaceOnly(const std::string& s) {
     return allTrue;
 }
 
-void textUnformattedMultiline(ImGui::MarkdownConfig& mdConfig, std::string_view text) {
-    ImGui::Markdown(text.data(), text.length(), mdConfig);
+void textUnformattedMultiline(std::string_view text) {
+    auto begin = text.begin();
+    auto end = text.end();
+    while (begin != end) {
+        auto next = std::find(begin, end, '\n');
+        ImGui::TextUnformatted(begin, next);
+        begin = (next != end) ? next + 1 : end;
+    }
+}
+
+void textUnformattedMultiline(ImGui::MarkdownConfig& mdConfig, std::string_view text,
+                              bool renderMarkdown = true) {
+    if (renderMarkdown) {
+        ImGui::Markdown(text.data(), text.length(), mdConfig);
+    } else {
+        textUnformattedMultiline(text);
+    }
+}
+
+bool renderAsMarkdown(const ChatMessageType type) {
+    if (type == ChatMessageType::ToolCall || type == ChatMessageType::ToolResponse)
+        return false;
+    return true;
 }
 
 size_t countNewLines(const std::string& str) { return std::count(str.begin(), str.end(), '\n'); }
@@ -275,7 +296,7 @@ static void renderAgentStream(TuiState& state, const int agentIndex, const int64
         }
 
         ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-        textUnformattedMultiline(state.mdConfig, msg.content);
+        textUnformattedMultiline(msg.content);
         ImGui::PopTextWrapPos();
 
         ImGui::Unindent();
@@ -313,7 +334,7 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
     }
 
     ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-    textUnformattedMultiline(state.mdConfig, entry.text);
+    textUnformattedMultiline(state.mdConfig, entry.text, renderAsMarkdown(entry.type));
     ImGui::PopTextWrapPos();
 
     // offset to avoid collision with thinking ID
@@ -371,7 +392,7 @@ static bool renderSingleHeader(TuiState& state, const ChatMessage& entry, ImVec2
         }
 
         ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-        textUnformattedMultiline(state.mdConfig, entry.text);
+        textUnformattedMultiline(state.mdConfig, entry.text, renderAsMarkdown(entry.type));
         ImGui::PopTextWrapPos();
 
         std::string buttonId = " [c] ##" + std::to_string(entry.id);
