@@ -99,11 +99,11 @@ struct Chat {
                 (Message a) {
                     return (a.content.length + a.thinking.length) / ApproxTokenSize;
                 }, (ToolMessage a) {
-                    return a.toolCalls.toString.length / ApproxTokenSize;
+                    return (a.toolCalls.toString.length + a.thinking.length) / ApproxTokenSize;
                 }, (ToolResponse a) {
                     return a.content.length / ApproxTokenSize;
                 }, (VisionMessage a) {
-                    return a.content.length / ApproxTokenSize;
+                    return (a.content.length + a.imageDataUrl.length) / ApproxTokenSize;
                 });
                 // dfmt on
             }
