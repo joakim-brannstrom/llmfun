@@ -181,12 +181,11 @@ struct AgentApp {
                 logger.tracef("[%s]: %s", a.role, a.content);
             }
         }, (ToolMessage a) {
+            auto calls = summarizeToolCalls(a.toolCalls, 500);
+            this.sendChatThinkMessage("[tool calls %s]: %(%-s\n%)", a.thinking,
+                TuiChatMessageType_ToolCall, calls.length, calls);
             if (a.isFinalAnswer()) {
                 uiMsg.finalAnswer(a.getFinalAnswer());
-            } else {
-                auto calls = summarizeToolCalls(a.toolCalls, 500);
-                this.sendChatMessage("[tool calls %s]: %(%-s\n%)",
-                    TuiChatMessageType_ToolCall, calls.length, calls);
             }
         }, (ToolResponse a) {
             if (!isHiddenToolResponse(a.toolName)) {
