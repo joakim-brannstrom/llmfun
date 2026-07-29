@@ -803,14 +803,16 @@ string getEnvApiKey() {
 }
 
 auto replaceMagicWord(T)(T variable) {
-    import std.string : replace;
     import std.file : thisExePath;
+    import std.path : dirName;
+    import std.string : replace;
 
     immutable BinaryMagic = "@{llmfun}";
+    auto binaryDir = thisExePath.dirName;
 
     static if (is(T == Path) || is(T == AbsolutePath)) {
-        return T(variable.toString.replace(BinaryMagic, thisExePath));
+        return T(variable.toString.replace(BinaryMagic, binaryDir));
     } else {
-        return variable.replace(BinaryMagic, thisExePath);
+        return variable.replace(BinaryMagic, binaryDir);
     }
 }
