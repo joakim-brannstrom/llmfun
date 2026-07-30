@@ -25,8 +25,10 @@
 - workarea is not allowed to be a symlink. Security reasons
 - the 'answer' parameter in taskDone is almost a summary of everything between it and the previous user query. Maybe the summary algorithm should be updated to only keep final answers?
 - the self improvement of how to use tools should always be injected directly after the system prompt on startup if the chat is empty
-- editFile when using append or replace seems to prefix with an empty newline
 - editFile remove and replace is hard for an LLM to use incrementally because it changes the line numbers. Start by requiring that "content" contains the first line of the text that is to be removed.
+- if llmfun/data/scratch do not exist history file is loaded relative to the llmfun binary
+- replace "format!" with interpolated strings when possible
+- in tool calls and the response there is an excessive amount of escaping of slash
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
