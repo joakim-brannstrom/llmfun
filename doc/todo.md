@@ -29,6 +29,7 @@
 - if llmfun/data/scratch do not exist history file is loaded relative to the llmfun binary
 - replace "format!" with interpolated strings when possible
 - in tool calls and the response there is an excessive amount of escaping of slash
+- replace the grep tool with an internal implementation, to reduce the dependency on the OS
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
