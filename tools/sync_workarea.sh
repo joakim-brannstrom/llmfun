@@ -1,6 +1,6 @@
 #!/bin/bash -ex
 
-rm -rf llmfun/workarea/llmfun/.git
+rsync --delete -a .git/ llmfun/workarea/llmfun/.git/
 rsync -va --delete source/ llmfun/workarea/llmfun/source/
 rsync -va --delete cpp_tui/ llmfun/workarea/llmfun/cpp_tui/
 rsync -va --delete common/ llmfun/workarea/llmfun/common/
@@ -12,12 +12,6 @@ rsync -a config/ llmfun/workarea/llmfun/config/
 rsync -a *.mak llmfun/workarea/llmfun/
 rsync -a --delete --exclude ".git" vendor/ llmfun/workarea/llmfun/vendor/
 rm -rf llmfun/workarea/llmfun/vendor/imtui/test/build
-
-pushd llmfun/workarea/llmfun
-git init
-git add source dub.sdl *.mak vendor
-git commit -m "import source"
-popd
 
 llmfun rag --db llmfun/data/rag.sqlite3 --sync -i '.*\.(md)$' doc
 llmfun rag --db llmfun/data/rag.sqlite3 --sync -i '.*\.d$' source local_model/source common/source
