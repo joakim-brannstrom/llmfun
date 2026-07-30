@@ -39,6 +39,14 @@ configuration "application-with-local-model" {
     lflags "-rpath=$$ORIGIN" "-L$PACKAGE_DIR/build" "-lllama" platform="linux"
 }
 
+configuration "time-trace" {
+    mainSourceFile "source/app.d"
+    excludeSourceFiles "source/utility_app.d"
+
+    dflags "-ftime-trace" "-ftime-trace-file=$PACKAGE_DIR/trace.json"
+    postBuildCommands "timetrace2txt trace.json -o trace.txt"
+}
+
 configuration "llmfun_test" {
     targetName "llmfun_test"
 
