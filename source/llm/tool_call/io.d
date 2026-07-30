@@ -1,20 +1,20 @@
 module llm.tool_call.io;
 
 import logger = std.logger;
-import std.algorithm : map, filter, startsWith, count, joiner, endsWith, splitter;
-import std.array : empty, appender, array;
-import std.conv : to;
+import std.algorithm : map, filter, startsWith, count, joiner, endsWith, splitter, canFind;
+import std.array : empty, appender, array, join;
+import std.conv : to, text;
+import std.exception : enforce;
 import std.file : readText, exists, mkdirRecurse, getSize, remove, dirEntries, SpanMode;
 import std.format : format, formattedWrite;
-import std.json : JSONValue;
+import std.json : JSONValue, parseJSON;
+import std.path : relativePath;
+import std.process : execute;
 import std.range : enumerate;
 import std.regex : Regex, regex;
 import std.stdio : File;
-import std.string : join, splitLines, indexOf, strip, split, replace;
+import std.string : splitLines, indexOf, strip, split, replace, toLower, chomp;
 import std.sumtype : match;
-import std.exception : enforce;
-import std.path : relativePath;
-import std.process : execute;
 
 import my.path : AbsolutePath;
 
@@ -129,7 +129,1044 @@ ExecuteFuncResult readFile(Context baseCtx, string path, long startLine, long co
 enum EditMode {
     replace,
     remove,
-    append
+    append,
+    insert_before,
+    insert_after
+}
+
+/**
+ * Parse a mode string into an EditMode enum value.
+ * Accepts both kebab-case (e.g. "insert-before").
+ * Normalizes input by removing hyphens and converting to lowercase before matching.
+ * Throws on invalid mode.
+ */
+EditMode parseEditMode(string modeStr) @safe {
+    try {
+        return replace(modeStr, "-", "_").toLower.to!EditMode;
+    } catch (Exception e) {
+        logger.info(e.msg);
+    }
+    throw new Exception("Invalid edit mode '" ~ modeStr
+            ~ "'. Valid modes: replace, remove, append, insert_before, insert_after");
+}
+
+unittest {
+    assert(parseEditMode("replace") == EditMode.replace);
+    assert(parseEditMode("remove") == EditMode.remove);
+    assert(parseEditMode("append") == EditMode.append);
+    assert(parseEditMode("insert-after") == EditMode.insert_after);
+    assert(parseEditMode("insert-before") == EditMode.insert_before);
+    assert(parseEditMode("REPLACE") == EditMode.replace); // case-insensitive
+    assert(parseEditMode("Remove") == EditMode.remove); // case-insensitive
+
+    bool threw = false;
+    try {
+        parseEditMode("invalid");
+    } catch (Exception) {
+        threw = true;
+    }
+    assert(threw, "should throw on invalid mode");
+}
+
+/**
+ * Perform a case-sensitive substring search across file lines.
+ * Returns the 0-based index of the first line containing the marker,
+ * or -1 if not found.
+ *
+ * Parameters:
+ *     lines:  Array of file lines to search
+ *     marker: Substring to search for (case-sensitive)
+ *
+ * Returns:
+ *     0-based index of the first matching line, or -1 if not found
+ */
+long findMarkerLine(string[] lines, string marker) @safe {
+    enforce(marker.length > 0, "marker must not be empty");
+    foreach (i, line; lines) {
+        if (line.canFind(marker)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+unittest {
+    string[] lines = ["hello world", "foo bar", "hello again"];
+
+    // Exact substring match
+    assert(findMarkerLine(lines, "hello world") == 0);
+
+    // Substring match (marker is part of line)
+    assert(findMarkerLine(lines, "world") == 0);
+    assert(findMarkerLine(lines, "foo") == 1);
+
+    // Multiple matches - should return first (index 0)
+    assert(findMarkerLine(lines, "hello") == 0);
+
+    // Case-sensitive: "Foo" does not match "foo"
+    assert(findMarkerLine(lines, "Foo") == -1);
+    assert(findMarkerLine(lines, "HELLO") == -1);
+
+    // Not found
+    assert(findMarkerLine(lines, "xyz") == -1);
+
+    // Empty marker throws exception
+    {
+        bool threw = false;
+        try {
+            findMarkerLine(lines, "");
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "empty marker should throw");
+    }
+
+    // Empty lines array
+    assert(findMarkerLine(cast(string[])[], "xyz") == -1);
+}
+
+/**
+ * Range representing a matched code block within a file.
+ *
+ * Fields:
+ *     start: 0-based start index in the file lines (inclusive)
+ *     end:   0-based end index in the file lines (exclusive)
+ *     found: true if a matching code block was found
+ */
+struct CodeBlockRange {
+    size_t start;
+    size_t end;
+    bool found;
+}
+
+/**
+ * Find a code block in file lines using trimmed equality matching.
+ *
+ * Matching algorithm:
+ * 1. Skip leading empty lines in searchLines to find the anchor line.
+ * 2. Anchor line matches when fileLine.strip == searchLine.strip (trimmed equality).
+ * 3. Subsequent non-empty search lines must match corresponding file lines via trimmed equality.
+ * 4. Empty search lines are flexible — they are skipped and do not consume file lines.
+ *
+ * Parameters:
+ *     fileLines:   Array of file lines to search in
+ *     searchLines: Array of search lines to match (the code block to find)
+ *
+ * Returns:
+ *     CodeBlockRange with start/end indices if found, or found=false if not found
+ *
+ * Throws:
+ *     Exception if searchLines is empty or contains only empty/whitespace lines
+ */
+CodeBlockRange findCodeBlock(const(char[])[] fileLines, const(char[])[] searchLines) @safe {
+    enforce(searchLines.length > 0, "search block must not be empty");
+
+    // Find anchor (first non-empty line in searchLines after stripping)
+    size_t anchorIdx = 0;
+    while (anchorIdx < searchLines.length && searchLines[anchorIdx].strip.length == 0) {
+        anchorIdx++;
+    }
+
+    enforce(anchorIdx < searchLines.length,
+            "search block must contain at least one non-empty line (all lines are empty or whitespace)");
+
+    auto anchorStripped = searchLines[anchorIdx].strip;
+
+    // Search for anchor in fileLines
+    foreach (i, fileLine; fileLines) {
+        if (fileLine.strip != anchorStripped) {
+            continue;
+        }
+
+        // Found anchor at position i — try to match remaining search lines
+        size_t filePos = i + 1;
+        bool allMatch = true;
+
+        foreach (searchIdx; anchorIdx + 1 .. searchLines.length) {
+            auto searchStripped = searchLines[searchIdx].strip;
+            if (searchStripped.length == 0) {
+                // Empty search line is flexible — skip without consuming file lines
+                continue;
+            }
+
+            if (filePos >= fileLines.length) {
+                allMatch = false;
+                break;
+            }
+
+            if (fileLines[filePos].strip != searchStripped) {
+                allMatch = false;
+                break;
+            }
+
+            filePos++;
+        }
+
+        if (allMatch) {
+            return CodeBlockRange(i, filePos, true);
+        }
+    }
+
+    return CodeBlockRange(0, 0, false);
+}
+
+unittest {
+    // === Exact match ===
+    {
+        string[] fileLines = ["foo", "bar", "baz"];
+        string[] searchLines = ["foo", "bar"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 0);
+        assert(result.end == 2);
+    }
+
+    // === Whitespace tolerance via strip ===
+    {
+        string[] fileLines = ["    foo", "  bar  ", "baz"];
+        string[] searchLines = ["foo", "bar"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 0);
+        assert(result.end == 2);
+    }
+
+    // === Tabs vs spaces tolerance ===
+    {
+        string[] fileLines = ["\t\tfoo", "\tbar"];
+        string[] searchLines = ["foo", "bar"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 0);
+        assert(result.end == 2);
+    }
+
+    // === Comment false positive prevention ===
+    // Searching for "foo" should NOT match "// call fooBar()"
+    {
+        string[] fileLines = ["// call fooBar()", "other"];
+        string[] searchLines = ["foo"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(!result.found);
+    }
+
+    // === Not found ===
+    {
+        string[] fileLines = ["hello", "world"];
+        string[] searchLines = ["foo"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(!result.found);
+    }
+
+    // === First match when multiple matches exist ===
+    {
+        string[] fileLines = ["foo", "bar", "foo", "bar", "extra"];
+        string[] searchLines = ["foo", "bar"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 0);
+        assert(result.end == 2);
+    }
+
+    // === Empty search block throws ===
+    {
+        bool threw = false;
+        try {
+            findCodeBlock(["foo"], cast(string[])[]);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    // === All-empty search block throws ===
+    {
+        bool threw = false;
+        try {
+            findCodeBlock(["foo"], ["", "  ", "\t"]);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw);
+    }
+
+    // === Leading empty lines in search content ===
+    {
+        string[] fileLines = ["foo", "bar"];
+        string[] searchLines = ["", "", "foo", "bar"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 0);
+        assert(result.end == 2);
+    }
+
+    // === Multi-line search block matching ===
+    {
+        string[] fileLines = ["function foo() {", "    return bar;", "}"];
+        string[] searchLines = ["function foo() {", "    return bar;", "}"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 0);
+        assert(result.end == 3);
+    }
+
+    // === Empty search lines in middle (flexible) ===
+    {
+        string[] fileLines = ["function foo() {", "    return bar;", "}"];
+        string[] searchLines = [
+            "function foo() {", "", "    return bar;", "", "}"
+        ];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 0);
+        assert(result.end == 3);
+    }
+
+    // === Match not at start of file ===
+    {
+        string[] fileLines = ["header", "foo", "bar", "footer"];
+        string[] searchLines = ["foo", "bar"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 1);
+        assert(result.end == 3);
+    }
+
+    // === Single-line search block ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        string[] searchLines = ["world"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 1);
+        assert(result.end == 2);
+    }
+
+    // === Empty file lines ===
+    {
+        auto result = findCodeBlock(cast(string[])[], ["foo"]);
+        assert(!result.found);
+    }
+    // === Search block longer than file ===
+    {
+        string[] fileLines = ["foo"];
+        string[] searchLines = ["foo", "bar", "baz"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(!result.found);
+    }
+
+    // === Anchor at end of file with trailing search lines ===
+    {
+        string[] fileLines = ["header", "anchor"];
+        string[] searchLines = ["anchor", "trailing"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(!result.found);
+    }
+
+    // === CRLF line endings tolerance ===
+    {
+        string[] fileLines = ["foo\r", "bar\r"];
+        string[] searchLines = ["foo", "bar"];
+        auto result = findCodeBlock(fileLines, searchLines);
+        assert(result.found);
+        assert(result.start == 0);
+        assert(result.end == 2);
+    }
+}
+
+/**
+ * Edit a file in memory by finding a marker line and applying an edit mode.
+ *
+ * Parameters:
+ *     fileLines: Array of file lines to edit
+ *     mode: Edit mode determining how to apply the edit
+ *     content: Content to insert (split into lines for multi-line content)
+ *     marker: String to search for in file lines (case-sensitive substring match)
+ *
+ * Returns: Modified lines array with the edit applied.
+ *
+ * Mode behavior:
+ *     replace:      Replace the marker line with content lines
+ *     remove:       Remove the marker line (content must be empty)
+ *     append:       Keep marker line, add content lines after it
+ *     insert_after:  Same as append
+ *     insert_before: Add content lines before marker line, keep marker line
+ *
+ * Throws: Exception if marker not found or if remove mode has non-empty content.
+ */
+string[] editFileByMarkerMemory(string[] fileLines, EditMode mode, string content, string marker) @safe {
+    // Fail fast: validate marker before calling findMarkerLine
+    enforce(marker.length > 0, "marker must not be empty");
+    enforce(!(mode == EditMode.remove && content.length > 0), "remove mode requires empty content");
+
+    long markerIndex = findMarkerLine(fileLines, marker);
+    enforce(markerIndex >= 0, "Marker not found: '" ~ marker ~ "'");
+
+    // Use chomp to prevent splitLines from creating a trailing empty element
+    // when content ends with a newline (e.g. "line1\nline2\n" => ["line1","line2"])
+    auto contentLines = content.length > 0 ? content.chomp.splitLines : null;
+
+    auto lines = appender!(string[])();
+    foreach (i, line; fileLines) {
+        if (i == markerIndex) {
+            final switch (mode) {
+            case EditMode.replace:
+                lines.put(contentLines);
+                break;
+            case EditMode.remove:
+                // Skip the marker line entirely
+                break;
+            case EditMode.append:
+            case EditMode.insert_after:
+                lines.put(line.idup);
+                lines.put(contentLines);
+                break;
+            case EditMode.insert_before:
+                lines.put(contentLines);
+                lines.put(line.idup);
+                break;
+            }
+        } else {
+            lines.put(line.idup);
+        }
+    }
+    return lines[];
+}
+
+unittest {
+    // === Replace mode: single-line content ===
+    {
+        string[] fileLines = ["hello", "world", "foo", "bar"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.replace, "replaced", "world");
+        assert(res.length == 4);
+        assert(res[0] == "hello");
+        assert(res[1] == "replaced");
+        assert(res[2] == "foo");
+        assert(res[3] == "bar");
+    }
+
+    // === Replace mode: multi-line content ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.replace, "line1\nline2", "world");
+        assert(res.length == 4);
+        assert(res[0] == "hello");
+        assert(res[1] == "line1");
+        assert(res[2] == "line2");
+        assert(res[3] == "foo");
+    }
+
+    // === Remove mode ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.remove, "", "world");
+        assert(res.length == 2);
+        assert(res[0] == "hello");
+        assert(res[1] == "foo");
+    }
+
+    // === Remove mode: non-empty content throws ===
+    {
+        bool threw = false;
+        try {
+            editFileByMarkerMemory(["hello", "world"], EditMode.remove, "not empty", "world");
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "remove mode with non-empty content should throw");
+    }
+
+    // === Append mode: keep marker, add content after ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.append, "appended", "world");
+        assert(res.length == 4);
+        assert(res[0] == "hello");
+        assert(res[1] == "world");
+        assert(res[2] == "appended");
+        assert(res[3] == "foo");
+    }
+
+    // === Append mode: multi-line content ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.append, "line1\nline2", "world");
+        assert(res.length == 5);
+        assert(res[0] == "hello");
+        assert(res[1] == "world");
+        assert(res[2] == "line1");
+        assert(res[3] == "line2");
+        assert(res[4] == "foo");
+    }
+
+    // === InsertAfter mode: same as append ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.insert_after, "after", "world");
+        assert(res.length == 4);
+        assert(res[0] == "hello");
+        assert(res[1] == "world");
+        assert(res[2] == "after");
+        assert(res[3] == "foo");
+    }
+
+    // === InsertBefore mode: add content before, keep marker ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.insert_before, "before", "world");
+        assert(res.length == 4);
+        assert(res[0] == "hello");
+        assert(res[1] == "before");
+        assert(res[2] == "world");
+        assert(res[3] == "foo");
+    }
+
+    // === InsertBefore mode: multi-line content ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.insert_before,
+                "line1\nline2", "world");
+        assert(res.length == 5);
+        assert(res[0] == "hello");
+        assert(res[1] == "line1");
+        assert(res[2] == "line2");
+        assert(res[3] == "world");
+        assert(res[4] == "foo");
+    }
+
+    // === Marker not found throws ===
+    {
+        bool threw = false;
+        try {
+            editFileByMarkerMemory(["hello", "world"], EditMode.replace, "x", "notfound");
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "marker not found should throw");
+    }
+
+    // === Empty marker throws ===
+    {
+        bool threw = false;
+        try {
+            editFileByMarkerMemory(["hello"], EditMode.replace, "x", "");
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "empty marker should throw");
+    }
+
+    // === Non-marker lines preserved unchanged ===
+    {
+        string[] fileLines = ["line1", "line2", "line3", "line4"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.replace, "new", "line2");
+        assert(res[0] == "line1");
+        assert(res[1] == "new");
+        assert(res[2] == "line3");
+        assert(res[3] == "line4");
+    }
+
+    // === Marker at start of file ===
+    {
+        string[] fileLines = ["marker", "line2", "line3"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.replace, "new", "marker");
+        assert(res.length == 3);
+        assert(res[0] == "new");
+        assert(res[1] == "line2");
+        assert(res[2] == "line3");
+    }
+
+    // === Marker at end of file ===
+    {
+        string[] fileLines = ["line1", "line2", "marker"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.replace, "new", "marker");
+        assert(res.length == 3);
+        assert(res[0] == "line1");
+        assert(res[1] == "line2");
+        assert(res[2] == "new");
+    }
+
+    // === First match when multiple lines contain marker ===
+    {
+        string[] fileLines = ["hello world", "goodbye world", "end"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.replace, "replaced", "world");
+        assert(res.length == 3);
+        assert(res[0] == "replaced");
+        assert(res[1] == "goodbye world");
+        assert(res[2] == "end");
+    }
+
+    // === Replace mode: empty content (effectively removes marker line) ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.replace, "", "world");
+        assert(res.length == 2);
+        assert(res[0] == "hello");
+        assert(res[1] == "foo");
+    }
+
+    // === Empty file lines ===
+    {
+        bool threw = false;
+        try {
+            editFileByMarkerMemory(cast(string[])[], EditMode.replace, "x", "marker");
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "empty file lines with marker should throw");
+    }
+
+    // === Trailing newline in content handled correctly ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.replace, "line1\nline2\n", "world");
+        assert(res.length == 4, res.length.to!string);
+        assert(res[0] == "hello");
+        assert(res[1] == "line1");
+        assert(res[2] == "line2");
+        assert(res[3] == "foo");
+    }
+
+    // === Trailing newline in append mode ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        auto res = editFileByMarkerMemory(fileLines, EditMode.append, "line1\nline2\n", "world");
+        assert(res.length == 5, res.length.to!string);
+        assert(res[0] == "hello");
+        assert(res[1] == "world");
+        assert(res[2] == "line1");
+        assert(res[3] == "line2");
+        assert(res[4] == "foo");
+    }
+}
+
+/**
+ * Find the first occurrence of a code block in file lines and replace it
+ * with replacement lines.
+ *
+ * Uses findCodeBlock (trimmed equality matching) to locate the search block,
+ * then replaces the matched range with the replacement lines.
+ *
+ * Parameters:
+ *     fileLines:   Array of file lines to edit
+ *     searchLines: Array of search lines to find (the code block to locate)
+ *     replaceLines: Array of replacement lines to insert in place of the match
+ *
+ * Returns: Modified lines array with the first occurrence replaced.
+ *
+ * Throws: Exception if searchLines is empty or if the search block is not found.
+ */
+string[] searchAndReplaceMemory(string[] fileLines, string[] searchLines, string[] replaceLines) @safe {
+    auto range = findCodeBlock(fileLines, searchLines);
+    enforce(range.found, "Search block not found in file");
+
+    auto result = appender!(string[])();
+    result.put(fileLines[0 .. range.start]);
+    result.put(replaceLines);
+    result.put(fileLines[range.end .. $]);
+    return result[];
+}
+
+unittest {
+    // === Single-line replace ===
+    {
+        string[] fileLines = ["hello", "world", "foo"];
+        string[] searchLines = ["world"];
+        string[] replaceLines = ["replaced"];
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        assert(res.length == 3);
+        assert(res[0] == "hello");
+        assert(res[1] == "replaced");
+        assert(res[2] == "foo");
+    }
+
+    // === Multi-line replace ===
+    {
+        string[] fileLines = ["header", "line1", "line2", "line3", "footer"];
+        string[] searchLines = ["line1", "line2", "line3"];
+        string[] replaceLines = ["replacement"];
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        assert(res.length == 3);
+        assert(res[0] == "header");
+        assert(res[1] == "replacement");
+        assert(res[2] == "footer");
+    }
+
+    // === Multi-line replace with multi-line replacement ===
+    {
+        string[] fileLines = ["a", "b", "c", "d"];
+        string[] searchLines = ["b", "c"];
+        string[] replaceLines = ["x", "y", "z"];
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        assert(res.length == 5);
+        assert(res[0] == "a");
+        assert(res[1] == "x");
+        assert(res[2] == "y");
+        assert(res[3] == "z");
+        assert(res[4] == "d");
+    }
+
+    // === Whitespace tolerance via trimmed equality ===
+    {
+        string[] fileLines = ["    foo", "    bar", "baz"];
+        string[] searchLines = ["foo", "bar"];
+        string[] replaceLines = ["replaced"];
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        assert(res.length == 2);
+        assert(res[0] == "replaced");
+        assert(res[1] == "baz");
+    }
+
+    // === Only first occurrence replaced (not all) ===
+    {
+        string[] fileLines = ["foo", "bar", "foo", "bar", "end"];
+        string[] searchLines = ["foo", "bar"];
+        string[] replaceLines = ["replaced"];
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        assert(res.length == 4);
+        assert(res[0] == "replaced");
+        assert(res[1] == "foo");
+        assert(res[2] == "bar");
+        assert(res[3] == "end");
+    }
+
+    // === Replace at start of file ===
+    {
+        string[] fileLines = ["foo", "bar", "baz"];
+        string[] searchLines = ["foo"];
+        string[] replaceLines = ["replaced"];
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        assert(res.length == 3);
+        assert(res[0] == "replaced");
+        assert(res[1] == "bar");
+        assert(res[2] == "baz");
+    }
+
+    // === Replace at end of file ===
+    {
+        string[] fileLines = ["foo", "bar", "baz"];
+        string[] searchLines = ["baz"];
+        string[] replaceLines = ["replaced"];
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        assert(res.length == 3);
+        assert(res[0] == "foo");
+        assert(res[1] == "bar");
+        assert(res[2] == "replaced");
+    }
+
+    // === Replace entire file content ===
+    {
+        string[] fileLines = ["foo", "bar"];
+        string[] searchLines = ["foo", "bar"];
+        string[] replaceLines = ["replaced"];
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        assert(res.length == 1);
+        assert(res[0] == "replaced");
+    }
+
+    // === Empty replacement (effectively removes search block) ===
+    {
+        string[] fileLines = ["header", "foo", "bar", "footer"];
+        string[] searchLines = ["foo", "bar"];
+        string[] replaceLines = cast(string[])[];
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        assert(res.length == 2);
+        assert(res[0] == "header");
+        assert(res[1] == "footer");
+    }
+
+    // === Search block not found throws ===
+    {
+        bool threw = false;
+        try {
+            searchAndReplaceMemory(["hello", "world"], ["notfound"], [
+                "replaced"
+            ]);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "search block not found should throw");
+    }
+
+    // === Empty search block throws (inherited from findCodeBlock) ===
+    {
+        bool threw = false;
+        try {
+            searchAndReplaceMemory(["hello"], cast(string[])[], ["replaced"]);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "empty search block should throw");
+    }
+
+    // === Empty file with non-empty search block throws ===
+    {
+        bool threw = false;
+        try {
+            searchAndReplaceMemory(cast(string[])[], ["something"], ["replaced"]);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "empty file with non-empty search should throw not found");
+    }
+
+    // === Comment false positive prevention (inherited from findCodeBlock) ===
+    // Searching for "foo" should NOT match "// call fooBar()"
+    {
+        bool threw = false;
+        try {
+            searchAndReplaceMemory(["// call fooBar()", "other"], ["foo"], [
+                "replaced"
+            ]);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "should not match comments via trimmed equality");
+    }
+}
+
+/**
+ * Replace all non-overlapping occurrences of a search block with replacement lines.
+ *
+ * Scans the file from the beginning, finding each occurrence of the search block
+ * via findCodeBlock and replacing it with the replacement lines. After each
+ * replacement, the search resumes from the line immediately after the replacement
+ * (non-overlapping behavior).
+ *
+ * Parameters:
+ *     fileLines:    Array of file lines to search and modify
+ *     searchLines:  Array of search lines to match (the code block to find)
+ *     replaceLines: Array of replacement lines (used for each match)
+ *     result:       Output parameter receiving the modified lines array
+ *
+ * Returns:
+ *     The number of replacements made (always >= 1)
+ *
+ * Throws:
+ *     Exception if searchLines is empty
+ *     Exception if zero matches are found in the file
+ */
+size_t searchAndReplaceAllMemory(string[] fileLines, string[] searchLines,
+        string[] replaceLines, ref string[] result) @safe {
+    auto app = appender!(string[])();
+    size_t pos = 0;
+    size_t count = 0;
+    auto repl = replaceLines;
+
+    while (pos < fileLines.length) {
+        auto r = findCodeBlock(fileLines[pos .. $], searchLines);
+        if (!r.found) {
+            // No more matches — append remaining lines
+            app.put(fileLines[pos .. $]);
+            break;
+        }
+
+        // r.start and r.end are relative to fileLines[pos .. $]
+        // Convert to absolute positions
+        auto absStart = pos + r.start;
+        auto absEnd = pos + r.end;
+
+        enforce(absEnd > pos, "findCodeBlock returned zero-length match");
+        // Lines before the match
+        app.put(fileLines[pos .. absStart]);
+        // Replacement content
+        app.put(repl);
+
+        pos = absEnd;
+        count++;
+    }
+
+    enforce(count > 0, "Search block not found in file");
+
+    result = app[];
+    return count;
+}
+
+unittest {
+    // === Zero matches throws exception ===
+    {
+        bool threw = false;
+        string[] result;
+        try {
+            searchAndReplaceAllMemory(["hello", "world"], ["notfound"], [
+                "replaced"
+            ], result);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "zero matches should throw");
+    }
+
+    // === Single match replaced correctly ===
+    {
+        string[] fileLines = ["header", "foo", "bar", "footer"];
+        string[] searchLines = ["foo", "bar"];
+        string[] replaceLines = ["replaced"];
+        string[] result;
+        auto count = searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, result);
+        assert(count == 1);
+        assert(result.length == 3);
+        assert(result[0] == "header");
+        assert(result[1] == "replaced");
+        assert(result[2] == "footer");
+    }
+
+    // === Multiple matches all replaced ===
+    {
+        string[] fileLines = ["foo", "bar", "between", "foo", "bar", "end"];
+        string[] searchLines = ["foo", "bar"];
+        string[] replaceLines = ["replaced"];
+        string[] result;
+        auto count = searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, result);
+        assert(count == 2);
+        assert(result.length == 4);
+        assert(result[0] == "replaced");
+        assert(result[1] == "between");
+        assert(result[2] == "replaced");
+        assert(result[3] == "end");
+    }
+
+    // === Non-overlapping: search continues from after replacement ===
+    {
+        string[] fileLines = ["foo", "bar", "foo", "bar", "foo", "bar"];
+        string[] searchLines = ["foo", "bar"];
+        string[] replaceLines = ["x"];
+        string[] result;
+        auto count = searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, result);
+        assert(count == 3);
+        assert(result.length == 3);
+        assert(result[0] == "x");
+        assert(result[1] == "x");
+        assert(result[2] == "x");
+    }
+
+    // === Multi-line replacement content ===
+    {
+        string[] fileLines = ["a", "target", "a", "target", "a"];
+        string[] searchLines = ["target"];
+        string[] replaceLines = ["rep1", "rep2"];
+        string[] result;
+        auto count = searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, result);
+        assert(count == 2);
+        assert(result.length == 7);
+        assert(result[0] == "a");
+        assert(result[1] == "rep1");
+        assert(result[2] == "rep2");
+        assert(result[3] == "a");
+        assert(result[4] == "rep1");
+        assert(result[5] == "rep2");
+        assert(result[6] == "a");
+    }
+
+    // === Whitespace tolerance via trimmed equality ===
+    {
+        string[] fileLines = [
+            "    foo", "    bar", "baz", "    foo", "    bar", "end"
+        ];
+        string[] searchLines = ["foo", "bar"];
+        string[] replaceLines = ["replaced"];
+        string[] result;
+        auto count = searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, result);
+        assert(count == 2);
+        assert(result.length == 4);
+        assert(result[0] == "replaced");
+        assert(result[1] == "baz");
+        assert(result[2] == "replaced");
+        assert(result[3] == "end");
+    }
+
+    // === Replace at start of file ===
+    {
+        string[] fileLines = ["foo", "bar", "foo", "bar"];
+        string[] searchLines = ["foo"];
+        string[] replaceLines = ["replaced"];
+        string[] result;
+        auto count = searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, result);
+        assert(count == 2);
+        assert(result.length == 4);
+        assert(result[0] == "replaced");
+        assert(result[1] == "bar");
+        assert(result[2] == "replaced");
+        assert(result[3] == "bar");
+    }
+
+    // === Replace at end of file ===
+    {
+        string[] fileLines = ["start", "foo", "foo"];
+        string[] searchLines = ["foo"];
+        string[] replaceLines = ["replaced"];
+        string[] result;
+        auto count = searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, result);
+        assert(count == 2);
+        assert(result.length == 3);
+        assert(result[0] == "start");
+        assert(result[1] == "replaced");
+        assert(result[2] == "replaced");
+    }
+
+    // === Empty replacement (effectively removes all matches) ===
+    {
+        string[] fileLines = ["header", "foo", "middle", "foo", "footer"];
+        string[] searchLines = ["foo"];
+        string[] replaceLines = cast(string[])[];
+        string[] result;
+        auto count = searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, result);
+        assert(count == 2);
+        assert(result.length == 3);
+        assert(result[0] == "header");
+        assert(result[1] == "middle");
+        assert(result[2] == "footer");
+    }
+
+    // === Empty search block throws (inherited from findCodeBlock) ===
+    {
+        bool threw = false;
+        string[] result;
+        try {
+            searchAndReplaceAllMemory(["hello"], cast(string[])[], ["replaced"], result);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "empty search block should throw");
+    }
+
+    // === Empty file with non-empty search throws ===
+    {
+        bool threw = false;
+        string[] result;
+        try {
+            searchAndReplaceAllMemory(cast(string[])[], ["something"], [
+                "replaced"
+            ], result);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "empty file with non-empty search should throw not found");
+    }
+
+    // === Comment false positive prevention (inherited from findCodeBlock) ===
+    {
+        bool threw = false;
+        string[] result;
+        try {
+            searchAndReplaceAllMemory(["// call fooBar()", "other"], ["foo"],
+                    ["replaced"], result);
+        } catch (Exception) {
+            threw = true;
+        }
+        assert(threw, "should not match comments via trimmed equality");
+    }
+
+    // === Original array not mutated ===
+    {
+        string[] fileLines = ["a", "target", "b", "target", "c"];
+        string[] original = fileLines.dup;
+        string[] searchLines = ["target"];
+        string[] replaceLines = ["replaced"];
+        string[] result;
+        searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, result);
+        assert(fileLines == original, "original fileLines should not be mutated");
+    }
 }
 
 @Function("Edit a file by applying a change. "
@@ -161,7 +1198,12 @@ ExecuteFuncResult editFile(Context baseCtx, string path, string content,
     }
 
     try {
-        const mode_ = mode.to!EditMode;
+        const mode_ = parseEditMode(mode);
+        if (mode_ == EditMode.insert_before || mode_ == EditMode.insert_after) {
+            return ExecuteFuncResult(
+                    "error: mode \"" ~ mode ~ "\" is not supported by editFile. Use editByMarker instead.",
+                    success: false);
+        }
         if (mode_ == EditMode.remove && !content.empty) {
             return ExecuteFuncResult("error: parameter mode is \"remove\" but content is not empty",
                     success: false);
@@ -180,6 +1222,271 @@ ExecuteFuncResult editFile(Context baseCtx, string path, string content,
     return ExecuteFuncResult("OK", success: true);
 }
 
+@Function("Edit a file by finding a marker line and applying an edit mode. " ~ "Finds the first line containing the marker string and applies the specified mode. " ~ "Modes: replace (replace marker line with content), remove (delete marker line, content must be empty), " ~ "append (keep marker line, add content after), insert_after (same as append), " ~ "insert_before (add content before marker line, keep marker line). " ~ "Marker matching is case-sensitive substring matching. " ~ "Mode names accept snake_case or kebab-case (e.g. insert_before or insert-before). " ~ "Returns OK on success. " ~ "path: path to the file (relative to workarea)\n" ~ "content: content to insert (must be empty for remove mode)\n" ~ "mode: edit mode - replace, remove, append, insert_before/insert-before, or insert_after/insert-after\n" ~ "marker: the text to search for (case-sensitive substring match)")
+ExecuteFuncResult editFileByMarker(Context baseCtx, string path, string content,
+        string mode, string marker) {
+    mixin(baseContextToSpecific!FileContext);
+
+    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
+    if (!path_.valid) {
+        return ExecuteFuncResult(path_.errorMsg, success: false);
+    }
+    if (marker.empty) {
+        return ExecuteFuncResult("error: marker must not be empty", success: false);
+    }
+
+    EditMode mode_;
+    try {
+        mode_ = parseEditMode(mode);
+    } catch (Exception e) {
+        return ExecuteFuncResult(i"error: invalid mode '$(mode)': $(e.msg)".text, success: false);
+    }
+
+    if (mode_ == EditMode.remove && content.length > 0) {
+        return ExecuteFuncResult("error: parameter mode is \"remove\" but content is not empty",
+                success: false);
+    }
+
+    try {
+        auto res = editFileByMarkerMemory(File(path_.toString)
+                .byLineCopy.array, mode_, content, marker);
+        writeLines(path_, res);
+    } catch (Exception e) {
+        return ExecuteFuncResult(i"error: failed to edit file '$(path)' by marker '$(marker)' with mode '$(
+                mode)': $(e.msg)".text, success: false);
+    }
+    return ExecuteFuncResult("OK", success: true);
+}
+
+@Function("Preview the result of editing a file by marker without writing to disk. "
+        ~ "Finds the first line containing the marker string and applies the specified mode. "
+        ~ "Modes: replace (replace marker line with content), remove (delete marker line, content must be empty), "
+        ~ "append (keep marker line, add content after), insert_after (same as append), "
+        ~ "insert_before (add content before marker line, keep marker line). "
+        ~ "Returns a JSON object with fields: success (bool), message (string), preview (string), "
+        ~ "matchedAt (1-based line number where marker was found), linesChanged (int, delta of added minus removed lines). "
+        ~ "Mode names accept snake_case or kebab-case (e.g. insert_before or insert-before). "
+        ~ "path: path to the file (relative to workarea)\n"
+        ~ "content: content to insert (must be empty for remove mode)\n"
+        ~ "mode: edit mode - replace, remove, append, insert_before/insert-before, or insert_after/insert-after\n"
+        ~ "marker: the text to search for (case-sensitive substring match)")
+ExecuteFuncResult editFileByMarkerDryRun(Context baseCtx, string path,
+        string content, string mode, string marker) {
+    mixin(baseContextToSpecific!FileContext);
+
+    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
+    if (!path_.valid) {
+        return ExecuteFuncResult(path_.errorMsg, success: false);
+    }
+    if (marker.empty) {
+        return ExecuteFuncResult("error: marker must not be empty", success: false);
+    }
+
+    EditMode mode_;
+    try {
+        mode_ = parseEditMode(mode);
+    } catch (Exception e) {
+        return ExecuteFuncResult(i"error: invalid mode '$(mode)': $(e.msg)".text, success: false);
+    }
+
+    if (mode_ == EditMode.remove && content.length > 0) {
+        return ExecuteFuncResult("error: parameter mode is 'remove' but content is not empty",
+                success: false);
+    }
+
+    try {
+        auto fileLines = File(path_.toString).byLineCopy.array;
+
+        const markerIndex = findMarkerLine(fileLines, marker);
+        if (markerIndex < 0) {
+            return ExecuteFuncResult(i"error: marker '$(marker)' not found in file '$(path)'".text,
+                    success: false);
+        }
+
+        auto res = editFileByMarkerMemory(fileLines, mode_, content, marker).join("\n");
+
+        auto json = JSONValue.emptyObject;
+        json["success"] = true;
+        json["message"] = "OK";
+        json["preview"] = res;
+        json["matchedAt"] = markerIndex + 1;
+        json["linesChanged"] = cast(long) res.length - cast(long) fileLines.length;
+        return ExecuteFuncResult(json.toString, success: true);
+    } catch (Exception e) {
+        return ExecuteFuncResult(i"error: failed to preview edit on file '$(path)' by marker '$(
+                marker)' with mode '$(mode)': $(e.msg)".text, success: false);
+    }
+}
+
+@Function("Replace the first occurrence of a search block with replacement content. "
+        ~ "Uses trimmed equality matching: each non-empty search line must match a file line after stripping whitespace. "
+        ~ "Empty search lines are flexible (they don't need to match). "
+        ~ "Only the first occurrence is replaced. " ~ "Returns OK on success. "
+        ~ "path: path to the file (relative to workarea)\n"
+        ~ "searchContent: the text block to search for (trimmed equality matching, empty lines are flexible)\n"
+        ~ "replaceContent: the replacement text (replaces the matched block)")
+ExecuteFuncResult searchAndReplace(Context baseCtx, string path,
+        string searchContent, string replaceContent) {
+    mixin(baseContextToSpecific!FileContext);
+
+    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
+    if (!path_.valid) {
+        return ExecuteFuncResult(path_.errorMsg, success: false);
+    }
+    if (searchContent.empty) {
+        return ExecuteFuncResult("error: searchContent must not be empty", success: false);
+    }
+
+    // Use chomp to prevent splitLines from creating a trailing empty element
+    auto searchLines = searchContent.chomp.splitLines;
+
+    // Check for whitespace-only search content (mirrors findCodeBlock's check)
+    bool hasNonEmptyLine = false;
+    foreach (line; searchLines) {
+        if (line.strip.length > 0) {
+            hasNonEmptyLine = true;
+            break;
+        }
+    }
+    if (!hasNonEmptyLine) {
+        return ExecuteFuncResult(
+                "error: searchContent must contain at least one non-empty line (all lines are empty or whitespace)",
+                success: false);
+    }
+
+    auto replaceLines = replaceContent.length > 0 ? replaceContent.chomp.splitLines
+        : cast(string[])[];
+
+    try {
+        auto fileLines = File(path_.toString).byLineCopy.array;
+        auto res = searchAndReplaceMemory(fileLines, searchLines, replaceLines);
+        writeLines(path_, res);
+    } catch (Exception e) {
+        return ExecuteFuncResult(format!"error: failed to search and replace in file '%s': %s"(path,
+                e.msg), success: false);
+    }
+    return ExecuteFuncResult("OK", success: true);
+}
+
+@Function("Replace all non-overlapping occurrences of a search block with replacement content. " ~ "Uses trimmed equality matching: each non-empty search line must match a file line after stripping whitespace. " ~ "Empty search lines are flexible (they don't need to match). " ~ "After each replacement, the search resumes from the line after the replacement (non-overlapping). " ~ "Returns a JSON object with fields: success (bool), message (string), replacements (int, number of replacements made). " ~ "path: path to the file (relative to workarea)\n" ~ "searchContent: the text block to search for (trimmed equality matching, empty lines are flexible)\n" ~ "replaceContent: the replacement text (replaces each matched block)")
+ExecuteFuncResult searchAndReplaceAll(Context baseCtx, string path,
+        string searchContent, string replaceContent) {
+    mixin(baseContextToSpecific!FileContext);
+
+    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
+    if (!path_.valid) {
+        return ExecuteFuncResult(path_.errorMsg, success: false);
+    }
+    if (searchContent.empty) {
+        return ExecuteFuncResult("error: searchContent must not be empty", success: false);
+    }
+
+    // Use chomp to prevent splitLines from creating a trailing empty element
+    auto searchLines = searchContent.chomp.splitLines;
+
+    // Check for whitespace-only search content (mirrors findCodeBlock's check)
+    bool hasNonEmptyLine = false;
+    foreach (line; searchLines) {
+        if (line.strip.length > 0) {
+            hasNonEmptyLine = true;
+            break;
+        }
+    }
+    if (!hasNonEmptyLine) {
+        return ExecuteFuncResult(
+                "error: searchContent must contain at least one non-empty line (all lines are empty or whitespace)",
+                success: false);
+    }
+
+    auto replaceLines = replaceContent.length > 0 ? replaceContent.chomp.splitLines
+        : cast(string[])[];
+
+    try {
+        auto fileLines = File(path_.toString).byLineCopy.array;
+        string[] res;
+        auto count = searchAndReplaceAllMemory(fileLines, searchLines, replaceLines, res);
+        writeLines(path_, res);
+        auto json = JSONValue.emptyObject;
+        json["success"] = true;
+        json["message"] = "OK";
+        json["replacements"] = count;
+        return ExecuteFuncResult(json.toString, success: true);
+    } catch (Exception e) {
+        if (e.msg == "Search block not found in file") {
+            return ExecuteFuncResult(i"error: search block not found in file '$(path)'".text,
+                    success: false);
+        }
+        return ExecuteFuncResult(i"error: failed to search and replace all in file '$(path)': $(
+                e.msg)".text, success: false);
+    }
+}
+
+@Function("Preview the result of a search and replace operation without writing to disk. "
+        ~ "Uses trimmed equality matching: each non-empty search line must match a file line after stripping whitespace. "
+        ~ "Empty search lines are flexible (they don't need to match). " ~ "Only the first occurrence is replaced. "
+        ~ "Returns a JSON object with fields: success (bool), message (string), preview (string), "
+        ~ "matchedAt (1-based line number of first matched line), linesChanged (int, delta of added minus removed lines). "
+        ~ "path: path to the file (relative to workarea)\n"
+        ~ "searchContent: the text block to search for (trimmed equality matching, empty lines are flexible)\n"
+        ~ "replaceContent: the replacement text (replaces the matched block)")
+ExecuteFuncResult searchAndReplaceDryRun(Context baseCtx, string path,
+        string searchContent, string replaceContent) {
+    mixin(baseContextToSpecific!FileContext);
+
+    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
+    if (!path_.valid) {
+        return ExecuteFuncResult(path_.errorMsg, success: false);
+    }
+    if (searchContent.empty) {
+        return ExecuteFuncResult("error: searchContent must not be empty", success: false);
+    }
+
+    // Use chomp to prevent splitLines from creating a trailing empty element
+    auto searchLines = searchContent.chomp.splitLines;
+
+    // Check for whitespace-only search content (mirrors findCodeBlock's check)
+    bool hasOnlyEmptyLines = () {
+        foreach (line; searchLines.filter!(a => !a.strip.empty)) {
+            return false;
+        }
+        return true;
+    }();
+    if (hasOnlyEmptyLines) {
+        return ExecuteFuncResult(
+                "error: searchContent must contain at least one non-empty line (all lines are empty or whitespace)",
+                success: false);
+    }
+
+    auto replaceLines = replaceContent.length > 0 ? replaceContent.chomp.splitLines : null;
+
+    try {
+        auto fileLines = File(path_.toString).byLineCopy.array;
+
+        auto range = findCodeBlock(fileLines, searchLines);
+        if (!range.found) {
+            return ExecuteFuncResult(i"error: search block not found in file '$(path)'".text,
+                    success: false);
+        }
+
+        // Build result manually using the range to avoid calling findCodeBlock twice
+        auto result = appender!(string[])();
+        result.put(fileLines[0 .. range.start]);
+        result.put(replaceLines);
+        result.put(fileLines[range.end .. $]);
+
+        auto json = JSONValue.emptyObject;
+        json["success"] = true;
+        json["message"] = "OK";
+        json["preview"] = result[].join("\n");
+        json["matchedAt"] = cast(long)(range.start + 1);
+        json["linesChanged"] = cast(long) result[].length - cast(long) fileLines.length;
+        return ExecuteFuncResult(json.toString, success: true);
+    } catch (Exception e) {
+        return ExecuteFuncResult(i"error: failed to preview search and replace on file '$(path)': $(
+                e.msg)".text, success: false);
+    }
+}
+
 string[] editFileMemory(RangeT)(RangeT fileLines, EditMode mode, string content,
         long startLine, long count) @trusted {
     --startLine;
@@ -196,6 +1503,12 @@ string[] editFileMemory(RangeT)(RangeT fileLines, EditMode mode, string content,
                 break;
             case EditMode.append:
                 lines.put(txtLine.value.idup);
+                break;
+            case EditMode.insert_before:
+            case EditMode.insert_after:
+                // Reserved for future marker-based editing tools (editByMarker)
+                enforce(false,
+                        "insert_before/insert_after modes are not supported by editFile; use marker-based editing");
                 break;
             }
         } else if (mode == EditMode.append && txtLine.index == endLine) {
@@ -249,8 +1562,43 @@ ExecuteFuncResult applyDiff(Context baseCtx, string path, string diff) {
         writeLines(path_, result);
         return ExecuteFuncResult("OK", success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed applying diff to file '%s': %s"(path,
-                e.msg), success: false);
+        return ExecuteFuncResult(i"error: failed applying diff to file '$(path)': $(e.msg)".text,
+                success: false);
+    }
+}
+
+@Function("Preview the result of applying a unified diff patch without writing to disk. "
+        ~ "The diff must follow the standard unified format: each hunk starts with "
+        ~ "`@@ -oldStart[,oldCount] +newStart[,newCount] @@`, followed by lines starting "
+        ~ "with ' ' (context), '-' (remove) or '+' (add). The diff must match the *exact* "
+        ~ "current content of the file; use `readFile` first to obtain it. "
+        ~ "Returns a JSON object with fields: success (bool), message (string), preview (string), linesChanged (int). "
+        ~ "path: path to the file (relative to workarea)" ~ "diff: the unified diff patch to apply")
+ExecuteFuncResult applyDiffDryRun(Context baseCtx, string path, string diff) {
+    mixin(baseContextToSpecific!FileContext);
+
+    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
+    if (!path_.valid) {
+        return ExecuteFuncResult(path_.errorMsg, success: false);
+    }
+    if (diff.empty) {
+        return ExecuteFuncResult("error: diff must not be empty", success: false);
+    }
+
+    try {
+        auto fileLines = File(path_.toString).byLineCopy.array;
+        auto diffLines = diff.splitLines.filter!(a => !a.empty).array;
+        auto result = applyDiffMemory(fileLines, diffLines);
+
+        auto json = JSONValue.emptyObject;
+        json["success"] = true;
+        json["message"] = "OK";
+        json["preview"] = result.join("\n");
+        json["linesChanged"] = cast(long) result.length - cast(long) fileLines.length;
+        return ExecuteFuncResult(json.toString, success: true);
+    } catch (Exception e) {
+        return ExecuteFuncResult(i"error: failed to preview diff application on file '$(path)': $(
+                e.msg)".text, success: false);
     }
 }
 
@@ -272,18 +1620,18 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
     while (lineIdx < diffLines.length) {
         auto line = diffLines[lineIdx];
         if (!line.startsWith("@@"))
-            throw new Exception(format!"Expected hunk header but got: %s"(line));
+            throw new Exception(i"Expected hunk header but got: $(line)".text);
 
         // Parse header: "@@ -oldStart[,oldCount] +newStart[,newCount] @@"
         auto secondAt = line.indexOf("@@", 2);
-        enforce(secondAt != -1, format!"Invalid hunk header (missing closing @@): %s"(line));
+        enforce(secondAt != -1, i"Invalid hunk header (missing closing @@): $(line)".text);
         auto header = line[2 .. secondAt].strip;
         auto parts = header.split;
-        enforce(parts.length >= 2, format!"Invalid hunk header format: %s"(line));
+        enforce(parts.length >= 2, i"Invalid hunk header format: $(line)".text);
 
         // Old range
         auto oldRange = parts[0];
-        enforce(oldRange.startsWith("-"), format!"Old range must start with '-': %s"(line));
+        enforce(oldRange.startsWith("-"), i"Old range must start with '-': $(line)".text);
         oldRange = oldRange[1 .. $];
         long oldStart;
         size_t oldCount;
@@ -299,7 +1647,7 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
 
         // New range
         auto newRange = parts[1];
-        enforce(newRange.startsWith("+"), format!"New range must start with '+': %s"(line));
+        enforce(newRange.startsWith("+"), i"New range must start with '+': $(line)".text);
         newRange = newRange[1 .. $];
         long newStart;
         size_t newCount;
@@ -312,8 +1660,8 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
             newCount = 1;
         }
         if (oldPos < fileIdx)
-            throw new Exception(format!"Hunk tries to go backward (oldStart=%d, current file position=%d)"(oldStart,
-                    fileIdx + 1));
+            throw new Exception(i"Hunk tries to go backward (oldStart=$(oldStart), current file position=$(
+                    fileIdx + 1))".text);
 
         // Copy lines from current position up to the start of this hunk
         while (fileIdx < oldPos) {
@@ -345,11 +1693,10 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
 
             switch (firstChar) {
             case ' ': // context line - present in both old and new
-                enforce(fileIdx < fileLines.length,
-                        format!"Unexpected end of file at line %d (hunk context)"(fileIdx + 1));
-                enforce(fileLines[fileIdx] == content,
-                        format!"Context mismatch at line %d: expected '%s' but found '%s'"(fileIdx + 1,
-                            content, fileLines[fileIdx]));
+                enforce(fileIdx < fileLines.length, i"Unexpected end of file at line $(fileIdx + 1) (hunk context)"
+                        .text);
+                enforce(fileLines[fileIdx] == content, i"Context mismatch at line $(fileIdx + 1): expected '$(
+                        content)' but found '$(fileLines[fileIdx])'".text);
                 result ~= fileLines[fileIdx];
                 fileIdx++;
                 processedOld++;
@@ -364,19 +1711,19 @@ string[] applyDiffMemory(string[] fileLines, string[] diffLines) @safe {
                 processedNew++;
                 break;
             default:
-                throw new Exception(
-                        format!"Invalid hunk line (must start with ' ', '-' or '+'): %s"(hunkLine));
+                throw new Exception(i"Invalid hunk line (must start with ' ', '-' or '+'): $(
+                        hunkLine)".text);
             }
             lineIdx++;
         }
 
         // Validate the counts declared in the header
         enforce(processedOld == oldCount,
-                format!"Hunk @@ -%d,%d +%d,%d @@ consumes %d old lines but header declares %d"(oldStart,
-                    oldCount, newStart, newCount, processedOld, oldCount));
+                i"Hunk @@ -$(oldStart),$(oldCount) +$(newStart),$(newCount) @@ consumes $(
+                    processedOld) old lines but header declares $(oldCount)".text);
         enforce(processedNew == newCount,
-                format!"Hunk @@ -%d,%d +%d,%d @@ produces %d new lines but header declares %d"(oldStart,
-                    oldCount, newStart, newCount, processedNew, newCount));
+                i"Hunk @@ -$(oldStart),$(oldCount) +$(newStart),$(newCount) @@ produces $(
+                    processedNew) new lines but header declares $(newCount)".text);
     }
 
     // Append remaining file lines after the last hunk
@@ -564,14 +1911,6 @@ unittest {
     }
 }
 
-@Function("Replace all occurrences of from with to in text. Returns the modified text or `error`.")
-ExecuteFuncResult replaceAll(Context baseCtx, string text, string from, string to) {
-    auto res = text.replace(from, to);
-    if (res == text)
-        return ExecuteFuncResult("error: no `from` from in `text`", success: false);
-    return ExecuteFuncResult(res, success: true);
-}
-
 @Function("List files in directory as JSON array of paths, types and sizes. recursive=1 for recursive scan. Max entries are returned for recursive scan or error.")
 ExecuteFuncResult listDirectory(Context baseCtx, string path, long recursive) {
     mixin(baseContextToSpecific!FileContext);
@@ -587,9 +1926,8 @@ ExecuteFuncResult listDirectory(Context baseCtx, string path, long recursive) {
         JSONValue[] rval;
         foreach (a; dirEntries(path_.toString, recursive != 0 ? SpanMode.depth : SpanMode.shallow)) {
             if (recursive != 0 && rval.length > maxDirEntries) {
-                return ExecuteFuncResult(
-                        format!"error: failed listing directory recursive: more than %s entries in the result"(
-                        maxDirEntries), success: false);
+                return ExecuteFuncResult(i"error: failed listing directory recursive: more than $(
+                        maxDirEntries) entries in the result".text, success: false);
             }
 
             auto e = JSONValue.emptyObject;
@@ -601,8 +1939,8 @@ ExecuteFuncResult listDirectory(Context baseCtx, string path, long recursive) {
         }
         return ExecuteFuncResult(JSONValue(rval).toString, success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed listing directory '%s': %s"(path,
-                e.msg), success: false);
+        return ExecuteFuncResult(i"error: failed listing directory '$(path)': $(e.msg)".text,
+                success: false);
     }
 }
 
@@ -614,8 +1952,8 @@ ExecuteFuncResult grepFiles(Context baseCtx, string path, string pattern, long m
     auto grepMaxResults = ctx.getToolLimits().grepMaxResults;
 
     if (maxResults > grepMaxResults) {
-        return ExecuteFuncResult(format!"error: requested maxResults %s exceeds limit %s"(maxResults,
-                grepMaxResults), success: false);
+        return ExecuteFuncResult(i"error: requested maxResults $(maxResults) exceeds limit $(
+                grepMaxResults)".text, success: false);
     }
     if (maxResults < 1) {
         return ExecuteFuncResult("error: maxResults must be >= 1", success: false);
@@ -729,4 +2067,483 @@ string validateLineRange(long startLine, long count, long maxLines) {
     if (count > maxLines)
         return format!"error: tried to access %s lines but %s is max"(count, maxLines);
     return null;
+}
+
+// ============================================================================
+// Integration Tests for New File Editing Tools
+// ============================================================================
+
+// Mock FileContext for integration tests
+class TestFileContext : FileContext {
+    import std.file;
+
+    AbsolutePath workAreaDir;
+
+    this(string dir) {
+        workAreaDir = dir.AbsolutePath;
+        mkdirRecurse(workAreaDir.toString);
+    }
+
+    void teardown() {
+        import std.file : rmdirRecurse;
+
+        try {
+            rmdirRecurse(workAreaDir.toString);
+        } catch (Exception) {
+            // Silently ignore cleanup failures during test teardown
+        }
+    }
+
+    bool isPathInsideWorkArea(AbsolutePath path) {
+        auto p = path.toString;
+        auto w = workAreaDir.toString;
+        return p.startsWith(w) && (p.length == w.length || p[w.length] == '/');
+    }
+
+    AbsolutePath workArea() {
+        return workAreaDir;
+    }
+
+    ToolLimits getToolLimits() {
+        return ToolLimits();
+    }
+}
+
+// Helper: create a test file with given content
+void createTestFile(TestFileContext ctx, string relativePath, string content) {
+    assert(!relativePath.startsWith("/"), "relativePath must not be absolute: " ~ relativePath);
+    auto fullPath = (ctx.workArea ~ relativePath).AbsolutePath;
+    mkdirRecurse(fullPath.dirName.toString);
+    auto f = File(fullPath.toString, "w");
+    f.write(content);
+}
+
+// Helper: read file content for verification
+string readTestFile(TestFileContext ctx, string relativePath) {
+    auto fullPath = (ctx.workArea ~ relativePath).AbsolutePath;
+    return readText(fullPath.toString);
+}
+
+// Helper: create a test context with a unique directory name
+TestFileContext makeTestContext(string testName) {
+    import std.datetime : Clock;
+
+    return new TestFileContext("./llmfun_test/" ~ testName ~ "_" ~ Clock.currTime.toString);
+}
+
+// ----------------------------------------------------------------------------
+// editFileByMarker Integration Tests
+// ----------------------------------------------------------------------------
+
+unittest {
+    // Integration test: editFileByMarker - replace mode
+    auto ctx = makeTestContext("marker_replace");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nhello world\nline3\n");
+
+    auto result = editFileByMarker(ctx, "test.txt", "replaced", "replace", "hello world");
+    assert(result.success, result.msg);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "line1\nreplaced\nline3\n", content);
+}
+
+unittest {
+    // Integration test: editFileByMarker - remove mode
+    auto ctx = makeTestContext("marker_remove");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nhello world\nline3\n");
+
+    auto result = editFileByMarker(ctx, "test.txt", "", "remove", "hello world");
+    assert(result.success, result.msg);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "line1\nline3\n", content);
+}
+
+unittest {
+    // Integration test: editFileByMarker - insert_before mode
+    auto ctx = makeTestContext("marker_insertbefore");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nhello world\nline3\n");
+
+    auto result = editFileByMarker(ctx, "test.txt", "inserted", "insert-before", "hello world");
+    assert(result.success, result.msg);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "line1\ninserted\nhello world\nline3\n", content);
+}
+
+unittest {
+    // Integration test: editFileByMarker - insert_after mode
+    auto ctx = makeTestContext("marker_insertafter");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nhello world\nline3\n");
+
+    auto result = editFileByMarker(ctx, "test.txt", "inserted", "insert-after", "hello world");
+    assert(result.success, result.msg);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "line1\nhello world\ninserted\nline3\n", content);
+}
+
+unittest {
+    // Integration test: editFileByMarker - multi-line content
+    auto ctx = makeTestContext("marker_multiline");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nmarker\nline3\n");
+
+    auto result = editFileByMarker(ctx, "test.txt", "newA\nnewB\nnewC", "replace", "marker");
+    assert(result.success, result.msg);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "line1\nnewA\nnewB\nnewC\nline3\n", content);
+}
+
+unittest {
+    // Integration test: editFileByMarker - error: marker not found
+    auto ctx = makeTestContext("marker_notfound");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nline2\n");
+
+    auto result = editFileByMarker(ctx, "test.txt", "x", "replace", "notfound");
+    assert(!result.success);
+    assert(result.msg.canFind("not found"), result.msg);
+}
+
+unittest {
+    // Integration test: editFileByMarker - error: empty marker
+    auto ctx = makeTestContext("marker_empty");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\n");
+
+    auto result = editFileByMarker(ctx, "test.txt", "x", "replace", "");
+    assert(!result.success);
+    assert(result.msg.canFind("empty"), result.msg);
+}
+
+unittest {
+    // Integration test: editFileByMarker - error: invalid path
+    auto ctx = makeTestContext("marker_invalidpath");
+    scope (exit)
+        ctx.teardown;
+
+    auto result = editFileByMarker(ctx, "nonexistent.txt", "x", "replace", "marker");
+    assert(!result.success);
+}
+
+// ----------------------------------------------------------------------------
+// editFileByMarkerDryRun Integration Tests
+// ----------------------------------------------------------------------------
+
+unittest {
+    // Integration test: editFileByMarkerDryRun - does NOT modify file
+    auto ctx = makeTestContext("markerdryrun");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nhello world\nline3\n");
+
+    auto result = editFileByMarkerDryRun(ctx, "test.txt", "replaced", "replace", "hello world");
+    assert(result.success, result.msg);
+
+    // Verify file was NOT modified
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "line1\nhello world\nline3\n", content);
+
+    // Verify preview contains modified content
+    auto json = parseJSON(result.msg);
+    assert(json["preview"].str.canFind("replaced"));
+    assert(json["matchedAt"].integer == 2);
+}
+
+unittest {
+    // Integration test: editFileByMarkerDryRun - returns correct preview fields
+    auto ctx = makeTestContext("markerdryrun_fields");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nhello world\nline3\n");
+
+    auto result = editFileByMarkerDryRun(ctx, "test.txt", "new1\nnew2", "replace", "hello world");
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["preview"].str.canFind("new1"));
+    assert(json["preview"].str.canFind("new2"));
+    assert(json["matchedAt"].integer == 2);
+}
+
+// ----------------------------------------------------------------------------
+// searchAndReplace Integration Tests
+// ----------------------------------------------------------------------------
+
+unittest {
+    // Integration test: searchAndReplace - single line replace
+    auto ctx = makeTestContext("sar_single");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nfunction foo() {\n    return 1;\n}\nline5\n");
+
+    auto result = searchAndReplace(ctx, "test.txt",
+            "function foo() {\n    return 1;\n}", "function bar() {\n    return 2;\n}");
+    assert(result.success, result.msg);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content.canFind("function bar()"));
+    assert(content.canFind("return 2"));
+    assert(!content.canFind("function foo()"));
+}
+
+unittest {
+    // Integration test: searchAndReplace - trimmed equality (whitespace tolerance)
+    auto ctx = makeTestContext("sar_trimmed");
+    scope (exit)
+        ctx.teardown;
+
+    // File has 4-space indentation
+    createTestFile(ctx, "test.txt", "    int x = 1;\n    int y = 2;\n");
+
+    // Search with tab indentation - should still match via trimmed equality
+    auto result = searchAndReplace(ctx, "test.txt", "\tint x = 1;", "    int x = 100;");
+    assert(result.success, result.msg);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content.canFind("int x = 100"), content);
+}
+
+unittest {
+    // Integration test: searchAndReplace - first match only
+    auto ctx = makeTestContext("sar_firstonly");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "foo\nbar\nfoo\nbaz\n");
+
+    auto result = searchAndReplace(ctx, "test.txt", "foo", "replaced");
+    assert(result.success, result.msg);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "replaced\nbar\nfoo\nbaz\n", content);
+}
+
+unittest {
+    // Integration test: searchAndReplace - error: search not found
+    auto ctx = makeTestContext("sar_notfound");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nline2\n");
+
+    auto result = searchAndReplace(ctx, "test.txt", "notfound", "replacement");
+    assert(!result.success);
+    assert(result.msg.canFind("not found"), result.msg);
+}
+
+unittest {
+    // Integration test: searchAndReplace - error: empty search content
+    auto ctx = makeTestContext("sar_empty");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\n");
+
+    auto result = searchAndReplace(ctx, "test.txt", "", "replacement");
+    assert(!result.success);
+    assert(result.msg.canFind("empty"), result.msg);
+}
+
+// ----------------------------------------------------------------------------
+// searchAndReplaceAll Integration Tests
+// ----------------------------------------------------------------------------
+
+unittest {
+    // Integration test: searchAndReplaceAll - multiple replacements
+    auto ctx = makeTestContext("sarall_multi");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "foo\nbar\nfoo\nbaz\nfoo\n");
+
+    auto result = searchAndReplaceAll(ctx, "test.txt", "foo", "replaced");
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["replacements"].integer == 3, json["replacements"].integer.to!string);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "replaced\nbar\nreplaced\nbaz\nreplaced\n", content);
+}
+
+unittest {
+    // Integration test: searchAndReplaceAll - error: zero matches
+    auto ctx = makeTestContext("sarall_zero");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nline2\n");
+
+    auto result = searchAndReplaceAll(ctx, "test.txt", "notfound", "replacement");
+    assert(!result.success);
+    assert(result.msg.canFind("not found"), result.msg);
+}
+
+// ----------------------------------------------------------------------------
+// searchAndReplaceDryRun Integration Tests
+// ----------------------------------------------------------------------------
+
+unittest {
+    // Integration test: searchAndReplaceDryRun - does NOT modify file
+    auto ctx = makeTestContext("sardryrun");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nfunction foo() {\n    return 1;\n}\nline5\n");
+
+    string original = readTestFile(ctx, "test.txt");
+
+    auto result = searchAndReplaceDryRun(ctx, "test.txt",
+            "function foo() {\n    return 1;\n}", "function bar() {\n    return 2;\n}");
+    assert(result.success, result.msg);
+
+    // Verify file was NOT modified
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == original, content);
+
+    // Verify preview contains modified content
+    auto json = parseJSON(result.msg);
+    assert(json["preview"].str.canFind("function bar()"));
+    assert(json["matchedAt"].integer == 2);
+}
+
+// ----------------------------------------------------------------------------
+// applyDiffDryRun Integration Tests
+// ----------------------------------------------------------------------------
+
+unittest {
+    // Integration test: applyDiffDryRun - does NOT modify file
+    auto ctx = makeTestContext("diffdryrun");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\nline2\nline3\n");
+
+    string original = readTestFile(ctx, "test.txt");
+
+    string diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2modified\n line3\n";
+
+    auto result = applyDiffDryRun(ctx, "test.txt", diff);
+    assert(result.success, result.msg);
+
+    // Verify file was NOT modified
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == original, content);
+
+    // Verify preview contains modified content
+    auto json = parseJSON(result.msg);
+    assert(json["preview"].str.canFind("line2modified"));
+    assert(!json["preview"].str.canFind("-line2"));
+}
+
+unittest {
+    // Integration test: applyDiffDryRun - error: empty diff
+    auto ctx = makeTestContext("diffdryrun_empty");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\n");
+
+    auto result = applyDiffDryRun(ctx, "test.txt", "");
+    assert(!result.success);
+    assert(result.msg.canFind("empty"), result.msg);
+}
+
+// ----------------------------------------------------------------------------
+// Workarea Confinement Tests
+// ----------------------------------------------------------------------------
+
+unittest {
+    // Integration test: workarea confinement - absolute path rejected
+    auto ctx = makeTestContext("workarea");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\n");
+
+    // Absolute path should be rejected
+    auto result = editFileByMarker(ctx, "/etc/passwd", "x", "replace", "marker");
+    assert(!result.success);
+    assert(result.msg.canFind("absolute"), result.msg);
+}
+
+unittest {
+    // Integration test: workarea confinement - path traversal rejected
+    auto ctx = makeTestContext("workarea_traversal");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\n");
+
+    // Path traversal should be rejected
+    auto result = editFileByMarker(ctx, "../test.txt", "x", "replace", "marker");
+    assert(!result.success);
+    assert(result.msg.canFind("workarea") || result.msg.canFind("outside"), result.msg);
+}
+
+// ----------------------------------------------------------------------------
+// Error Path Tests
+// ----------------------------------------------------------------------------
+
+unittest {
+    // Integration test: editFileByMarker - invalid mode
+    auto ctx = makeTestContext("invalidmode");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\n");
+
+    auto result = editFileByMarker(ctx, "test.txt", "x", "invalid-mode", "line1");
+    assert(!result.success);
+    assert(result.msg.canFind("invalid"), result.msg);
+}
+
+unittest {
+    // Integration test: searchAndReplace - whitespace-only search content
+    auto ctx = makeTestContext("whitespaceonly");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\n");
+
+    auto result = searchAndReplace(ctx, "test.txt", "   \n\n   ", "replacement");
+    assert(!result.success);
+    assert(result.msg.canFind("non-empty"), result.msg);
+}
+
+unittest {
+    // Integration test: editFileByMarker - remove mode with non-empty content
+    auto ctx = makeTestContext("remove_content");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "line1\n");
+
+    auto result = editFileByMarker(ctx, "test.txt", "not empty", "remove", "line1");
+    assert(!result.success);
+    assert(result.msg.canFind("remove"), result.msg);
 }
