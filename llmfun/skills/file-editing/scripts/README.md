@@ -44,27 +44,6 @@ python3 swap_code.py source/app.d --old old.d --new new.d --dry-run
 - `--old <file> --new <file>` — Replace old code with new code
 - `--start N --end M --new <file>` — Replace line range with new code
 
-### `apply_patch.py`
-Apply patches to source files. Supports simple text patches with markers and context.
-
-```bash
-# Apply patch file
-python3 apply_patch.py source/app.d --patch debug_patch.patch
-
-# Add code before marker
-python3 apply_patch.py source/app.d --marker "// Commands" --add debug_cmd.d
-
-# Add code after marker
-python3 apply_patch.py source/app.d --marker "// Commands" --add debug_cmd.d --after
-
-# Dry run
-python3 apply_patch.py source/app.d --patch debug_patch.patch --dry-run
-```
-
-**Patch modes:**
-- `--patch <file>` — Apply unified diff patch
-- `--marker <text> --add <file>` — Add code at marker
-
 ## Origin
 
 These scripts were consolidated from ~5 one-off utility scripts that accumulated
