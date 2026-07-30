@@ -4,7 +4,7 @@ import logger = std.logger;
 import core.sync : Mutex, Condition;
 import std.algorithm : filter, max, map, count;
 import std.array : join, appender;
-import std.conv : to;
+import std.conv : to, text;
 import std.datetime : Clock, SysTime, Duration, dur;
 import std.format : format;
 import std.range;
@@ -205,69 +205,63 @@ struct PipelineResult {
 /// Format a PipelineResult as a human-readable string for terminal output.
 string prettyPrint(PipelineResult result) {
     auto a = appender!string();
-    const sep = "────────────────────────────────────────────────────────────";
-    const indent = "  ";
 
     a.put("\n");
-    a.put(sep ~ "\n");
-    a.put("  Pipeline Result\n");
-    a.put(sep ~ "\n");
+    a.put("# Pipeline Result\n");
+    a.put("\n");
 
     // Summary line
-    a.put(format("%sStatus: %s\n", indent, result.allSuccess
-            ? "✓ All succeeded" : "✗ Some failed"));
-    a.put(format("%sTotal duration: %s ms\n", indent, result.totalDurationMs));
-    a.put(format("%sAgents executed: %s\n", indent, result.agentResults.length));
+    a.put(format("- Status: %s\n", result.allSuccess ? "✓ All succeeded" : "✗ Some failed"));
+    a.put(i"- Total duration: $(result.totalDurationMs) ms\n".text);
+    a.put(i"- Agents executed: $(result.agentResults.length)\n".text);
     if (result.wasInterrupted)
-        a.put(format("%sInterrupted: Yes\n", indent));
+        a.put("- Interrupted: Yes\n");
     a.put("\n");
 
     // Execution order
     if (result.executionOrder.length > 0) {
-        a.put(format("%sExecution order: %s\n", indent, result.executionOrder.join(" → ")));
+        a.put(format("Execution order: %s\n", result.executionOrder.join(" → ")));
         a.put("\n");
     }
 
     // Per-agent results
-    a.put(sep ~ "\n");
-    a.put("  Agent Results\n");
-    a.put(sep ~ "\n");
+    a.put("\n");
+    a.put("# Agent Results\n");
 
     foreach (i, agent; result.agentResults) {
         a.put("\n");
-        a.put(format("%sAgent #%s: %s\n", indent, i + 1, agent.agentName));
-        a.put(format("%s  Status: %s\n", indent, agent.success ? "✓ Success" : "✗ Failed"));
-        a.put(format("%s  Duration: %s ms\n", indent, agent.durationMs));
+        a.put("## Agent $(i+1): $(agent.agentName)\n".text);
+        a.put(format("- Status: %s\n", agent.success ? "✓ Success" : "✗ Failed"));
+        a.put(i"- Duration: $(agent.durationMs) ms\n".text);
 
         // Truncate long outputs for readability
         auto outputPreview = agent.output;
-        if (outputPreview.length > 500) {
+        if (outputPreview.length > 1500) {
             const originalLen = outputPreview.length;
-            outputPreview = outputPreview[0 .. 500] ~ "\n  ... (truncated, "
-                ~ originalLen.to!string ~ " chars total)";
+            outputPreview = i"$(outputPreview[0 .. 1500])\n... (truncated $(originalLen) chars total)"
+                .text;
         }
 
         if (!outputPreview.empty) {
-            a.put(indent ~ "  Output:\n");
+            a.put("### Output\n");
             foreach (line; outputPreview.split("\n")) {
-                a.put(indent ~ "    " ~ line ~ "\n");
+                a.put(line);
+                a.put("\n");
             }
         } else {
-            a.put(indent ~ "  Output: (empty)\n");
+            a.put("### Output (empty)\n");
         }
     }
 
-    a.put("\n" ~ sep ~ "\n");
-    a.put("  Final Output\n");
-    a.put(sep ~ "\n");
+    a.put("\n");
+    a.put("# Final Output\n");
 
     if (!result.finalOutput.empty) {
         a.put(result.finalOutput ~ "\n");
     } else {
-        a.put("  (empty)\n");
+        a.put("(empty)\n");
     }
 
-    a.put(sep ~ "\n");
     return a.data;
 }
 
