@@ -153,6 +153,8 @@ struct ChatTabLeftPanel {
     static constexpr size_t MaxAgents = 16;
 
     int activeAgent{-1};
+
+    bool autoScroll = true;
 };
 
 struct ChatTab {
@@ -174,7 +176,7 @@ struct ChatTab {
     ChatMessage streamMsg;
 };
 
-enum class ActiveTab { chat, log, agentStream };
+enum class ActiveTab { chat, log };
 
 struct MarkdownStyle {
     ImVec4 heading[4] = {ImVec4(1.0f, 0.9f, 0.2f, 1.0f), ImVec4(0.2f, 1.0f, 1.0f, 1.0f),

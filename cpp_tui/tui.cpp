@@ -143,6 +143,7 @@ void textUnformattedMultiline(ImGui::MarkdownConfig& mdConfig, std::string_view 
                               bool renderMarkdown = true) {
     if (renderMarkdown) {
         ImGui::Markdown(text.data(), text.length(), mdConfig);
+        ImGui::TextUnformatted(""); // ugly hack to make autoscroll work.
     } else {
         textUnformattedMultiline(text);
     }
@@ -642,14 +643,6 @@ int InputResizeCallback(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
-void renderTabAgentStream(TuiState& state, Log& log) {
-    auto& panel = state.left;
-
-    if (panel.activeAgent < 0) {
-        return;
-    }
-}
-
 void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
     if (panel.agents.empty()) {
         panel.panelW = 0;
@@ -696,6 +689,7 @@ void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
                          panel.activeButton)) {
             panel.activeAgent = i;
             panel.agents[i].activity = false;
+            panel.autoScroll = true;
         }
     }
     ImGui::EndChild();
@@ -792,6 +786,8 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
             renderSingleHeader(state, state.chat.streamMsg, DisplaySize, true, false, true, true);
         }
 
+        bool autoScroll = state.autoScroll;
+
         if (state.left.activeAgent != -1 && state.left.activeAgent < state.left.agents.size()) {
             auto& agent = state.left.agents[state.left.activeAgent];
             size_t count{1};
@@ -801,6 +797,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
                 ++count;
             }
             renderAgentStream(state, count, agent.updateCnt + 1, agent.agentId, agent.stream);
+            autoScroll = state.left.autoScroll;
         }
 
         if (!state.readyStatus) {
@@ -809,7 +806,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
                             1000000000);
         }
 
-        if (state.autoScroll) {
+        if (autoScroll) {
             ImGui::SetScrollHereY(1.0f);
         }
 
@@ -818,16 +815,9 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         const float scrollY = ImGui::GetScrollY();
         const float scrollMax = ImGui::GetScrollMaxY();
         if (scrollMax > 0.0f) {
-            state.autoScroll = (scrollY >= scrollMax - 1.0f);
-        }
-
-        static std::string dummyBuf{" "};
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
-        ImGui::InputText("##llm_output_tab_focus", dummyBuf.data(), dummyBuf.size());
-        ImGui::PopStyleColor(2);
-        if (ImGui::IsItemActive()) {
-            focusInput = true;
+            bool x = (scrollY >= scrollMax - 1.0f);
+            state.autoScroll = x;
+            state.left.autoScroll = x;
         }
 
         ImGui::EndChild();
@@ -912,8 +902,6 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         if (!state.userQuery.newInputBufString.empty()) {
             state.userQuery.newInputBufString.clear();
         }
-
-        // inputHistory();
 
         ImGui::SameLine();
         ImGui::BeginGroup();
@@ -1026,9 +1014,6 @@ void renderMainWindow(TuiState& state, Log& log) {
         break;
     case ActiveTab::log:
         renderTabLog(state, log);
-        break;
-    case ActiveTab::agentStream:
-        renderTabAgentStream(state, log);
         break;
     }
 }
