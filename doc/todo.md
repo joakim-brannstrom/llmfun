@@ -30,6 +30,8 @@
 - replace "format!" with interpolated strings when possible
 - in tool calls and the response there is an excessive amount of escaping of slash
 - replace the grep tool with an internal implementation, to reduce the dependency on the OS
+- editFileByMarker, "replace" mode is probably bugged and is keeping the old content so it basically work as append. If the LLM gives marker "abc" and then the content "foo\nbar\smurf" it expectes abc to be replaced by "foo" and the next two lines to be replaced by "bar" and "smurf".
+- the edit... should probably all be converted to using editFileInMemory because all the edits can be reduced down to editing lines. This would reduce the code duplication in io.d
 
 - createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
 
