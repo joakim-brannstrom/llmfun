@@ -1,26 +1,17 @@
-- FeedbackEngine should use an agent name when it request data
 - integrate internet search, searchxng
-- change @Function to also take a descripton of parameters
 - change tools so not all are listed via "tool_calls" but rather that there is one basic tool to ask for available tools
 - add Z3 as a tool
 - add a simple expression execution so the llm can call a tool with e.g. `1+3*4` to calculate 
-- make ctrl+c able to interrupt a http request
 - add trace logging support to file
 - Max timeout when using -p
 - deep research
-- add autocomplete
 - add a specific /code analyze mode to update a plan/code_analysis.md
 - support AGENT.md
-- write a system design review template and an implementation plan review template. The pipeline agents are complaining
-- maybe write the context use as part of the summary in the tree node chat
-- integrate imgui_markdown
 - move choosing a model to the menu
-- add back history save
 - look at what claude code is doing with .claude/rules and CLAUDE.md
 - change the behavior of loading a .llmfun.json from the current directory if it exist to only doing it if the project is trusted
 - before writing a file check that the file isn't inside a tree of symlinks from the workarea and up
 - a memory file that is written should have a date when it was updated. Even better if each section in it that is changed have a date. This is to enhance the LLM's capability to reason about the "age" of the data if it gets conflicting data from different sources.
-- add a /fixcomments <filename> that goes through filename and updates all comments to be relevant to the current code. Those that seem to not match the code should be flagged.
 - add more @safe tags
 - workarea is not allowed to be a symlink. Security reasons
 - the 'answer' parameter in taskDone is almost a summary of everything between it and the previous user query. Maybe the summary algorithm should be updated to only keep final answers?
@@ -32,15 +23,10 @@
 - replace the grep tool with an internal implementation, to reduce the dependency on the OS
 - editFileByMarker, "replace" mode is probably bugged and is keeping the old content so it basically work as append. If the LLM gives marker "abc" and then the content "foo\nbar\smurf" it expectes abc to be replaced by "foo" and the next two lines to be replaced by "bar" and "smurf".
 - the edit... should probably all be converted to using editFileInMemory because all the edits can be reduced down to editing lines. This would reduce the code duplication in io.d
-
-- createEmbedder must use ModelPool. It is RAII so it ensures that models are deallocated when the pool is destroyed and enable reuse of an already loaded model
-
 - make sound notification configurable in json via config.d
 
 # ui
 - change the background color for the input field to dark grey
-- show what pipeline agents are doing in a window
-- stream visualization of the current message
 - add UI where an agent can query the user for input.
 - make it easy to create a simple, straight pipeline from the TUI as a chat message.
 - log messages sent to the TUI should have the severity so the heading can be colored differently
@@ -48,7 +34,6 @@
 - add a menu item to open a separate window to show more detailed statistic about LLM such as latency, token use in total etc
 - add a menu item to navigate the RAG database
 - taskDone is displayed incorrectly when reading the database. Should be FinalAnswer
-- send a "clear pipeline" when starting a new pipeline task
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
