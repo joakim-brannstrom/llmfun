@@ -12,7 +12,8 @@ RUN apt install -y --no-install-recommends \
         make cmake ninja-build \
         gcc g++ \
         curl \
-        xz-utils
+        xz-utils \
+        libncurses-dev
 
         # vulkan-tools libvulkan-dev vulkan-validationlayers glslc spirv-headers pkg-config
 WORKDIR /opt
