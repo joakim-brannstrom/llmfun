@@ -5,6 +5,7 @@ import std.algorithm : canFind, filter, map;
 import std.format : format;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.range : array;
+import std.traits : isIntegral, isFloatingPoint;
 
 import my.filter : ReFilter;
 
@@ -16,36 +17,13 @@ struct Function {
     string desc;
 }
 
-struct Param {
-    string type;
-    string name;
+// UDA to mark a parameter as optional
+struct ParamOptional {
 }
 
-// Extracted from functions marked by UDA's and the parameters
-struct FunctionDesc {
-    string name;
-    string desc;
-    Param[] params;
-    ExecuteFuncResult function(Context, JSONValue) callback;
-}
-
-// A function call
-struct FunctionCall {
-    string name;
-    JSONValue args;
-}
-
-FunctionDesc[] getFunctions() @trusted nothrow @nogc {
-    return cast(FunctionDesc[]) registeredFunc;
-}
-
-// only called at program start single threaded.
-void addFunction(FunctionDesc f) {
-    if (registeredFunc.canFind!(fd => fd.name == f.name)) {
-        logger.warningf("Duplicate tool function '%s' registered, ignoring", f.name);
-        return;
-    }
-    registeredFunc ~= cast(shared) f;
+// UDA to describe a parameter (in the parameter struct)
+struct ParamDescription {
+    string value;
 }
 
 struct ExecuteFuncResult {
@@ -53,7 +31,47 @@ struct ExecuteFuncResult {
     bool success;
 }
 
-ExecuteFuncResult executeFunc(Context ctx, string name, JSONValue args) nothrow {
+struct RegParam {
+    string name;
+    string type;
+    string desc;
+    bool required;
+}
+
+struct RegFunction {
+    string name;
+    string desc;
+    RegParam[] params;
+    ExecuteFuncResult function(Context, JSONValue) callback;
+}
+
+struct FunctionCall {
+    string name;
+    JSONValue args;
+}
+
+RegFunction[] getFunctions() @trusted nothrow @nogc {
+    return cast(RegFunction[]) registeredFunc;
+}
+
+// should only be called called at program start single threaded.
+void addFunction(RegFunction f) {
+    if (registeredFunc.canFind!(fd => fd.name == f.name)) {
+        logger.warningf("Duplicate tool function '%s' registered, ignoring", f.name);
+        return;
+    }
+    registeredFunc ~= cast(shared) f;
+}
+
+// Filter the JSON tool descriptions array using ReFilter.
+// Only tools whose name matches the filter are returned.
+JSONValue filterToolDescriptions(JSONValue allTools, ReFilter filter_) {
+    import std.algorithm : filter;
+
+    return JSONValue(allTools.array.filter!(a => filter_.match(a["function"]["name"].str)).array);
+}
+
+private ExecuteFuncResult executeFunc(Context ctx, string name, JSONValue args) nothrow {
     try {
         foreach (func; getFunctions.filter!(a => a.name == name)) {
             auto rval = func.callback(ctx, args);
@@ -70,16 +88,7 @@ ExecuteFuncResult executeFunc(Context ctx, string name, JSONValue args) nothrow 
     return ExecuteFuncResult("error: should not happen", false);
 }
 
-/// Filter the JSON tool descriptions array using ReFilter.
-/// Only tools whose name matches the filter are returned.
-JSONValue filterToolDescriptions(JSONValue allTools, ReFilter filter_) {
-    import std.algorithm : filter;
-
-    return JSONValue(allTools.array.filter!(a => filter_.match(a["function"]["name"].str)).array);
-}
-
-/// Overload of executeFunc that filters tool execution via ReFilter.
-/// If the tool name does not match the filter, returns an error.
+// If the tool name does not match the filter, returns an error.
 ExecuteFuncResult executeFunc(Context ctx, string name, JSONValue args, ReFilter filter_) nothrow {
     try {
         if (!filter_.match(name))
@@ -91,211 +100,79 @@ ExecuteFuncResult executeFunc(Context ctx, string name, JSONValue args, ReFilter
     return executeFunc(ctx, name, args);
 }
 
-// JSON following the OpenAI format
+// Returns: JSON following the OpenAI format
 JSONValue descAllFunctions() @safe {
+    import std.algorithm : map, filter;
+    import std.array : array, empty;
+
     JSONValue[] rval;
     foreach (func; getFunctions) {
-        JSONValue jf;
-        jf["name"] = func.name;
-        jf["description"] = func.desc;
+        JSONValue jfunc;
+        jfunc["name"] = func.name;
+        jfunc["description"] = func.desc;
 
         auto jparams = JSONValue.emptyObject;
-        foreach (param; func.params) {
-            jparams[param.name] = JSONValue(["type": param.type]);
+        foreach (p; func.params) {
+            auto j = JSONValue.emptyObject;
+            j["type"] = p.type;
+            if (!p.desc.empty) {
+                j["description"] = p.desc;
+            }
+            jparams[p.name] = j;
         }
-        jf["parameters"] = [
-            "type": JSONValue("object"),
-            "properties": jparams,
-            "required": JSONValue(func.params.map!(a => a.name).array)
-        ];
+        jfunc["parameters"] = JSONValue.emptyObject;
+        jfunc["parameters"]["type"] = "object";
+        jfunc["parameters"]["properties"] = jparams;
+        jfunc["parameters"]["required"] = JSONValue(func.params
+                .filter!(a => a.required)
+                .map!(a => a.name)
+                .array);
 
-        JSONValue wrap;
-        wrap["type"] = "function";
-        wrap["function"] = jf;
-        rval ~= wrap;
+        JSONValue jwrap;
+        jwrap["type"] = "function";
+        jwrap["function"] = jfunc;
+        rval ~= jwrap;
     }
     return JSONValue(rval);
-}
-
-struct ParseFuncCallResult {
-    FunctionCall[] calls;
-    bool failed;
-}
-
-ParseFuncCallResult parseFuncCall(string text) {
-    import std.regex : regex, matchAll;
-
-    FunctionCall[] calls;
-    bool parseFail;
-    static auto pattern = regex(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", "gs");
-    foreach (match; matchAll(text, pattern)) {
-        try {
-            auto j = parseJSON(match[1].map!(c => c < 0x20 ? ' ' : c).array);
-            if ("name" in j && "arguments" in j) {
-                calls ~= FunctionCall(j["name"].str, j["arguments"]);
-            }
-        } catch (Exception e) {
-            logger.infof("Failed to parse function call: %s", e.msg);
-            parseFail = true;
-        }
-    }
-    return ParseFuncCallResult(calls, parseFail);
-}
-
-string getJsonGrammar() {
-    import std.array : join;
-
-    const functions = getFunctions.map!(a => `"\"` ~ a.name ~ `\""`).join(" | ");
-
-    // json.gbnf
-    return `
-root ::= "{" ws "\"name\"" ws ":" ws toolname ws "," ws "\"arguments\"" ws ":" ws object ws "}</tool_call>"
-
-toolname ::= ` ~ functions ~ `
-
-value  ::= object | array | string | number | ("true" | "false" | "null") ws
-
-object ::=
-  "{" ws (
-            string ":" ws value
-    ("," ws string ":" ws value)*
-  )? "}" ws
-
-array  ::=
-  "[" ws (
-            value
-    ("," ws value)*
-  )? "]" ws
-
-string ::=
-  "\"" (
-    [^"\\] |
-    "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]) # escapes
-  )* "\"" ws
-
-number ::= ("-"? ([0-9] | [1-9] [0-9]*)) ("." [0-9]+)? ([eE] [-+]? [0-9]+)? ws
-
-# Optional space: by convention, applied in this grammar after literal chars when allowed
-ws ::= ([ \t\n] ws)?
-        `;
 }
 
 // Register all functions marked by @Function in the module.
 mixin template RegisterLlmFunctions() {
     shared static this() {
-        import llm.tool_call : addFunction, FunctionDesc, Function;
-        import std.algorithm : among;
-        import std.array : join;
-        import std.conv : to;
-        import std.format : format;
-        import std.json : JSONValue, JSONType, JSONOptions;
-        import std.traits : hasUDA, getUDAs, ParameterIdentifierTuple,
-            Parameters, isIntegral, isFloatingPoint;
+        import llm.tool_call : addFunction, RegFunction, Function, toParams, initParams;
+        import std.array : empty;
+        import std.json : JSONValue;
+        import std.traits : hasUDA, getUDAs, Parameters, isAggregateType;
 
         mixin("alias TheModule = " ~ __MODULE__ ~ ";");
 
-        static foreach (memberName; __traits(allMembers, TheModule)) {
+        static foreach (moduleMemberName; __traits(allMembers, TheModule)) {
             {
-                static if (memberName != "object" && memberName != "TheModule") {
-                    mixin("alias member = " ~ memberName ~ ";");
-                    static if (is(typeof(member) == function) && hasUDA!(member, Function)) {
-                        enum funcDesc = getUDAs!(member, Function)[0].desc;
-                        alias FuncParamNames = ParameterIdentifierTuple!member[1 .. $];
-                        alias FuncParamTypes = Parameters!member[1 .. $];
-
-                        Param[] params;
-                        static foreach (i; 0 .. FuncParamNames.length) {
-                            {
-                                static if (is(FuncParamTypes[i] : string))
-                                    enum type = "string";
-                                else static if (isIntegral!(FuncParamTypes[i])
-                                        || isFloatingPoint!(FuncParamTypes[i]))
-                                    enum type = "number";
-                                else
-                                    enum type = "null";
-                                params ~= Param(type: type, name: FuncParamNames[i]);
-                            }
-                        }
+                static if (moduleMemberName != "object" && moduleMemberName != "TheModule") {
+                    mixin("alias moduleMember = " ~ moduleMemberName ~ ";");
+                    static if (is(typeof(moduleMember) == function)
+                            && hasUDA!(moduleMember, Function)) {
+                        enum funcDesc = getUDAs!(moduleMember, Function)[0].desc;
+                        alias FuncParamTypes = Parameters!moduleMember;
+                        static assert(FuncParamTypes.length == 2,
+                                "Function " ~ __MODULE__ ~ "." ~ moduleMemberName
+                                ~ " must take only two arguments where the second is a struct");
+                        alias ParamsT = FuncParamTypes[1];
+                        static assert(isAggregateType!ParamsT,
+                                "Function " ~ __MODULE__ ~ "." ~ moduleMemberName
+                                ~ " second parameter must be an aggregate type but is a "
+                                ~ ParamsT.stringof);
 
                         static ExecuteFuncResult funcCallback(Context ctx, JSONValue args) {
-                            string[] strValues;
-                            long[] intValues;
-                            double[] floatValues;
-                            bool[] boolValues;
-
-                            ExecuteFuncResult makeWarning(size_t i)() {
-                                return ExecuteFuncResult(format!"error using tool '%s': wrong parameter type '%s': Expected parameter '%s' of type '%s'"(
-                                        memberName, args[FuncParamNames[i]].type,
-                                        FuncParamNames[i], FuncParamTypes[i].stringof), false);
+                            auto params = initParams!ParamsT(args, toParams!ParamsT);
+                            if (params.errorMsg.empty) {
+                                return moduleMember(ctx, params.value);
                             }
+                            return ExecuteFuncResult(msg: params.errorMsg, success: false);
+                        }
 
-                            static foreach (i; 0 .. FuncParamNames.length) {
-                                if (FuncParamNames[i]!in args) {
-                                    return ExecuteFuncResult(
-                                            format!"error using tool '%s': missing parameter: '%s' of type '%s'"(
-                                            memberName, FuncParamNames[i],
-                                            FuncParamTypes[i].stringof), false);
-                                }
-
-                                strValues ~= "";
-                                intValues ~= 0;
-                                floatValues ~= 0.0;
-                                boolValues ~= false;
-
-                                static if (is(FuncParamTypes[i] : string)) {
-                                    if (args[FuncParamNames[i]].type == JSONType.string) {
-                                        strValues[$ - 1] = args[FuncParamNames[i]].str;
-                                    } else {
-                                        return makeWarning!(i)();
-                                    }
-                                } else static if (isIntegral!(FuncParamTypes[i])) {
-                                    if (args[FuncParamNames[i]].type == JSONType.integer) {
-                                        intValues[$ - 1] = args[FuncParamNames[i]].integer;
-                                    } else {
-                                        return makeWarning!(i)();
-                                    }
-                                } else static if (isFloatingPoint!(FuncParamTypes[i])) {
-                                    if (args[FuncParamNames[i]].type == JSONType.float_) {
-                                        floatValues[$ - 1] = args[FuncParamNames[i]].float_;
-                                    } else {
-                                        return makeWarning!(i)();
-                                    }
-                                } else static if (is(FuncParamTypes[i] : bool)) {
-                                    if (among(args[FuncParamNames[i]].type,
-                                            JSONType.true_, JSONType.false_)) {
-                                        boolValues[$ - 1] = args[FuncParamNames[i]].boolean;
-                                    } else {
-                                        return makeWarning!(i)();
-                                    }
-                                } else {
-                                    static assert(0, "Unsupported parameter type "
-                                            ~ FuncParamTypes[i].stringof
-                                            ~ " in function call " ~ memberName);
-                                }
-                            }
-                            enum callFunc = {
-                                string[] p;
-                                static foreach (i; 0 .. FuncParamNames.length) {
-                                    static if (is(FuncParamTypes[i] : string)) {
-                                        p ~= "strValues[" ~ i.to!string ~ "]";
-                                    } else static if (isIntegral!(FuncParamTypes[i])) {
-                                        p ~= "intValues[" ~ i.to!string ~ "]";
-                                    } else static if (isFloatingPoint!(FuncParamTypes[i])) {
-                                        p ~= "floatValues[" ~ i.to!string ~ "]";
-                                    } else static if (is(FuncParamTypes[i] : bool)) {
-                                        p ~= "boolValues[" ~ i.to!string ~ "]";
-                                    } else {
-                                        static assert(0, "Unsupported parameter type "
-                                                ~ FuncParamTypes[i].stringof
-                                                ~ " in function call " ~ memberName);
-                                    }
-                                }
-                                return "return member(ctx, " ~ p.join(",") ~ ");";
-                            }();
-                            mixin(callFunc);
-                        };
-                        addFunction(FunctionDesc(name: memberName, desc: funcDesc,
-                                params: params, callback: &funcCallback));
+                        addFunction(RegFunction(name: moduleMemberName, desc: funcDesc,
+                                params: toParams!ParamsT, callback: &funcCallback));
                     }
                 }
             }
@@ -311,6 +188,96 @@ string baseContextToSpecific(TargetT, string func = __PRETTY_FUNCTION__)() {
 `;
 }
 
+RegParam toParam(T)(string name, string desc, bool required) {
+    static if (is(T == string))
+        enum type = "string";
+    else static if (isIntegral!T || isFloatingPoint!T)
+        enum type = "number";
+    else static if (is(T == bool))
+        enum type = "boolean";
+    else
+        static assert(0, "unsupported type " ~ T.stringof);
+
+    return RegParam(name: name, type: type, desc: desc, required: required);
+}
+
+auto getJsonValue(T)(JSONValue json) {
+    static if (is(T == string))
+        return json.str;
+    else static if (isIntegral!T)
+        return cast(T) json.integer;
+    else static if (isFloatingPoint!T)
+        return json.floating;
+    else static if (is(T == bool))
+        return json.boolean;
+    else
+        static assert(0, "unsupported type " ~ T.stringof);
+}
+
+struct InitParams(T) {
+    string errorMsg;
+    T value;
+}
+
+InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
+    import std.algorithm : filter, map;
+    import std.conv : text;
+
+    InitParams!ParamsT rval;
+
+    foreach (a; regParams.filter!(a => a.required)) {
+        if (a.name !in json) {
+            rval.errorMsg = i"error: missing required parameter '$(a.name)'".text;
+            return rval;
+        }
+    }
+
+    bool[string] allFields;
+    static foreach (field; __traits(allMembers, ParamsT)) {
+        {
+            alias FT = typeof(__traits(getMember, rval.value, field));
+            allFields[field] = true;
+            if (auto v = field in json) {
+                try {
+                    __traits(getMember, rval.value, field) = getJsonValue!FT(*v);
+                } catch (Exception e) {
+                    rval.errorMsg = i"error: wrong parameter type '$(v.type)': Expected parameter '$(
+                            field)' of type $(FT.stringof): $(e.msg)".text;
+                    return rval;
+                }
+            }
+        }
+    }
+
+    foreach (key; json.object.byKey) {
+        if (key !in allFields) {
+            rval.errorMsg = i"error: no such parameter '$(key)'".text;
+        }
+    }
+
+    return rval;
+}
+
+RegParam[] toParams(FunctionParamT)() {
+    import std.traits : hasUDA, getUDAs;
+
+    RegParam[] rval;
+    static foreach (field; FunctionParamT.tupleof) {
+        {
+            enum name = field.stringof;
+            static if (hasUDA!(field, ParamDescription)) {
+                enum desc = getUDAs!(field, ParamDescription)[0].value;
+            } else {
+                enum desc = "";
+            }
+            enum isOptional = hasUDA!(field, ParamOptional);
+            rval ~= toParam!(typeof(field))(name: name, desc: desc, required: !isOptional);
+        }
+    }
+
+    return rval;
+}
+
 private:
 
-shared(FunctionDesc[]) registeredFunc;
+shared(RegFunction[]) registeredFunc;
