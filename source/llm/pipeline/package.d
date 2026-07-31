@@ -230,7 +230,7 @@ string prettyPrint(PipelineResult result) {
 
     foreach (i, agent; result.agentResults) {
         a.put("\n");
-        a.put("## Agent $(i+1): $(agent.agentName)\n".text);
+        a.put(i"## Agent $(i + 1): $(agent.agentName)\n".text);
         a.put(format("- Status: %s\n", agent.success ? "✓ Success" : "✗ Failed"));
         a.put(i"- Duration: $(agent.durationMs) ms\n".text);
 
@@ -243,7 +243,7 @@ string prettyPrint(PipelineResult result) {
         }
 
         if (!outputPreview.empty) {
-            a.put("### Output\n");
+            a.put("\n### Output\n\n---\n\n");
             foreach (line; outputPreview.split("\n")) {
                 a.put(line);
                 a.put("\n");
