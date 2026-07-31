@@ -1,11 +1,11 @@
 module llm.tool_call.sandbox;
 
+import std.conv : to, text;
 import std.file : exists;
 import std.format : format;
 import std.json : JSONValue;
 import std.process : execute;
 import std.string : toLower, replace;
-import std.conv : to;
 
 import my.path : AbsolutePath, Path;
 
@@ -22,11 +22,19 @@ interface SandboxContext : Context {
     string getContainerCmd();
 }
 
-@Function("Execute d/python code in sandbox. Returns JSON with exit_code and output")
-ExecuteFuncResult executeCode(Context baseCtx, string path, string language) {
+struct ExecuteCodeParams {
+    @ParamDescription("Path to the source file to execute")
+    string path;
+
+    @ParamDescription("Programming language: 'd' or 'python'")
+    string language;
+}
+
+@Function("Execute code in sandbox. Returns JSON with exit_code and output")
+ExecuteFuncResult executeCode(Context baseCtx, ExecuteCodeParams params) {
     mixin(baseContextToSpecific!SandboxContext);
 
-    auto pathRes = pathToWorkarea(ctx, path, checkExist: true);
+    auto pathRes = pathToWorkarea(ctx, params.path, checkExist: true);
     if (!pathRes.valid)
         return ExecuteFuncResult(pathRes.errorMsg, success: false);
     auto path_ = pathRes.path;
@@ -34,7 +42,7 @@ ExecuteFuncResult executeCode(Context baseCtx, string path, string language) {
     try {
         string cmd;
         const imageName = {
-            switch (language.toLower) {
+            switch (params.language.toLower) {
             case "d":
                 cmd = "ldmd2 -run /source";
                 return "dlang/llmfun:1.0";
@@ -42,16 +50,17 @@ ExecuteFuncResult executeCode(Context baseCtx, string path, string language) {
                 cmd = "python3 /source";
                 return "llmfun/python3:1.0";
             default:
-                throw new Exception("unsupported language " ~ language);
+                throw new Exception(i"unsupported language $(params.language)".text);
             }
         }();
 
         // TODO: check the ulimit config. This is copied from the podman run documentation.
         auto status = execute([
             ctx.getContainerCmd, "run", "--rm", "--cpus", "2", "--ulimit",
-            "nofile=1024:1024", "--stop-timeout", "60", "--memory", "1g", "-v",
-            path_.toString ~ ":/source:ro", "-v",
-            ctx.workArea.toString ~ ":/workarea", imageName, "bash", "-c", cmd
+            "nofile=1024:1024", "--stop-timeout", "60", "--memory", "1g",
+            "-v", i"$(path_.toString):/source:ro".text, "-v",
+            i"$(ctx.workArea.toString):/workarea".text, imageName, "bash", "-c",
+            cmd
         ]);
         return ExecuteFuncResult(JSONValue([
             "exit_code": JSONValue(status.status),
@@ -62,18 +71,26 @@ ExecuteFuncResult executeCode(Context baseCtx, string path, string language) {
     }
 }
 
-@Function("Execute d code with dub in sandbox. Parameter command: build or test. See loadSkill('dlang', ...) for more information. Returns JSON with exit_code and output")
-ExecuteFuncResult executeDCodeWithDub(Context baseCtx, string path, string command) {
+struct ExecuteDCodeWithDubParams {
+    @ParamDescription("Path to the D project directory containing dub.sdl or dub.json")
+    string path;
+
+    @ParamDescription("Command to execute: 'build' or 'test'")
+    string command;
+}
+
+@Function("Execute d code with dub in sandbox. Always load the skill 'dlang' before use. Returns JSON with exit_code and output")
+ExecuteFuncResult executeDCodeWithDub(Context baseCtx, ExecuteDCodeWithDubParams params) {
     mixin(baseContextToSpecific!SandboxContext);
 
-    auto pathRes = pathToWorkarea(ctx, path, checkExist: true);
+    auto pathRes = pathToWorkarea(ctx, params.path, checkExist: true);
     if (!pathRes.valid)
         return ExecuteFuncResult(pathRes.errorMsg, success: false);
     auto path_ = pathRes.path;
 
     try {
         string cmd;
-        switch (command) {
+        switch (params.command) {
         case "build":
             cmd = "dub build";
             break;
@@ -81,9 +98,8 @@ ExecuteFuncResult executeDCodeWithDub(Context baseCtx, string path, string comma
             cmd = "dub test";
             break;
         default:
-            return ExecuteFuncResult(
-                    "error: supported commands are 'build', 'test'. Unsupported command argument: "
-                    ~ command);
+            return ExecuteFuncResult(i"error: supported commands are 'build', 'test'. Unsupported command argument: $(
+                    params.command)".text, success: false);
         }
         const imageName = "dlang/llmfun:1.0";
 
@@ -101,11 +117,21 @@ ExecuteFuncResult executeDCodeWithDub(Context baseCtx, string path, string comma
     }
 }
 
-@Function("Execute a git command in the specified repository directory. Returns JSON with `exit_code` and combined `stdout`/`stderr` in `output`.\n" ~ "command: Git subcommand and arguments (without leading 'git'), e.g. 'status', 'commit -m msg'\n" ~ "repo: Path to the repository directory to run the command in")
-ExecuteFuncResult executeGit(Context baseCtx, string repo, string command) {
+struct ExecuteGitParams {
+    @ParamDescription("Path to the repository directory to run the command in")
+    string repo;
+
+    @ParamDescription(
+            "Git subcommand and arguments (without leading 'git'), e.g. 'status', 'commit -m msg'")
+    string command;
+}
+
+@Function(
+        "Execute a git command. Returns JSON with `exit_code` and combined `stdout`/`stderr` in `output`")
+ExecuteFuncResult executeGit(Context baseCtx, ExecuteGitParams params) {
     mixin(baseContextToSpecific!SandboxContext);
 
-    auto pathRes = pathToWorkarea(ctx, repo, checkExist: true);
+    auto pathRes = pathToWorkarea(ctx, params.repo, checkExist: true);
     if (!pathRes.valid)
         return ExecuteFuncResult(pathRes.errorMsg.replace("path", "repo"), success: false);
     auto path_ = pathRes.path;
@@ -115,13 +141,14 @@ ExecuteFuncResult executeGit(Context baseCtx, string repo, string command) {
         auto status = execute([
             ctx.getContainerCmd, "run", "--rm", "--cpus", "2", "--ulimit",
             "nofile=1024:1024", "--stop-timeout", "60", "--memory", "8g",
-            "-v", path_.toString ~ ":/workarea:rw", imageName, "git " ~ command
+            "-v", i"$(path_.toString):/workarea:rw".text, imageName,
+            i"git $(params.command)".text
         ]);
         return ExecuteFuncResult(JSONValue([
             "exit_code": JSONValue(status.status),
             "output": JSONValue(status.output)
         ]).toString, success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
+        return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
     }
 }

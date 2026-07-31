@@ -69,16 +69,24 @@ private string getMemorySummary(MemoryContext ctx, string topic) {
     }
 }
 
+struct WriteMemoryParams {
+    @ParamDescription("Topic name for the memory (alphanumeric + underscore, limited length)")
+    string topic;
+
+    @ParamDescription("Content to store as markdown paragraph for future retrieval")
+    string content;
+}
+
 @Function("Store content as markdown paragraph for future retrieval about a topic")
-ExecuteFuncResult writeMemory(Context baseCtx, string topic, string content) {
+ExecuteFuncResult writeMemory(Context baseCtx, WriteMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 
-    if (auto e = checkTopic(ctx, topic))
+    if (auto e = checkTopic(ctx, params.topic))
         return ExecuteFuncResult(e, success: false);
 
     try {
-        if (!ctx.saveMemoryFile(topic, content)) {
-            return ExecuteFuncResult(format!"error: failed saving the memory with topic '%s'"(topic),
+        if (!ctx.saveMemoryFile(params.topic, params.content)) {
+            return ExecuteFuncResult(format!"error: failed saving the memory with topic '%s'"(params.topic),
                     success: false);
         }
     } catch (Exception e) {
@@ -87,48 +95,61 @@ ExecuteFuncResult writeMemory(Context baseCtx, string topic, string content) {
     return ExecuteFuncResult("OK", success: true);
 }
 
+struct ReadMemoryParams {
+    @ParamDescription("Topic name to retrieve memory from")
+    string topic;
+}
+
 @Function("Retrieve stored memory from past self about a topic")
-ExecuteFuncResult readMemory(Context baseCtx, string topic) {
+ExecuteFuncResult readMemory(Context baseCtx, ReadMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 
-    if (auto e = checkTopic(ctx, topic))
+    if (auto e = checkTopic(ctx, params.topic))
         return ExecuteFuncResult(e, success: false);
 
     try {
-        return ctx.readMemory(topic).match!((string a) {
+        return ctx.readMemory(params.topic).match!((string a) {
             return ExecuteFuncResult(a, success: true);
         }, (_) {
-            return ExecuteFuncResult(format!"error: no memory topic '%s' exist"(topic),
+            return ExecuteFuncResult(format!"error: no memory topic '%s' exists"(params.topic),
                 success: false);
         });
 
     } catch (Exception e) {
-        logger.tracef("error retrieving memory '%s': %s", topic, e.msg);
+        logger.tracef("error retrieving memory '%s': %s", params.topic, e.msg);
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
 }
 
+struct RemoveMemoryParams {
+    @ParamDescription("Topic name of the memory to remove")
+    string topic;
+}
+
 @Function("Remove a memory that is no longer useful such as temporary notes about a topic")
-ExecuteFuncResult removeMemory(Context baseCtx, string topic) {
+ExecuteFuncResult removeMemory(Context baseCtx, RemoveMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 
-    if (auto e = checkTopic(ctx, topic))
+    if (auto e = checkTopic(ctx, params.topic))
         return ExecuteFuncResult(e, success: false);
 
     try {
-        if (ctx.removeMemory(topic)) {
+        if (ctx.removeMemory(params.topic)) {
             return ExecuteFuncResult("OK", success: true);
         }
         return ExecuteFuncResult(
-                format!"error: failed to remove memory '%s'. The memory do not exist or is write protected"(topic),
-                success: false);
+                format!"error: failed to remove memory '%s'. The memory does not exist or is write protected"(
+                params.topic), success: false);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
 }
 
+struct GetMemoryTopicsParams {
+}
+
 @Function("Retrieve all memory topics with summaries for each topic")
-ExecuteFuncResult getMemoryTopics(Context baseCtx) {
+ExecuteFuncResult getMemoryTopics(Context baseCtx, GetMemoryTopicsParams params) {
     mixin(baseContextToSpecific!MemoryContext);
     auto topics = ctx.getMemoryFileTopics;
     if (topics.empty)

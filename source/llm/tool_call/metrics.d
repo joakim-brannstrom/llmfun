@@ -18,8 +18,11 @@ interface MetricsContext : Context {
     ToolLimits getToolLimits();
 }
 
+struct GetMetricsParams {
+}
+
 @Function("Get current system metrics as a markdown report")
-ExecuteFuncResult getMetrics(Context baseCtx) {
+ExecuteFuncResult getMetrics(Context baseCtx, GetMetricsParams params) {
     mixin(baseContextToSpecific!MetricsContext);
 
     try {
@@ -30,14 +33,22 @@ ExecuteFuncResult getMetrics(Context baseCtx) {
     }
 }
 
+struct GetToolHistoryParams {
+    @ParamDescription("Maximum number of recent tool call events to return")
+    @ParamOptional long limit = 10;
+
+    @ParamDescription("Maximum length of the result string for each event")
+    @ParamOptional long maxLength = 100;
+}
+
 @Function("Get recent tool call history")
-ExecuteFuncResult getToolHistory(Context baseCtx, long limit, long resultLen) {
+ExecuteFuncResult getToolHistory(Context baseCtx, GetToolHistoryParams params) {
     mixin(baseContextToSpecific!MetricsContext);
 
     auto maxArgLen = ctx.getToolLimits().maxArgLength;
 
     try {
-        auto events = ctx.getRecentEvents(limit);
+        auto events = ctx.getRecentEvents(params.limit);
         if (events.length == 0) {
             return ExecuteFuncResult("No tool call history available", success: false);
         }
@@ -48,12 +59,12 @@ ExecuteFuncResult getToolHistory(Context baseCtx, long limit, long resultLen) {
             result ~= format!"%s. [%s] %s - Success: %s\n   Args: %s\n   Result: %s\n\n"(i + 1,
                     dt.toISOExtString(), event.toolName,
                     event.success ? "Yes" : "No", truncate(event.arguments.toString,
-                        maxArgLen), truncate(event.result, resultLen));
+                        maxArgLen), truncate(event.result, params.maxLength));
         }
         return ExecuteFuncResult(result, success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: failed getting tool history: %s"(e.msg),
-                success: true);
+                success: false);
     }
 }
 

@@ -3,7 +3,7 @@ module llm.tool_call.rag;
 import logger = std.logger;
 import std.algorithm : map, filter, startsWith, count, joiner, endsWith;
 import std.array : empty, appender, array;
-import std.conv : to;
+import std.conv : to, text;
 import std.datetime : SysTime;
 import std.file : readText, exists, mkdirRecurse, getSize, remove, dirEntries, SpanMode;
 import std.format : format, formattedWrite;
@@ -40,7 +40,7 @@ private string checkTopic(RAGContext ctx, string topic) {
         return "error: topic must not be empty";
     auto maxLen = ctx.getToolLimits().maxTopicLength;
     if (topic.length > maxLen)
-        return format!"error: topic too long. Max %s characters"(maxLen);
+        return i"error: topic too long. Max $(maxLen) characters".text;
     if (auto err = checkAlphaNumUnderscore(topic))
         return err;
     return null;
@@ -60,49 +60,92 @@ private string toResult(Document[] docs) {
             doc.value.offset.end, doc.value.data)).join("\n\n");
 }
 
-ExecuteFuncResult queryFunc(alias searchFunc)(Context baseCtx, string textQuery,
-        string vectorQuery, long topK, string database) {
-    mixin(baseContextToSpecific!RAGContext);
-
-    auto maxTopKVal = ctx.getToolLimits().maxTopK;
-    if (topK < 1 || topK > maxTopKVal) {
-        return ExecuteFuncResult(format!"error: topK parameter must be in range [1, %s]"(maxTopKVal),
-                success: false);
+/**
+ * Generic query helper that works with param structs.
+ * Uses compile-time field detection to determine which RAG query method to call:
+ * - Both textQuery and vectorQuery present → queryBestMatch
+ * - Only textQuery present → queryTextSearch
+ * - Only vectorQuery present → querySemantic
+ */
+private ExecuteFuncResult queryFunc(P)(RAGContext ctx, P params) {
+    if (params.topK < 1 || params.topK > ctx.getToolLimits().maxTopK) {
+        return ExecuteFuncResult(i"error: params.topK parameter must be in range [1, $(
+                ctx.getToolLimits().maxTopK)]".text, success: false);
     }
 
-    if ((textQuery.empty || textQuery.strip.empty) && (vectorQuery.empty || vectorQuery.strip.empty)) {
+    string textQuery;
+    static if (__traits(hasMember, P, "textQuery")) {
+        textQuery = params.textQuery;
         if (textQuery.strip.empty)
             return ExecuteFuncResult("error: textQuery must not be empty", success: false);
-        return ExecuteFuncResult("error: vectorQuery must not be empty", success: false);
+    }
+
+    string vectorQuery;
+    static if (__traits(hasMember, P, "vectorQuery")) {
+        vectorQuery = params.vectorQuery;
+        if (vectorQuery.strip.empty)
+            return ExecuteFuncResult("error: vectorQuery must not be empty", success: false);
     }
 
     try {
-        auto docs = searchFunc(ctx.getRAG, textQuery, vectorQuery, topK, database);
+        Document[] docs;
+        static if (__traits(hasMember, P, "textQuery") && __traits(hasMember, P, "vectorQuery")) {
+            docs = ctx.getRAG().queryBestMatch(textQuery, vectorQuery,
+                    params.topK, params.database);
+        } else static if (__traits(hasMember, P, "textQuery")) {
+            docs = ctx.getRAG().queryTextSearch(textQuery, params.topK, params.database);
+        } else {
+            docs = ctx.getRAG().querySemantic(vectorQuery, params.topK, params.database);
+        }
+
         if (docs.length == 0) {
-            auto query = () {
-                if (!textQuery.empty && !vectorQuery.empty) {
-                    return format!"textQuery: '%s' vectorQuery: '%s'"(textQuery, vectorQuery);
+            auto queryDesc = () {
+                static if (__traits(hasMember, P, "textQuery")
+                        && __traits(hasMember, P, "vectorQuery")) {
+                    return i"textQuery: '$(textQuery)' vectorQuery: '$(vectorQuery)'".text;
+                } else static if (__traits(hasMember, P, "textQuery")) {
+                    return i"textQuery: '$(textQuery)'".text;
+                } else {
+                    return i"vectorQuery: '$(vectorQuery)'".text;
                 }
-                if (textQuery.empty) {
-                    return format!"vectorQuery: '%s'"(vectorQuery);
-                }
-                return format!"textQuery: '%s'"(textQuery);
             }();
-            return ExecuteFuncResult(format!"error: search completed but no results found for %s"(query),
+            return ExecuteFuncResult(i"error: search completed but no results found for $(queryDesc)".text,
                     success: false);
         }
         return ExecuteFuncResult(toResult(docs), success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: database error during search: %s"(e.msg),
+        return ExecuteFuncResult(i"error: database error during search: $(e.msg)".text,
                 success: false);
     }
 }
 
-@Function("Search RAG for topK relevant results by query text. If 'database' is '*', all databases are searched. Otherwise restricts search to the database with that name. Use listRAGDatabases to discover available database names.")
-ExecuteFuncResult querySemantic(Context baseCtx, string vectorQuery, long topK, string database) {
-    return queryFunc!((RAG rag, string textQuery, string vectorQuery, long topK,
-            string database) => rag.querySemantic(vectorQuery, topK, database))(baseCtx,
-            null, vectorQuery, topK, database);
+struct QuerySemanticParams {
+    @ParamDescription("Natural language query for semantic similarity search")
+    string vectorQuery;
+
+    @ParamDescription("Number of results to return")
+    @ParamOptional long topK = 5;
+
+    @ParamDescription("Database name to search, or '*' for all databases")
+    @ParamOptional string database = "*";
+}
+
+@Function(
+        "Search the RAG using semantic queries. Use listRAGDatabases to discover available database names.")
+ExecuteFuncResult querySemantic(Context baseCtx, QuerySemanticParams params) {
+    mixin(baseContextToSpecific!RAGContext);
+    return queryFunc(ctx, params);
+}
+
+struct QueryTextSearchParams {
+    @ParamDescription("FTS5 full-text search query. See function description for syntax details.")
+    string textQuery;
+
+    @ParamDescription("Number of results to return")
+    @ParamOptional long topK = 5;
+
+    @ParamDescription("Database name to search, or '*' for all databases")
+    @ParamOptional string database = "*";
 }
 
 @Function("Search RAG using FTS5 full-text search for topK relevant results. The `textQuery` is passed directly to SQLite FTS5. Supported syntax:
@@ -113,29 +156,44 @@ ExecuteFuncResult querySemantic(Context baseCtx, string vectorQuery, long topK, 
 - Start-of-column: `^phrase` only matches if phrase starts at first token.
 - Proximity: `NEAR(phrase1 phrase2, N)` matches phrases within N tokens (default 10).
 - Quoting: Strings with special characters must be double-quoted. Barewords are alphanumeric + underscore.
-Note: Column filters (`colname:` or `{col1 col2}:`) are NOT supported and will cause errors. If `database` is `*`, all databases are searched. Use `listRAGDatabases` to discover available database names.")
-ExecuteFuncResult queryTextSearch(Context baseCtx, string textQuery, long topK, string database) {
+Note: Column filters (`colname:` or `{col1 col2}:`) are NOT supported and will cause errors. Use listRAGDatabases to discover available database names.")
+ExecuteFuncResult queryTextSearch(Context baseCtx, QueryTextSearchParams params) {
     import llm.rag.database : fts5Help;
 
-    auto res = queryFunc!((RAG rag, string textQuery, string vectorQuery, long topK,
-            string database) => rag.queryTextSearch(textQuery, topK, database))(baseCtx,
-            textQuery, null, topK, database);
+    mixin(baseContextToSpecific!RAGContext);
+    auto res = queryFunc(ctx, params);
     if (!res.success) {
         res.msg ~= "\nDid you follow the syntax for an FTS5 query for the textQuery parameter? Here is the full specification:\n" ~ fts5Help;
     }
     return res;
 }
 
-@Function("Search RAG using combined semantic (`vectorQuery`) and FTS5 full-text (`textQuery`) search for topK relevant results. The `textQuery` uses FTS5 syntax: `AND`/`OR`/`NOT` (precedence: implicit space-AND > NOT > AND > OR), `( )` grouping (always use explicit AND after parens), `\"phrases\"`, `term*` prefix, `^` start-of-column, `NEAR()` proximity, and `+` phrase concatenation. Column filters are NOT supported. See `queryTextSearch` for the full specification. The `vectorQuery` is a natural language question for semantic similarity. Use `listRAGDatabases` to discover available database names.")
-ExecuteFuncResult queryBestMatch(Context baseCtx, string textQuery,
-        string vectorQuery, long topK, string database) {
-    return queryFunc!((RAG rag, string textQuery, string vectorQuery, long topK,
-            string database) => rag.queryBestMatch(textQuery, vectorQuery, topK, database))(baseCtx,
-            textQuery, vectorQuery, topK, database);
+struct QueryBestMatchParams {
+    @ParamDescription(
+            "FTS5 full-text search query. See `queryTextSearch` for the full specification")
+    string textQuery;
+
+    @ParamDescription("Natural language query for semantic similarity search")
+    string vectorQuery;
+
+    @ParamDescription("Number of results to return")
+    @ParamOptional long topK = 5;
+
+    @ParamDescription("Database name to search, or '*' for all databases")
+    @ParamOptional string database = "*";
+}
+
+@Function("Search RAG using combined semantic and FTS5 full-text. Use `listRAGDatabases` to discover available database names.")
+ExecuteFuncResult queryBestMatch(Context baseCtx, QueryBestMatchParams params) {
+    mixin(baseContextToSpecific!RAGContext);
+    return queryFunc(ctx, params);
+}
+
+struct ListRAGDatabasesParams {
 }
 
 @Function("List all available RAG databases with their names and file paths. Use this to discover database names for filtering queries.")
-ExecuteFuncResult listRAGDatabases(Context baseCtx) {
+ExecuteFuncResult listRAGDatabases(Context baseCtx, ListRAGDatabasesParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
     try {
@@ -160,11 +218,16 @@ ExecuteFuncResult listRAGDatabases(Context baseCtx) {
     }
 }
 
+struct LoadFileToRAGParams {
+    @ParamDescription("Path to the file to load into the RAG index")
+    string path;
+}
+
 @Function("Load file content into RAG index")
-ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
+ExecuteFuncResult loadFileToRAG(Context baseCtx, LoadFileToRAGParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
-    auto path_ = pathToWorkarea(ctx, path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
@@ -176,67 +239,81 @@ ExecuteFuncResult loadFileToRAG(Context baseCtx, string path) {
         auto result = ctx.getRAG().add(Document(Origin(Path(normalizedPath)),
                 data, Offset.init), ctx.getRagConfig());
         spinSql!(() => ctx.getRAG.fts5Rebuild);
-        return ExecuteFuncResult(format!"File '%s' (%s length) added as %s chunks to the RAG"(path,
-                result.length, result.chunks), success: true);
+        return ExecuteFuncResult(i"File '$(params.path)' ($(result.length) length) added as $(
+                result.chunks) chunks to the RAG".text, success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: failed loading file into rag: %s"(e.msg),
                 success: false);
     }
 }
 
-@Function("Load content into RAG index with a topic name. Topic must be alphanumeric + underscore, limited length. See error messages for exact limit.")
-ExecuteFuncResult loadContentToRAG(Context baseCtx, string topic, string content) {
+struct LoadContentToRAGParams {
+    @ParamDescription("Topic name for the content (alphanumeric + underscore)")
+    string topic;
+
+    @ParamDescription("Content to store in the RAG index")
+    string content;
+}
+
+@Function("Load content into RAG index with a topic name.")
+ExecuteFuncResult loadContentToRAG(Context baseCtx, LoadContentToRAGParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
-    if (auto e = checkTopic(ctx, topic)) {
+    if (auto e = checkTopic(ctx, params.topic)) {
         return ExecuteFuncResult(e, success: false);
     }
-    if (content.empty) {
+    if (params.content.empty) {
         return ExecuteFuncResult("error: content must not be empty", success: false);
     }
     const ulong maxContentSize = 1024 * 1024; // 1MB
-    if (content.length > maxContentSize) {
-        return ExecuteFuncResult(format!"error: content too large. Max %s bytes"(maxContentSize),
+    if (params.content.length > maxContentSize) {
+        return ExecuteFuncResult("error: content too large. Max $(maxContentSize) bytes".text,
                 success: false);
     }
 
     try {
-        auto result = ctx.getRAG().add(Document(Origin(Topic(topic)), content,
-                Offset.init), ctx.getRagConfig());
+        auto result = ctx.getRAG().add(Document(Origin(Topic(params.topic)),
+                params.content, Offset.init), ctx.getRagConfig());
         spinSql!(() => ctx.getRAG.fts5Rebuild);
-        return ExecuteFuncResult(format!"Content (%s length) added to '%s' as %s chunks to the RAG"(result.length,
-                topic, result.chunks), success: true);
+        return ExecuteFuncResult(i"Content ($(result.length) length) added to '$(params.topic)' as $(
+                result.chunks) chunks to the RAG".text, success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed loading topic into rag: %s"(e.msg),
+        return ExecuteFuncResult(i"error: failed loading topic into rag: $(e.msg)".text,
                 success: false);
     }
 }
 
-@Function("Remove topic from RAG index. Topic must be alphanumeric + underscore, limited length. See error messages for exact limit.")
-ExecuteFuncResult removeTopicFromRAG(Context baseCtx, string topic) {
+struct RemoveTopicFromRAGParams {
+    @ParamDescription(
+            "Topic name to remove from the RAG index (alphanumeric + underscore, limited length)")
+    string topic;
+}
+
+@Function("Remove topic from RAG index.")
+ExecuteFuncResult removeTopicFromRAG(Context baseCtx, RemoveTopicFromRAGParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
-    if (auto e = checkTopic(ctx, topic)) {
+    if (auto e = checkTopic(ctx, params.topic)) {
         return ExecuteFuncResult(e, success: false);
     }
 
     try {
-        const chunks = spinSql!(() => ctx.getRAG().removeSource(Origin(Topic(topic))));
+        const chunks = spinSql!(() => ctx.getRAG().removeSource(Origin(Topic(params.topic))));
         spinSql!(() => ctx.getRAG.fts5Rebuild);
-        return ExecuteFuncResult(format!"removed topic '%s' with %s chunks from RAG"(topic,
-                chunks), success: true);
+        return ExecuteFuncResult(i"removed topic '$(params.topic)' with $(chunks) chunks from RAG".text,
+                success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed to remove topic '%s' from RAG: %s"(topic,
-                e.msg), success: false);
+        return ExecuteFuncResult(i"error: failed to remove topic '$(params.topic)' from RAG: $(
+                e.msg)".text, success: false);
     }
 }
 
 /**
  * Private helper: prefix each line of text with its absolute line number.
- * When appendLoc is non-zero, splits text into lines and prefixes each with
+ * When appendLoc is true, splits text into lines and prefixes each with
  * "LINE_NUM→ " starting from startLineNumber.
  */
-private string applyAppendLoc(string text, long startLineNumber, long appendLoc) {
+private string applyAppendLoc(string text, long startLineNumber, bool appendLoc) {
     if (!appendLoc)
         return text;
 
@@ -252,42 +329,55 @@ private string applyAppendLoc(string text, long startLineNumber, long appendLoc)
     return buf[];
 }
 
-@Function("Read a specific line from a file in the RAG index. Returns the text chunk(s) containing the given line number. If 'database' is '*', all databases are searched. The 'appendLoc' parameter (non-zero = true) prefixes each line with its line number, matching readFile behavior.")
-ExecuteFuncResult queryReadFile(Context baseCtx, string filePath, long lineNumber,
-        string database, long appendLoc) {
+struct QueryReadFileParams {
+    @ParamDescription("Path to the file in the RAG index")
+    string filePath;
+
+    @ParamDescription("Line number to read (1-based)")
+    long lineNumber;
+
+    @ParamDescription("Database name to search, or '*' for all databases")
+    @ParamOptional string database = "*";
+
+    @ParamDescription("Prefix each line with its line number")
+    @ParamOptional bool appendLoc = true;
+}
+
+@Function("Read a specific line from a file in the RAG index.")
+ExecuteFuncResult queryReadFile(Context baseCtx, QueryReadFileParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
-    if (filePath.empty) {
+    if (params.filePath.empty) {
         return ExecuteFuncResult("error: filePath must not be empty", success: false);
     }
-    if (lineNumber < 1) {
-        return ExecuteFuncResult(format!"error: lineNumber must be >= 1, got: %s"(lineNumber),
+    if (params.lineNumber < 1) {
+        return ExecuteFuncResult(i"error: lineNumber must be >= 1, got: $(params.lineNumber)".text,
                 success: false);
     }
-    if (!database.empty && !ctx.getRAG().databaseExists(database)) {
-        return ExecuteFuncResult(format!"error: database '%s' not found"(database), success: false);
+    if (!params.database.empty && !ctx.getRAG().databaseExists(params.database)) {
+        return ExecuteFuncResult(i"error: database '$(params.database)' not found".text,
+                success: false);
     }
 
-    auto fileAsPath = Path(filePath);
-
     try {
-        auto matches = ctx.getRAG().queryReadFile(fileAsPath, lineNumber, database);
+        auto fileAsPath = Path(params.filePath);
+        auto matches = ctx.getRAG().queryReadFile(fileAsPath, params.lineNumber, params.database);
 
         if (matches.length == 0) {
-            if (!ctx.getRAG().hasFile(fileAsPath, database)) {
-                return ExecuteFuncResult(format!"error: file '%s' not found in RAG index"(filePath),
+            if (!ctx.getRAG().hasFile(fileAsPath, params.database)) {
+                return ExecuteFuncResult(i"error: file 'params.filePath' not found in RAG index".text,
                         success: false);
             }
-            return ExecuteFuncResult(format!"error: file '%s' exists in RAG but no chunk contains line %s"(filePath,
-                    lineNumber), success: false);
+            return ExecuteFuncResult(i"error: file '$(params.filePath)' exists in RAG but no chunk contains line $(
+                    params.lineNumber)".text, success: false);
         }
 
         string[] resultBlocks;
         foreach (i, match; matches) {
-            string originStr = match.origin.match!((Topic a) => format!"topic: '%s'"(a.name),
+            string originStr = match.origin.match!((Topic a) => i"topic: '$(a.name)'".text,
                     (Url a) => a.value, (Path a) => a.toString);
 
-            string text = applyAppendLoc(match.data, match.line.begin, appendLoc);
+            string text = applyAppendLoc(match.data, match.line.begin, params.appendLoc);
 
             resultBlocks ~= format("--- Result %s ('%s' in database '%s' line %s-%s chars %s-%s) ---\n%s", i + 1,
                     originStr, match.databaseName, match.line.begin,
