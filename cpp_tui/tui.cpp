@@ -296,7 +296,7 @@ static void renderAgentStream(TuiState& state, const int agentIndex, const int64
         }
 
         ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-        textUnformattedMultiline(msg.content);
+        textUnformattedMultiline(state.mdConfig, msg.content);
         ImGui::PopTextWrapPos();
 
         ImGui::Unindent();
@@ -419,10 +419,10 @@ static void renderSingleHeader(TuiState& state, size_t i, ImVec2 displaySize,
     const bool isRecent =
         (static_cast<int>(i) >= static_cast<int>(state.chat.outputLines.size()) - 10);
     const bool showHeader = state.chat.outputLineOpen.count(i) == 0;
-    const bool isLastMsg = (i == state.chat.outputLines.size() - 1);
+    const bool showThinking = (i >= state.chat.outputLines.size() - 3);
 
     if (renderSingleHeader(state, entry, displaySize, forceOpen || isRecent, showHeader,
-                           isLastMsg)) {
+                           showThinking)) {
         state.chat.outputLineOpen.insert(i);
     } else {
         state.chat.outputLineOpen.erase(i);
@@ -789,7 +789,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
 
         if (state.chat.hasStreamMsg) {
-            renderSingleHeader(state, state.chat.streamMsg, DisplaySize, true, false, true, false);
+            renderSingleHeader(state, state.chat.streamMsg, DisplaySize, true, false, true, true);
         }
 
         if (state.left.activeAgent != -1 && state.left.activeAgent < state.left.agents.size()) {

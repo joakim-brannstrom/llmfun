@@ -176,24 +176,24 @@ struct AgentApp {
             if (!a.role.among(Role.user, Role.system) || (printUser && a.role != Role.system)) {
                 auto msgType = a.role == Role.user ? TuiChatMessageType_User
                     : TuiChatMessageType_Assistant;
-                this.sendChatThinkMessage("[%s]: %s", a.thinking, msgType, a.role, a.content);
+                this.sendChatThinkMessage("%s: %s", a.thinking, msgType, a.role, a.content);
             } else {
                 logger.tracef("[%s]: %s", a.role, a.content);
             }
         }, (ToolMessage a) {
             auto calls = summarizeToolCalls(a.toolCalls, 500);
-            this.sendChatThinkMessage("[tool calls %s]: %(%-s\n%)", a.thinking,
+            this.sendChatThinkMessage("tool calls %s: %(%-s\n%)", a.thinking,
                 TuiChatMessageType_ToolCall, calls.length, calls);
             if (a.isFinalAnswer()) {
                 uiMsg.finalAnswer(a.getFinalAnswer());
             }
         }, (ToolResponse a) {
             if (!isHiddenToolResponse(a.toolName)) {
-                this.sendChatMessage("[tool result %-s]: %s", TuiChatMessageType_ToolResponse,
+                this.sendChatMessage("tool result %-s: %s", TuiChatMessageType_ToolResponse,
                     a.toolName, summarizeToolResponse(a, 500));
             }
         }, (VisionMessage a) {
-            this.sendChatMessage("[user]: %s (with image)", TuiChatMessageType_User, a.content);
+            this.sendChatMessage("user: %s (with image)", TuiChatMessageType_User, a.content);
         });
     }
 
@@ -599,7 +599,7 @@ class StreamMessageUpdater : IStreamCallback {
         if (!tools.empty) {
             foreach (tool; tools) {
                 content ~= "\n--- Tool ---\n";
-                content ~= tool.content;
+                content ~= tool.toPrettyString(1000);
                 content ~= "\n\n";
             }
         }
@@ -638,8 +638,8 @@ class PipelineStreamMessageUpdater : IStreamCallback {
         if (!tools.empty) {
             foreach (tool; tools) {
                 content ~= "\n--- Tool ---\n";
-                content ~= tool.content;
-                content ~= "\n\n";
+                content ~= tool.toPrettyString(1000);
+                content ~= "\n";
             }
         }
 

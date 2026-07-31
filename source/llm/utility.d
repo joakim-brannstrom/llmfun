@@ -25,24 +25,9 @@ string summarizeToolResponse(ToolResponse msg, size_t maxLength) {
     auto content = msg.content;
 
     try {
-        auto j = parseJSON(msg.content);
-        bool foundContent;
-
-        // only decode and use the value of content if it is the only key.
-        foreach (key, value; j.object) {
-            if (foundContent) {
-                content = msg.content;
-                break;
-            }
-
-            if (key == "content") {
-                content = value.str;
-                foundContent = true;
-            }
-        }
+        content = parseJSON(msg.content).toPrettyString;
     } catch (Exception e) {
     }
-
     return content.length < maxLength ? content : format("%s... (%d chars)",
             content[0 .. maxLength], content.length);
 }
@@ -79,7 +64,7 @@ string[] summarizeToolCalls(JSONValue calls, size_t maxLength) {
             bool isFirst = true;
             foreach (p; params) {
                 if (!isFirst)
-                    buf.put(", ");
+                    buf.put(",\n");
                 buf.put(p);
                 isFirst = false;
             }

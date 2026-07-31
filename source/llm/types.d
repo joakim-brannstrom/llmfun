@@ -44,7 +44,22 @@ struct StreamMessage {
 }
 
 struct StreamToolCall {
-    string content;
+    string toolName;
+    string arguments;
+
+    string toPrettyString(size_t limit) @safe {
+        import std.algorithm : min;
+        import std.conv : text;
+        import std.json : parseJSON;
+
+        try {
+            return i"$(toolName)\n```json\n$(parseJSON(arguments).toPrettyString)\n```\n".text;
+        } catch (Exception e) {
+        }
+        if (arguments.length > limit)
+            return i"$(toolName)\n$(arguments[0 .. limit])...$(arguments.length)\n".text;
+        return i"$(toolName)\n$(arguments)\n".text;
+    }
 }
 
 interface IStreamCallback {
