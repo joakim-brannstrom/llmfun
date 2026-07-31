@@ -263,11 +263,17 @@ static bool isAssistantGroupOpen(const RenderGroup& grp, const std::vector<Rende
 static void renderAgentStream(TuiState& state, const int agentIndex, const int64_t updateCount,
                               const std::string agentId, const AgentStreamMessage& msg) {
     auto headerTmp = agentId;
+    if (!msg.role.empty()) {
+        headerTmp.append(" [");
+        headerTmp.append(msg.role);
+        headerTmp.append("]");
+    }
+    if (!msg.status.empty()) {
+        headerTmp.append(" [");
+        headerTmp.append(msg.status);
+        headerTmp.append("]");
+    }
     headerTmp.append(" [");
-    headerTmp.append(msg.role);
-    headerTmp.append("] [");
-    headerTmp.append(msg.status);
-    headerTmp.append("] [");
     headerTmp.append(std::to_string(updateCount));
     headerTmp.append("]");
 
