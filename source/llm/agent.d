@@ -10,7 +10,7 @@ import std.datetime : Clock, SysTime, Duration;
 import std.exception : collectException;
 import std.file : readText, exists, read, rename;
 import std.format : format, formattedWrite;
-import std.json : JSONValue, parseJSON, JSONType;
+import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
 import std.path : stripExtension, baseName;
 import std.range : empty;
 import std.regex : Regex, regex;
@@ -363,7 +363,8 @@ class Agent : IBasicAgent {
         try {
             auto historyPath = dir ~ (this.name ~ "_history.json");
             string tempFile = historyPath.toString ~ ".tmp";
-            File(tempFile, "w").write(chat.toSaveJson.toPrettyString);
+            File(tempFile, "w").write(
+                    chat.toSaveJson.toPrettyString(JSONOptions.doNotEscapeSlashes));
             rename(tempFile, historyPath.toString);
         } catch (Exception e) {
             logger.trace(e.msg).collectException;

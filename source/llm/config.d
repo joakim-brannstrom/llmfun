@@ -7,7 +7,7 @@ import std.conv : to;
 import std.file : readText, exists, mkdirRecurse, rename;
 import std.format : format;
 import std.datetime : Clock;
-import std.json : JSONValue, JSONType, parseJSON;
+import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.sumtype : SumType, match;
 import std.string : toLower, startsWith;
 
@@ -298,7 +298,7 @@ struct LlmConfig {
             stateObj["isConsolidating"] = isConsolidating;
             stateObj["consolidationInterval"] = consolidationInterval;
             stateObj["lastSessionCountUpdate"] = lastSessionCountUpdate;
-            File(tempFile, "w").writeln(stateObj.toString);
+            File(tempFile, "w").writeln(stateObj.toString(JSONOptions.doNotEscapeSlashes));
             rename(tempFile, stateFile);
         } catch (Exception e) {
             try {

@@ -1,6 +1,6 @@
 module llm.types;
 
-import std.json : JSONValue;
+import std.json : JSONValue, JSONOptions;
 
 import llm.chat : Chat;
 import llm.summary_agent : SummaryAgent;
@@ -53,7 +53,8 @@ struct StreamToolCall {
         import std.json : parseJSON;
 
         try {
-            return i"$(toolName)\n```json\n$(parseJSON(arguments).toPrettyString)\n```\n".text;
+            return i"$(toolName)\n```json\n$(parseJSON(arguments)
+                    .toPrettyString(JSONOptions.doNotEscapeSlashes))\n```\n".text;
         } catch (Exception e) {
         }
         if (arguments.length > limit)

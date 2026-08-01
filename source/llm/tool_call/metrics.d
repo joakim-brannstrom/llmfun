@@ -3,7 +3,7 @@ module llm.tool_call.metrics;
 import logger = std.logger;
 import std.datetime : SysTime, DateTime, TimeZone, dur;
 import std.format : format;
-import std.json : JSONValue;
+import std.json : JSONValue, JSONOptions;
 
 import llm.tool_call;
 import llm.metric.calculator;
@@ -58,7 +58,7 @@ ExecuteFuncResult getToolHistory(Context baseCtx, GetToolHistoryParams params) {
             auto dt = SysTime(DateTime.init) + event.timestamp.dur!"msecs";
             result ~= format!"%s. [%s] %s - Success: %s\n   Args: %s\n   Result: %s\n\n"(i + 1,
                     dt.toISOExtString(), event.toolName,
-                    event.success ? "Yes" : "No", truncate(event.arguments.toString,
+                    event.success ? "Yes" : "No", truncate(event.arguments.toString(JSONOptions.doNotEscapeSlashes),
                         maxArgLen), truncate(event.result, params.maxLength));
         }
         return ExecuteFuncResult(result, success: true);

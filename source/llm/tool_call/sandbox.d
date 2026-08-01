@@ -3,7 +3,7 @@ module llm.tool_call.sandbox;
 import std.conv : to, text;
 import std.file : exists;
 import std.format : format;
-import std.json : JSONValue;
+import std.json : JSONValue, JSONOptions;
 import std.process : execute;
 import std.string : toLower, replace;
 
@@ -65,7 +65,7 @@ ExecuteFuncResult executeCode(Context baseCtx, ExecuteCodeParams params) {
         return ExecuteFuncResult(JSONValue([
             "exit_code": JSONValue(status.status),
             "output": JSONValue(status.output)
-        ]).toString, success: true);
+        ]).toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
@@ -111,7 +111,7 @@ ExecuteFuncResult executeDCodeWithDub(Context baseCtx, ExecuteDCodeWithDubParams
         return ExecuteFuncResult(JSONValue([
             "exit_code": JSONValue(status.status),
             "output": JSONValue(status.output)
-        ]).toString, success: true);
+        ]).toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
     }
@@ -147,7 +147,7 @@ ExecuteFuncResult executeGit(Context baseCtx, ExecuteGitParams params) {
         return ExecuteFuncResult(JSONValue([
             "exit_code": JSONValue(status.status),
             "output": JSONValue(status.output)
-        ]).toString, success: true);
+        ]).toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
     }

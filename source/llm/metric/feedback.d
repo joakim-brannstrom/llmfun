@@ -5,6 +5,7 @@ import std.algorithm : filter, map, sort, uniq, count;
 import std.array : array, appender;
 import std.conv : to;
 import std.format : format;
+import std.json : JSONOptions;
 import std.numeric : cosineSimilarity;
 import std.range : take;
 import std.string : startsWith;
@@ -57,8 +58,8 @@ private:
     int countSimilarFailures(ToolCallEvent target, ToolCallEvent[] allFailures) @safe {
         int count = 1; // Count the target itself
         foreach (other; allFailures.filter!(a => a.toolName == target.toolName)) {
-            if (similarity(other.arguments.toString,
-                    target.arguments.toString) > SimilarityThreshold) {
+            if (similarity(other.arguments.toString(JSONOptions.doNotEscapeSlashes),
+                    target.arguments.toString(JSONOptions.doNotEscapeSlashes)) > SimilarityThreshold) {
                 count++;
             }
         }

@@ -99,7 +99,7 @@ struct Chat {
                 (Message a) {
                     return (a.content.length + a.thinking.length) / ApproxTokenSize;
                 }, (ToolMessage a) {
-                    return (a.toolCalls.toString.length + a.thinking.length) / ApproxTokenSize;
+                    return (a.toolCalls.toString(JSONOptions.doNotEscapeSlashes).length + a.thinking.length) / ApproxTokenSize;
                 }, (ToolResponse a) {
                     return a.content.length / ApproxTokenSize;
                 }, (VisionMessage a) {
@@ -188,8 +188,9 @@ struct Chat {
         foreach (a; history) {
             a.match!((Message a) => formattedWrite(w, `[%s, "%s"]`, a.role,
                     a.content), (ToolMessage a) => formattedWrite(w, `[%s, "%s"]`, a.role,
-                    a.toolCalls.toString), (ToolResponse a) => formattedWrite(w, `[%s, "%s", id:%s, name:%s]`,
-                    a.role, a.content, a.toolCallId, a.toolName),
+                    a.toolCalls.toString(JSONOptions.doNotEscapeSlashes)),
+                    (ToolResponse a) => formattedWrite(w, `[%s, \"%s\", id:%s, name:%s]`,
+                        a.role, a.content, a.toolCallId, a.toolName),
                     (VisionMessage a) => formattedWrite(w, `[%s, "%s", image]`, "user", a.content));
         }
         put(w, ")");
@@ -399,12 +400,13 @@ struct ToolMessage {
     }
 
     size_t length() @safe const {
-        return toolCalls.toString.length;
+        return toolCalls.toString(JSONOptions.doNotEscapeSlashes).length;
     }
 
     string toString() @safe const {
         return format!"Message(role:%s toolCalls:%s saveData:%s)"(role,
-                toolCalls.toString, saveData.toString);
+                toolCalls.toString(JSONOptions.doNotEscapeSlashes),
+                saveData.toString(JSONOptions.doNotEscapeSlashes));
     }
 
     JSONValue toJson() @safe {

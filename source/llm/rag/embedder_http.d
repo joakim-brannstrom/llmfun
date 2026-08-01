@@ -6,7 +6,7 @@ import logger = std.logger;
 import std.algorithm : map, joiner;
 import std.array : appender, empty;
 import std.format : format;
-import std.json : JSONValue, parseJSON, JSONType;
+import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
 import std.string : split;
 import std.sumtype : SumType, match;
 import core.time : dur;
@@ -105,7 +105,8 @@ class RemoteEmbedder : Embedder {
         EmbedResult rval;
         for (int i = 0; i < MaxRetryEmbedder && hasError; ++i) {
             hasError = false;
-            auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl, jsonReq.toString, rqCfg);
+            auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl,
+                    jsonReq.toString(JSONOptions.doNotEscapeSlashes), rqCfg);
             result.match!((HttpResult r) { rval = parseHttp(r); }, (HttpError e) {
                 hasError = true;
                 rval = EmbedResult(EmbedError(e.errorMsg));

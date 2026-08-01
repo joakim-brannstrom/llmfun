@@ -4,7 +4,7 @@ import logger = std.logger;
 import std.algorithm : among, sort, filter;
 import std.array : array, appender, empty, join;
 import std.format : format, formattedWrite;
-import std.json : JSONValue, JSONType, parseJSON;
+import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.stdio : writef, stdout;
 
 import my.path;
@@ -25,7 +25,7 @@ string summarizeToolResponse(ToolResponse msg, size_t maxLength) {
     auto content = msg.content;
 
     try {
-        content = parseJSON(msg.content).toPrettyString;
+        content = parseJSON(msg.content).toPrettyString(JSONOptions.doNotEscapeSlashes);
     } catch (Exception e) {
     }
     return content.length < maxLength ? content : format("%s... (%d chars)",

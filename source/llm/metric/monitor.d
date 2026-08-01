@@ -5,7 +5,7 @@ import std.algorithm : filter, splitter;
 import std.array : empty;
 import std.datetime : Clock;
 import std.file : exists, readText;
-import std.json : JSONValue, parseJSON;
+import std.json : JSONValue, parseJSON, JSONOptions;
 import std.stdio : File;
 
 import my.path;
@@ -64,7 +64,7 @@ private:
     void saveEvent(ToolCallEvent event) @safe {
         try {
             auto json = eventToJSON(event);
-            File(dataFile.toString, "a").writeln(json);
+            File(dataFile.toString, "a").writeln(json.toString(JSONOptions.doNotEscapeSlashes));
             trimLogFile;
         } catch (Exception e) {
             // Never let persistence failures crash the agent

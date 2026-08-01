@@ -7,7 +7,7 @@ import std.conv : to, text;
 import std.exception : enforce;
 import std.file : readText, exists, mkdirRecurse, getSize, remove, dirEntries, SpanMode;
 import std.format : format, formattedWrite;
-import std.json : JSONValue, parseJSON;
+import std.json : JSONValue, parseJSON, JSONOptions;
 import std.path : relativePath;
 import std.process : execute;
 import std.range : enumerate;
@@ -107,7 +107,7 @@ ExecuteFuncResult readFile(Context baseCtx, ReadFileParams params) {
     auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
     if (!path_.valid) {
         json["error"] = path_.errorMsg;
-        return ExecuteFuncResult(json.toString, success: false);
+        return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: false);
     }
     auto maxLines = ctx.getToolLimits().readFileMaxLines;
     if (maxLines <= 0) {
@@ -116,12 +116,12 @@ ExecuteFuncResult readFile(Context baseCtx, ReadFileParams params) {
     }
     if (auto err = validateLineRange(params.startLine, params.count, maxLines)) {
         json["error"] = err;
-        return ExecuteFuncResult(json.toString, success: false);
+        return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: false);
     }
     try {
         if (getSize(path_) == 0) {
             json["content"] = "";
-            return ExecuteFuncResult(json.toString, success: true);
+            return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: true);
         }
 
         auto buf = appender!(string)();
@@ -136,11 +136,11 @@ ExecuteFuncResult readFile(Context baseCtx, ReadFileParams params) {
             buf.put('\n');
         }
         json["content"] = buf[];
-        return ExecuteFuncResult(json.toString, success: true);
+        return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
         json["error"] = i"error: failed reading $(params.count) lines starting at line $(
                 params.startLine) from file '$(params.path)': $(e.msg)".text;
-        return ExecuteFuncResult(json.toString, success: false);
+        return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: false);
     }
 }
 
@@ -1321,7 +1321,7 @@ ExecuteFuncResult editFileByMarker(Context baseCtx, EditFileByMarkerParams param
         } else {
             writeLines(path_, res);
         }
-        return ExecuteFuncResult(json.toString, success: true);
+        return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(i"error: failed to edit file '$(params.path)' by marker '$(
                 params.marker)' with mode '$(params.mode)': $(e.msg)".text, success: false);
@@ -1409,7 +1409,7 @@ ExecuteFuncResult searchAndReplace(Context baseCtx, SearchAndReplaceParams param
         }
 
         json["replacements"] = count;
-        return ExecuteFuncResult(json.toString, success: true);
+        return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(i"error: failed to search and replace in file '$(params.path)': $(
                 e.msg)".text, success: false);
@@ -1506,7 +1506,7 @@ ExecuteFuncResult applyDiff(Context baseCtx, ApplyDiffParams params) {
             writeLines(path_, result);
         }
 
-        return ExecuteFuncResult(json.toString, success: true);
+        return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(i"error: failed applying diff to file '$(params.path)': $(e.msg)".text,
                 success: false);
@@ -1856,7 +1856,8 @@ ExecuteFuncResult listDirectory(Context baseCtx, ListDirectoryParams params) {
                 e["size"] = a.size.JSONValue;
             rval ~= e;
         }
-        return ExecuteFuncResult(JSONValue(rval).toString, success: true);
+        return ExecuteFuncResult(JSONValue(rval)
+                .toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(i"error: failed listing directory '$(params.path)': $(e.msg)".text,
                 success: false);

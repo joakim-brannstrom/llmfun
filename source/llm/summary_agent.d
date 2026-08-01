@@ -8,7 +8,7 @@ import std.array : array, appender, empty;
 import std.conv : to;
 import std.file : readText;
 import std.format : format, formattedWrite;
-import std.json : JSONValue, parseJSON, JSONType;
+import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
 import std.range : enumerate, iota;
 import std.string : strip, replace, toUpper, toLower;
 import std.sumtype : SumType, match;
@@ -323,10 +323,14 @@ struct SummaryAgent {
         size_t start;
         size_t curr;
         foreach (msg; messages) {
-            auto m = msg.match!((Message m) { return m.toJson.toString; }, (ToolMessage m) {
-                return m.toJson.toString;
-            }, (ToolResponse m) { return m.toJson.toString; }, (VisionMessage m) {
-                return m.toJson.toString;
+            auto m = msg.match!((Message m) {
+                return m.toJson.toString(JSONOptions.doNotEscapeSlashes);
+            }, (ToolMessage m) {
+                return m.toJson.toString(JSONOptions.doNotEscapeSlashes);
+            }, (ToolResponse m) {
+                return m.toJson.toString(JSONOptions.doNotEscapeSlashes);
+            }, (VisionMessage m) {
+                return m.toJson.toString(JSONOptions.doNotEscapeSlashes);
             });
             if (((m.length + buf[].length) / ApproxTokenSize) > maxTokens) {
                 rval ~= tuple(buf[].idup, start, curr);
