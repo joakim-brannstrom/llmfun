@@ -3,7 +3,7 @@ module llm.config;
 import logger = std.logger;
 import std.algorithm : filter, map;
 import std.array : array, empty, appender, empty;
-import std.conv : to;
+import std.conv : to, text;
 import std.file : readText, exists, mkdirRecurse, rename;
 import std.format : format;
 import std.datetime : Clock;
@@ -156,11 +156,10 @@ struct LlmConfig {
     bool warnIfNoApiKey = true;
 
     invariant {
-        assert(maxManifestSkills > 0,
-                "maxManifestSkills must be positive, got " ~ maxManifestSkills.to!string);
-        assert(maxAlwaysApplyTokens >= 0,
-                "maxAlwaysApplyTokens must be non-negative (0 = unlimited), got "
-                ~ maxAlwaysApplyTokens.to!string);
+        assert(maxManifestSkills > 0, i"maxManifestSkills must be positive, got $(maxManifestSkills)"
+                .text);
+        assert(maxAlwaysApplyTokens >= 0, i"maxAlwaysApplyTokens must be non-negative (0 = unlimited), got $(
+                maxAlwaysApplyTokens)".text);
     }
 
     EmbedConfig embedConfig;
@@ -379,12 +378,13 @@ struct LlmConfig {
 
     // Compose system prompt with skills
     string getPrompt(SkillManager skillManager, string promptName = null, bool addSkills = true) {
+        import std.string : strip;
         import llm.skill : buildAlwaysApplyBlock;
 
         string basePrompt = promptName.empty ? getBasePrompt(agentPrompt) : getBasePrompt(
                 promptName);
 
-        string fullPrompt;
+        string fullPrompt = basePrompt;
 
         if (!disableSkills && addSkills) {
             // Always-apply block: prepend
@@ -395,13 +395,8 @@ struct LlmConfig {
             string manifestXml = skillManager.getManifestXml(maxManifestSkills);
 
             if (!alwaysApplyBlock.empty || !manifestXml.empty) {
-                fullPrompt = alwaysApplyBlock ~ (alwaysApplyBlock.empty
-                        ? "" : "\n") ~ basePrompt ~ "\n\n" ~ manifestXml;
-            } else {
-                fullPrompt = basePrompt;
+                fullPrompt = i"$(basePrompt)\n$(alwaysApplyBlock)\n\n$(manifestXml)".text.strip;
             }
-        } else {
-            fullPrompt = basePrompt;
         }
 
         return fullPrompt;
