@@ -4,8 +4,7 @@ import logger = std.logger;
 import std.algorithm : filter, count;
 import std.array : empty;
 import std.ascii : letters, isAlphaNum;
-import std.conv : to;
-import std.format : format;
+import std.conv : text;
 import std.random : randomSample;
 import std.typecons : Nullable;
 import std.utf : byCodeUnit;
@@ -13,12 +12,14 @@ import std.utf : byCodeUnit;
 import my.path : Path, AbsolutePath;
 
 Path tempPath() @safe {
+    import std.conv : to;
+
     return letters.byCodeUnit.randomSample(20).to!string.Path;
 }
 
-string checkAlphaNumUnderscore(string s) {
+string checkAlphaNumUnderscore(string s) @safe pure {
     if (s.filter!(a => (!a.isAlphaNum && a != '_')).count != 0)
-        return format!"error: topic may only contain alphanumeric characters and underscores [0-9,a-z,A-Z,_]";
+        return "error: topic may only contain alphanumeric characters and underscores [0-9,a-z,A-Z,_]";
     return null;
 }
 
@@ -35,34 +36,31 @@ PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path, bool che
     import std.string : startsWith;
 
     if (path.isAbsolute) {
-        return PathCheckResult(ctx.workArea, false,
-                format!"error: path '%s' is an absolute path. Only relative paths are allowed"(path));
+        return PathCheckResult(ctx.workArea, false, i"error: path '$(path)' is an absolute path. Only relative paths are allowed"
+                .text);
     }
 
     auto path_ = (ctx.workArea ~ path).AbsolutePath;
     if (!ctx.isPathInsideWorkArea(path_)) {
         logger.trace(path_);
-        return PathCheckResult(ctx.workArea, false,
-                format!"error: path '%s' must be inside the allowed workarea"(path));
+        return PathCheckResult(ctx.workArea, false, i"error: path '$(path)' must be inside the allowed workarea"
+                .text);
     }
     if (checkExist && !path_.exists) {
         logger.trace(path_);
-        return PathCheckResult(path_, false, format!"error: path '%s' do not exist"(path));
+        return PathCheckResult(path_, false, i"error: path '$(path)' do not exist".text);
     }
     if (path_.exists && path_.isSymlink) {
         logger.trace(path_);
-        return PathCheckResult(path_, false,
-                format!"error: path '%s' is a symlink. Symlinks are not allowed to be read/write."(
-                    path));
+        return PathCheckResult(path_, false, i"error: path '$(path)' is a symlink. Symlinks are not allowed to be read/write."
+                .text);
     }
     auto checkPath = path.dirName;
     while (!checkPath.empty && checkPath.startsWith(ctx.workArea.toString)) {
         if (checkPath.exists && checkPath.isSymlink) {
             logger.trace(checkPath);
-            return PathCheckResult(path_, false,
-                    format!"error: path '%s' is a symlink. Read/write is not allowed from inside a symlink."(
-                        checkPath));
-
+            return PathCheckResult(path_, false, i"error: path '$(checkPath)' is a symlink. Read/write is not allowed from inside a symlink."
+                    .text);
         }
         checkPath = checkPath.dirName;
     }

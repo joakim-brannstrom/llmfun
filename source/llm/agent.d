@@ -575,10 +575,10 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
         }
 
         override bool isPathInsideWorkArea(AbsolutePath p) {
-            import std.algorithm : startsWith;
+            import llm.utility : isPathInsideWorkarea;
 
             logger.tracef("checking if %s is inside %s", p.toString, workArea_.toString);
-            return p.toString.startsWith(workArea_.toString);
+            return isPathInsideWorkarea(p, workArea_);
         }
 
         override AbsolutePath workArea() {

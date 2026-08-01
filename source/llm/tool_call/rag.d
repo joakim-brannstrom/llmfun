@@ -31,11 +31,11 @@ interface RAGContext : Context {
     RAG getRAG();
     bool isPathInsideWorkArea(AbsolutePath path);
     AbsolutePath workArea();
-    ToolLimits getToolLimits();
+    ToolLimits getToolLimits() @safe;
     RagConfig getRagConfig();
 }
 
-private string checkTopic(RAGContext ctx, string topic) {
+private string checkTopic(RAGContext ctx, string topic) @safe {
     if (topic.empty)
         return "error: topic must not be empty";
     auto maxLen = ctx.getToolLimits().maxTopicLength;
@@ -46,14 +46,28 @@ private string checkTopic(RAGContext ctx, string topic) {
     return null;
 }
 
-private string location(Document doc) {
-    import std.sumtype : match;
+/// Check if a topic name belongs to the protected AGENTS.md namespace.
+/// Topics starting with "agent_md_" are managed exclusively by the system
+/// (agent_md.d module) and cannot be modified via agent tool calls.
+private bool isAgentMdTopic(string topic) @safe pure nothrow {
+    return topic.startsWith("agent_md_");
+}
 
+/// Reject protected AGENTS.md topics, returning an error message or null if allowed.
+private string checkAgentMdProtection(string topic) @safe pure {
+    if (isAgentMdTopic(topic)) {
+        return i"error: topic '$(topic)' is protected. AGENTS.md topics (agent_md_*) are managed exclusively by the system and cannot be modified via tool calls."
+            .text;
+    }
+    return null;
+}
+
+private string location(Document doc) @safe pure {
     return doc.origin.match!((Topic a) => "topic: " ~ a.name, (Url a) => a.value,
             (Path a) => a.toString);
 }
 
-private string toResult(Document[] docs) {
+private string toResult(Document[] docs) @safe {
     return docs.enumerate.map!(doc => format("--- Result %s ('%s' in database '%s' line %s-%s chars %s-%s) ---\n%s",
             doc.index + 1, location(doc.value), doc.value.databaseName,
             doc.value.line.begin, doc.value.line.end, doc.value.offset.begin,
@@ -262,6 +276,9 @@ ExecuteFuncResult loadContentToRAG(Context baseCtx, LoadContentToRAGParams param
     if (auto e = checkTopic(ctx, params.topic)) {
         return ExecuteFuncResult(e, success: false);
     }
+    if (auto e = checkAgentMdProtection(params.topic)) {
+        return ExecuteFuncResult(e, success: false);
+    }
     if (params.content.empty) {
         return ExecuteFuncResult("error: content must not be empty", success: false);
     }
@@ -294,6 +311,9 @@ ExecuteFuncResult removeTopicFromRAG(Context baseCtx, RemoveTopicFromRAGParams p
     mixin(baseContextToSpecific!RAGContext);
 
     if (auto e = checkTopic(ctx, params.topic)) {
+        return ExecuteFuncResult(e, success: false);
+    }
+    if (auto e = checkAgentMdProtection(params.topic)) {
         return ExecuteFuncResult(e, success: false);
     }
 

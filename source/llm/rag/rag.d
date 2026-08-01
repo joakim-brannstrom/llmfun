@@ -18,8 +18,6 @@ import logger = std.logger;
 import std.algorithm : map, filter, joiner, sort, cache, swap, count;
 import std.array : array, empty, appender;
 import std.datetime : SysTime;
-import std.digest.murmurhash : MurmurHash3;
-import std.digest;
 import std.path : baseName, stripExtension;
 import std.random : uniform;
 import std.range : take, enumerate, iota;
@@ -321,15 +319,10 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     import std.json : parseJSON;
     import std.uni : byCodePoint, byGrapheme, isWhite;
     import std.utf : toUTF8;
-    import llm.common.config : ApproxTokenSize;
     import llm.rag.database;
-    import llm.utility : getValue;
+    import llm.utility : getValue, computeContentHash;
 
-    long toUint(ubyte[4] a) {
-        return a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
-    }
-
-    long dataHash = toUint(digest!(MurmurHash3!32)(doc.data));
+    long dataHash = computeContentHash(doc.data);
 
     if (spinSql!(() => rag.hasSource(Source(doc.origin, dataHash.SourceChecksum)))) {
         logger.trace("source already exist in database");

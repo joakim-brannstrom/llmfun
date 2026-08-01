@@ -3,9 +3,9 @@ module llm.app_agent;
 
 import logger = std.logger;
 import std.algorithm;
-import std.array : empty, array;
+import std.array : empty, array, appender;
 import std.concurrency;
-import std.conv : to;
+import std.conv : to, text;
 import std.exception : ifThrown;
 import std.file : exists, readText;
 import std.format : format;
@@ -14,6 +14,7 @@ import std.string : strip, startsWith, join, toStringz, split;
 import std.sumtype : match;
 
 import llm.agent;
+import llm.agent_md;
 import llm.app_config : UserConfig, userToLlmConfig, createRag;
 import llm.chat;
 import llm.coder;
@@ -104,6 +105,7 @@ struct AgentApp {
         s ~= "   /code <query>      Run the coder pipeline";
         s ~= "   /debug             Toggle verbose debug output";
         s ~= "   /skills            List available skills";
+        s ~= "   /refresh-agent-md  Force re-summarize AGENTS.md";
         return s.join("\n");
     }
 
@@ -118,20 +120,40 @@ struct AgentApp {
         }
 
         auto alwaysApplyCount = skills.filter!(skill => skill.alwaysApply).array.length;
-        string[] lines;
-        lines ~= "Available skills:";
-        lines ~= "";
+        auto lines = appender!(string[])();
+        lines.put("Available skills:");
+        lines.put("");
 
         foreach (skill; skills) {
             auto tag = skill.alwaysApply ? " [always-apply]" : "";
             auto desc = skill.description.length > 80
                 ? skill.description[0 .. 77] ~ "..." : skill.description;
-            lines ~= format("  %-25s %s", skill.name ~ tag, desc);
+            lines.put(format("  %-25s %s", skill.name ~ tag, desc));
         }
 
-        lines ~= "";
-        lines ~= format("%s skills available, %s always-apply", skills.length, alwaysApplyCount);
-        return lines.join("\n");
+        lines.put("");
+        lines.put(i"$(skills.length) skills available, $(alwaysApplyCount) always-apply".text);
+        return lines[].join("\n");
+    }
+
+    private void handleRefreshAgentMd() {
+        this.sendChatMessage("assistant: Refreshing AGENTS.md... (summarizing, please wait)",
+                TuiChatMessageType_Assistant);
+        try {
+            auto newState = refreshAgentMd(llmConf, rag);
+            if (newState.isValid()) {
+                agent_.setSystemPrompt(llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf.agentPrompt,
+                        addSkills: true, agentMdSummary: newState.summary));
+                this.sendChatMessage("assistant: AGENTS.md refreshed successfully.\nSummary (%d chars):\n%s",
+                        TuiChatMessageType_Assistant, newState.summary.length, newState.summary);
+            } else {
+                this.sendChatMessage("assistant: No AGENTS.md found in workarea, or refresh failed.",
+                        TuiChatMessageType_Assistant);
+            }
+        } catch (Exception e) {
+            this.sendChatMessage("assistant: Error refreshing AGENTS.md: %s",
+                    TuiChatMessageType_Assistant, e.msg);
+        }
     }
 
     private void sendChatMessage(Args...)(string msg, TuiChatMessageType type, Args args) {
@@ -272,8 +294,7 @@ struct AgentApp {
         } else if (query.startsWith("/plan ")) {
             uiMsg.pipelineClear;
             auto q = query["/plan ".length .. $];
-            sendChatMessage("[assistant]: Running plan pipeline: %s",
-                    TuiChatMessageType_Assistant, q);
+            sendChatMessage("assistant: Running plan pipeline: %s", TuiChatMessageType_Assistant, q);
             auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
                 return isStopAgentTriggered;
             }, llmConf.toolFilter.to(), makePipelineStreamCallback);
@@ -282,26 +303,29 @@ struct AgentApp {
         } else if (query.startsWith("/code ")) {
             uiMsg.pipelineClear;
             auto q = query["/code ".length .. $];
-            sendChatMessage("[assistant]: Running coder pipeline: %s",
+            sendChatMessage("assistant: Running coder pipeline: %s",
                     TuiChatMessageType_Assistant, q);
             auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
                 return isStopAgentTriggered;
             }, llmConf.toolFilter.to(), makePipelineStreamCallback);
             if (result.wasInterrupted) {
-                this.sendChatMessage("[assistant]: Pipeline interrupted by user.",
+                this.sendChatMessage("assistant: Pipeline interrupted by user.",
                         TuiChatMessageType_Assistant);
                 return AgentStatus.active;
             }
-            this.sendChatMessage(format!"[assistant]: %s"(prettyPrint(result)),
+            this.sendChatMessage(i"assistant: $(prettyPrint(result))".text,
                     TuiChatMessageType_Assistant);
             return AgentStatus.active;
         } else if (query == "/skills") {
             this.sendChatMessage(this.formatSkillsList(), TuiChatMessageType_Assistant);
             return AgentStatus.active;
+        } else if (query == "/refresh-agent-md") {
+            this.handleRefreshAgentMd();
+            return AgentStatus.active;
         } else if (query.empty) {
             return AgentStatus.active;
         } else if (query.startsWith("/")) {
-            this.sendChatMessage("[system] Unknown command: '%s'. Type /help for available commands.",
+            this.sendChatMessage("system: Unknown command: '%s'. Type /help for available commands.",
                     TuiChatMessageType_Assistant, query);
             return AgentStatus.active;
         }
@@ -374,15 +398,19 @@ struct AgentApp {
         if (rag is null)
             return 1;
 
-        // Skill discovery
         skillManager_ = makeSkillManager(llmConf);
+
+        // Process AGENTS.md (hybrid: summary in prompt, full content in RAG)
+        auto agentMdState = processAgentMd(llmConf, uconf.noCwdConfig, rag);
+        if (agentMdState.isValid())
+            logger.tracef("AGENTS.md processed, summary length: %s", agentMdState.summary.length);
 
         agentHistory = llmConf.scratchArea;
         monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
         agent_ = new Agent("main", llmConf, skillManager_, monitor, rag, llmConf.toolFilter.to());
         agent_.loadHistory(agentHistory);
-        agent_.setSystemPrompt(llmConf.getPrompt(skillManager: skillManager_,
-                promptName: llmConf.agentPrompt, addSkills: true));
+        agent_.setSystemPrompt(llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf.agentPrompt,
+                addSkills: true, agentMdSummary: agentMdState.summary));
 
         lastServerStat.context = agent_.chat.approxContextSize;
         scope (exit)

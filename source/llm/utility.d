@@ -11,6 +11,22 @@ import my.path;
 
 import llm.chat : Role, ToolResponse;
 
+// Convert a 4-byte hash to a long (little-endian byte order).
+private long toLong(ubyte[4] a) @safe {
+    return a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
+}
+
+// Compute a content checksum using MurmurHash3-32.
+// Params:
+//  content The text content to hash
+// Returns: A long representing the 32-bit hash value
+long computeContentHash(string content) @safe {
+    import std.digest : digest;
+    import std.digest.murmurhash : MurmurHash3;
+
+    return toLong(digest!(MurmurHash3!32)(content));
+}
+
 /// Display compression result
 string compressionResultToString(bool compressed, size_t originalLength,
         size_t newLength, size_t keptXCount, long keptXTokens, long ctxUsed, long newContextSize) {
@@ -314,4 +330,22 @@ bool removeMemoryBackup(Path[] memoryArea) {
     }
 
     return allOk;
+}
+
+// Check if a path is safely inside the workarea.
+// Uses proper directory boundary check to prevent prefix attacks
+// (e.g., /workarea_evil would not match /workarea).
+// Params:
+//  path The path to check
+//  workArea The workarea root path
+// Returns: true if path is safely inside workarea
+bool isPathInsideWorkarea(AbsolutePath path, AbsolutePath workArea) @safe pure nothrow @nogc {
+    import std.algorithm : startsWith;
+
+    if (!path.toString.startsWith(workArea.toString))
+        return false;
+    // Ensure proper directory boundary: either exact match or next char is '/'
+    if (path.length == workArea.length)
+        return true;
+    return path[workArea.length] == '/';
 }

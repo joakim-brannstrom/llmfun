@@ -2,7 +2,7 @@ module llm.config;
 
 import logger = std.logger;
 import std.algorithm : filter, map;
-import std.array : array, empty, appender, empty;
+import std.array : array, empty, appender, join;
 import std.conv : to, text;
 import std.file : readText, exists, mkdirRecurse, rename;
 import std.format : format;
@@ -22,6 +22,9 @@ immutable ProgramName = "llmfun";
 
 /// Minimum interval (in seconds) between session count increments.
 private enum SessionCountMinIntervalSec = 3 * 3600;
+
+/// RAG query instruction appended to system prompt when AGENTS.md summary is present.
+private immutable AgentMdRagInstruction = "For detailed explanations, architecture justifications, or lengthy code examples, " ~ "query your RAG knowledge base using the 'AGENTS.md' source. However, you must obey the " ~ "compressed rules listed above at all times, even if you don't retrieve the full file.";
 
 struct RagDatabaseConfig {
     Path path;
@@ -377,7 +380,9 @@ struct LlmConfig {
     }
 
     // Compose system prompt with skills
-    string getPrompt(SkillManager skillManager, string promptName = null, bool addSkills = true) {
+    // Composition order: basePrompt → alwaysApplyBlock → agentMdSummary → ragInstruction → memory → timestamp → manifestXml
+    string getPrompt(SkillManager skillManager, string promptName = null,
+            bool addSkills = true, string agentMdSummary = null) {
         import std.string : strip;
         import llm.skill : buildAlwaysApplyBlock;
 
@@ -386,17 +391,33 @@ struct LlmConfig {
 
         string fullPrompt = basePrompt;
 
+        string alwaysApplyBlock;
+        string manifestXml;
+
         if (!disableSkills && addSkills) {
-            // Always-apply block: prepend
-            string alwaysApplyBlock = buildAlwaysApplyBlock(skillManager.getAlwaysApplySkills(),
+            alwaysApplyBlock = buildAlwaysApplyBlock(skillManager.getAlwaysApplySkills(),
                     maxAlwaysApplyTokens);
 
-            // Manifest: append
-            string manifestXml = skillManager.getManifestXml(maxManifestSkills);
+            manifestXml = skillManager.getManifestXml(maxManifestSkills);
+        }
 
-            if (!alwaysApplyBlock.empty || !manifestXml.empty) {
-                fullPrompt = i"$(basePrompt)\n$(alwaysApplyBlock)\n\n$(manifestXml)".text.strip;
-            }
+        // Build the prompt in the defined composition order
+        bool hasAgentMd = !agentMdSummary.empty;
+        string ragInstruction = hasAgentMd ? AgentMdRagInstruction : "";
+
+        if (hasAgentMd || !alwaysApplyBlock.empty || !manifestXml.empty) {
+            string[] parts;
+            parts ~= basePrompt;
+            if (!alwaysApplyBlock.empty)
+                parts ~= alwaysApplyBlock;
+            if (hasAgentMd)
+                parts ~= agentMdSummary;
+            if (hasAgentMd)
+                parts ~= ragInstruction;
+            if (!manifestXml.empty)
+                parts ~= manifestXml;
+
+            fullPrompt = parts.join("\n\n").strip;
         }
 
         return fullPrompt;

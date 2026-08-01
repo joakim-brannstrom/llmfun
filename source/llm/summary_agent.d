@@ -3,9 +3,10 @@ module llm.summary_agent;
 import core.thread : Thread;
 import core.time : dur;
 import logger = std.logger;
-import std.algorithm : map, filter, canFind, startsWith, sort, min, sum, among;
+import std.algorithm : map, filter, canFind, startsWith, endsWith, sort, min,
+    sum, among, splitter;
 import std.array : array, appender, empty;
-import std.conv : to;
+import std.conv : to, text;
 import std.file : readText;
 import std.format : format, formattedWrite;
 import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
@@ -23,6 +24,11 @@ import llm.config : SummaryModelConfig, toRequestConfig, getEnvApiKey;
 import llm.query : LlmRequester, toJson, LlamaRequestError;
 import llm.utility : summarizeToolCalls, summarizeToolResponse;
 
+alias SummaryChunkT = Tuple!(string, "summary", size_t, "startMessageIndex",
+        size_t, "endMessageIndex");
+
+// Callback type for merging multiple chunk summaries into a single string.
+alias MergeCallback = string delegate(SummaryChunkT[] summaries);
 struct SummaryAgent {
     private {
         LlmRequester rqSummary;
@@ -40,13 +46,12 @@ struct SummaryAgent {
     string formatMessagesToText(Chat.MessageT[] messages) {
         auto buf = appender!string();
         foreach (i, msg; messages) {
-            auto content = msg.match!((Message m) => format!("%s: %s")(m.role.to!string,
-                    m.content), (ToolMessage m) => format!("%s: tool_calls=[%s]")(m.role.to!string,
-                    summarizeToolCalls(m.toolCalls, ToolCallMaxLength)),
-                    (ToolResponse m) => format!("%s: %s")(m.role.to!string,
-                        m.content.length < MaxToolResponse ? m.content
-                        : m.content[0 .. MaxToolResponse]),
-                    (VisionMessage m) => "user: " ~ m.content ~ " [image]");
+            auto content = msg.match!((Message m) => i"$(m.role): $(m.content)".text,
+                    (ToolMessage m) => i"$(m.role): tool_calls=[$(summarizeToolCalls(m.toolCalls,
+                        ToolCallMaxLength))]".text,
+                    (ToolResponse m) => i"$(m.role): $(m.content.length < MaxToolResponse
+                        ? m.content : m.content[0 .. MaxToolResponse])".text,
+                    (VisionMessage m) => i"user: $(m.content) [image]".text);
             buf.put(content);
             if (i < messages.length - 1)
                 buf.put('\n');
@@ -80,23 +85,23 @@ struct SummaryAgent {
         size_t purgedCount;
     }
 
-    /// Result of requestSummary containing summaries and chunk statistics
+    // Result of requestSummary containing summaries and chunk statistics
     struct RequestSummaryResult {
-        Tuple!(string, size_t, size_t)[] summaries;
+        SummaryChunkT[] summaries;
         size_t chunkCount;
         size_t successfulChunks;
         size_t failedChunks;
     }
 
-    /// Callback type for progress reporting during compression.
-    /// @param currentChunk  1-based index of current chunk being processed
-    /// @param totalChunks   total number of chunks to process
-    /// @param status        human-readable status message
+    // Callback type for progress reporting during compression.
+    // @param currentChunk  1-based index of current chunk being processed
+    // @param totalChunks   total number of chunks to process
+    // @param status        human-readable status message
     alias ProgressCallback = void delegate(size_t currentChunk, size_t totalChunks, string status);
 
-    /// Filter out ToolMessage and ToolResponse entries matching an exclusion list.
-    /// Returns a new array with excluded tool calls removed.
-    /// Tracks the number of messages purged in purgedCount.
+    // Filter out ToolMessage and ToolResponse entries matching an exclusion list.
+    // Returns a new array with excluded tool calls removed.
+    // Tracks the number of messages purged in purgedCount.
     private Tuple!(Chat.MessageT[], size_t) purgeTools(Chat.MessageT[] history,
             string[] excludedTools_) {
         if (excludedTools_.empty)
@@ -143,10 +148,10 @@ struct SummaryAgent {
         return typeof(return)(result, purgedCount);
     }
 
-    /// Compress the chat history using a token-budget approach.
-    /// Keeps last KeepLast messages (Y), fills X from newest backwards up to TokenBudget,
-    /// and summarizes remaining messages.
-    /// Returns result with details about the compression.
+    // Compress the chat history using a token-budget approach.
+    // Keeps last KeepLast messages (Y), fills X from newest backwards up to TokenBudget,
+    // and summarizes remaining messages.
+    // Returns result with details about the compression.
     CompressResult compress(ref Chat chat, ProgressCallback callback = null,
             string[] excludedTools_ = null) {
         size_t purgedCount = 0;
@@ -256,7 +261,7 @@ struct SummaryAgent {
                 failedChunks: failedChunks, purgedCount: purgedCount);
     }
 
-    /// Estimate token count of a message (role + content)
+    // Estimate token count of a message (role + content)
     long estimateTokens(Chat.MessageT msg) {
         import std.string : join;
 
@@ -267,7 +272,7 @@ struct SummaryAgent {
         return cast(long) text.length / ApproxTokenSize;
     }
 
-    /// Apply summarizeToolCalls to tool messages to reduce size
+    // Apply summarizeToolCalls to tool messages to reduce size
     Chat.MessageT summarizeToolCallsIfNeeded(Chat.MessageT msg) {
         auto r = msg.match!((Message m) => Chat.MessageT(m),
                 (ToolMessage m) => Chat.MessageT(m), (ToolResponse m) => Chat.MessageT(m),
@@ -275,8 +280,8 @@ struct SummaryAgent {
         return r;
     }
 
-    /// Summarize a single oversized message to fit within TokenBudget.
-    /// Returns the original message if summarization fails.
+    // Summarize a single oversized message to fit within TokenBudget.
+    // Returns the original message if summarization fails.
     Chat.MessageT summarizeSingleMessage(Chat.MessageT msg) {
         import std.string : join;
 
@@ -346,8 +351,8 @@ struct SummaryAgent {
         return rval;
     }
 
-    /// Send summary request to LLM over HTTP
-    /// Returns summaries and chunk statistics via a result struct.
+    // Send summary request to LLM over HTTP
+    // Returns summaries and chunk statistics via a result struct.
     RequestSummaryResult requestSummary(Chat.MessageT[] messages, ProgressCallback callback = null) {
         if (summaryPrompt.empty) {
             logger.warning("No system prompt set");
@@ -355,20 +360,23 @@ struct SummaryAgent {
         }
 
         RequestSummaryResult result;
-        Tuple!(string, size_t, size_t)[] summaries;
+        SummaryChunkT[] summaries;
         size_t chunkCount;
         size_t successfulChunks;
         size_t failedChunks;
 
-        immutable Query = q"(Summarize the conversation below using the JSON schema defined in the system prompt.
+        immutable Query = q"(Summarize the conversation below as a concise bullet list, as defined in the system prompt.
 
-Respond ONLY with a single line of valid JSON. Do not add any other text, explanations, or markdown fences. The output must start with `{"summary":` and end with `}`.
+Respond ONLY using the markdown text. Do not add any other text, explanations, or headings.
 
 The conversation is presented as JSONL - each line is one message in chronological order. Use only the information present; do not invent facts.
 
 Here is an example of the output format you MUST follow:
 
-{"summary": "The user asked about APIs. The assistant explained REST and GraphQL, then wrote a simple GET endpoint in Python using FastAPI. No errors occurred.", "pending_tasks": ["add error handling to the endpoint"], "open_questions": ["should the endpoint use async?"], "failed_attempts": []}
+- The user asked about APIs.
+- The assistant explained REST and GraphQL, then wrote a simple GET endpoint in Python using FastAPI. No errors occurred.
+- pending task: add error handling to the endpoint
+- open questions: should the endpoint use async?
 
 {previous}
 
@@ -402,7 +410,8 @@ Now summarize the next %s messages, noting any changes, reversals, or continuati
             auto resp = request(rqSummary, summaryChat);
             if (resp.gotResponse) {
                 successfulChunks++;
-                summaries ~= tuple(resp.response, conversation[1], conversation[2]);
+                summaries ~= SummaryChunkT(stripFences(resp.response),
+                        conversation[1], conversation[2]);
                 if (callback) {
                     callback(chunkCount, chunks.length,
                             format("Chunk %s of %s completed successfully",
@@ -425,7 +434,7 @@ Now summarize the next %s messages, noting any changes, reversals, or continuati
         return result;
     }
 
-    /// Build validation prompt for checking summary against original messages
+    // Build validation prompt for checking summary against original messages
     string buildValidationPrompt(string summaryText, string preservedText, string lastText) {
         immutable ValidationQuery = q"(You are validating a summary against the original conversation messages.
 
@@ -434,13 +443,28 @@ Answer with ONLY "yes" or "no".
 Does the summary contradict any of the following messages? (i.e., does the summary say something that is directly opposed to what the messages say?)
 
 Summary to validate:
+
+---
+
 {summary}
 
+---
+
 Preserved messages (high importance, must not be contradicted):
+
+---
+
 {preserved}
 
+---
+
 Last messages:
+
+---
+
 {last}
+
+---
 
 Answer:
 )";
@@ -448,29 +472,43 @@ Answer:
             .replace("{preserved}", preservedText).replace("{last}", lastText);
     }
 
-    /// Build fix prompt for correcting a contradictory summary
+    // Build fix prompt for correcting a contradictory summary
     string buildFixPrompt(string summaryText, string preservedText, string lastText) {
         immutable FixQuery = q"(The summary contradicts the original messages. Please fix the summary to accurately reflect the conversation.
 
 Original summary (contains errors):
+
+---
+
 {summary}
 
+---
+
 Preserved messages (high importance, must not be contradicted):
+
+---
+
 {preserved}
 
+---
+
 Last messages:
+
+---
+
 {last}
 
-Please provide a corrected summary using the same JSON schema as before (summary, pending_tasks, open_questions, failed_attempts).
+---
 
-Respond ONLY with a single line of valid JSON.
-)";
+Please provide a corrected summary as a concise bullet list, matching the format used before.
+
+Respond ONLY with the bullet list. Do not add any other text, explanations or headings.)";
         return FixQuery.replace("{summary}", summaryText)
             .replace("{preserved}", preservedText).replace("{last}", lastText);
     }
 
-    /// Ask LLM if summary contradicts preserved/last messages
-    /// Returns true if contradiction found (or error), false if clean
+    // Ask LLM if summary contradicts preserved/last messages
+    // Returns true if contradiction found (or error), false if clean
     bool hasContradiction(string summaryText, string preservedText, string lastText) {
         auto query = buildValidationPrompt(summaryText, preservedText, lastText);
 
@@ -497,8 +535,8 @@ Respond ONLY with a single line of valid JSON.
         return false;
     }
 
-    /// Ask LLM to fix a contradictory summary
-    /// Returns fixed summary or empty string on failure
+    // Ask LLM to fix a contradictory summary
+    // Returns fixed summary or empty string on failure
     string fixSummaryWithLLM(string brokenSummary, string preservedText, string lastText) {
         auto query = buildFixPrompt(brokenSummary, preservedText, lastText);
 
@@ -513,10 +551,10 @@ Respond ONLY with a single line of valid JSON.
         return null;
     }
 
-    /// Validate summary against preserved + last messages using LLM
-    /// If contradiction detected, prompt model to fix the summary
-    /// Iterates up to MaxValidationIterations times
-    bool validateAndFixSummary(ref Tuple!(string, size_t, size_t)[] summary,
+    // Validate summary against preserved + last messages using LLM
+    // If contradiction detected, prompt model to fix the summary
+    // Iterates up to MaxValidationIterations times
+    bool validateAndFixSummary(ref SummaryChunkT[] summary,
             Chat.MessageT[] preserved, Chat.MessageT[] last, ref Chat chat) {
         if (summary.empty || summary.map!(a => a[0].length).sum < MinSummaryLength)
             return false;
@@ -541,24 +579,170 @@ Respond ONLY with a single line of valid JSON.
             }
 
             mergedSummary = fixed;
-            summary.length = 0;
-            summary ~= tuple(fixed, 0UL, 0UL);
+            summary = [SummaryChunkT(fixed, 0UL, 0UL)];
             logger.tracef("Summary fixed in iteration %s", iteration + 1);
         }
 
-        logger.warning("Max validation iterations reached (%s), accepting summary with possible contradictions",
+        logger.warningf("Max validation iterations reached (%s), accepting summary with possible contradictions",
                 MaxValidationIterations);
         return true;
     }
+
+    // Summarize arbitrary text content (e.g., AGENTS.md) into a bullet-list summary.
+    // Chunks text to fit within context window, summarizes each chunk, and merges results.
+    // Params:
+    //  content text to summarize (max 32KB)
+    //  maxWords target word count for the final summary (soft target — LLM may produce slightly more or fewer words; default 200)
+    //  merge optional merge callback for combining chunk summaries
+    // Returns: bullet-list summary string
+    string summarizeText(string content, size_t maxWords = 200, MergeCallback merge = null) {
+        immutable MaxInputSize = 32 * 1024; // 32KB limit
+
+        if (content.empty) {
+            logger.warning("summarizeText: empty content");
+            return null;
+        }
+
+        if (content.length > MaxInputSize) {
+            logger.warningf("summarizeText: content exceeds %s byte limit (%s bytes), truncating",
+                    MaxInputSize, content.length);
+            content = content[0 .. MaxInputSize];
+        }
+
+        if (summaryPrompt.empty) {
+            logger.warning("summarizeText: no system prompt set");
+            return null;
+        }
+
+        // Chunk the text by paragraphs, keeping each chunk within context window
+        auto chunks = chunkTextForSummary(content);
+        if (chunks.empty) {
+            return null;
+        }
+
+        SummaryChunkT[] summaries;
+        size_t chunkIdx = 0;
+
+        foreach (chunk; chunks) {
+            chunkIdx++;
+
+            auto query = "Summarize the following text as a concise bullet list.\n" ~ i"Target approximately $(maxWords) words total. Use bullet points (-) for each key point.\n".text
+                ~ "Focus on: capabilities, constraints, commands, tools, and important details.\n" ~ i"\nText to summarize:\n```\n$(
+                        chunk)\n```\n".text;
+
+            Chat summaryChat;
+            summaryChat.add(Message(Role.system, userQuery: false, content: summaryPrompt,
+                    thinking: null));
+            summaryChat.add(Message(Role.user, userQuery: false, content: query, thinking: null));
+
+            auto resp = request(rqSummary, summaryChat);
+            if (resp.gotResponse && !resp.response.empty) {
+                auto summaryText = stripFences(resp.response);
+                summaries ~= SummaryChunkT(summaryText, 0UL, 0UL);
+                logger.tracef("summarizeText: chunk %s/%s summarized (%s chars)",
+                        chunkIdx, chunks.length, summaryText.length);
+            } else {
+                logger.warningf("summarizeText: chunk %s/%s produced no summary",
+                        chunkIdx, chunks.length);
+            }
+        }
+
+        if (summaries.empty) {
+            logger.warning("summarizeText: all chunks failed to produce summaries");
+            return null;
+        }
+
+        // Merge all chunk summaries into one
+        string result = merge is null ? defaultMergeSummary(summaries) : merge(summaries);
+        logger.tracef("summarizeText: produced %s-char summary from %s chunks",
+                result.length, chunks.length);
+        return result;
+    }
+
+    // Chunk text into pieces that fit within the context window for summarization.
+    // Splits by paragraphs (double newlines) and groups them into chunks.
+    // Oversized paragraphs are hard-split at character boundaries.
+    private string[] chunkTextForSummary(string content) {
+        auto maxChunkSize = (contextSize - AnswerSize) * ApproxTokenSize;
+
+        // Split by paragraphs (double newlines or single newlines)
+        auto paragraphs = content.splitter("\n\n").array
+            .map!(a => a.strip)
+            .filter!(a => !a.empty)
+            .array;
+
+        if (paragraphs.empty) {
+            // Fallback: split by single newlines
+            paragraphs = content.splitter("\n").array
+                .map!(a => a.strip)
+                .filter!(a => !a.empty)
+                .array;
+        }
+
+        if (paragraphs.empty) {
+            return [content];
+        }
+
+        // Group paragraphs into chunks that fit within context window
+        string[] chunks;
+        auto buf = appender!string();
+        foreach (para; paragraphs) {
+            // Handle oversized paragraphs by hard-splitting
+            if (cast(long) para.length > maxChunkSize) {
+                // Flush current chunk first
+                if (!buf[].empty) {
+                    chunks ~= buf[].idup;
+                    buf = appender!string();
+                }
+                // Hard-split oversized paragraph into fixed-size chunks
+                for (size_t offset = 0; offset < para.length; offset += maxChunkSize) {
+                    auto end = (offset + maxChunkSize < para.length) ? offset + maxChunkSize
+                        : para.length;
+                    chunks ~= para[offset .. end].idup;
+                }
+                continue;
+            }
+
+            // Try adding this paragraph to current chunk
+            auto testContent = buf[] ~ "\n\n" ~ para;
+            auto testTokens = cast(long) testContent.length / ApproxTokenSize;
+
+            if (testTokens > (contextSize - AnswerSize)) {
+                // Current chunk is full, save it and start a new one
+                if (!buf[].empty) {
+                    chunks ~= buf[].idup;
+                    buf = appender!string();
+                }
+            }
+            if (buf[].empty) {
+                buf.put(para);
+            } else {
+                buf.put("\n\n");
+                buf.put(para);
+            }
+        }
+        if (!buf[].empty) {
+            chunks ~= buf[].idup;
+        }
+
+        return chunks;
+    }
 }
 
-string mergeSummary(Tuple!(string, size_t, size_t)[] summarize) {
+string defaultMergeSummary(SummaryChunkT[] summaries) {
     auto buf = appender!string();
-    foreach (a; summarize.enumerate) {
-        formattedWrite(buf, "[chunk %s (messages %s-%s) summary]:\n%s\n",
-                a.index, a.value[1], a.value[2], a.value[0]);
+    foreach (a; summaries.enumerate) {
+        buf.put(i"[chunk $(a.index) (messages $(a.value[1])-$(a.value[2])) summary]:\n$(a.value[0])\n"
+                .text);
     }
     return buf[];
+}
+
+// Merge an array of chunk summaries into a single string.
+// Uses the provided merge callback, or defaults to defaultMergeSummary.
+// TODO: remove this function
+string mergeSummary(SummaryChunkT[] summaries, MergeCallback merge = null) {
+    return merge is null ? defaultMergeSummary(summaries) : merge(summaries);
 }
 
 Tuple!(string, "response", bool, "gotResponse") request(ref LlmRequester rq, ref Chat chat) {
@@ -577,4 +761,14 @@ Tuple!(string, "response", bool, "gotResponse") request(ref LlmRequester rq, ref
     }, (LlamaRequestError e) { logger.warningf("Failed LLM request: %s", e); });
 
     return typeof(return)(responseMsg, gotResponse);
+}
+
+/// Strip markdown code fences (``` ... ```) from a string.
+private string stripFences(string text) {
+    import std.string : join;
+
+    return text.splitter("\n").filter!(a => !a.startsWith("```"))
+        .map!(a => a.strip)
+        .filter!(a => !a.empty)
+        .join("\n");
 }
