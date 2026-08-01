@@ -1,11 +1,14 @@
 ---
 name: create-skill
 description: >-
-  Create a new Agent Skill (SKILL.md + supporting files) from scratch. Use when
-  the user asks to create, write, generate, or scaffold a new skill for llmfun
-  or any Agent Skills-compatible tool. Triggers on: create skill, new skill,
-  scaffold skill, generate skill, skill creation, make skill, add skill.
-version: 1.1.0
+  Create or update an Agent Skill (SKILL.md + supporting files). Use when
+  the user asks to create, write, generate, scaffold, update, modify, or edit
+  a skill for llmfun or any Agent Skills-compatible tool. Also applies when
+  validating existing skills against constraints (body under 4096 bytes, no
+  duplicate content, name matches directory). Triggers on: create skill, new
+  skill, scaffold skill, generate skill, update skill, modify skill, edit
+  skill, skill creation, make skill, add skill, skill validation.
+version: 1.2.0
 ---
 
 # Create Skill
@@ -20,6 +23,8 @@ Use this skill when the user:
 - Wants to scaffold a skill directory
 - Needs help writing a SKILL.md file
 - Wants to convert a workflow or thinking template into a reusable skill
+- Asks to update, modify, or edit an existing skill
+- Needs to validate an existing skill against constraints
 
 ## Skill Anatomy
 
