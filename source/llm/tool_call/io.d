@@ -1292,6 +1292,10 @@ ExecuteFuncResult editFileByMarker(Context baseCtx, EditFileByMarkerParams param
     if (params.marker.empty) {
         return ExecuteFuncResult("error: marker must not be empty", success: false);
     }
+    if (params.marker.canFind("\n")) {
+        return ExecuteFuncResult("error: marker must be a single line, it may NOT contain newlines",
+                success: false);
+    }
 
     EditMode mode_;
     try {
