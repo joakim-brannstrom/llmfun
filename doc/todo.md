@@ -25,7 +25,6 @@
 - the edit... should probably all be converted to using editFileInMemory because all the edits can be reduced down to editing lines. This would reduce the code duplication in io.d
 - make sound notification configurable in json via config.d
 - merge the tools listDirectory, removeFile, checksumFile etc to one tool which take a command and then a key/value json string, which is the arguments. This approach should reduce the number of tools that is needed and thus the system prompt. Do a similar thing for sandbox.
-- make a skill for creating/updating an AGENT.md
 - vision support and loadImageApi should not use the current agent but call another agent, ask it to describe the image and return back the answer as a tool response. So instead of this dance with "vision" messages, injecting, interpret etc it is a tool. The bad thing with this redesign is that the current context is "wiped"/reloaded so will be potentially slow in llama.cpp. But the good thing is I could in llama.cpp for example configure it so that the vision model is qwen-3.5-9b that is running on the CPU while the main agent model is on the GPU.
 - when summarizing the agent context add all messages, excluding the system prompt, to the RAG in one large document under the topic "agent_context". Protect this topic. This should then also be added to the summarized context that all details are saved in the RAG under this topic. Each time an agent is summarized or /new is called the topic is either replaced or deleted.
 
@@ -80,7 +79,9 @@
 - the check if a skill should be copied should also check the version and loadSkill should have a flag "overwrite". So if the skill match but is newer than the one in sandbox it should overwrite the sandbox.
 - skills should be part of the metrics that are collected. How often they are loaded etc
 - when copying/overwriting a skill it must not only check the name but also the version
-- if copyRecurse fail then the whole skill must be returned to the agent. This happens in the ase where there are no workarea.
+    If it is a new version of the skill then the old one should be removed and replaced by the new version
+- if copyRecurse fail then the whole skill must be returned to the agent. This happens in the case where there are no workarea.
+- it should be possible to mark a skill, in the frontmatter, that it should not be shown in the system prompt. Only available for load on demand.
 
 # memory
 ## Workflow Improvements
