@@ -5,7 +5,7 @@ import logger = std.logger;
 import core.sync : Condition, Mutex;
 import std.algorithm : splitter, canFind, startsWith, map, filter;
 import std.datetime : Clock, dur, SysTime;
-import std.format : format;
+import std.conv : text;
 import std.json : parseJSON;
 import std.range : retro;
 import std.string : strip;
@@ -96,8 +96,8 @@ void runMemoryConsolidation(LlmConfig llmConf, RAG rag, MetricMonitor monitor,
         if (mergedCount == 0 && removedCount == 0) {
             return "[system]: Memory consolidation complete. No changes needed.";
         }
-        return format!"[system]: Memory consolidation complete. Merged %s topics, removed %s obsolete topics."(
-                mergedCount, removedCount);
+        return i"system: Memory consolidation complete. Merged $(mergedCount) topics, removed $(
+                removedCount) obsolete topics.".text;
     }();
     sendChatMessage(finalAnswer, TuiChatMessageType_FinalAnswer);
 
@@ -131,8 +131,8 @@ If there are no topics to consolidate or remove, output:
     auto consolidationAgent = new Agent("consolidation", llmConf, monitor, rag);
     consolidationAgent.addUserQuery(consolidationPrompt);
 
-    sendChatMessage(format!"[system]: Running memory consolidation (session #%d)..."(
-            llmConf.sessionCount), TuiChatMessageType_Assistant);
+    sendChatMessage(i"system: Running memory consolidation (session #$(llmConf.sessionCount))...".text,
+            TuiChatMessageType_Assistant);
 
     auto doneMutex = new Mutex();
     auto doneCond = new Condition(doneMutex);
@@ -153,7 +153,7 @@ If there are no topics to consolidate or remove, output:
         pool.submit(consolidationAgent, &callback);
     } catch (Exception e) {
         logger.errorf("Failed to submit consolidation agent: %s", e.msg);
-        sendChatMessage(format!"[system]: Memory consolidation failed: %s. Restored previous memory state."(e.msg),
+        sendChatMessage(i"system: Memory consolidation failed: $(e.msg). Restored previous memory state.".text,
                 TuiChatMessageType_Assistant);
         return none!ProcessResult();
     }

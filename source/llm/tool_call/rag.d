@@ -6,7 +6,7 @@ import std.array : empty, appender, array;
 import std.conv : to, text;
 import std.datetime : SysTime;
 import std.file : readText, exists, mkdirRecurse, getSize, remove, dirEntries, SpanMode;
-import std.format : format, formattedWrite;
+import std.format : format;
 import std.json : JSONValue;
 import std.range : enumerate;
 import std.regex : Regex, regex;
@@ -220,14 +220,14 @@ ExecuteFuncResult listRAGDatabases(Context baseCtx, ListRAGDatabasesParams param
         auto lines = appender!(string[])();
         bool isFirst = true;
         foreach (a; infos) {
-            lines.put(format!"%s -%s '%s'"(a.name, isFirst ? " [primary] - " : "", a.description));
+            lines.put(i"$(a.name) -$(isFirst ? " [primary] - " : "") '$(a.description)'".text);
             isFirst = false;
         }
 
-        return ExecuteFuncResult(format!"Available RAG databases:\n%-(%s\n%)"(lines[]),
+        return ExecuteFuncResult(i"Available RAG databases:\n$(lines[].join("\n"))".text,
                 success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed to list RAG databases: %s"(e.msg),
+        return ExecuteFuncResult(i"error: failed to list RAG databases: $(e.msg)".text,
                 success: false);
     }
 }
@@ -256,7 +256,7 @@ ExecuteFuncResult loadFileToRAG(Context baseCtx, LoadFileToRAGParams params) {
         return ExecuteFuncResult(i"File '$(params.path)' ($(result.length) length) added as $(
                 result.chunks) chunks to the RAG".text, success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed loading file into rag: %s"(e.msg),
+        return ExecuteFuncResult(i"error: failed loading file into rag: $(e.msg)".text,
                 success: false);
     }
 }
@@ -343,7 +343,7 @@ private string applyAppendLoc(string text, long startLineNumber, bool appendLoc)
     foreach (i, l; lines) {
         if (i > 0)
             buf.put('\n');
-        formattedWrite(buf, "%s→ %s", lineNum++, l);
+        buf.put(i"$(lineNum++)→ $(l)".text);
     }
     buf.put('\n');
     return buf[];
@@ -406,7 +406,7 @@ ExecuteFuncResult queryReadFile(Context baseCtx, QueryReadFileParams params) {
 
         return ExecuteFuncResult(resultBlocks.join("\n\n"), success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: database error during query: %s"(e.msg),
+        return ExecuteFuncResult(i"error: database error during query: $(e.msg)".text,
                 success: false);
     }
 }

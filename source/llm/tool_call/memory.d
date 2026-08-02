@@ -3,8 +3,7 @@ module llm.tool_call.memory;
 import logger = std.logger;
 import std.algorithm : map, filter, startsWith, count;
 import std.array : empty, appender, array;
-import std.conv : to;
-import std.format : format, formattedWrite;
+import std.conv : text;
 import std.json : JSONValue;
 import std.regex : Regex, regex;
 import std.string : join, splitLines, indexOf, lastIndexOf, strip, split;
@@ -35,7 +34,7 @@ private string checkTopic(MemoryContext ctx, string topic) {
     if (topic.empty)
         return "error: empty topic";
     if (topic.length > maxLen)
-        return format!"error: topic too long. Max %s characters"(maxLen);
+        return i"error: topic too long. Max $(maxLen) characters".text;
     if (auto err = checkAlphaNumUnderscore(topic))
         return err;
     return null;
@@ -86,11 +85,11 @@ ExecuteFuncResult writeMemory(Context baseCtx, WriteMemoryParams params) {
 
     try {
         if (!ctx.saveMemoryFile(params.topic, params.content)) {
-            return ExecuteFuncResult(format!"error: failed saving the memory with topic '%s'"(params.topic),
+            return ExecuteFuncResult(i"error: failed saving the memory with topic '$(params.topic)'".text,
                     success: false);
         }
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
+        return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
     }
     return ExecuteFuncResult("OK", success: true);
 }
@@ -110,14 +109,11 @@ ExecuteFuncResult readMemory(Context baseCtx, ReadMemoryParams params) {
     try {
         return ctx.readMemory(params.topic).match!((string a) {
             return ExecuteFuncResult(a, success: true);
-        }, (_) {
-            return ExecuteFuncResult(format!"error: no memory topic '%s' exists"(params.topic),
-                success: false);
-        });
-
+        }, (_) { return ExecuteFuncResult(i"error: no memory topic '$(params.topic)' exists".text,
+                success: false); });
     } catch (Exception e) {
         logger.tracef("error retrieving memory '%s': %s", params.topic, e.msg);
-        return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
+        return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
     }
 }
 
@@ -137,11 +133,10 @@ ExecuteFuncResult removeMemory(Context baseCtx, RemoveMemoryParams params) {
         if (ctx.removeMemory(params.topic)) {
             return ExecuteFuncResult("OK", success: true);
         }
-        return ExecuteFuncResult(
-                format!"error: failed to remove memory '%s'. The memory does not exist or is write protected"(
-                params.topic), success: false);
+        return ExecuteFuncResult(i"error: failed to remove memory '$(params.topic)'. The memory does not exist or is write protected"
+                .text, success: false);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: %s"(e.msg), success: false);
+        return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
     }
 }
 
@@ -156,10 +151,10 @@ ExecuteFuncResult getMemoryTopics(Context baseCtx, GetMemoryTopicsParams params)
         return ExecuteFuncResult("No memory topics available.", success: true);
 
     auto buf = appender!string();
-    formattedWrite(buf, "Available memory topics:\n");
+    buf.put("Available memory topics:\n");
     foreach (topic; topics) {
         auto summary = getMemorySummary(ctx, topic);
-        formattedWrite(buf, "\n# Memory: %s\nSummary: %s\n", topic, summary);
+        buf.put(i"\n# Memory: $(topic)\nSummary: $(summary)\n".text);
     }
     return ExecuteFuncResult(buf.data, success: true);
 }

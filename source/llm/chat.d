@@ -3,9 +3,8 @@ module llm.chat;
 import logger = std.logger;
 import std.algorithm : filter, map, sum, min, canFind;
 import std.array : array, replace, appender;
-import std.conv : to;
+import std.conv : to, text;
 import std.exception : collectException;
-import std.format : format;
 import std.json : JSONValue, JSONOptions, parseJSON, JSONType;
 import std.range : enumerate, isOutputRange, empty;
 import std.sumtype : SumType, match;
@@ -261,7 +260,7 @@ struct VisionMessage {
         } else {
             imgPreview = "[" ~ imageDataUrl ~ "]";
         }
-        return format!"VisionMessage(content:%s image:%s)"(content, imgPreview);
+        return i"VisionMessage(content:$(content) image:$(imgPreview))".text;
     }
 }
 
@@ -294,8 +293,8 @@ struct Message {
     }
 
     string toString() @safe const {
-        return format!"Message(role:%s user:%s content:%s thinking:%.80s saveData:%s)"(role,
-                isUserQuery, content, thinking, saveData);
+        return i"Message(role:$(role) user:$(isUserQuery) content:$(content) thinking:$(
+                thinking[0 .. min(thinking.length, 80)]) saveData:$(saveData))".text;
     }
 
     bool isUserQuery() @safe const nothrow {
@@ -404,9 +403,9 @@ struct ToolMessage {
     }
 
     string toString() @safe const {
-        return format!"Message(role:%s toolCalls:%s saveData:%s)"(role,
-                toolCalls.toString(JSONOptions.doNotEscapeSlashes),
-                saveData.toString(JSONOptions.doNotEscapeSlashes));
+        return i"Message(role:$(role) toolCalls:$(
+                toolCalls.toString(JSONOptions.doNotEscapeSlashes)) saveData:$(
+                saveData.toString(JSONOptions.doNotEscapeSlashes)))".text;
     }
 
     JSONValue toJson() @safe {
@@ -514,13 +513,16 @@ struct ToolResponse {
     string content;
     string toolCallId;
     string toolName;
+    bool success; // if the tool succeeded or not.
     JSONValue metadata;
 
-    this(string content, string toolCallId, string toolName, JSONValue metadata = JSONValue.init) @safe nothrow {
+    this(string content, string toolCallId, string toolName, bool success,
+            JSONValue metadata = JSONValue.init) @safe nothrow {
         this.role = Role.tool;
         this.content = content;
         this.toolCallId = toolCallId;
         this.toolName = toolName;
+        this.success = success;
         this.metadata = metadata;
     }
 
@@ -529,7 +531,7 @@ struct ToolResponse {
     }
 
     string toString() @safe const {
-        return format!"Message(role:%s toolName:%s content:%s)"(role, toolName, content);
+        return i"Message(role:$(role) toolName:$(toolName) content:$(content))".text;
     }
 
     JSONValue toJson() @safe {

@@ -176,8 +176,8 @@ struct LlmConfig {
         if (codeModels.length == 0)
             throw new Exception("No code models configured");
         if (activeCodeModelIndex < 0 || activeCodeModelIndex >= codeModels.length)
-            throw new Exception(format!"Active code model index %s is out of bounds (count: %s)"(
-                    activeCodeModelIndex, codeModels.length));
+            throw new Exception(i"Active code model index $(activeCodeModelIndex) is out of bounds (count: $(
+                    codeModels.length))".text);
         return codeModels[activeCodeModelIndex];
     }
 
@@ -218,13 +218,13 @@ struct LlmConfig {
         }
 
         if (matchCount == 0) {
-            return format!"No model matches '%s'. Available models: %s"(name,
-                    codeModels.map!(m => m.name));
+            return i"No model matches '$(name)'. Available models: $(codeModels.map!(m => m.name))"
+                .text;
         }
         if (matchCount > 1) {
-            return format!"Ambiguous model name '%s'. Matches: %s"(name,
+            return i"Ambiguous model name '$(name)'. Matches: $(
                     codeModels.filter!(m => m.name.toLower == lowerName)
-                        .map!(m => m.name));
+                    .map!(m => m.name))".text;
         }
 
         activeCodeModelIndex = matchIndex;
@@ -236,8 +236,8 @@ struct LlmConfig {
     string[] listModels() const @safe {
         auto app = appender!(string[])();
         foreach (i, model; codeModels) {
-            app.put(format!"%s (index: %s)%s"(model.name, i,
-                    (i == activeCodeModelIndex ? " [active]" : "")));
+            app.put(i"$(model.name) (index: $(i))$(i == activeCodeModelIndex ? " [active]" : "")"
+                    .text);
         }
         return app.data;
     }
@@ -777,15 +777,15 @@ void validateConfig(LlmConfig conf) {
 
     // Validate activeCodeModelIndex is within bounds
     if (conf.activeCodeModelIndex < 0 || conf.activeCodeModelIndex >= conf.codeModels.length)
-        throw new Exception(format!"activeCodeModelIndex %s is out of bounds (codeModels count: %s)"(
-                conf.activeCodeModelIndex, conf.codeModels.length));
+        throw new Exception(i"activeCodeModelIndex $(conf.activeCodeModelIndex) is out of bounds (codeModels count: $(
+                conf.codeModels.length))".text);
 
     // Validate each CodeModelConfig has required fields
     foreach (i, model; conf.codeModels) {
         if (model.name.empty)
-            throw new Exception(format!"codeModels[%s].name must not be empty"(i));
+            throw new Exception(i"codeModels[$(i)].name must not be empty".text);
         if (model.server.url.empty)
-            throw new Exception(format!"codeModels[%s].server.url must not be empty"(i));
+            throw new Exception(i"codeModels[$(i)].server.url must not be empty".text);
     }
 
     if (conf.toolLimits.readFileMaxLines < 1)

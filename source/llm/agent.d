@@ -5,7 +5,7 @@ import core.time : dur;
 import logger = std.logger;
 import std.algorithm;
 import std.array;
-import std.conv : to;
+import std.conv : to, text;
 import std.datetime : Clock, SysTime, Duration;
 import std.exception : collectException;
 import std.file : readText, exists, read, rename;
@@ -475,7 +475,8 @@ private:
                 sd["taskDoneAnswer"] = JSONValue(taskDoneMessage_);
             }
             chat.add(ToolMessage(thinking, JSONValue([call.toJson]), JSONValue.init, sd));
-            chat.add(ToolResponse(content: result, toolCallId: call.id, toolName: call.name, success: success));
+            chat.add(ToolResponse(content: result, toolCallId: call.id,
+                    toolName: call.name, success: success));
             if (auto image = toolCtx.drainVisionImage) {
                 chat.add(VisionMessage(image.query, image.data));
                 waitingForVisionResponse = true;
@@ -690,7 +691,7 @@ struct StreamResponse {
         }
 
         string toString() @safe const {
-            return format!"ToolCall(id:%s name:%s arguments:'%s')"(id, name, arguments);
+            return i"ToolCall(id:$(id) name:$(name) arguments:'$(arguments)')".text;
         }
 
         StreamToolCall toStream() @safe nothrow const {
@@ -724,8 +725,8 @@ struct StreamResponse {
         long codeNr = -1;
 
         string toString() @safe const {
-            return format!"ErrorMessage(type:%s message:%s code:%s codeNr:%s)"(type,
-                    message, code, codeNr);
+            return i"ErrorMessage(type:$(type) message:$(message) code:$(code) codeNr:$(codeNr))"
+                .text;
         }
     }
 
@@ -754,8 +755,8 @@ struct StreamResponse {
     }
 
     void toString(Writer)(ref Writer w) const if (isOutputRange!(Writer, char)) {
-        formattedWrite(w, "StreamResponse(isDone:%s%s %s %s %s)", isDone, hasError
-                ? format!"ErrorMessage(%s)"(error) : "", stat, message, toolCalls);
+        formattedWrite(w, "StreamResponse(isDone:%s%s %s %s %s)", isDone,
+                hasError ? i"ErrorMessage($(error))".text : "", stat, message, toolCalls);
     }
 
     void parse(const(char)[] response) {

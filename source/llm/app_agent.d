@@ -172,8 +172,8 @@ struct AgentApp {
     }
 
     private void progressCallback(size_t currentChunk, size_t totalChunks, string status) {
-        uiMsg.chatMessage(format!"assistant: Compressing... %s/%s : %s"(currentChunk,
-                totalChunks, status), TuiChatMessageType_Assistant);
+        uiMsg.chatMessage(i"assistant: Compressing... $(currentChunk)/$(totalChunks) : $(status)".text,
+                TuiChatMessageType_Assistant);
     }
 
     private void setStatusText(bool readyState) {
@@ -606,8 +606,9 @@ class UiMessenger {
 }
 
 string formatStatusText(bool readyState, long contextSize, ServerStat stat, string model) {
-    return format!"Context: %s/%s tokens | %.1f tok/s | Model: '%s' | %s"(stat.context,
-            contextSize, stat.predictedPerSecond, model, readyState ? "Ready" : "Busy");
+    return i"Context $(stat.context)/$(contextSize) tokens | $(
+            format!"%.1f"(stat.predictedPerSecond)) tok/s | Model: '$(model)' | $(
+            readyState ? "Ready" : "Busy")".text;
 }
 
 class StreamMessageUpdater : IStreamCallback {
@@ -671,8 +672,8 @@ class PipelineStreamMessageUpdater : IStreamCallback {
             }
         }
 
-        string status = format!"Context %s/%s tokens | %.1f tok/s"(stat.context,
-                contextSize, stat.predictedPerSecond);
+        string status = i"Context $(stat.context)/$(contextSize) tokens | $(
+                format!"%.1f"(stat.predictedPerSecond)) tok/s".text;
 
         uiMsg.pipelineStreamChatMessage(agentId: agentId, content: content,
                 thinking: msg.reasoning, role: msg.role, status: status);

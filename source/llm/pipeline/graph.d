@@ -1,9 +1,9 @@
 module llm.pipeline.graph;
 
 import logger = std.logger;
+import std.conv : text;
 import std.algorithm : filter, max, map, count;
 import std.array : join, appender, empty, array;
-import std.format : format;
 
 interface Node {
     string id() const;
@@ -82,9 +82,9 @@ class Graph {
     /// Throws if fromId or toId do not exist.
     void add(Edge e) {
         if (e.fromId !in nodes)
-            throw new Exception(format!"add(Edge): source node '%s' not found"(e.fromId));
+            throw new Exception(i"add(Edge): source node '$(e.fromId)' not found".text);
         if (e.toId !in nodes)
-            throw new Exception(format!"add(Edge): target node '%s' not found"(e.toId));
+            throw new Exception(i"add(Edge): target node '$(e.toId)' not found".text);
         const id = edges.length;
         edges[id] = e;
         edgesMeta[id] = EdgeMeta.init;
@@ -223,8 +223,8 @@ class Graph {
         }
         buf.put("  Edges:\n");
         foreach (id, ref e; edges) {
-            string loopStr = e.maxLoops > 0
-                ? format!" [loop:%s/%s]"(edgesMeta[id].traversalCount, e.maxLoops) : "";
+            string loopStr = e.maxLoops > 0 ? i" [loop:$(edgesMeta[id].traversalCount)/$(e.maxLoops)]".text
+                : "";
             formattedWrite(buf, "    %s -> %s [condition:%s]%s\n", e.fromId,
                     e.toId, e.canTraverse(nodes[e.fromId], nodes[e.toId]), loopStr);
         }
@@ -251,7 +251,7 @@ version (unittest) {
         }
 
         override string toString() {
-            return format!"DummyNode(%s)"(id_);
+            return i"DummyNode($(id_))".text;
         }
     }
 

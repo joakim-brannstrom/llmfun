@@ -6,7 +6,6 @@ import std.array : empty, appender, array, join;
 import std.conv : to, text;
 import std.exception : enforce;
 import std.file : readText, exists, mkdirRecurse, getSize, remove, dirEntries, SpanMode;
-import std.format : format, formattedWrite;
 import std.json : JSONValue, parseJSON, JSONOptions;
 import std.path : relativePath;
 import std.process : execute;
@@ -130,7 +129,7 @@ ExecuteFuncResult readFile(Context baseCtx, ReadFileParams params) {
         foreach (line; File(path_).byLine.enumerate.filter!(a => a.index >= firstIdx
                 && a.index < lastIndex)) {
             if (params.appendLoc) {
-                formattedWrite(buf, "%s→", line.index + 1);
+                buf.put(i"$(line.index + 1)→".text);
             }
             buf.put(line.value);
             buf.put('\n');
@@ -1908,8 +1907,8 @@ ExecuteFuncResult grepFiles(Context baseCtx, GrepFilesParams params) {
         string rval = result.output.strip.replace(path_.toString, params.path);
         const results = rval.splitter('\n').count;
         if (results > grepMaxResults) {
-            return ExecuteFuncResult(format!"error: %s results exceeds max allowed %s"(results,
-                    grepMaxResults), success: false);
+            return ExecuteFuncResult(i"error: $(results) results exceeds max allowed $(
+                    grepMaxResults)".text, success: false);
         }
         if (rval.empty) {
             return ExecuteFuncResult(i"error: no matches found searching in path '$(params.path)' with pattern '$(
@@ -1917,8 +1916,8 @@ ExecuteFuncResult grepFiles(Context baseCtx, GrepFilesParams params) {
         }
         return ExecuteFuncResult(rval, success: true);
     }
-    return ExecuteFuncResult(format!"error: failed to execute '%(%-s %)': %s"(
-            cmd[0 .. $ - 1] ~ params.path, result.output.strip), success: false);
+    return ExecuteFuncResult(i"error: failed to execute '$((cmd[0 .. $ - 1] ~ params.path).join(
+            " "))': $(result.output.strip)".text, success: false);
 }
 
 struct CountLinesInFileParams {
@@ -2015,11 +2014,11 @@ void writeLines(AbsolutePath path, string[] lines) {
 
 string validateLineRange(long startLine, long count, long maxLines) {
     if (startLine < 1)
-        return format!"error: parameter startLine %s must be > 0"(startLine);
+        return i"error: parameter startLine $(startLine) must be > 0".text;
     if (count < 1)
-        return format!"error: parameter count %s must be > 0"(count);
+        return i"error: parameter count $(count) must be > 0".text;
     if (count > maxLines)
-        return format!"error: tried to access %s lines but %s is max"(count, maxLines);
+        return i"error: tried to access $(count) lines but $(maxLines) is max".text;
     return null;
 }
 
@@ -2027,62 +2026,64 @@ string validateLineRange(long startLine, long count, long maxLines) {
 // Integration Tests for New File Editing Tools
 // ============================================================================
 
-// Mock FileContext for integration tests
-class TestFileContext : FileContext {
-    import std.file;
+version (unittest) {
+    // Mock FileContext for integration tests
+    class TestFileContext : FileContext {
+        import std.file;
 
-    AbsolutePath workAreaDir;
+        AbsolutePath workAreaDir;
 
-    this(string dir) {
-        workAreaDir = dir.AbsolutePath;
-        mkdirRecurse(workAreaDir.toString);
-    }
+        this(string dir) {
+            workAreaDir = dir.AbsolutePath;
+            mkdirRecurse(workAreaDir.toString);
+        }
 
-    void teardown() {
-        import std.file : rmdirRecurse;
+        void teardown() {
+            import std.file : rmdirRecurse;
 
-        try {
-            rmdirRecurse(workAreaDir.toString);
-        } catch (Exception) {
-            // Silently ignore cleanup failures during test teardown
+            try {
+                rmdirRecurse(workAreaDir.toString);
+            } catch (Exception) {
+                // Silently ignore cleanup failures during test teardown
+            }
+        }
+
+        bool isPathInsideWorkArea(AbsolutePath path) {
+            auto p = path.toString;
+            auto w = workAreaDir.toString;
+            return p.startsWith(w) && (p.length == w.length || p[w.length] == '/');
+        }
+
+        AbsolutePath workArea() {
+            return workAreaDir;
+        }
+
+        ToolLimits getToolLimits() {
+            return ToolLimits();
         }
     }
 
-    bool isPathInsideWorkArea(AbsolutePath path) {
-        auto p = path.toString;
-        auto w = workAreaDir.toString;
-        return p.startsWith(w) && (p.length == w.length || p[w.length] == '/');
+    // Helper: create a test file with given content
+    void createTestFile(TestFileContext ctx, string relativePath, string content) {
+        assert(!relativePath.startsWith("/"), "relativePath must not be absolute: " ~ relativePath);
+        auto fullPath = (ctx.workArea ~ relativePath).AbsolutePath;
+        mkdirRecurse(fullPath.dirName.toString);
+        auto f = File(fullPath.toString, "w");
+        f.write(content);
     }
 
-    AbsolutePath workArea() {
-        return workAreaDir;
+    // Helper: read file content for verification
+    string readTestFile(TestFileContext ctx, string relativePath) {
+        auto fullPath = (ctx.workArea ~ relativePath).AbsolutePath;
+        return readText(fullPath.toString);
     }
 
-    ToolLimits getToolLimits() {
-        return ToolLimits();
+    // Helper: create a test context with a unique directory name
+    TestFileContext makeTestContext(string testName) {
+        import std.datetime : Clock;
+
+        return new TestFileContext("./llmfun_test/" ~ testName ~ "_" ~ Clock.currTime.toString);
     }
-}
-
-// Helper: create a test file with given content
-void createTestFile(TestFileContext ctx, string relativePath, string content) {
-    assert(!relativePath.startsWith("/"), "relativePath must not be absolute: " ~ relativePath);
-    auto fullPath = (ctx.workArea ~ relativePath).AbsolutePath;
-    mkdirRecurse(fullPath.dirName.toString);
-    auto f = File(fullPath.toString, "w");
-    f.write(content);
-}
-
-// Helper: read file content for verification
-string readTestFile(TestFileContext ctx, string relativePath) {
-    auto fullPath = (ctx.workArea ~ relativePath).AbsolutePath;
-    return readText(fullPath.toString);
-}
-
-// Helper: create a test context with a unique directory name
-TestFileContext makeTestContext(string testName) {
-    import std.datetime : Clock;
-
-    return new TestFileContext("./llmfun_test/" ~ testName ~ "_" ~ Clock.currTime.toString);
 }
 
 // ----------------------------------------------------------------------------

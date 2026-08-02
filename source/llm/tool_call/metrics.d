@@ -1,6 +1,7 @@
 module llm.tool_call.metrics;
 
 import logger = std.logger;
+import std.conv : text;
 import std.datetime : SysTime, DateTime, TimeZone, dur;
 import std.format : format;
 import std.json : JSONValue, JSONOptions;
@@ -29,7 +30,7 @@ ExecuteFuncResult getMetrics(Context baseCtx, GetMetricsParams params) {
         auto calc = ctx.getCalculator();
         return ExecuteFuncResult(calc.generateReport(), success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed getting metrics: %s"(e.msg), success: false);
+        return ExecuteFuncResult(i"error: failed getting metrics: $(e.msg)".text, success: false);
     }
 }
 
@@ -56,14 +57,14 @@ ExecuteFuncResult getToolHistory(Context baseCtx, GetToolHistoryParams params) {
         string result;
         foreach (i, event; events) {
             auto dt = SysTime(DateTime.init) + event.timestamp.dur!"msecs";
-            result ~= format!"%s. [%s] %s - Success: %s\n   Args: %s\n   Result: %s\n\n"(i + 1,
-                    dt.toISOExtString(), event.toolName,
-                    event.success ? "Yes" : "No", truncate(event.arguments.toString(JSONOptions.doNotEscapeSlashes),
-                        maxArgLen), truncate(event.result, params.maxLength));
+            result ~= i"$(i + 1). [$(dt.toISOExtString())] $(event.toolName) - Success: $(event.success
+                    ? "Yes" : "No")\n   Args: $(truncate(event.arguments.toString(
+                    JSONOptions.doNotEscapeSlashes), maxArgLen))\n   Result: $(
+                    truncate(event.result, params.maxLength))\n\n".text;
         }
         return ExecuteFuncResult(result, success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(format!"error: failed getting tool history: %s"(e.msg),
+        return ExecuteFuncResult(i"error: failed getting tool history: $(e.msg)".text,
                 success: false);
     }
 }

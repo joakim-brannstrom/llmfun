@@ -2,7 +2,7 @@ module llm.metric.calculator;
 
 import std.algorithm : sort, map;
 import std.array : array, appender;
-import std.conv : to;
+import std.conv : to, text;
 import std.format : format, formattedWrite;
 import std.math : sqrt;
 import std.range : take, put;

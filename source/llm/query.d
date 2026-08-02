@@ -6,7 +6,6 @@ import logger = std.logger;
 import std.array : empty;
 import std.conv : to, text;
 import std.exception : collectException;
-import std.format : format;
 import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
 import std.stdio : writeln;
 import std.sumtype : SumType, match;
@@ -152,7 +151,7 @@ struct LlmSlotRequester {
         try {
             auto url = cfg.slotUrl;
             if (auto model = "model" in cfg.header)
-                url ~= format!"?model=%s"(model.str);
+                url ~= i"?model=$(model.str)".text;
 
             auto result = httpGetWithRetry(rq, url, rqCfg);
 
@@ -309,13 +308,13 @@ SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(ref Request rq
             auto response = (cast(const(char)[])(streamData[])).byUTF!char.text;
 
             if (code >= 500) {
-                lastError = HttpError(code, response,
-                        format!"HTTP %s (server error, retryable): %s"(code, response));
+                lastError = HttpError(code, response, i"HTTP $(code) (server error, retryable): $(
+                        response)".text);
                 continue;
             }
             if (code >= 400) {
-                return ReturnT(HttpError(code, response,
-                        format!"HTTP %s (client error, not retryable): %s"(code, response)));
+                return ReturnT(HttpError(code, response, i"HTTP $(code) (client error, not retryable): $(
+                        response)".text));
             }
             return ReturnT(HttpResult(code, response));
         } catch (Exception e) {

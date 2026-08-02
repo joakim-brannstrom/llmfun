@@ -7,7 +7,7 @@ import core.time : dur;
 
 import std.algorithm : countUntil, map, joiner;
 import std.array : empty;
-import std.format : format;
+import std.conv : text;
 import std.json : parseJSON;
 import std.stdio : writeln, writefln;
 import std.conv : to;
@@ -29,8 +29,9 @@ int appMain(UserConfig uconf, UserConfig.PrintToolMetricsConfig conf) {
                 auto idx = events.countUntil!(a => a == lastEvent);
                 events = idx < 0 ? events : events[idx + 1 .. $];
                 foreach (e; events) {
-                    auto args = e.arguments.object.byKeyValue.map!(a => format!"%s:%s"(a.key.color(Color.yellow),
-                            a.value.toString)).joiner(", ");
+                    auto args = e.arguments.object.byKeyValue.map!(
+                            a => i"$(a.key.color(Color.yellow)):$(a.value.toString)".text).joiner(
+                            ", ");
                     writefln("%s - agent:%s time:%s tool:%s(%s) -> %s",
                             e.timestamp.to!string.color(e.success ? Color.green
                                 : Color.red), e.agentName, e.responseTimeMs == 0

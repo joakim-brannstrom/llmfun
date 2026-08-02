@@ -3,8 +3,7 @@ module llm.metric.feedback;
 import logger = std.logger;
 import std.algorithm : filter, map, sort, uniq, count;
 import std.array : array, appender;
-import std.conv : to;
-import std.format : format;
+import std.conv : to, text;
 import std.json : JSONOptions;
 import std.numeric : cosineSimilarity;
 import std.range : take;
@@ -47,8 +46,8 @@ private:
             auto similarCount = countSimilarFailures(failure, failures);
             if (similarCount >= 2) {
                 countedTools[failure.toolName] = true;
-                warnings ~= format!"%s: This tool failed %s times with similar arguments. Consider checking the input or tool configuration."(
-                        failure.toolName, similarCount);
+                warnings ~= i"$(failure.toolName): This tool failed $(similarCount) times with similar arguments. Consider checking the input or tool configuration."
+                    .text;
             }
         }
 

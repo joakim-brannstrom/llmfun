@@ -534,8 +534,8 @@ class SkillManager {
         enum size_t maxSize = 1_048_576; // 1MB
         auto fileSize = getSize(skillMdPath.toString);
         if (fileSize > maxSize) {
-            return SkillResult(Skill.init,
-                    format!"SKILL.md too large: %s bytes (max %s)"(fileSize, maxSize));
+            return SkillResult(Skill.init, i"SKILL.md too large: $(fileSize) bytes (max $(maxSize))"
+                    .text);
         }
 
         auto content = readText(skillMdPath.toString);
@@ -549,8 +549,8 @@ class SkillManager {
         }
 
         if (!isValidName(fm.name)) {
-            return SkillResult(Skill.init, format!"invalid skill name '%s': must be 1-64 lowercase alphanumeric chars with hyphens (no leading/trailing/consecutive hyphens)"(
-                    fm.name));
+            return SkillResult(Skill.init, i"invalid skill name '$(fm.name)': must be 1-64 lowercase alphanumeric chars with hyphens (no leading/trailing/consecutive hyphens)"
+                    .text);
         }
 
         // Non-fatal warning only
@@ -619,12 +619,12 @@ class SkillManager {
         const existingContent = readText(existingSkillMd);
         const existingFm = parseFrontmatter(existingContent);
         if (!existingFm.parseErrors.empty) {
-            throw new Exception(format!"Cannot verify existing skill at '%s': SKILL.md parse error: %s"(destDir,
-                    existingFm.parseErrors.join(", ")));
+            throw new Exception(i"Cannot verify existing skill at '$(destDir)': SKILL.md parse error: $(
+                    existingFm.parseErrors.join(", "))".text);
         }
         if (!existingFm.name.empty && existingFm.name != name) {
-            throw new Exception(format!"Destination '%s' contains skill '%s', not '%s'"(destDir,
-                    existingFm.name, name));
+            throw new Exception(i"Destination '$(destDir)' contains skill '$(existingFm.name)', not '$(
+                    name)'".text);
         }
 
         // Same skill at destination - compare versions
@@ -662,9 +662,8 @@ class SkillManager {
             // Verify copy produced a valid SKILL.md
             const copiedSkillMd = buildPath(destDir, "SKILL.md");
             if (!exists(copiedSkillMd)) {
-                throw new Exception(
-                        format!"Copy completed but SKILL.md missing at '%s' - copy may be incomplete"(
-                        destDir));
+                throw new Exception(i"Copy completed but SKILL.md missing at '$(destDir)' - copy may be incomplete"
+                        .text);
             }
 
             if (isUpgrade) {
@@ -719,8 +718,8 @@ class SkillManager {
         if (maxEntries > 0 && allSkills.length > cast(size_t) maxEntries) {
             long remaining = cast(long) allSkills.length - maxEntries;
             ap.put("<!-- ");
-            ap.put(format!"%s more skills available. Use loadSkill with the skill name to see them."(
-                    remaining));
+            ap.put(i"$(remaining) more skills available. Use loadSkill with the skill name to see them."
+                    .text);
             ap.put(" -->\n");
         }
 
@@ -771,8 +770,8 @@ string buildAlwaysApplyBlock(Skill[] alwaysApply, long maxTokens) {
 
     if (omittedCount > 0) {
         ap.put("[Warning: ");
-        ap.put(format!"%s always-apply skills omitted due to token budget (limit: %d tokens). Remaining skills are still available via loadSkill."(
-                omittedCount, maxTokens));
+        ap.put(i"$(omittedCount) always-apply skills omitted due to token budget (limit: $(
+                maxTokens) tokens). Remaining skills are still available via loadSkill.".text);
         ap.put("]\n");
     }
 

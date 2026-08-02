@@ -2,7 +2,7 @@ module llm.tool_call;
 
 import logger = std.logger;
 import std.algorithm : canFind, filter, map;
-import std.format : format;
+import std.conv : text;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.range : array;
 import std.traits : isIntegral, isFloatingPoint;
@@ -78,10 +78,10 @@ private ExecuteFuncResult executeFunc(Context ctx, string name, JSONValue args) 
             logger.tracef("call %s with args %s -> %s", name, args, rval.msg);
             return rval;
         }
-        return ExecuteFuncResult(format!"error: unknown tool %s"(name), false);
+        return ExecuteFuncResult(i"error: unknown tool $(name)".text, false);
     } catch (Exception e) {
         try {
-            return ExecuteFuncResult(format!"error: executing tool '%s': %s"(name, e.msg), false);
+            return ExecuteFuncResult(i"error: executing tool '$(name)': $(e.msg)".text, false);
         } catch (Exception e) {
         }
     }

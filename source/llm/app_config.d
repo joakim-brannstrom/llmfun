@@ -3,7 +3,6 @@ module llm.app_config;
 
 import logger = std.logger;
 import std.array : empty;
-import std.format : format;
 import std.sumtype : match;
 
 import argparse : CLI, NamedArgument, PositionalArgument, Command, Description,
@@ -17,7 +16,7 @@ import llm.rag.rag : RAG;
 struct UserConfig {
     SubCommand!(Default!AgentChatConfig, Rag, PrintToolMetricsConfig) cmd;
 
-    @(NamedArgument("v", "verbose").Description(format!"Log verbosity level"))
+    @(NamedArgument("v", "verbose").Description("Log verbosity level"))
     VerboseMode verbosity;
 
     @(NamedArgument("config", "c").Description("Configuration file to read"))
