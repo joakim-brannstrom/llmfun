@@ -28,3 +28,4 @@ llmfun/workarea
 llmfun/data/scratch
 llmfun/data/rag.sqlite3
 llmfun/data/state.json
+llmfun/data/agent_md_cache.json
