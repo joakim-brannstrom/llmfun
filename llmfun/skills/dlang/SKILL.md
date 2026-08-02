@@ -35,6 +35,52 @@ Use this skill when:
 - **Check dub config first**: Read `dub.sdl` or `dub.json` before building to understand project structure.
 - **Verify build output**: Check the `targetPath` directory (default: `./`) for compiled artifacts.
 
+## Code Conventions
+
+Full details in `references/code-conventions.md`. Key rules:
+
+### Comments
+
+- **Use ddoc**, not doxygen. Forms: `/** ... */`, `///`, `/+ ... +/`.
+- **Module header:** Brief ddoc (1-3 lines) before `module` declaration.
+- **Explain why, not what.** Concise: 1-2 lines. No hard-wrapping.
+- **Write code first, comment later.** Never comment copied code.
+
+### String Handling
+
+- **Prefer interpolated strings** over `std.format.format`.
+- **Prefer backtick-strings** when embedding `"` or `\`.
+
+### Variable Initialization
+
+- **NEVER initialize `string` with `= ""`.** D auto-initializes locals.
+- **Prefer local function initialization** over scattered assignments.
+
+### Naming & Formatting
+
+- **Local imports** inside functions/structs where symbols are not pervasive
+- **No magic numbers** without named constants
+
+### Error Handling
+
+- **No empty catch blocks.** Log via `std.logger`.
+- **Silent catches for @safe:** Nested try/catch around logging allowed when
+  `.collectException` can't be used. Innermost empty catch is the only exception.
+
+### Attributes
+
+- **@safe:** Mark whenever possible. Fix issues, don't downgrade.
+- **@trusted:** Only when `@safe` not feasible. Keep minimal, verify inputs.
+- **@system:** Default. Avoid; only for low-level ops (pointers, asm, C interop).
+- **pure:** Add when no global/mutable state access.
+- **nothrow:** Mark when no exceptions. Signals error-return patterns.
+
+### General
+
+- **ASCII only.** No emdash, unicode arrows, or non-ASCII.
+- **No mid-sentence line breaks.** Let lines flow naturally.
+- **Reuse existing infrastructure** over introducing new components.
+
 ## Workflow
 
 1. **Identify the project**: Locate the `dub.sdl` or `dub.json` file.
@@ -71,4 +117,5 @@ This minimal config reads and compiles all files in the source directory.
 ## References
 
 - Dub configuration guide: `references/dub-config.md`
+- Code conventions: `references/code-conventions.md`
 - Scripts: `scripts/README.md`
