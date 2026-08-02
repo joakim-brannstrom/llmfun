@@ -1,14 +1,15 @@
 module llm.skill;
 
 import logger = std.logger;
-import std.algorithm : filter, map;
+import std.algorithm : filter, map, among;
 import std.array : appender, join, Appender, empty;
-import std.file : exists, isDir, dirEntries, SpanMode, getSize, readText;
+import std.conv : to, text;
+import std.file : exists, isDir, dirEntries, SpanMode, getSize, readText, rename;
 import std.format : format;
 import std.path : baseName, buildPath;
 import std.range : array;
-import std.string : strip, splitLines;
 import std.regex : regex, matchFirst;
+import std.string : strip, splitLines, split;
 import std.typecons : Nullable, nullable;
 
 import my.file : copyRecurse;
@@ -76,6 +77,240 @@ struct SkillFrontmatter {
     string license;
     string[] allowedTools;
     string[] parseErrors;
+}
+
+/// Semantic version struct.
+struct SemVer {
+    int[] value;
+
+    int major() @safe pure nothrow const @nogc {
+        if (value.length >= 1)
+            return value[0];
+        return 0;
+    }
+
+    int minor() @safe pure nothrow const @nogc {
+        if (value.length >= 2)
+            return value[1];
+        return 0;
+    }
+
+    int patch() @safe pure nothrow const @nogc {
+        if (value.length >= 3)
+            return value[2];
+        return 0;
+    }
+
+    bool valid() @safe pure nothrow const @nogc {
+        return !value.empty;
+    }
+}
+
+/// Parse a semantic version string. Handles X.Y.Z, X.Y, X formats.
+/// Strips leading v/V prefix and pre-release suffixes at - or +.
+/// Returns invalid SemVer (valid==false) on parse failure with a warning log.
+SemVer parseSemVer(string verStr) {
+    auto s = verStr.strip;
+    if (s.empty) {
+        logger.warningf("Failed to parse version string: empty string");
+        return SemVer.init;
+    }
+
+    if (s[0].among('v', 'V')) {
+        s = s[1 .. $];
+    }
+
+    // Strip pre-release suffix at - or +
+    foreach (i, c; s) {
+        if (c == '-' || c == '+') {
+            s = s[0 .. i];
+            break;
+        }
+    }
+
+    SemVer rval;
+    foreach (p; s.split('.')) {
+        try {
+            rval.value ~= p.to!int;
+        } catch (Exception e) {
+            logger.warningf("Failed to parse version string: '%s' part '%s': %s", verStr, p, e.msg);
+            return SemVer.init;
+        }
+    }
+
+    return rval;
+}
+
+/// Compare two version strings.
+/// Returns -1 (source older), 0 (equal), or +1 (source newer).
+/// Edge cases:
+///   - Both empty → 0
+///   - Source empty, dest not → -1
+///   - Source not empty, dest empty → +1
+///   - Source unparseable → 0 (skip)
+///   - Dest unparseable → +1 (copy)
+int compareVersions(string sourceVersion, string destVersion) {
+    // Both empty → equal
+    if (sourceVersion.empty && destVersion.empty) {
+        return 0;
+    }
+
+    // Source empty, dest not → source is "older"
+    if (sourceVersion.empty) {
+        return -1;
+    }
+
+    // Source not empty, dest empty → source is "newer"
+    if (destVersion.empty) {
+        return +1;
+    }
+
+    auto src = parseSemVer(sourceVersion);
+    auto dst = parseSemVer(destVersion);
+
+    // Source unparseable → skip (return 0)
+    if (!src.valid) {
+        return 0;
+    }
+
+    // Dest unparseable → treat as newer source (return +1)
+    if (!dst.valid) {
+        return +1;
+    }
+
+    // Three-way numeric comparison
+    if (src.major != dst.major)
+        return src.major > dst.major ? 1 : -1;
+    if (src.minor != dst.minor)
+        return src.minor > dst.minor ? 1 : -1;
+    if (src.patch != dst.patch)
+        return src.patch > dst.patch ? 1 : -1;
+
+    return 0;
+}
+
+unittest {
+    // Basic format: X.Y.Z
+    auto v1 = parseSemVer("1.2.3");
+    assert(v1.valid);
+    assert(v1.major == 1);
+    assert(v1.minor == 2);
+    assert(v1.patch == 3);
+
+    // Partial format: X.Y
+    auto v2 = parseSemVer("1.2");
+    assert(v2.valid);
+    assert(v2.major == 1);
+    assert(v2.minor == 2);
+    assert(v2.patch == 0);
+
+    // Partial format: X
+    auto v3 = parseSemVer("1");
+    assert(v3.valid);
+    assert(v3.major == 1);
+    assert(v3.minor == 0);
+    assert(v3.patch == 0);
+
+    // Leading v prefix
+    auto v4 = parseSemVer("v1.0.0");
+    assert(v4.valid);
+    assert(v4.major == 1);
+    assert(v4.minor == 0);
+    assert(v4.patch == 0);
+
+    // Leading V prefix
+    auto v5 = parseSemVer("V2.3.4");
+    assert(v5.valid);
+    assert(v5.major == 2);
+    assert(v5.minor == 3);
+    assert(v5.patch == 4);
+
+    // Pre-release suffix at -
+    auto v6 = parseSemVer("1.0.0-beta.1");
+    assert(v6.valid);
+    assert(v6.major == 1);
+    assert(v6.minor == 0);
+    assert(v6.patch == 0);
+
+    // Pre-release suffix at +
+    auto v7 = parseSemVer("1.0.0+build123");
+    assert(v7.valid);
+    assert(v7.major == 1);
+    assert(v7.minor == 0);
+    assert(v7.patch == 0);
+
+    // Extra segments beyond major.minor.patch are ignored
+    auto v8 = parseSemVer("1.2.3.4");
+    assert(v8.valid);
+    assert(v8.major == 1);
+    assert(v8.minor == 2);
+    assert(v8.patch == 3);
+
+    // Unparseable returns invalid
+    auto v9 = parseSemVer("abc");
+    assert(!v9.valid);
+
+    // Empty string returns invalid
+    auto v10 = parseSemVer("");
+    assert(!v10.valid);
+
+    // Lone v prefix returns invalid
+    auto v11 = parseSemVer("v");
+    assert(!v11.valid);
+
+    // Trailing dot returns invalid
+    auto v12 = parseSemVer("1.2.3.");
+    assert(!v12.valid);
+
+    // Leading minus treated as pre-release delimiter, returns invalid
+    auto v13 = parseSemVer("-1.2.3");
+    assert(!v13.valid);
+}
+
+unittest {
+    // Equal versions
+    assert(compareVersions("1.0.0", "1.0.0") == 0);
+
+    // Newer source
+    assert(compareVersions("2.0.0", "1.0.0") == 1);
+    assert(compareVersions("1.1.0", "1.0.0") == 1);
+    assert(compareVersions("1.0.1", "1.0.0") == 1);
+
+    // Older source
+    assert(compareVersions("1.0.0", "2.0.0") == -1);
+    assert(compareVersions("1.0.0", "1.1.0") == -1);
+    assert(compareVersions("1.0.0", "1.0.1") == -1);
+
+    // Both empty
+    assert(compareVersions("", "") == 0);
+
+    // Dest empty, source not -> source is "newer"
+    assert(compareVersions("1.0.0", "") == +1);
+
+    // Source empty, dest not -> source is "older"
+    assert(compareVersions("", "1.0.0") == -1);
+
+    // Source unparseable -> skip (0)
+    assert(compareVersions("abc", "1.0.0") == 0);
+
+    // Dest unparseable -> copy (+1)
+    assert(compareVersions("1.0.0", "abc") == +1);
+
+    // Both unparseable -> skip (0)
+    assert(compareVersions("abc", "xyz") == 0);
+
+    // Leading v prefix stripped
+    assert(compareVersions("v1.0.0", "1.0.0") == 0);
+
+    // Pre-release suffix stripped
+    assert(compareVersions("1.0.0-beta", "1.0.0") == 0);
+
+    // Partial versions equal
+    assert(compareVersions("1.0.0", "1.0") == 0);
+    assert(compareVersions("1", "1.0.0") == 0);
+
+    // Extra segments ignored
+    assert(compareVersions("1.2.3.4", "1.2.3") == 0);
 }
 
 /// Thrown when a skill is not found.
@@ -345,23 +580,23 @@ class SkillManager {
         return skills.values.array;
     }
 
-    Skill[] getAlwaysApplySkills() {
+    Skill[] getAlwaysApplySkills() @safe {
         return skills.values.filter!(s => s.alwaysApply).array;
     }
 
     /// Load cached skill body by name. Throws SkillNotFoundException if missing.
     string loadSkillBody(string name) {
         if (name !in skills) {
-            throw new SkillNotFoundException(format!"Skill not found: %s"(name));
+            throw new SkillNotFoundException(i"Skill not found: $(name)".text);
         }
         return skills[name].loadBody();
     }
 
     /// Copy skill dir to destDir (idempotent). Returns skill body.
     /// Throws: SkillNotFoundException, Exception (empty destDir, wrong skill, malformed SKILL.md).
-    string loadSkill(string name, string destDir) {
+    string loadSkill(string name, Path destDir, bool overwrite) {
         if (name !in skills) {
-            throw new SkillNotFoundException(format!"Skill not found: %s"(name));
+            throw new SkillNotFoundException(i"Skill not found: $(name)".text);
         }
         auto skill = skills[name];
 
@@ -369,28 +604,78 @@ class SkillManager {
             throw new Exception("destDir must not be empty");
         }
 
-        if (exists(destDir)) {
-            auto existingSkillMd = buildPath(destDir, "SKILL.md");
-            if (exists(existingSkillMd)) {
-                auto existingContent = readText(existingSkillMd);
-                auto existingFm = parseFrontmatter(existingContent);
-                if (!existingFm.parseErrors.empty) {
-                    throw new Exception(format!"Cannot verify existing skill at '%s': SKILL.md parse error: %s"(
-                            destDir, existingFm.parseErrors.join(", ")));
-                }
-                if (!existingFm.name.empty && existingFm.name != name) {
-                    throw new Exception(format!"Destination '%s' contains skill '%s', not '%s'"(destDir,
-                            existingFm.name, name));
-                }
-                logger.tracef("Skill '%s' already present at %s, skipping copy", name, destDir);
+        if (!exists(destDir)) {
+            copyRecurse(skill.dir, destDir);
+            logger.tracef("Copied skill '%s' to %s", name, destDir);
+            return skill.loadBody();
+        }
+
+        const existingSkillMd = buildPath(destDir, "SKILL.md");
+        if (!exists(existingSkillMd)) {
+            throw new Exception(i"Destination '$(destDir)' exists but does not contain a valid SKILL.md. The parameter destDir should be $(
+                    destDir)/$(name)".text);
+        }
+
+        const existingContent = readText(existingSkillMd);
+        const existingFm = parseFrontmatter(existingContent);
+        if (!existingFm.parseErrors.empty) {
+            throw new Exception(format!"Cannot verify existing skill at '%s': SKILL.md parse error: %s"(destDir,
+                    existingFm.parseErrors.join(", ")));
+        }
+        if (!existingFm.name.empty && existingFm.name != name) {
+            throw new Exception(format!"Destination '%s' contains skill '%s', not '%s'"(destDir,
+                    existingFm.name, name));
+        }
+
+        // Same skill at destination - compare versions
+        const cmp = compareVersions(skill.version_, existingFm.version_);
+        if (cmp > 0 || overwrite) {
+            // Source is newer or overwrite requested - backup and copy
+            const isUpgrade = cmp > 0;
+            string backupDir = destDir.toString ~ ".llmfun_backup";
+            if (isUpgrade) {
+                logger.infof("Skill '%s' version %s is newer than %s at %s - upgrading",
+                        name, skill.version_, existingFm.version_, destDir);
             } else {
+                logger.infof("Skill '%s' overwrite requested at %s - backing up and copying",
+                        name, destDir);
+            }
+
+            rename(destDir, backupDir);
+
+            logger.tracef("Backed up existing skill '%s' to %s", name, backupDir);
+            scope (failure) {
+                if (exists(backupDir)) {
+                    try {
+                        rename(backupDir, destDir);
+                        logger.warningf("Restored backup of skill '%s' from %s after copy failure",
+                                name, backupDir);
+                    } catch (Exception e) {
+                        logger.errorf("Failed to restore backup of skill '%s' from %s: %s",
+                                name, backupDir, e.msg);
+                    }
+                }
+            }
+
+            copyRecurse(skill.dir, destDir);
+
+            // Verify copy produced a valid SKILL.md
+            const copiedSkillMd = buildPath(destDir, "SKILL.md");
+            if (!exists(copiedSkillMd)) {
                 throw new Exception(
-                        format!"Destination '%s' exists but does not contain a valid SKILL.md"(
+                        format!"Copy completed but SKILL.md missing at '%s' - copy may be incomplete"(
                         destDir));
             }
+
+            if (isUpgrade) {
+                logger.infof("Upgraded skill '%s' to version %s at %s", name,
+                        skill.version_, destDir);
+            } else {
+                logger.infof("Overwrote skill '%s' at %s", name, destDir);
+            }
         } else {
-            copyRecurse(skill.dir, destDir.Path);
-            logger.tracef("Copied skill '%s' to %s", name, destDir);
+            logger.tracef("Skill '%s' already present at %s with version %s (source version %s), skipping copy",
+                    name, destDir, existingFm.version_, skill.version_);
         }
 
         return skill.loadBody();

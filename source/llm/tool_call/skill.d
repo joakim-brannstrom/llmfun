@@ -27,13 +27,16 @@ struct LoadSkillParams {
     @ParamDescription(
             "Destination directory path inside the sandbox where the skill will be copied")
     string destDir;
+
+    @ParamOptional @ParamDescription(
+            "Force overwrite existing skill regardless of version (default: false)")
+    bool overwrite;
 }
 
-@Function("Load a skill by copying it into the sandbox workarea. "
+@Function("Load a skill by copying it into the workarea. "
         ~ "Use this when a skill's name or description matches the current task. "
         ~ "Copies the entire skill directory (SKILL.md, references/, scripts/, assets/) "
-        ~ "to the destination. Returns the full SKILL.md body. "
-        ~ "Fails if the destination already exists and contains a different skill.")
+        ~ "to the destination. Returns the full SKILL.md body.")
 ExecuteFuncResult loadSkill(Context baseCtx, LoadSkillParams params) {
     mixin(baseContextToSpecific!SkillContext);
 
@@ -51,12 +54,12 @@ ExecuteFuncResult loadSkill(Context baseCtx, LoadSkillParams params) {
 
     try {
         auto mgr = ctx.getSkillManager();
-        auto body = mgr.loadSkill(params.skillName, destDir_);
+        auto body = mgr.loadSkill(params.skillName, destDir_, params.overwrite);
         string bodyPreview = body;
         if (body.length > 4096) {
             // TODO: should count grapheme so chinese letters work correctly
-            body = body[0 .. 4096] ~ format("\n\n... (truncated, skill is %s bytes total",
-                    body.length);
+            body = i"$(body[0 .. 4096])\n\n... (truncated, skill is $(body.length) bytes total)"
+                .text;
         }
         return ExecuteFuncResult(i"Skill loaded: $(params.skillName)\nCopied to: $(params.destDir)\n\n$(
                 bodyPreview)".text, success: true);

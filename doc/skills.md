@@ -21,6 +21,7 @@ Skills are portable, reusable instruction bundles that extend llmfun with specia
 - [Creating a Skill](#creating-a-skill)
 - [Using Skills](#using-skills)
   - [loadSkill Tool](#loadskill-tool)
+  - [Version Checking & Overwrite](#version-checking--overwrite)
   - [alwaysApply Skills](#alwaysapply-skills)
   - [glob-Triggered Skills](#glob-triggered-skills)
 - [Sandbox Containment](#sandbox-containment)
@@ -351,6 +352,7 @@ The `loadSkill` tool is the primary way to activate a skill. The agent calls it 
 **Parameters:**
 - `skillName`: The skill's `name` field (from frontmatter)
 - `destDir`: Destination path inside the sandbox workarea
+- `overwrite`: Force overwrite existing skill regardless of version (default: `false`)
 
 **What happens:**
 1. The entire skill directory is copied into the sandbox
@@ -361,7 +363,97 @@ The `loadSkill` tool is the primary way to activate a skill. The agent calls it 
    - `readFile("./.llmfun/loaded_skills/my-skill/references/guide.md")`
    - `executeCode("./.llmfun/loaded_skills/my-skill/scripts/helper.sh")`
 
-**Idempotency:** Loading the same skill to the same destination is safe — the second call skips the copy. Loading a different skill to an existing destination fails with a clear error.
+**Version checking:** When the destination already contains the same skill, versions are compared (see [Version Checking & Overwrite](#version-checking--overwrite)). Newer source versions trigger a backup + copy upgrade. Equal or older versions skip the copy. The `overwrite=true` flag forces copying regardless of version.
+
+**Idempotency:** Loading the same skill to the same destination is safe — the second call skips the copy if versions are equal. Loading a different skill to an existing destination fails with a clear error.
+
+### Version Checking & Overwrite
+
+When loading a skill to a destination that already contains the same skill, llmfun compares versions to decide whether to copy.
+
+#### Version Comparison Rules
+
+Versions are read from the `version` field in each skill's YAML frontmatter. Comparison follows semantic versioning (major.minor.patch):
+
+| Scenario | Source Version | Dest Version | Action |
+|----------|---------------|--------------|--------|
+| Equal versions | `1.0.0` | `1.0.0` | Skip copy |
+| Source newer | `1.2.0` | `1.0.0` | Backup + copy (upgrade) |
+| Source older | `0.9.0` | `1.0.0` | Skip copy |
+| Source has version, dest doesn't | `1.0.0` | *(empty)* | Backup + copy |
+| Both missing versions | *(empty)* | *(empty)* | Skip copy |
+| Source version unparseable | `abc` | `1.0.0` | Skip copy |
+| Dest version unparseable | `1.0.0` | `abc` | Backup + copy |
+
+**Version format:** Supports `X.Y.Z`, `X.Y`, `X`, with optional leading `v`/`V` prefix. Pre-release suffixes (e.g., `-beta.1`, `+build123`) are stripped for comparison.
+
+**Design rationale:** When the destination has no version but the source does, llmfun treats the source as newer — this ensures versioned skills can upgrade unversioned local copies. The asymmetric handling of unparseable versions follows the same principle: unparseable source versions skip (safe default), while unparseable dest versions trigger copy (optimistic upgrade).
+
+#### Overwrite Flag
+
+Set `overwrite: true` to force copying regardless of version comparison:
+
+```
+loadSkill(skillName: "code-review", destDir: "./.llmfun/loaded_skills/code-review", overwrite: true)
+```
+
+This is useful when:
+- You want to refresh a skill's files without changing its version
+- You suspect the local copy is corrupted
+- You want to test a modified skill before bumping its version
+- You want to **downgrade** to a previous version (use with caution — a backup is created automatically)
+
+**Note:** `overwrite=true` does not bypass skill name validation. It only bypasses the version comparison check.
+
+#### Backup & Recovery
+
+Before any overwrite (whether triggered by version upgrade or `overwrite=true`), the existing destination is backed up:
+
+- **Backup location:** `destDir.llmfun_backup` (e.g., `./.llmfun/loaded_skills/code-review.llmfun_backup`). The suffix is appended to the full `destDir` path provided to `loadSkill`.
+- **Backup method:** Atomic rename (O(1) on most filesystems)
+- **Automatic rollback:** If the copy fails after backup, the backup is automatically restored using D's `scope (failure)` cleanup mechanism
+
+**Manual recovery:** If you need to roll back a skill upgrade manually:
+
+```bash
+# Remove the current (newer) skill
+rm -rf ./.llmfun/loaded_skills/code-review
+
+# Restore from backup
+mv ./.llmfun/loaded_skills/code-review.llmfun_backup ./.llmfun/loaded_skills/code-review
+```
+
+#### Version Upgrade Scenarios
+
+**Scenario 1: Automatic upgrade**
+```
+Installed: code-review v1.0.0
+Available: code-review v1.2.0
+Action:    Backup v1.0.0 → code-review.llmfun_backup, copy v1.2.0
+```
+
+**Scenario 2: No upgrade needed**
+```
+Installed: code-review v1.2.0
+Available: code-review v1.2.0
+Action:    Skip copy (already up to date)
+```
+
+**Scenario 3: Force refresh**
+```
+Installed: code-review v1.2.0
+Available: code-review v1.2.0
+Action:    Backup + copy (overwrite=true forces it)
+```
+
+**Scenario 4: Prevent downgrade**
+```
+Installed: code-review v2.0.0
+Available: code-review v1.0.0
+Action:    Skip copy (source is older)
+```
+
+---
 
 ### alwaysApply Skills
 
@@ -561,6 +653,28 @@ All code must follow these conventions:
 2. **Check token budget**: If `maxAlwaysApplyTokens` is exceeded, skill may be omitted
 3. **Check logs**: Warning is logged if skill is omitted due to budget
 
+### Skill Not Upgrading
+
+1. **Check version field**: Verify the source skill's `version` in frontmatter is newer than the installed version
+2. **Check version format**: Must be parseable as semantic version (e.g., `1.0.0`, `v1.2.0`). Invalid versions like `abc` cause the copy to be skipped
+3. **Use `overwrite: true`**: Force a refresh if versions are equal but you suspect file corruption
+4. **Check for backup**: Look for `destDir.llmfun_backup` to confirm a previous upgrade occurred
+5. **Check logs**: Warnings are logged when version parsing fails
+
+### Recover from Failed Upgrade
+
+If a skill upgrade fails and leaves things in a bad state:
+
+1. **Check for backup**: Look for `destDir.llmfun_backup`
+2. **Restore manually**:
+   ```bash
+   rm -rf ./.llmfun/loaded_skills/my-skill
+   mv ./.llmfun/loaded_skills/my-skill.llmfun_backup ./.llmfun/loaded_skills/my-skill
+   ```
+3. **Retry**: Call `loadSkill` again after restoring
+
+---
+
 ### Disable Skills Entirely
 
 Set `"disableSkills": true` in your config. No skills will be discovered or loaded.
@@ -580,6 +694,8 @@ llmfun implements the [Agent Skills open standard](https://agentskills.io/specif
 
 **llmfun-specific extensions:**
 - `loadSkill` copies skills into sandbox (required for containment)
+- Version checking with automatic backup + upgrade on newer versions
+- `overwrite` flag to force skill refresh regardless of version
 - `maxManifestSkills` and `maxAlwaysApplyTokens` configuration options
 - `/skills` slash command for listing skills
 
