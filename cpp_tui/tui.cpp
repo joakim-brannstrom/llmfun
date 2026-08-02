@@ -315,13 +315,13 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
         return;
     const auto& entry = state.chat.outputLines[i];
 
-    const bool isLastMessage = state.chat.outputLines.size() - 1 == i;
+    const bool showOpen = (i + 5) > state.chat.outputLines.size();
+    const auto openFlags = ImGuiTreeNodeFlags_Framed |
+                           (showOpen ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None);
     auto treeId = makeUniqueId(entry.summary, "", entry.id);
     ImGui::PushStyleColor(ImGuiCol_Header, state.chat.nestedAssistNodeBg);
     StyleColorGuard topNodeGuard{1};
-    if (!ImGui::TreeNodeEx(treeId.c_str(), ImGuiTreeNodeFlags_Framed |
-                                               (isLastMessage ? ImGuiTreeNodeFlags_DefaultOpen
-                                                              : ImGuiTreeNodeFlags_None))) {
+    if (!ImGui::TreeNodeEx(treeId.c_str(), openFlags)) {
         return;
     }
     topNodeGuard.pop();
@@ -330,7 +330,7 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
         auto thinkId = makeUniqueId("Model reasoning", "_assist_think_", entry.id);
         ImGui::PushStyleColor(ImGuiCol_Header, state.chat.thinkingNodeBg);
         StyleColorGuard thinkGuard{1};
-        if (ImGui::TreeNodeEx(thinkId.c_str(), ImGuiTreeNodeFlags_Framed)) {
+        if (ImGui::TreeNodeEx(thinkId.c_str(), openFlags)) {
             thinkGuard.pop();
             ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
             textUnformattedMultiline(state.mdConfig, entry.thinking);
