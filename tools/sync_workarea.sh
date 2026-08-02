@@ -8,6 +8,7 @@ rsync -va --delete local_model/ llmfun/workarea/llmfun/local_model/
 rsync -va --delete doc/ llmfun/workarea/llmfun/doc/
 rsync -a dub.sdl llmfun/workarea/llmfun/dub.sdl
 rsync -a README.md llmfun/workarea/llmfun/
+rsync -a AGENTS.md llmfun/workarea/llmfun/
 rsync -a config/ llmfun/workarea/llmfun/config/
 rsync -a *.mak llmfun/workarea/llmfun/
 rsync -a --delete --exclude ".git" vendor/ llmfun/workarea/llmfun/vendor/
