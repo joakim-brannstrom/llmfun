@@ -1,9 +1,9 @@
 module llm.tool_call.skill;
 
+import logger = std.logger;
 import std.array : empty;
 import std.conv : text;
 import std.file : exists;
-import std.format : format;
 import std.string : strip;
 
 import my.path : AbsolutePath;
@@ -40,31 +40,46 @@ struct LoadSkillParams {
 ExecuteFuncResult loadSkill(Context baseCtx, LoadSkillParams params) {
     mixin(baseContextToSpecific!SkillContext);
 
-    auto destDir_ = pathToWorkarea(ctx, params.destDir);
-    if (!destDir_.valid) {
-        return ExecuteFuncResult(destDir_.errorMsg, success: false);
-    }
-    if (!ctx.workArea.exists) {
-        return ExecuteFuncResult("error: using a skill is blocked. loadSkill is disabled",
-                success: false);
-    }
+    auto fallbackLoad() {
+        try {
+            // fallback to only loading the body but not the full skill
+            auto mgr = ctx.getSkillManager();
+            auto body = mgr.loadSkillBody(params.skillName);
+            return ExecuteFuncResult(i"Skill loaded: $(params.skillName)\nFailed to copy skill to: $(
+                    params.destDir)\n\n$(body)".text, success: true);
+        } catch (Exception e) {
+            return ExecuteFuncResult(i"error: loading skill '$(params.skillName): $(e.msg)".text,
+                    success: false);
+        }
+    };
+
     if (params.skillName.strip.empty) {
         return ExecuteFuncResult("error: empty parameter skillName", success: false);
     }
 
+    if (!ctx.workArea.exists) {
+        return fallbackLoad();
+    }
+
+    auto destDir_ = pathToWorkarea(ctx, params.destDir);
+    if (!destDir_.valid) {
+        return ExecuteFuncResult(destDir_.errorMsg, success: false);
+    }
+
     try {
+        // try to load the full skill
         auto mgr = ctx.getSkillManager();
         auto body = mgr.loadSkill(params.skillName, destDir_, params.overwrite);
-        string bodyPreview = body;
         if (body.length > 4096) {
             // TODO: should count grapheme so chinese letters work correctly
             body = i"$(body[0 .. 4096])\n\n... (truncated, skill is $(body.length) bytes total)"
                 .text;
         }
         return ExecuteFuncResult(i"Skill loaded: $(params.skillName)\nCopied to: $(params.destDir)\n\n$(
-                bodyPreview)".text, success: true);
+                body)".text, success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(i"error: loading skill '$(params.skillName): $(e.msg)".text,
-                success: false);
+        logger.trace(e.msg);
     }
+
+    return fallbackLoad();
 }

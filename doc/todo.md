@@ -76,11 +76,7 @@
 - If a skill-related bug prevents agent startup, users can set `"disableSkills": true` in their JSON config to bypass all skill logic. This is the primary rollback mechanism.
 - Glob-Triggered Skill Activation (P2)
 - `allowed-tools` Permission Bypass (P2)
-- the check if a skill should be copied should also check the version and loadSkill should have a flag "overwrite". So if the skill match but is newer than the one in sandbox it should overwrite the sandbox.
 - skills should be part of the metrics that are collected. How often they are loaded etc
-- when copying/overwriting a skill it must not only check the name but also the version
-    If it is a new version of the skill then the old one should be removed and replaced by the new version
-- if copyRecurse fail then the whole skill must be returned to the agent. This happens in the case where there are no workarea.
 - it should be possible to mark a skill, in the frontmatter, that it should not be shown in the system prompt. Only available for load on demand.
 
 # memory
