@@ -29,43 +29,23 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
         bool delegate() interrupt, ReFilter toolFilter, IStreamCallback callback) {
 
     // dfmt off
-    // Agent 1: Code Analyser
-    const codeAnalyserPromptNew =
-        "You are a Code Analyser Expert. Your job is to analyze the program and produce a comprehensive report.\n\n" ~
-        "## Instructions\n" ~
-        "1. Call `loadSkill(\"code-analysis\", \"skills/code-analysis\")` to load the code analysis skill.\n" ~
-        "2. Follow the template steps to analyze the project thoroughly.\n" ~
-        "3. Produce a clear, well-structured report.\n" ~
-        "4. Save your report document to the file at `plan/code_analysis.md`.\n" ~
-        "5. Add the plan to the RAG with the tool `loadFileToRAG`.\n" ~
-        "6. After saving, call 'setPipelineOutput' with 'ok' and call `taskDone` to complete your task.\n";
-
-    const codeAnalyserPromptUpdate =
-        "You are a Code Analyser Expert. Your job is to analyze the program and produce a comprehensive report.\n\n" ~
-        "## Instructions\n" ~
-        "1. A previous code analysis report exist at `plan/code_analysis.md` and the primary RAG database. Start by reading it one to understand the project, then updated it based on the changed files.\n" ~
-        "2. Save your updated report document to the file at `plan/code_analysis.md`.\n" ~
-        "3. Add the plan to the RAG with the tool `loadFileToRAG`.\n" ~
-        "4. After saving, call 'setPipelineOutput' with 'ok' and call `taskDone` to complete your task.\n";
-
-    // Agent 2: System Designer
+    // Agent 1: System Designer
     const systemDesignerPrompt =
         "You are a System Designer. Your job is to analyze a user's request and produce a comprehensive system design document.\n\n" ~
         "## Instructions\n" ~
-        "1. An analysis of the source code and project is available via the query tools in the primary RAG database. Use it when unclear about details in the source code.\n" ~
+        "1. The source code may exist in the primary RAG database. Use it when unclear about details in the source code that you need to analyze.\n" ~
         "2. Call `loadSkill(\"system-design\", \"skills/system-design\")` to load the system design skill.\n" ~
         "3. Follow the template steps to analyze the user's request thoroughly.\n" ~
         "4. Produce a clear, well-structured system design document.\n" ~
         "5. Save your design document to a file in the `plan/system_design.md`.\n" ~
         "6. After saving, call 'setPipelineOutput' with 'ok' and call `taskDone` to complete your task.\n";
 
-    // Agent 3: System Design reviewer
+    // Agent 2: System Design reviewer
     // TODO: bullet 3 should reference a system design review template
     const systemDesignerFeedbackPrompt =
         "You are a System Design Reviewer. Your job is to review a system design plan, critique it, and provide actionable feedback for improvement.\n\n" ~
         "## Instructions\n" ~
-        "1. Analysis of the source code is available via the query tools in the primary RAG database. Use it to better understand the source code.\n" ~
-        "   Note: the state of the source code in the primary RAG database do not contain the latest changes.\n" ~
+        "1. The source code may exist in the primary RAG database. Use it when unclear about details in the source code that you need to analyze.\n" ~
         "2. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
         "3. Call `loadSkill(\"system-design\", \"skills/system-design\")` to load the system design skill for review guidance.\n" ~
         "4. Follow the template to thoroughly analyze the design across dimensions such as requirements clarity, architecture, scalability, reliability, security, cost-efficiency, maintainability, and documentation quality.\n" ~
@@ -76,12 +56,12 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
         "6. Call 'pipelineOutput' with your review as argument.\n" ~
         "7. After call to 'pipelineOutput', call `taskDone` to complete your task.\n";
 
-    // Agent 4: Implementation Planner
+    // Agent 3: Implementation Planner
     const implPlannerPrompt =
         "You are an Implementation Planner. Your job is to convert a system design into a\n" ~
         "detailed, actionable implementation plan with individual tasks.\n\n" ~
         "## Instructions\n" ~
-        "1. Analysis of the source code is available via the query tools in the primary database. Use it to better understand the source code.\n" ~
+        "1. The source code may exist in the primary RAG database. Use it when unclear about details in the source code that you need to analyze.\n" ~
         "2. Call `loadSkill(\"implementation-plan\", \"skills/implementation-plan\")` to load the implementation plan skill.\n" ~
         "3. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
         "4. Follow the template steps to break the design into concrete implementation tasks.\n" ~
@@ -90,26 +70,6 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
     // dfmt on
 
     auto tmpManager = makeSkillManager(llmConf);
-
-    // Create transient agents
-    Agent codeAnalyser;
-    void initCodeAnalyserAgent() {
-        codeAnalyser = new Agent("code_analyser", llmConf, monitor, rag, toolFilter);
-        codeAnalyser.setSystemPrompt(llmConf.getPrompt(tmpManager));
-    }
-
-    if ((llmConf.workArea ~ "plan/code_analysis.md").exists) {
-        if ((Clock.currTime - timeLastModified(
-                llmConf.workArea ~ "plan/code_analysis.md")) > 1.dur!"days") {
-            // do not update it too often. It is expensive
-            // TODO: the time should be configurable
-            initCodeAnalyserAgent();
-            codeAnalyser.addUserQuery(codeAnalyserPromptUpdate);
-        }
-    } else {
-        initCodeAnalyserAgent();
-        codeAnalyser.addUserQuery(codeAnalyserPromptNew);
-    }
 
     auto designer = new Agent("system_designer", llmConf, monitor, rag, toolFilter);
     designer.setSystemPrompt(llmConf.getPrompt(tmpManager));
@@ -126,7 +86,6 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
 
     tmpManager = null; // release back to GC
 
-    // Wire into a linear pipeline (no loops)
     // dfmt off
     auto pipelineBuilder = pipelineBuilder
         .streamCallback(callback)
@@ -136,22 +95,17 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
         .addEdge("system_design", "system_design_review", null, 1)
         .addEdge("system_design_review", "system_design", null, 0)
         .addEdge("system_design", "impl_planner")
+        .startNode("system_design")
         .stopNode("impl_planner");
     // dfmt on
 
-    if (codeAnalyser is null) {
-        pipelineBuilder = pipelineBuilder.startNode("system_design");
-    } else {
-        pipelineBuilder = pipelineBuilder.addNode("code_analyser", codeAnalyser)
-            .addEdge("code_analyser", "system_design").startNode("code_analyser");
-    }
     auto pipeline = pipelineBuilder.build();
 
     logger.trace(pipeline);
-    logger.infof("[plan] Starting pipeline for query: %s", query);
+    logger.infof("plan Starting pipeline for query: %s", query);
     auto result = pipeline.run(interrupt);
 
-    logger.infof("[plan] Pipeline completed: allSuccess=%s, agents=%d",
+    logger.infof("plan Pipeline completed: success=%s agents=%s",
             result.allSuccess, result.agentResults.length);
 
     return result;

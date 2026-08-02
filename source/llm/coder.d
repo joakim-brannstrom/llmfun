@@ -37,9 +37,9 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
     auto codeQuery =
         "You are a Coder. Your job is to implement working code based on the user's request.\n\n" ~
         "## Instructions\n" ~
-        "1. Analysis of the source code is available via the query tools in the primary RAG database. Use it to better understand the source code.\n" ~
+        "1. The source code may exist in the primary RAG database. Use it when unclear about details in the source code that you need to analyze.\n" ~
         "2. Call `loadSkill(\"code-task\", \"skills/code-task\")` to load the code task skill.\n" ~
-        "3. Analyze the user's request and plan your implementation.\\n" ~
+        "3. Analyze the user's request and plan your implementation.\n" ~
         "4. Write clean, well-structured code.\n" ~
         "5. Save your implementation to `code/implementation.md` using `writeFile`.\n" ~
         "6. If you receive feedback from a code reviewer (passed as input), address each point in your revision.\n" ~
@@ -49,7 +49,8 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
     const reviewerQuery =
         "You are a Code Reviewer. Your job is to review the coder's implementation and provide actionable feedback.\n\n" ~
         "## Instructions\n" ~
-        "1. Analysis of the source code is available via the query tools in the primary RAG database. Use it to better understand the source code.\n" ~
+        "1. The source code may exist in the primary RAG database. Use it when unclear about details in the source code that you need to analyze.\n" ~
+        "   Note: the state of the source code in the primary RAG database do not contain the latest changes. You have to read the files manually to see the latest changes.\n" ~
         "2. Read the implementation from `code/implementation.md` using `readFile`.\n" ~
         "3. Call `loadSkill(\"code-review\", \"skills/code-review\")` to load the code review skill.\n" ~
         "4. Follow the template to thoroughly analyze the code for bugs, security issues, style violations, performance problems, and improvements.\n" ~
@@ -63,13 +64,8 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
 
     auto tmpManager = makeSkillManager(llmConf);
 
-    // Create transient agents
     auto coder = new Agent("coder", llmConf, monitor, rag, toolFilter);
     coder.setSystemPrompt(llmConf.getPrompt(tmpManager));
-    if ((llmConf.workArea ~ "plan/code_analysis.md").exists) {
-        codeQuery ~= "Note: an analysis of the source code and project is available via the query tools. Use it when unclear about details in the source code.\n";
-    }
-    coder.addUserQuery(codeQuery);
     coder.addUserQuery(query);
 
     auto reviewer = new Agent("code_reviewer", llmConf, monitor, rag, toolFilter);
@@ -78,9 +74,6 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
 
     tmpManager = null; // release back to GC
 
-    // Wire into a loop pipeline: coder -> reviewer -> coder (up to 3 coder runs)
-    // maxLoops=2 on the feedback edge means the reviewer feeds back to the coder
-    // at most 2 times, resulting in 3 total coder executions.
     // dfmt off
     auto pipelineBuilder = pipelineBuilder
         .streamCallback(callback)
@@ -95,10 +88,10 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
     auto pipeline = pipelineBuilder.build();
 
     logger.trace(pipeline);
-    logger.infof("[coder] Starting coder-reviewer pipeline for query: %s", query);
+    logger.infof("coder Starting pipeline for query: %s", query);
     auto result = pipeline.run(interrupt);
 
-    logger.infof("[coder] Pipeline completed: allSuccess=%s, agents=%d",
+    logger.infof("coder Pipeline completed: success=%s agents=%s",
             result.allSuccess, result.agentResults.length);
 
     return result;
