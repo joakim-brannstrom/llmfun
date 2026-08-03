@@ -513,17 +513,25 @@ struct ToolResponse {
     string content;
     string toolCallId;
     string toolName;
-    bool success; // if the tool succeeded or not.
-    JSONValue metadata;
+    JSONValue metadata; // for external tools only
+    JSONValue saveData; // for llmfun internal use
 
     this(string content, string toolCallId, string toolName, bool success,
-            JSONValue metadata = JSONValue.init) @safe nothrow {
+            JSONValue metadata = JSONValue.init, JSONValue saveData = JSONValue.init) @safe nothrow {
         this.role = Role.tool;
         this.content = content;
         this.toolCallId = toolCallId;
         this.toolName = toolName;
-        this.success = success;
         this.metadata = metadata;
+        this.saveData = saveData;
+        try {
+            this.saveData["success"] = success;
+        } catch (Exception e) {
+            try {
+                logger.tracef("ToolResponse: failed to store success in saveData: %s", e.msg);
+            } catch (Exception) {
+            }
+        }
     }
 
     size_t length() @safe const nothrow {
@@ -532,6 +540,11 @@ struct ToolResponse {
 
     string toString() @safe const {
         return i"Message(role:$(role) toolName:$(toolName) content:$(content))".text;
+    }
+
+    /// if the tool succeeded or not.
+    bool success() @safe {
+        return getValue(saveData, (v) => v["success"].boolean, false);
     }
 
     JSONValue toJson() @safe {
@@ -548,6 +561,9 @@ struct ToolResponse {
         if (metadata != JSONValue.init) {
             j["metadata"] = metadata;
         }
+        if (saveData != JSONValue.init) {
+            j["save_data"] = saveData;
+        }
         return j;
     }
 
@@ -559,6 +575,9 @@ struct ToolResponse {
             this.toolName = j["name"].str;
             if (auto m = "metadata" in j) {
                 this.metadata = *m;
+            }
+            if (auto s = "save_data" in j) {
+                this.saveData = *s;
             }
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
