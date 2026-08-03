@@ -48,7 +48,7 @@ string summarizeToolResponse(ToolResponse msg, size_t maxLength) {
             content[0 .. maxLength], content.length);
 }
 
-string[] summarizeToolCalls(JSONValue calls, size_t maxLength) {
+string[] summarizeToolCalls(JSONValue calls, size_t maxLength) @trusted {
     const errorMsg = "Wants to run: <unknown>";
     if (calls.type != JSONType.array || calls.array.empty)
         return [errorMsg];
@@ -65,25 +65,9 @@ string[] summarizeToolCalls(JSONValue calls, size_t maxLength) {
 
             // Extract only key arguments
             auto args = parseJSON(call["arguments"].str);
-            string[] params;
-            foreach (key, value; args.object) {
-                auto valueStr = value.toString;
-                if (valueStr.length > maxLength) {
-                    valueStr = format("'%s...' (%d chars)",
-                            valueStr[0 .. maxLength], valueStr.length);
-                }
-                params ~= format("%s=%s", key, valueStr);
-            }
 
-            // Sort parameters by length so shortest (most visible) come first
-            params = sort!("a.length < b.length")(params).array;
-            bool isFirst = true;
-            foreach (p; params) {
-                if (!isFirst)
-                    buf.put(",\n");
-                buf.put(p);
-                isFirst = false;
-            }
+            buf.put(summarizeToolCallArguments(args, maxLength));
+
             buf.put(")");
             return buf[];
         } catch (Exception e) {
@@ -98,6 +82,36 @@ string[] summarizeToolCalls(JSONValue calls, size_t maxLength) {
     }
 
     return rval[];
+}
+
+string summarizeToolCallArguments(JSONValue args, size_t maxLength) @trusted {
+    try {
+        auto buf = appender!string();
+
+        // Extract only key arguments
+        string[] params;
+        foreach (key, value; args.object) {
+            auto valueStr = value.toString;
+            if (valueStr.length > maxLength) {
+                valueStr = format("'%s...' (%d chars)", valueStr[0 .. maxLength], valueStr.length);
+            }
+            params ~= format("%s=%s", key, valueStr);
+        }
+
+        // Sort parameters by length so shortest (most visible) come first
+        params = sort!("a.length < b.length")(params).array;
+        bool isFirst = true;
+        foreach (p; params) {
+            if (!isFirst)
+                buf.put(",\n");
+            buf.put(p);
+            isFirst = false;
+        }
+        return buf[];
+    } catch (Exception e) {
+        logger.trace("summary failed, should not happen: ", e.msg);
+        return null;
+    }
 }
 
 void configCatchCtrlC() {

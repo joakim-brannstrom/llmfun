@@ -6,7 +6,7 @@ import logger = std.logger;
 import std.algorithm;
 import std.array;
 import std.conv : to, text;
-import std.datetime : Clock, SysTime, Duration;
+import std.datetime : Clock, SysTime, Duration, dur;
 import std.exception : collectException;
 import std.file : readText, exists, read, rename;
 import std.format : format, formattedWrite;
@@ -64,8 +64,12 @@ class Agent : IBasicAgent {
         IStreamCallback streamCallback;
         bool taskDone_;
         string taskDoneMessage_;
-        int lastToolCallWarning;
-        static immutable WarnEveryNthToolCall = 5;
+
+        SysTime lastToolCallWarning;
+        static immutable ToolCallWarnInterval = 15.dur!"minutes";
+        int toolCallWarnCounter = -1;
+        static immutable MinToolCallInterval = 50;
+
         ReFilter toolFilter;
         bool waitingForVisionResponse;
         ServerStat prevStat;
@@ -435,21 +439,20 @@ private:
         import llm.tool_call : executeFunc;
 
         foreach (call; toolCalls.byValue) {
-            // Check for warnings before processing each tool call
             try {
-                if (monitor !is null && lastToolCallWarning >= WarnEveryNthToolCall) {
-                    lastToolCallWarning = 0;
+                if (monitor !is null && (Clock.currTime > lastToolCallWarning
+                        && toolCallWarnCounter > MinToolCallInterval || toolCallWarnCounter == -1)) {
+                    toolCallWarnCounter = 0;
+                    lastToolCallWarning = Clock.currTime + ToolCallWarnInterval;
+
                     feedbackEngine.setEvents(monitor.getRecentEvents(100));
                     auto warnings = feedbackEngine.getWarnings();
-                    foreach (warning; warnings) {
-                        chat.add(Message(Role.system, userQuery: false,
-                                content: "warning: " ~ warning, thinking: null));
-                    }
+                    chat.add(Message(Role.user, userQuery: false, content: warnings, thinking: null));
                 }
             } catch (Exception e) {
                 logger.tracef("feedback check failed: %s", e.msg);
             }
-            ++lastToolCallWarning;
+            toolCallWarnCounter++;
 
             const startTime = Clock.currTime;
             bool success;

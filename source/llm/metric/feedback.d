@@ -7,7 +7,8 @@ import std.conv : to, text;
 import std.json : JSONOptions;
 import std.numeric : cosineSimilarity;
 import std.range : take;
-import std.string : startsWith;
+import std.string : startsWith, join;
+import std.typecons : Tuple;
 
 import llm.metric.monitor : ToolCallEvent;
 
@@ -27,42 +28,54 @@ struct FeedbackEngine {
     }
 
     /// Get warnings about repeated failure patterns
-    string[] getWarnings() @safe {
+    string getWarnings() @safe {
         auto failures = events.filter!(e => !e.success).array;
         return analyzePatterns(failures);
     }
 
 private:
 
-    string[] analyzePatterns(ToolCallEvent[] failures) @safe {
+    string analyzePatterns(ToolCallEvent[] failures) @safe {
         bool[string] countedTools;
         string[] warnings;
 
+        warnings ~= "[SYSTEM MONITORING NOTE]: Based on historical analysis across current and previous sessions the following tool has frequently failed to be used correctly.";
         foreach (failure; failures.filter!(a => a.toolName !in countedTools)) {
-            if (warnings.length >= MaxWarnings)
+            if (warnings.length >= (MaxWarnings + 1))
                 break;
 
             // Find similar failures
             auto similarCount = countSimilarFailures(failure, failures);
-            if (similarCount >= 2) {
+
+            if (similarCount.count >= 2) {
                 countedTools[failure.toolName] = true;
-                warnings ~= i"$(failure.toolName): This tool failed $(similarCount) times with similar arguments. Consider checking the input or tool configuration."
-                    .text;
+                warnings ~= i"$(failure.toolName): Failed $(similarCount.count) times. Common error: $(
+                        similarCount.error)".text;
             }
         }
 
-        return warnings;
+        return warnings.join("\n");
     }
 
-    int countSimilarFailures(ToolCallEvent target, ToolCallEvent[] allFailures) @safe {
-        int count = 1; // Count the target itself
+    Tuple!(int, "count", string, "error", double, "score") countSimilarFailures(
+            ToolCallEvent target, ToolCallEvent[] allFailures) @safe {
+        import llm.utility : summarizeToolCallArguments;
+
+        typeof(return) rval;
+        rval.count = 1; // count the target itself
+        rval.score = 0.0;
         foreach (other; allFailures.filter!(a => a.toolName == target.toolName)) {
-            if (similarity(other.arguments.toString(JSONOptions.doNotEscapeSlashes),
-                    target.arguments.toString(JSONOptions.doNotEscapeSlashes)) > SimilarityThreshold) {
-                count++;
+            const score = similarity(other.arguments.toString(JSONOptions.doNotEscapeSlashes),
+                    target.arguments.toString(JSONOptions.doNotEscapeSlashes));
+            if (score > SimilarityThreshold) {
+                rval.count++;
+                if (score > rval.score) {
+                    rval.error = other.result.length < 100 ? other.result : other.result[0 .. 100];
+                    rval.score = score;
+                }
             }
         }
-        return count;
+        return rval;
     }
 }
 
