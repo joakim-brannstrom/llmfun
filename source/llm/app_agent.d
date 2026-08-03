@@ -172,7 +172,7 @@ struct AgentApp {
     }
 
     private void progressCallback(size_t currentChunk, size_t totalChunks, string status) {
-        uiMsg.chatMessage(format!"[assistant]: Compressing... %s/%s : %s"(currentChunk,
+        uiMsg.chatMessage(format!"assistant: Compressing... %s/%s : %s"(currentChunk,
                 totalChunks, status), TuiChatMessageType_Assistant);
     }
 
@@ -203,16 +203,16 @@ struct AgentApp {
                 logger.tracef("[%s]: %s", a.role, a.content);
             }
         }, (ToolMessage a) {
-            auto calls = summarizeToolCalls(a.toolCalls, 500);
-            this.sendChatThinkMessage("tool calls %s: %(%-s\n%)", a.thinking,
-                TuiChatMessageType_ToolCall, calls.length, calls);
+            auto calls = summarizeToolCalls(a.toolCalls, 1000);
+            this.sendChatThinkMessage("tool call: %(%-s\n%)", a.thinking,
+                TuiChatMessageType_ToolCall, calls);
             if (a.isFinalAnswer()) {
                 uiMsg.finalAnswer(a.getFinalAnswer());
             }
         }, (ToolResponse a) {
             if (!isHiddenToolResponse(a.toolName)) {
-                this.sendChatMessage("tool result %-s: %s", TuiChatMessageType_ToolResponse,
-                    a.toolName, summarizeToolResponse(a, 500));
+                this.sendChatMessage("tool result %s: %-s %s", TuiChatMessageType_ToolResponse,
+                    a.success ? "✅" : "❌", a.toolName, summarizeToolResponse(a, 1000));
             }
         }, (VisionMessage a) {
             this.sendChatMessage("user: %s (with image)", TuiChatMessageType_User, a.content);

@@ -475,7 +475,7 @@ private:
                 sd["taskDoneAnswer"] = JSONValue(taskDoneMessage_);
             }
             chat.add(ToolMessage(thinking, JSONValue([call.toJson]), JSONValue.init, sd));
-            chat.add(ToolResponse(content: result, toolCallId: call.id, toolName: call.name));
+            chat.add(ToolResponse(content: result, toolCallId: call.id, toolName: call.name, success: success));
             if (auto image = toolCtx.drainVisionImage) {
                 chat.add(VisionMessage(image.query, image.data));
                 waitingForVisionResponse = true;
