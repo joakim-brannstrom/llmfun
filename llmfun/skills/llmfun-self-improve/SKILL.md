@@ -6,7 +6,7 @@ description: >-
   Triggers on: self improvement, improve framework, enhance agent, fix llmfun,
   agent capabilities, framework changes, llmfun source, self-improve,
   improve myself.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Self Improve Skill
@@ -41,8 +41,8 @@ llmfun/
 
 - **DUB** is the build system. Config: `llmfun/dub.sdl`
 - **llama.mak** builds llama.cpp libraries (referenced in `dub.sdl` preBuildCommands)
-- Use `executeDCodeWithDub("llmfun")` for full project builds
-- Use `executeCode` for simple single-file D compilation
+- Use `executeImage` with a D language container with llmfun dependencies for full project builds
+- Use `executeImage` with ldc2 command for simple single-file D compilation
 
 ## Code Conventions
 
@@ -56,7 +56,7 @@ llmfun/
 **Changes do not take effect automatically.** The running agent uses the previously
 loaded binary. After making changes:
 
-1. Build with `executeDCodeWithDub("llmfun")` to verify compilation
+1. Build with `executeImage(image_name="llmfun:latest", command=["dub", "build"])` to verify compilation
 2. Inform the user that changes require **merging and restarting** the framework
 3. The user must merge changes to main branch and restart for them to take effect
 
@@ -65,7 +65,7 @@ loaded binary. After making changes:
 1. **Identify the change** — What needs to be improved or fixed.
 2. **Locate the source** — Find the relevant files in `llmfun/source/`.
 3. **Make the change** — Modify source code in `llmfun/source/`.
-4. **Build and verify** — Run `executeDCodeWithDub("llmfun")`, check exit code (0 = success).
+4. **Build and verify** — Run `executeImage(image_name="llmfun:latest", command=["dub", "build"])`, check exit code (0 = success).
 5. **Fix errors** — If compilation fails, read errors, fix issues, rebuild.
 6. **Report** — Inform user of changes and remind them to merge and restart.
 

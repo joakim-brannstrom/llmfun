@@ -56,6 +56,41 @@ struct RagConfig {
     }
 }
 
+struct SandboxConfig {
+    /// Container runtime CLI command (e.g., "docker" or "podman")
+    string runtimeCli = "docker";
+
+    /// Default container image when none specified
+    string defaultImage = "alpine:latest";
+
+    /// Execution timeout in seconds
+    long timeoutSeconds = 60;
+
+    /// Memory limit for containers (e.g., "256m", "1g")
+    string memoryLimit = "256m";
+
+    /// CPU limit for containers (e.g., "0.5", "1", "2")
+    string cpuLimit = "0.5";
+
+    /// tmpfs mount options for /tmp inside container
+    string tmpfsOptions = "rw,noexec,nosuid,size=64m";
+
+    /// User namespace mapping (UID:GID)
+    string userNs = "1000:1000";
+
+    /// Maximum output bytes per stream (stdout/stderr)
+    long maxOutputBytes = 1_048_576;
+
+    /// Allowed image list (empty = allow all). Supports exact match and prefix:* wildcard.
+    string[] allowedImages;
+
+    invariant {
+        assert(runtimeCli.length > 0, "runtimeCli must not be empty");
+        assert(timeoutSeconds > 0, i"timeoutSeconds must be positive, got $(timeoutSeconds)".text);
+        assert(maxOutputBytes > 0, i"maxOutputBytes must be positive, got $(maxOutputBytes)".text);
+    }
+}
+
 struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
@@ -130,7 +165,7 @@ struct LlmConfig {
     /// Directory where the LLM can work with assets, create files etc.
     Path workArea = ProgramName ~ "/workarea";
 
-    string containerCmd = "podman";
+    SandboxConfig sandboxConfig;
 
     ToolLimits toolLimits;
 

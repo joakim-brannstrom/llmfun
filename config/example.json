@@ -5,7 +5,6 @@
   "thinkingTemplatesDir": "llmfun/config/thinking",
   "promptDir": "llmfun/config/prompt",
   "workArea": "llmfun/workarea",
-  "containerCmd": "podman",
   "agentPrompt": "AGENT.md",
   "activeCodeModelIndex": 0,
   "warnIfNoApiKey": true,
@@ -19,6 +18,18 @@
     "maxTopicLength": 100,
     "maxTopK": 20,
     "maxArgLength": 200
+  },
+
+  "sandboxConfig": {
+    "runtimeCli": "docker",
+    "defaultImage": "alpine:latest",
+    "timeoutSeconds": 60,
+    "memoryLimit": "256m",
+    "cpuLimit": "0.5",
+    "tmpfsOptions": "rw,noexec,nosuid,size=64m",
+    "userNs": "1000:1000",
+    "maxOutputBytes": 1048576,
+    "allowedImages": ["llmfun/*"]
   },
 
   "ragPrimary": {
@@ -39,9 +50,7 @@
       ".*"
     ],
     "exclude": [
-      "executeCode",
-      "executeDCodeWithDub",
-      "executeGit"
+    ]
     ]
   },
 

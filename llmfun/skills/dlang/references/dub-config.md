@@ -10,18 +10,18 @@ A dub project is a directory containing either:
 
 Build by executing `dub build` in the project directory. This reads the configuration and compiles all source files.
 
-## Using executeDCodeWithDub
+## Using executeImage
 
-The `executeDCodeWithDub` tool compiles and executes D code with dub.
+The `executeImage` tool runs commands in a container image. Use a D language image with dub.
 
 **Parameters:**
-- `path`: Path to the project directory (containing dub.sdl or dub.json)
-- `command`: Either `build` (compile) or `test` (run tests)
+- `image_name`: Container image with D toolchain (e.g., "dlang2:latest")
+- `command`: Command elements to execute (e.g., ["dub", "build"])
 
 **Example usage:**
 ```
-executeDCodeWithDub(path="my-project", command="build")
-executeDCodeWithDub(path="my-project", command="test")
+executeImage(image_name="dlang2:latest", command=["dub", "build"])
+executeImage(image_name="dlang2:latest", command=["dub", "test"])
 ```
 
 ## Minimal dub.sdl

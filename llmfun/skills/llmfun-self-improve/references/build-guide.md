@@ -3,7 +3,7 @@
 ## Making Changes
 
 1. Modify source code in `llmfun/source/`.
-2. Build with `executeDCodeWithDub("llmfun")`.
+2. Build with `executeImage(image_name="llmfun:latest", command=["dub", "build"])`.
 3. Check exit code: 0 = success, non-zero = errors.
 4. If errors occur, read the error output, identify the problematic file and line, then fix.
 5. Repeat until build succeeds.
@@ -12,19 +12,19 @@
 
 ### Full Project Build
 ```
-executeDCodeWithDub(path="llmfun", command="build")
+executeImage(image_name="llmfun:latest", command=["dub", "build"])
 ```
 Builds the entire llmfun project with all dependencies.
 
 ### Run Tests
 ```
-executeDCodeWithDub(path="llmfun", command="test")
+executeImage(image_name="llmfun:latest", command=["dub", "test"])
 ```
 Runs the test suite.
 
 ### Single File Compilation
 ```
-executeCode(path="path/to/file.d", language="d")
+executeImage(image_name="llmfun:latest", command=["ldc2", "path/to/file.d"])
 ```
 For simple single-file D compilation without project dependencies.
 
@@ -32,7 +32,7 @@ For simple single-file D compilation without project dependencies.
 
 After making changes:
 
-1. **Always run `executeDCodeWithDub("llmfun")`** to verify compilation succeeds.
+1. **Always run `executeImage(image_name="llmfun:latest", command=["dub", "build"])`** to verify compilation succeeds.
 2. Check the exit code: 0 means success, non-zero means errors.
 3. If errors occur, read the error output, identify the problematic file and line, then fix.
 4. Repeat until the build succeeds with exit code 0.

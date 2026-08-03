@@ -219,8 +219,8 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
             return AbsolutePath(".");
         }
 
-        override string getContainerCmd() {
-            return "docker";
+        override SandboxConfig getSandboxConfig() {
+            return SandboxConfig();
         }
 
         override string[] getMemoryFileTopics() {

@@ -644,8 +644,8 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             return conf.toolLimits;
         }
 
-        override string getContainerCmd() {
-            return conf.containerCmd;
+        override SandboxConfig getSandboxConfig() {
+            return conf.sandboxConfig;
         }
 
         override bool hasVisionModel() {

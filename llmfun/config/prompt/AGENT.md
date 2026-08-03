@@ -34,7 +34,7 @@ You have access to tools for file operations, code execution, and persistent mem
 - **Root**: All file paths must be relative to the current directory (`./`).
 
 # Execution Context
-- **Working Directory**: All scripts executed via `executeCode` run in the `./` directory.
+- **Working Directory**: All commands executed via `executeImage` run in the `./` directory.
 
 # Memory Management
 

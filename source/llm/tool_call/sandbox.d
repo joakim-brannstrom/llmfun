@@ -1,13 +1,23 @@
 module llm.tool_call.sandbox;
 
+import logger = std.logger;
+import std.algorithm : map, any, canFind, startsWith, endsWith, joiner;
+import std.array : appender, join, empty, array;
 import std.conv : to, text;
+import std.datetime.stopwatch : StopWatch, AutoStart, dur, Duration;
+import std.digest : toHexString;
+import std.digest.md : md5Of;
+import std.exception : collectException;
 import std.file : exists;
 import std.json : JSONValue, JSONOptions;
-import std.process : execute;
-import std.string : toLower, replace;
+import std.range : isInputRange;
+import std.string : replace;
+
+import proc;
 
 import my.path : AbsolutePath, Path;
 
+import llm.config : SandboxConfig;
 import llm.tool_call;
 import llm.tool_call.utility;
 
@@ -17,137 +27,545 @@ interface SandboxContext : Context {
     bool isPathInsideWorkArea(AbsolutePath path);
     AbsolutePath workArea();
 
-    // must have the same syntax as docker so either docker or podman
-    string getContainerCmd();
+    /// Get the sandbox configuration for container execution
+    SandboxConfig getSandboxConfig();
 }
 
-struct ExecuteCodeParams {
-    @ParamDescription("Path to the source file to execute")
-    string path;
+/// Structured result from container execution.
+/// Negative exit codes (e.g., -1 for timeout) are documented behavior.
+struct ContainerResult {
+    /// Standard output from the container
+    string stdout;
 
-    @ParamDescription("Programming language: 'd' or 'python'")
-    string language;
+    /// Standard error from the container. May contain truncation warnings.
+    string stderr;
+
+    /// Exit code. Negative values indicate errors (e.g., -1 for timeout).
+    int exitCode;
 }
 
-@Function("Execute code in sandbox. Returns JSON with exit_code and output")
-ExecuteFuncResult executeCode(Context baseCtx, ExecuteCodeParams params) {
-    mixin(baseContextToSpecific!SandboxContext);
+/// Shell-quote a string to prevent injection when passed to sh -c.
+/// Uses single quotes and escapes existing single quotes.
+private string shellQuote(string s) @safe pure nothrow {
+    return "'" ~ s.replace("'", "'\"'\"'") ~ "'";
+}
 
-    auto pathRes = pathToWorkarea(ctx, params.path, checkExist: true);
-    if (!pathRes.valid)
-        return ExecuteFuncResult(pathRes.errorMsg, success: false);
-    auto path_ = pathRes.path;
+/// Build the `docker run` / `podman run` argument array with security flags.
+/// Returns the argument array (not including the runtime CLI itself).
+/// Precondition: command must not be empty (validated by caller).
+string[] buildRunArgs(SandboxConfig config, string image, string[] command) @safe pure {
+    // Quote each command element to prevent shell injection.
+    // Commands are joined with && for sequential execution under sh -c.
+    string joinedCmd = command.map!shellQuote.join(" && ");
 
-    try {
-        string cmd;
-        const imageName = {
-            switch (params.language.toLower) {
-            case "d":
-                cmd = "ldmd2 -run /source";
-                return "dlang/llmfun:1.0";
-            case "python":
-                cmd = "python3 /source";
-                return "llmfun/python3:1.0";
-            default:
-                throw new Exception(i"unsupported language $(params.language)".text);
+    return [
+        "run", "--rm", "--user", config.userNs, "--network", "none", "--memory",
+        config.memoryLimit, "--cpus", config.cpuLimit, "--read-only", "--tmpfs",
+        "/tmp:" ~ config.tmpfsOptions, "--stop-timeout",
+        config.timeoutSeconds.to!string, image, "sh", "-c", joinedCmd,
+    ];
+}
+
+/// Result from collecting limited output from a process.
+private struct CollectedOutput {
+    string stdout;
+    string stderr;
+}
+
+/// Collect output from a proc drain range with per-stream byte limits.
+/// Appends truncation warnings to stderr when limits are exceeded.
+/// Continues draining after truncation to prevent pipe blocking.
+/// Note: Assumes output is text (UTF-8). Binary output will produce garbage.
+/// Template accepts any range of DrainElement (streaming range or materialized array).
+CollectedOutput collectOutputLimited(R)(R elems, long maxOutputBytes) @safe
+        if (isInputRange!R) {
+    // because of the logic in the function stdoutApp and stderrApp may contain
+    // a couple of bytes more than maxOutputBytes but that is okey because a
+    // couple of bytes over the limit is no problem. The limit try to guard
+    // against Mbyte of data over the limit. A couple of hundreds of byte is no
+    // problem.
+    auto stdoutApp = appender!(char[])();
+    auto stderrApp = appender!(char[])();
+
+    foreach (elem; elems) {
+        final switch (elem.type) {
+        case DrainElement.Type.stdout:
+            if (stdoutApp.length < maxOutputBytes) {
+                stdoutApp.put(elem.byUTF8);
             }
-        }();
-
-        // TODO: check the ulimit config. This is copied from the podman run documentation.
-        auto status = execute([
-            ctx.getContainerCmd, "run", "--rm", "--cpus", "2", "--ulimit",
-            "nofile=1024:1024", "--stop-timeout", "60", "--memory", "1g",
-            "-v", i"$(path_.toString):/source:ro".text, "-v",
-            i"$(ctx.workArea.toString):/workarea".text, imageName, "bash", "-c",
-            cmd
-        ]);
-        return ExecuteFuncResult(JSONValue([
-            "exit_code": JSONValue(status.status),
-            "output": JSONValue(status.output)
-        ]).toString(JSONOptions.doNotEscapeSlashes), success: true);
-    } catch (Exception e) {
-        return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
-    }
-}
-
-struct ExecuteDCodeWithDubParams {
-    @ParamDescription("Path to the D project directory containing dub.sdl or dub.json")
-    string path;
-
-    @ParamDescription("Command to execute: 'build' or 'test'")
-    string command;
-}
-
-@Function("Execute d code with dub in sandbox. Always load the skill 'dlang' before use. Returns JSON with exit_code and output")
-ExecuteFuncResult executeDCodeWithDub(Context baseCtx, ExecuteDCodeWithDubParams params) {
-    mixin(baseContextToSpecific!SandboxContext);
-
-    auto pathRes = pathToWorkarea(ctx, params.path, checkExist: true);
-    if (!pathRes.valid)
-        return ExecuteFuncResult(pathRes.errorMsg, success: false);
-    auto path_ = pathRes.path;
-
-    try {
-        string cmd;
-        switch (params.command) {
-        case "build":
-            cmd = "dub build";
             break;
-        case "test":
-            cmd = "dub test";
+        case DrainElement.Type.stderr:
+            if (stderrApp.length < maxOutputBytes) {
+                stderrApp.put(elem.byUTF8);
+            }
             break;
-        default:
-            return ExecuteFuncResult(i"error: supported commands are 'build', 'test'. Unsupported command argument: $(
-                    params.command)".text, success: false);
         }
-        const imageName = "dlang/llmfun:1.0";
-
-        auto status = execute([
-            ctx.getContainerCmd, "run", "--rm", "--cpus", "2", "--ulimit",
-            "nofile=1024:1024", "--stop-timeout", "60", "--memory", "8g", "-v",
-            path_.toString ~ ":/workarea:rw", imageName, "bash", "-c", cmd
-        ]);
-        return ExecuteFuncResult(JSONValue([
-            "exit_code": JSONValue(status.status),
-            "output": JSONValue(status.output)
-        ]).toString(JSONOptions.doNotEscapeSlashes), success: true);
-    } catch (Exception e) {
-        return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
     }
+
+    // Capture truncation state before appending warnings to avoid
+    // stdout warning bytes counting toward stderr limit.
+    bool stdoutTruncated = stdoutApp.length >= maxOutputBytes;
+    bool stderrTruncated = stderrApp.length >= maxOutputBytes;
+
+    if (stdoutTruncated) {
+        stderrApp.put(cast(const(ubyte)[])("\n[stdout truncated: " ~ stdoutApp.length.to!string
+                ~ " bytes collected, limit: " ~ maxOutputBytes.to!string ~ " bytes]"));
+    }
+    if (stderrTruncated) {
+        stderrApp.put(cast(const(ubyte)[])("\n[stderr truncated: " ~ stderrApp.length.to!string
+                ~ " bytes collected, limit: " ~ maxOutputBytes.to!string ~ " bytes]"));
+    }
+
+    return CollectedOutput(stdoutApp.data[].idup, stderrApp.data[].idup);
 }
 
-struct ExecuteGitParams {
-    @ParamDescription("Path to the repository directory to run the command in")
-    string repo;
+/// Check if an executable exists in PATH.
+/// Returns true if the executable can be found, false otherwise.
+private bool canFindExecutable(string name) {
+    import std.path : dirSeparator;
+    import my.file : whichFromEnv;
 
-    @ParamDescription(
-            "Git subcommand and arguments (without leading 'git'), e.g. 'status', 'commit -m msg'")
-    string command;
+    // If name contains a path separator, check it directly
+    if (canFind(name, dirSeparator)) {
+        return exists(name);
+    }
+
+    return !whichFromEnv("PATH", name).empty;
 }
 
-@Function(
-        "Execute a git command. Returns JSON with `exit_code` and combined `stdout`/`stderr` in `output`")
-ExecuteFuncResult executeGit(Context baseCtx, ExecuteGitParams params) {
+/// Check if an image name matches an allow-list entry.
+/// Supports exact match ("alpine:latest") and prefix match ("python:*").
+private bool imageMatchesAllowListEntry(string image, string entry) {
+    if (entry.endsWith("*")) {
+        // Prefix match: "python:*" matches "python:3.11", "python:latest", etc.
+        string prefix = entry[0 .. $ - 1];
+        return image.startsWith(prefix);
+    }
+    // Exact match
+    return image == entry;
+}
+
+/// Core container execution function using the proc library.
+/// Spawns the container runtime with the given arguments, enforces timeout,
+/// collects output with per-stream byte limits, and returns structured results.
+///
+/// Params:
+///    runtimeCli = Container runtime CLI (e.g., "docker" or "podman")
+///    args = Arguments to pass to the runtime (e.g., ["run", "--rm", ...])
+///    timeoutSec = Execution timeout in seconds
+///    maxOutputBytes = Maximum bytes per output stream
+///    image = Container image name (for logging)
+/// Returns: ContainerResult with stdout, stderr, and exitCode
+ContainerResult runContainerCommand(string runtimeCli, string[] args,
+        Duration timeout, long maxOutputBytes, string image) nothrow {
+    int exitCode = -1;
+    CollectedOutput output;
+    auto sw = StopWatch(AutoStart.yes);
+    scope (exit)
+        sw.stop();
+    try {
+        auto fullCmd = [runtimeCli] ~ args;
+
+        auto p = proc.pipeProcess(fullCmd).sandbox.timeout(timeout);
+        scope (exit)
+            p.dispose;
+
+        output = collectOutputLimited(proc.drain(p), maxOutputBytes);
+
+        try {
+            exitCode = p.wait;
+        } catch (Exception e) {
+            return ContainerResult(output.stdout, output.stderr ~ "\nerror: " ~ e.msg, -1);
+        }
+    } catch (Exception e) {
+        try {
+            return ContainerResult(null, i"error: running container with arguments $(args): $(e.msg)".text,
+                    -1);
+        } catch (Exception e) {
+        }
+    }
+    // Log timeout kill if detected (negative exit code indicates signal termination)
+    if (exitCode < 0 && exitCode != -1) {
+        logger.tracef("Container killed: image=%s, exitCode=%d, elapsed=%s",
+                image, exitCode, sw.peek).collectException;
+    }
+
+    return ContainerResult(output.stdout, output.stderr, exitCode);
+}
+
+/// Check if runtime CLI exists and return error message if not found.
+private string checkRuntimeCli(string runtimeCli) {
+    if (!canFindExecutable(runtimeCli)) {
+        return "error: container runtime '" ~ runtimeCli ~ "' not found in PATH";
+    }
+    return "";
+}
+
+/// Parameters for the executeImage tool.
+struct ExecuteImageParams {
+    @ParamDescription("Container image to run (e.g., 'alpine:latest', 'python:3.11')")
+    string imageName;
+
+    @ParamDescription("Command elements to execute inside the container")
+    string[] command;
+}
+
+@Function("Execute a command in a container image. Returns JSON with exit_code, stdout, and stderr")
+ExecuteFuncResult executeImage(Context baseCtx, ExecuteImageParams params) nothrow {
     mixin(baseContextToSpecific!SandboxContext);
 
-    auto pathRes = pathToWorkarea(ctx, params.repo, checkExist: true);
-    if (!pathRes.valid)
-        return ExecuteFuncResult(pathRes.errorMsg.replace("path", "repo"), success: false);
-    auto path_ = pathRes.path;
-
     try {
-        const imageName = "llmfun/git:1.0";
-        auto status = execute([
-            ctx.getContainerCmd, "run", "--rm", "--cpus", "2", "--ulimit",
-            "nofile=1024:1024", "--stop-timeout", "60", "--memory", "8g",
-            "-v", i"$(path_.toString):/workarea:rw".text, imageName,
-            i"git $(params.command)".text
-        ]);
+        // Get SandboxConfig
+        auto config = ctx.getSandboxConfig();
+
+        // Pre-flight: verify runtime CLI exists in PATH
+        string e = checkRuntimeCli(config.runtimeCli);
+        if (!e.empty) {
+            logger.warningf("Runtime CLI not found: %s: %s", config.runtimeCli, e);
+            return ExecuteFuncResult(e, success: false);
+        }
+
+        // Validate imageName non-empty, fallback to defaultImage
+        string image = params.imageName.empty ? config.defaultImage : params.imageName;
+
+        // Image allow-list check (empty list = allow all)
+        if (config.allowedImages.length > 0) {
+            bool allowed = config.allowedImages.any!(a => imageMatchesAllowListEntry(image, a));
+            if (!allowed) {
+                logger.warningf("Image rejected by allow-list: %s (allowed: %s)",
+                        image, config.allowedImages.joiner(", "));
+                return ExecuteFuncResult("error: image '" ~ image ~ "' not in allowed list",
+                        success: false);
+            }
+        }
+
+        // Validate command non-empty
+        if (params.command.empty) {
+            return ExecuteFuncResult("error: command must not be empty", success: false);
+        }
+
+        // Build run arguments
+        auto runArgs = buildRunArgs(config, image, params.command);
+
+        // Compute command hash for logging (shortened for readability)
+        string cmdHashShort = toHexString(md5Of(params.command.join(" "))).idup[0 .. 8];
+
+        // Execute container with timing
+        auto sw = StopWatch(AutoStart.yes);
+        logger.tracef("Container start: image=%s, cmdHash=%s, runtime=%s",
+                image, cmdHashShort, config.runtimeCli);
+        auto result = runContainerCommand(config.runtimeCli, runArgs,
+                config.timeoutSeconds.dur!"seconds", config.maxOutputBytes, image);
+        sw.stop();
+        logger.tracef("Container end: image=%s, exitCode=%s, duration=%s, stdout=%s bytes, stderr=%s bytes", image,
+                result.exitCode, sw.peek, result.stdout.length, result.stderr.length);
+
+        // Log output truncation if detected
+        if (result.stderr.canFind("truncated")) {
+            logger.tracef("Output truncated: image=%s, stdout=%d bytes, stderr=%d bytes, limit=%d bytes", image,
+                    result.stdout.length, result.stderr.length, config.maxOutputBytes);
+        }
+
         return ExecuteFuncResult(JSONValue([
-            "exit_code": JSONValue(status.status),
-            "output": JSONValue(status.output)
+            "exit_code": JSONValue(result.exitCode),
+            "stdout": JSONValue(result.stdout),
+            "stderr": JSONValue(result.stderr)
         ]).toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
-        return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
+        return ExecuteFuncResult("error: image '" ~ params.imageName ~ "' failed to execute: " ~ e.msg,
+                success: false);
     }
+}
+
+// Unit tests for buildRunArgs() and collectOutputLimited()
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Test: buildRunArgs with default SandboxConfig includes all security flags.
+unittest {
+    auto config = SandboxConfig();
+    auto args = buildRunArgs(config, "alpine:latest", ["echo", "hello"]);
+
+    assert(args[0] == "run");
+    assert(args.canFind("--rm"));
+    assert(args.canFind("--user"));
+    assert(args.canFind("--network"));
+    assert(args.canFind("none"));
+    assert(args.canFind("--memory"));
+    assert(args.canFind("--cpus"));
+    assert(args.canFind("--read-only"));
+    assert(args.canFind("--tmpfs"));
+    assert(args.canFind("--stop-timeout"));
+
+    // Verify default values are used
+    assert(args.canFind("1000:1000")); // userNs
+    assert(args.canFind("256m")); // memoryLimit
+    // Verify --stop-timeout is followed by "60" (positional check avoids false positives)
+    long timeoutIdx = -1;
+    foreach (i, arg; args) {
+        if (arg == "--stop-timeout") {
+            timeoutIdx = i;
+            break;
+        }
+    }
+    assert(timeoutIdx >= 0); // --stop-timeout exists
+    assert(args[timeoutIdx + 1] == "60"); // timeoutSeconds
+    assert(args.canFind("/tmp:rw,noexec,nosuid,size=64m")); // tmpfsOptions
+
+    // Verify image and shell are present
+    assert(args.canFind("alpine:latest"));
+    assert(args.canFind("sh"));
+    assert(args.canFind("-c"));
+}
+
+/// Test: buildRunArgs uses custom image when provided.
+unittest {
+    auto config = SandboxConfig();
+    auto args = buildRunArgs(config, "python:3.11", ["python", "--version"]);
+
+    assert(args.canFind("python:3.11"));
+    assert(!args.canFind("alpine:latest"));
+}
+
+/// Test: buildRunArgs correctly joins and quotes command array elements.
+unittest {
+    auto config = SandboxConfig();
+    auto args = buildRunArgs(config, "alpine:latest", [
+        "echo", "hello", "&&", "world"
+    ]);
+
+    // Find the command string (last element)
+    string cmdStr = args[$ - 1];
+
+    // Each element should be single-quoted
+    assert(cmdStr.canFind("'echo'"));
+    assert(cmdStr.canFind("'hello'"));
+    assert(cmdStr.canFind("'&&'")); // The && in the argument should be quoted, not interpreted
+    // Elements are joined with && (the separator between quoted elements)
+    assert(cmdStr.startsWith("'echo' && 'hello' && '&&' && 'world'"));
+    // Elements should be joined with &&
+    assert(cmdStr.canFind("&&"));
+}
+
+/// Test: buildRunArgs applies custom config values.
+unittest {
+    auto config = SandboxConfig();
+    config.runtimeCli = "podman";
+    config.defaultImage = "ubuntu:22.04";
+    config.timeoutSeconds = 120;
+    config.memoryLimit = "512m";
+    config.cpuLimit = "1.0";
+    config.tmpfsOptions = "rw,size=128m";
+    config.userNs = "2000:2000";
+
+    auto args = buildRunArgs(config, "ubuntu:22.04", ["bash", "-c", "test"]);
+
+    assert(args.canFind("2000:2000")); // custom userNs
+    assert(args.canFind("512m")); // custom memoryLimit
+    assert(args.canFind("1.0")); // custom cpuLimit
+    assert(args.canFind("120")); // custom timeoutSeconds
+    assert(args.canFind("/tmp:rw,size=128m")); // custom tmpfsOptions
+    assert(args.canFind("ubuntu:22.04")); // custom image
+}
+
+/// Test: collectOutputLimited collects all output when within limit.
+unittest {
+    DrainElement[] elems = [
+        DrainElement(DrainElement.Type.stdout, cast(const(ubyte)[]) "hello ".dup),
+        DrainElement(DrainElement.Type.stdout, cast(const(ubyte)[]) "world".dup),
+    ];
+
+    auto result = collectOutputLimited(elems, 1024);
+
+    assert(result.stdout == "hello world");
+    assert(result.stderr == "");
+}
+
+/// Test: collectOutputLimited handles empty input.
+unittest {
+    DrainElement[] elems; // empty array
+    auto result = collectOutputLimited(elems, 1024);
+    assert(result.stdout == "");
+    assert(result.stderr == "");
+}
+
+/// Test: collectOutputLimited truncates output and adds warning when over limit.
+unittest {
+    // Create multiple elements that together exceed the small limit
+    // Each element is 50 bytes, limit is 100 bytes
+    ubyte[50] chunk;
+    chunk[] = cast(ubyte) 'a';
+
+    DrainElement[] elems = [
+        DrainElement(DrainElement.Type.stdout, cast(const(ubyte)[]) chunk[]),
+        DrainElement(DrainElement.Type.stdout, cast(const(ubyte)[]) chunk[]),
+        DrainElement(DrainElement.Type.stdout, cast(const(ubyte)[]) chunk[]),
+        DrainElement(DrainElement.Type.stdout, cast(const(ubyte)[]) chunk[]), // 200 total, should stop at ~100
+    ];
+
+    auto result = collectOutputLimited(elems, 100);
+
+    // Output should be truncated near the limit (allow small overflow per design)
+    assert(result.stdout.length >= 100); // At least close to the limit
+    assert(result.stdout.length <= 150); // Well under total input size (150 bytes)
+
+    // Stderr should contain truncation warning
+    assert(result.stderr.canFind("stdout truncated"));
+    assert(result.stderr.canFind("bytes collected"));
+    assert(result.stderr.canFind("limit:"));
+}
+
+/// Test: collectOutputLimited separates stdout and stderr correctly.
+unittest {
+    DrainElement[] elems = [
+        DrainElement(DrainElement.Type.stdout, cast(const(ubyte)[]) "stdout-line1\n".dup),
+        DrainElement(DrainElement.Type.stderr, cast(const(ubyte)[]) "stderr-line1\n".dup),
+        DrainElement(DrainElement.Type.stdout, cast(const(ubyte)[]) "stdout-line2\n".dup),
+        DrainElement(DrainElement.Type.stderr, cast(const(ubyte)[]) "stderr-line2\n".dup),
+    ];
+
+    auto result = collectOutputLimited(elems, 1024);
+
+    assert(result.stdout == "stdout-line1\nstdout-line2\n");
+    assert(result.stderr == "stderr-line1\nstderr-line2\n");
+}
+
+// Unit tests for executeImage() and image allow-list matching
+
+version (unittest) {
+    private class MockSandboxContext : SandboxContext {
+        SandboxConfig config;
+
+        bool isPathInsideWorkArea(AbsolutePath path) {
+            return true;
+        }
+
+        AbsolutePath workArea() {
+            return AbsolutePath("/tmp/test-workarea");
+        }
+
+        SandboxConfig getSandboxConfig() {
+            return config;
+        }
+    }
+}
+
+/// Test: executeImage returns descriptive error when runtime CLI not found.
+unittest {
+    auto ctx = new MockSandboxContext();
+    ctx.config.runtimeCli = "nonexistent-runtime-cli-12345";
+
+    auto params = ExecuteImageParams();
+    params.imageName = "alpine:latest";
+    params.command = ["echo", "hello"];
+
+    auto result = executeImage(cast(Context) ctx, params);
+
+    assert(!result.success);
+    assert(result.msg.canFind("not found"));
+    assert(result.msg.canFind("nonexistent-runtime-cli-12345"));
+}
+
+/// Test: executeImage returns error when command is empty.
+unittest {
+    auto ctx = new MockSandboxContext();
+    ctx.config.runtimeCli = "/usr/bin/sh";
+
+    auto params = ExecuteImageParams();
+    params.imageName = "alpine:latest";
+    params.command = []; // empty command
+
+    auto result = executeImage(cast(Context) ctx, params);
+
+    assert(!result.success);
+    assert(result.msg.canFind("command must not be empty"));
+}
+
+/// Test: executeImage falls back to defaultImage when imageName is empty.
+/// Uses /usr/bin/sh as runtime to pass the existence check; the allow-list
+/// rejects the default image so we can verify fallback occurred.
+unittest {
+    auto ctx = new MockSandboxContext();
+    ctx.config.runtimeCli = "/usr/bin/sh";
+    ctx.config.defaultImage = "alpine:latest";
+    ctx.config.allowedImages = ["ubuntu:*"]; // reject default "alpine:latest"
+
+    auto params = ExecuteImageParams();
+    params.imageName = ""; // empty, should fallback to defaultImage
+    params.command = ["echo", "hello"];
+
+    auto result = executeImage(cast(Context) ctx, params);
+
+    // Should fail with allow-list error for "alpine:latest" (the default)
+    assert(!result.success);
+    assert(result.msg.canFind("alpine:latest"));
+    assert(result.msg.canFind("not in allowed list"));
+}
+
+/// Test: executeImage rejects image not in allow-list.
+unittest {
+    auto ctx = new MockSandboxContext();
+    ctx.config.runtimeCli = "/usr/bin/sh";
+    ctx.config.allowedImages = ["ubuntu:*"];
+
+    auto params = ExecuteImageParams();
+    params.imageName = "alpine:latest";
+    params.command = ["echo", "hello"];
+
+    auto result = executeImage(cast(Context) ctx, params);
+
+    assert(!result.success);
+    assert(result.msg.canFind("alpine:latest"));
+    assert(result.msg.canFind("not in allowed list"));
+}
+
+/// Test: executeImage does NOT reject image that matches allow-list.
+/// The container execution will fail (since /usr/bin/sh is not a real runtime),
+/// but the error should NOT be an allow-list rejection.
+unittest {
+    auto ctx = new MockSandboxContext();
+    ctx.config.runtimeCli = "/usr/bin/sh";
+    ctx.config.allowedImages = ["alpine:*"];
+
+    auto params = ExecuteImageParams();
+    params.imageName = "alpine:latest";
+    params.command = ["echo", "hello"];
+
+    auto result = executeImage(cast(Context) ctx, params);
+
+    // May fail due to container execution, but NOT due to allow-list
+    assert(!result.msg.canFind("not in allowed list"));
+}
+
+/// Test: executeImage skips allow-list check when allowedImages is empty.
+unittest {
+    auto ctx = new MockSandboxContext();
+    ctx.config.runtimeCli = "/usr/bin/sh";
+    ctx.config.allowedImages = []; // empty = allow all
+
+    auto params = ExecuteImageParams();
+    params.imageName = "any-random-image:tag";
+    params.command = ["echo", "hello"];
+
+    auto result = executeImage(cast(Context) ctx, params);
+
+    // Should NOT have allow-list error (empty list allows all)
+    assert(!result.msg.canFind("not in allowed list"));
+}
+
+/// Test: imageMatchesAllowListEntry with exact match.
+unittest {
+    assert(imageMatchesAllowListEntry("alpine:latest", "alpine:latest"));
+    assert(imageMatchesAllowListEntry("python:3.11", "python:3.11"));
+    assert(!imageMatchesAllowListEntry("alpine:latest", "alpine:3.18"));
+    assert(!imageMatchesAllowListEntry("alpine", "alpine:latest"));
+}
+
+/// Test: imageMatchesAllowListEntry with prefix wildcard match.
+unittest {
+    assert(imageMatchesAllowListEntry("python:3.11", "python:*"));
+    assert(imageMatchesAllowListEntry("python:latest", "python:*"));
+    assert(imageMatchesAllowListEntry("python:3.11-slim", "python:*"));
+    assert(imageMatchesAllowListEntry("ubuntu:22.04", "ubuntu:*"));
+    assert(!imageMatchesAllowListEntry("python:3.11", "node:*"));
+    assert(!imageMatchesAllowListEntry("my-python:3.11", "python:*"));
 }

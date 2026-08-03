@@ -39,6 +39,8 @@ struct RegParam {
     string type;
     string desc;
     bool required;
+    /// For array types, specifies the item type (e.g., "string" for string[])
+    string itemsType;
 }
 
 struct RegFunction {
@@ -118,6 +120,11 @@ JSONValue descAllFunctions() @safe {
         foreach (p; func.params) {
             auto j = JSONValue.emptyObject;
             j["type"] = p.type;
+            if (!p.itemsType.empty) {
+                auto items = JSONValue.emptyObject;
+                items["type"] = p.itemsType;
+                j["items"] = items;
+            }
             if (!p.desc.empty) {
                 j["description"] = p.desc;
             }
@@ -192,16 +199,24 @@ string baseContextToSpecific(TargetT, string func = __PRETTY_FUNCTION__)() {
 }
 
 RegParam toParam(T)(string name, string desc, bool required) {
+    RegParam result;
+    result.name = name;
+    result.desc = desc;
+    result.required = required;
+
     static if (is(T == string))
-        enum type = "string";
+        result.type = "string";
     else static if (isIntegral!T || isFloatingPoint!T)
-        enum type = "number";
+        result.type = "number";
     else static if (is(T == bool))
-        enum type = "boolean";
-    else
+        result.type = "boolean";
+    else static if (is(T == string[])) {
+        result.type = "array";
+        result.itemsType = "string";
+    } else
         static assert(0, "unsupported type " ~ T.stringof);
 
-    return RegParam(name: name, type: type, desc: desc, required: required);
+    return result;
 }
 
 auto getJsonValue(T)(JSONValue json) {
@@ -213,7 +228,13 @@ auto getJsonValue(T)(JSONValue json) {
         return json.floating;
     else static if (is(T == bool))
         return json.boolean;
-    else
+    else static if (is(T == string[])) {
+        string[] result;
+        foreach (item; json.array) {
+            result ~= item.str;
+        }
+        return result;
+    } else
         static assert(0, "unsupported type " ~ T.stringof);
 }
 

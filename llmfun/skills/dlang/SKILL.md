@@ -5,7 +5,7 @@ description: >-
   D programs, compiling D code, running D tests, or managing D project dependencies.
   Triggers on: dlang, d language, d programming, dub, dub.sdl, dub.json,
   D project, D build, D test, compile D, run D.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # D Language Skill
@@ -26,12 +26,13 @@ Use this skill when:
 
 - A **dub project** is a directory containing a `dub.sdl` or `dub.json` file.
 - Build by executing `dub build` in the project directory.
-- Use `executeDCodeWithDub` tool to compile and execute tests with commands: `build` or `test`.
+- Use `executeImage` tool with a D language container image to compile and execute tests.
+  Example: `executeImage(image_name="dlang2:latest", command=["dub", "build"])`
 
 ## Rules
 
 - **Always use dub**: Build and test through dub, not manual compilation.
-- **Prefer executeDCodeWithDub**: Use this tool over generic code execution.
+- **Use executeImage**: Use `executeImage` with a D language container to run dub commands.
 - **Check dub config first**: Read `dub.sdl` or `dub.json` before building to understand project structure.
 - **Verify build output**: Check the `targetPath` directory (default: `./`) for compiled artifacts.
 
@@ -91,7 +92,8 @@ Full details in `references/code-conventions.md`. Key rules:
 1. **Identify the project**: Locate the `dub.sdl` or `dub.json` file.
 2. **Read the configuration**: Understand project name, type, dependencies, and target path.
 3. **Choose the command**: Use `build` to compile, `test` to run tests.
-4. **Execute with dub**: Call `executeDCodeWithDub` with the project path and command.
+4. **Execute with dub**: Use `executeImage` with a D language container image and dub command.
+   Example: `executeImage(image_name="dlang2:latest", command=["dub", "build"])`
 5. **Verify results**: Check output for errors or test results.
 
 ## Utility Scripts

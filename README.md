@@ -169,7 +169,7 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
   "thinkingTemplatesDir": "llmfun/config/thinking",
   "promptDir": "llmfun/config/prompt",
   "workArea": "llmfun/workarea",
-  "containerCmd": "podman",
+  "sandboxConfig": {"runtimeCli": "docker", "defaultImage": "alpine:latest", ...},
   "agentPrompt": "AGENT.md",
   "activeCodeModelIndex": 0,
   "toolLimits": {...},
@@ -195,7 +195,7 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
 | `thinkingTemplatesDir` | string | `llmfun/config/thinking` | Directory with thinking strategy templates |
 | `promptDir` | string | `llmfun/config/prompt` | Directory with prompt templates |
 | `workArea` | string | `llmfun/workarea` | Agent working directory for file operations |
-| `containerCmd` | string | `podman` | Container runtime command (podman or docker) |
+| `sandboxConfig` | object | defaults | Container runtime config (runtimeCli, defaultImage, timeoutSeconds, memoryLimit, cpuLimit, tmpfsOptions, userNs, maxOutputBytes, allowedImages) |
 | `agentPrompt` | string | `AGENT.md` | Agent system prompt file name (searched in promptDir) |
 | `activeCodeModelIndex` | long | `0` | Index of the active code model in `codeModels` array |
 | `warnIfNoApiKey` | bool | `true` | Emit warnings when no API key is configured for model servers |
@@ -277,7 +277,7 @@ Controls which tools the agent can access via regex include/exclude patterns.
 ```json
 "toolFilter": {
   "include": [".*"],
-  "exclude": ["executeCode", "executeDCodeWithDub", "executeGit"]
+  "exclude": ["executeImage"]
 }
 ```
 
@@ -586,9 +586,7 @@ The agent has access to the following tools:
 
 | Tool | Description |
 |------|-------------|
-| `executeCode` | Execute D code in a sandbox container |
-| `executeDCodeWithDub` | Execute D code with dub (build or test) in a sandbox |
-| `executeGit` | Execute a git command in a sandboxed repository |
+| `executeImage` | Execute a command in a container image with security hardening (read-only rootfs, network isolation, resource limits) |
 
 ### Pipeline
 
