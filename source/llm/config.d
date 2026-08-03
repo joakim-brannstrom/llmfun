@@ -10,6 +10,7 @@ import std.datetime : Clock;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.sumtype : SumType, match;
 import std.string : toLower, startsWith;
+import std.typecons : Nullable;
 
 import my.path;
 
@@ -58,7 +59,7 @@ struct RagConfig {
 struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
-    // LLM save a memory to this file which is used between runs.
+    /// LLM save a memory to this file which is used between runs.
     Path[] memoryArea;
 
     bool noMemory;
@@ -126,7 +127,7 @@ struct LlmConfig {
         }
     }
 
-    // Directory where the LLM can work with assets, create files etc.
+    /// Directory where the LLM can work with assets, create files etc.
     Path workArea = ProgramName ~ "/workarea";
 
     string containerCmd = "podman";
@@ -138,24 +139,28 @@ struct LlmConfig {
 
     RagConfig ragConfig;
 
-    // Searched for in promptDir
+    /// Searched for in promptDir
     string agentPrompt = "AGENT.md";
 
     CodeModelConfig[] codeModels;
     long activeCodeModelIndex = 0;
 
-    // Tracks total session starts (incremented at the beginning of each session).
+    /// Tracks total session starts (incremented at the beginning of each session).
     uint sessionCount = 0;
-    // Prevents concurrent or crash-retry consolidation. Cleared on load if stale.
+    /// Prevents concurrent or crash-retry consolidation. Cleared on load if stale.
     bool isConsolidating = false;
-    // Default trigger threshold (every N sessions). 0 means disabled.
+    /// Default trigger threshold (every N sessions). 0 means disabled.
     uint consolidationInterval = 10;
-    // Unix epoch seconds of the last session count increment. 0 means never incremented.
+    /// Unix epoch seconds of the last session count increment. 0 means never incremented.
     long lastSessionCountUpdate = 0;
 
     SummaryModelConfig summaryModel;
 
-    // If true, emit a warning when no API key is configured for a model server. Defaults to true.
+    /// Optional dedicated vision model for image processing. When set, image analysis
+    /// delegates to a separate model specialized for vision tasks.
+    Nullable!VisionModelConfig visionModel;
+
+    /// If true, emit a warning when no API key is configured for a model server. Defaults to true.
     bool warnIfNoApiKey = true;
 
     invariant {
@@ -503,6 +508,27 @@ struct SummaryModelConfig {
     long maxTokens;
 }
 
+struct VisionModelConfig {
+    ServerConfig server;
+    string name;
+    string systemPrompt;
+    double temp;
+    long contextSize;
+    long maxTokens;
+    long reasoningBudget;
+    bool preserveThinking;
+    long timeoutSecs = 60;
+
+    invariant {
+        assert(!name.empty, "Vision model name must not be empty");
+        assert(!server.url.empty, "Vision model server URL must not be empty");
+        assert(temp >= 0.0 && temp <= 2.0, i"Temperature must be in [0.0, 2.0], got $(temp)".text);
+        assert(contextSize > 0, i"Context size must be positive, got $(contextSize)".text);
+        assert(timeoutSecs > 0 && timeoutSecs <= 3600, i"Timeout must be in (0, 3600], got $(
+                timeoutSecs)".text);
+    }
+}
+
 RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
     JSONValue makeHeader(string model, double temp, long maxTokens, ServerConfig cfg) {
         import std.math : isNaN;
@@ -636,6 +662,19 @@ private EmbedConfig jsonToEmbedConfig(JSONValue json) {
 auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
     import std.traits;
 
+    // Helper: extract inner type from Nullable!T, or void if not Nullable
+    template NullableInner(T) {
+        static if (is(T == Nullable!U_, U_))
+            alias NullableInner = U_;
+        else
+            alias NullableInner = void;
+    }
+
+    // Helper: check if type is Nullable!Something
+    template isNullableType(T) {
+        enum isNullableType = is(T == Nullable!U_, U_);
+    }
+
     void validateRagDatabase(JSONValue elem) {
         // Object format: {"path": "...", "description": "..."}
         if ("path" !in elem) {
@@ -715,6 +754,16 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                         } else static if (is(Type : EmbedConfig)) {
                             __traits(getMember, conf, llmMemberName) = jsonToEmbedConfig(
                                     json[llmMemberName]);
+                        } else static if (isNullableType!Type
+                                && isAggregateType!(NullableInner!Type)) {
+                            // Handle Nullable!T for aggregate types (e.g., Nullable!VisionModelConfig)
+                            alias InnerT = NullableInner!Type;
+                            auto val = json[llmMemberName];
+                            if (val.type != JSONType.NULL) {
+                                auto innerConf = InnerT.init;
+                                __traits(getMember, conf, llmMemberName) = Nullable!InnerT(jsonToConfig(innerConf,
+                                        val));
+                            }
                         } else static if (isAggregateType!Type) {
                             __traits(getMember, conf, llmMemberName) = jsonToConfig(__traits(getMember,
                                     conf, llmMemberName), *(llmMemberName in json));
@@ -756,6 +805,12 @@ private void checkApiKeyWarnings(LlmConfig conf) {
         warned = true;
     }
 
+    if (!conf.visionModel.isNull && !conf.visionModel.get.server.url.empty
+            && conf.visionModel.get.server.apiKey.empty) {
+        logger.warningf("No API key configured for vision model '%s'", conf.visionModel.get.name);
+        warned = true;
+    }
+
     conf.embedConfig.match!((RemoteEmbedConfig r) {
         if (r.server.apiKey.empty) {
             logger.warningf("No API key configured for remote embed model '%s'", r.name);
@@ -780,12 +835,18 @@ void validateConfig(LlmConfig conf) {
         throw new Exception(i"activeCodeModelIndex $(conf.activeCodeModelIndex) is out of bounds (codeModels count: $(
                 conf.codeModels.length))".text);
 
-    // Validate each CodeModelConfig has required fields
     foreach (i, model; conf.codeModels) {
         if (model.name.empty)
             throw new Exception(i"codeModels[$(i)].name must not be empty".text);
         if (model.server.url.empty)
-            throw new Exception(i"codeModels[$(i)].server.url must not be empty".text);
+            throw new Exception(i"codeModels[$(i)].server.url must not be empty for $(model.name)"
+                    .text);
+    }
+
+    if (!conf.visionModel.isNull) {
+        auto vm = conf.visionModel.get;
+        if (vm.server.url.empty)
+            throw new Exception("visionModel.server.url must not be empty");
     }
 
     if (conf.toolLimits.readFileMaxLines < 1)

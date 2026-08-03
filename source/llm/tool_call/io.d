@@ -20,6 +20,11 @@ import my.path : AbsolutePath;
 import llm.tool_call;
 import llm.tool_call.utility;
 import llm.config : ToolLimits;
+import llm.types : IAgent;
+
+// Re-export vision types from their canonical location for backward compatibility.
+public import llm.tool_call.vision : VisionContext, LoadImageApiParams,
+    loadImageApi, ImageLoadResult;
 
 mixin RegisterLlmFunctions!();
 
@@ -1968,42 +1973,6 @@ ExecuteFuncResult md5HashFile(Context baseCtx, Md5HashFileParams params) {
     }
 }
 
-interface VisionContext : Context {
-    bool isPathInsideWorkArea(AbsolutePath path);
-    AbsolutePath workArea();
-    bool addVisionImage(AbsolutePath path, string query) nothrow;
-}
-
-struct LoadImageApiParams {
-    @ParamDescription("Path to the image file")
-    string path;
-
-    @ParamDescription("Query to include with the image message")
-    @ParamOptional string query;
-}
-
-// TODO: update supported formats by checking what stb_image supports.
-@Function("Load an image from path into the vision context for interpretation. Supported formats are jpg, png, bmp, gif. The image will be attached to the next user message. The query will be part of the image message.")
-ExecuteFuncResult loadImageApi(Context baseCtx, LoadImageApiParams params) {
-    mixin(baseContextToSpecific!VisionContext);
-
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
-    if (!path_.valid) {
-        return ExecuteFuncResult(path_.errorMsg, success: false);
-    }
-
-    try {
-        if (ctx.addVisionImage(path_, params.query)) {
-            return ExecuteFuncResult(i"image loaded from '$(params.path)'".text, success: true);
-        }
-        return ExecuteFuncResult(i"error: failed to load image '$(params.path)'".text,
-                success: false);
-    } catch (Exception e) {
-        return ExecuteFuncResult(i"error: failed to load image '$(params.path)': $(e.msg)".text,
-                success: false);
-    }
-}
-
 private:
 
 void writeLines(AbsolutePath path, string[] lines) {
@@ -2027,6 +1996,9 @@ string validateLineRange(long startLine, long count, long maxLines) {
 // ============================================================================
 
 version (unittest) {
+    import std.typecons : Nullable;
+    import llm.config : VisionModelConfig;
+
     // Mock FileContext for integration tests
     class TestFileContext : FileContext {
         import std.file;
@@ -2048,17 +2020,17 @@ version (unittest) {
             }
         }
 
-        bool isPathInsideWorkArea(AbsolutePath path) {
+        override bool isPathInsideWorkArea(AbsolutePath path) {
             auto p = path.toString;
             auto w = workAreaDir.toString;
             return p.startsWith(w) && (p.length == w.length || p[w.length] == '/');
         }
 
-        AbsolutePath workArea() {
+        override AbsolutePath workArea() {
             return workAreaDir;
         }
 
-        ToolLimits getToolLimits() {
+        override ToolLimits getToolLimits() {
             return ToolLimits();
         }
     }

@@ -109,7 +109,7 @@ struct SemVer {
 /// Parse a semantic version string. Handles X.Y.Z, X.Y, X formats.
 /// Strips leading v/V prefix and pre-release suffixes at - or +.
 /// Returns invalid SemVer (valid==false) on parse failure with a warning log.
-SemVer parseSemVer(string verStr) {
+SemVer parseSemVer(string verStr) @safe {
     auto s = verStr.strip;
     if (s.empty) {
         logger.warningf("Failed to parse version string: empty string");
@@ -118,6 +118,10 @@ SemVer parseSemVer(string verStr) {
 
     if (s[0].among('v', 'V')) {
         s = s[1 .. $];
+    }
+    if (s.empty) {
+        logger.warningf("Failed to parse version string: '%s' (empty after prefix strip)", verStr);
+        return SemVer.init;
     }
 
     // Strip pre-release suffix at - or +
@@ -149,7 +153,7 @@ SemVer parseSemVer(string verStr) {
 ///   - Source not empty, dest empty → +1
 ///   - Source unparseable → 0 (skip)
 ///   - Dest unparseable → +1 (copy)
-int compareVersions(string sourceVersion, string destVersion) {
+int compareVersions(string sourceVersion, string destVersion) @safe {
     // Both empty → equal
     if (sourceVersion.empty && destVersion.empty) {
         return 0;

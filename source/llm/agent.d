@@ -32,6 +32,7 @@ import llm.skill : SkillManager, makeSkillManager;
 import llm.summary_agent;
 import llm.tool_call : FunctionCall, Context;
 import llm.tool_call.io : FileContext, VisionContext;
+import llm.tool_call.vision : DedicatedVisionAgent, DefaultVisionSystemPrompt;
 import llm.tool_call.memory : MemoryContext;
 import llm.tool_call.metrics : MetricsContext;
 import llm.tool_call.pipeline : PipelineControlContext;
@@ -536,39 +537,12 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
 
         override bool addVisionImage(AbsolutePath path, string query) nothrow {
             try {
-                import std.path : extension;
-                import std.string : toLower;
-                import std.base64 : Base64;
-                import std.file : getSize;
+                import llm.tool_call.vision : loadImage;
 
-                string mimeType;
-                switch (path.toString.extension.toLower) {
-                case ".jpg":
-                case ".jpeg":
-                    mimeType = "image/jpeg";
-                    break;
-                case ".png":
-                    mimeType = "image/png";
-                    break;
-                case ".bmp":
-                    mimeType = "image/bmp";
-                    break;
-                case ".gif":
-                    mimeType = "image/gif";
-                    break;
-                default:
+                auto result = loadImage(path);
+                if (!result.success)
                     return false;
-                }
-                immutable maxImageSize = 20 * 1024 * 1024;
-                const fileSize = getSize(path.toString);
-                if (fileSize > maxImageSize) {
-                    return false;
-                }
-
-                auto data = read(path);
-                string encoded = Base64.encode(cast(const(ubyte)[]) data);
-                string dataUrl = "data:" ~ mimeType ~ ";base64," ~ encoded;
-                pendingVisionImage = VisionImage(dataUrl, query);
+                pendingVisionImage = VisionImage(result.dataUrl, query);
                 return true;
             } catch (Exception e) {
                 return false;
@@ -592,6 +566,20 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
 
         override string getContainerCmd() {
             return conf.containerCmd;
+        }
+
+        override bool hasVisionModel() {
+            return !conf.visionModel.isNull;
+        }
+
+        override IAgent getVisionAgent() {
+            if (conf.visionModel.isNull) {
+                throw new Exception("getVisionAgent() called but no vision model is configured");
+            }
+            auto config = conf.visionModel.get;
+            string prompt = config.systemPrompt.length > 0 ? config.systemPrompt
+                : DefaultVisionSystemPrompt;
+            return new DedicatedVisionAgent(config, prompt);
         }
 
         override RAG getRAG() {

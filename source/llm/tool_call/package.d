@@ -6,8 +6,11 @@ import std.conv : text;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.range : array;
 import std.traits : isIntegral, isFloatingPoint;
+import std.typecons : Nullable;
 
 import my.filter : ReFilter;
+
+import llm.config : VisionModelConfig;
 
 interface Context {
 }

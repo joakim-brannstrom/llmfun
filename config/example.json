@@ -66,6 +66,7 @@
     {
       "server": {
         "url": "http://127.0.0.1:1234",
+        "type": "llamaCpp",
         "promptUrl": "v1/completion",
         "chatUrl": "v1/chat/completions",
         "slotUrl": "slots",
@@ -88,6 +89,7 @@
   "summaryModel": {
     "server": {
       "url": "http://127.0.0.1:1234",
+      "type": "llamaCpp",
       "promptUrl": "v1/completion",
       "chatUrl": "v1/chat/completions",
       "slotUrl": "slots",
@@ -110,10 +112,37 @@
     "preserveThinking": false
   },
 
+  "visionModel": {
+    "server": {
+      "url": "http://127.0.0.1:1234",
+      "type": "llamaCpp",
+      "promptUrl": "v1/completion",
+      "chatUrl": "v1/chat/completions",
+      "slotUrl": "slots",
+      "embedUrl": "embeddings",
+      "timeoutSeconds": 60,
+      "httpVerbosity": 0,
+      "verifySslCert": true,
+      "keepAlive": true,
+      "maxRetries": 3,
+      "backoffMs": 500,
+      "apiKey": ""
+    },
+    "name": "vision-model",
+    "systemPrompt": "",
+    "temp": 0.3,
+    "contextSize": 32768,
+    "maxTokens": 4096,
+    "reasoningBudget": 0,
+    "preserveThinking": false,
+    "timeoutSecs": 60
+  },
+
   "embedConfig": {
     "type": "remote",
     "server": {
       "url": "http://127.0.0.1:1234",
+      "type": "llamaCpp",
       "timeoutSeconds": 60,
       "httpVerbosity": 0,
       "verifySslCert": true,

@@ -180,6 +180,7 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
   "ragFilter": {...},
   "codeModels": [...],
   "summaryModel": {...},
+  "visionModel": {...},
   "embedConfig": {...}
 }
 ```
@@ -390,6 +391,41 @@ Configuration for the model used to compress chat history.
 | `maxTokens` | long | -1 | Maximum generation tokens |
 | `reasoningBudget` | long | 0 | Reasoning token budget |
 | `preserveThinking` | bool | false | Preserve thinking tags |
+
+### Vision Model (`visionModel`)
+
+Optional dedicated vision model for image processing. When configured, `loadImageApi` delegates image analysis to a separate vision-specialized model instead of sending images to the main agent model. This enables hardware separation (e.g., vision model on CPU, main model on GPU) and uses a model optimized for image understanding.
+
+```json
+"visionModel": {
+  "server": { ... },
+  "name": "vision-model",
+  "systemPrompt": "",
+  "temp": 0.3,
+  "contextSize": 32768,
+  "maxTokens": 4096,
+  "reasoningBudget": 0,
+  "preserveThinking": false,
+  "timeoutSecs": 60
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server` | object | (required) | Server configuration (see Server Configuration) |
+| `name` | string | (required) | Vision model name (e.g. "llava", "qwen2.5-vl") |
+| `systemPrompt` | string | built-in default | Custom system prompt for image description. Empty uses built-in prompt |
+| `temp` | double | 0 | Temperature for generation |
+| `contextSize` | long | 0 | Context window size in tokens |
+| `maxTokens` | long | -1 | Maximum tokens to generate (-1 = unlimited) |
+| `reasoningBudget` | long | 0 | Token budget for reasoning/thinking |
+| `preserveThinking` | bool | false | Preserve thinking tags in output |
+| `timeoutSecs` | long | 60 | Maximum time for a single vision request in seconds |
+
+**Behavior:**
+- When `visionModel` is configured: `loadImageApi` sends the image to the vision model and returns the text description as the tool result
+- When `visionModel` is not configured: `loadImageApi` loads the image into the main agent's vision context (existing inline behavior)
+- The vision model operates in isolation with no access to tools, memory, RAG, or skills
 
 ### Embedding Configuration (`embedConfig`)
 
