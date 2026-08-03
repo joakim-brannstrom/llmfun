@@ -1,6 +1,8 @@
 module llm.coder;
 
 import logger = std.logger;
+import std.array : empty;
+import std.conv : text;
 import std.file : exists;
 
 import my.filter : ReFilter;
@@ -64,6 +66,19 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
 
     auto tmpManager = makeSkillManager(llmConf);
 
+    auto planPath = llmConf.workArea ~ "plan/implementation_plan.md";
+    const implPlan = () {
+        import std.file : readText;
+
+        try {
+            if (planPath.exists)
+                return i"Implementation Plan\n\n--- \n\n$(readText(planPath))".text;
+        } catch (Exception e) {
+            logger.trace(i"unable to read the implementation plan $(planPath): $(e.msg)".text);
+        }
+        return null;
+    }();
+
     auto coder = new Agent("coder", llmConf, monitor, rag, toolFilter);
     coder.setSystemPrompt(llmConf.getPrompt(tmpManager));
     coder.addUserQuery(query);
@@ -71,6 +86,11 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
     auto reviewer = new Agent("code_reviewer", llmConf, monitor, rag, toolFilter);
     reviewer.setSystemPrompt(llmConf.getPrompt(tmpManager));
     reviewer.addUserQuery(reviewerQuery);
+
+    if (!implPlan.empty) {
+        coder.addUserQuery(implPlan);
+        reviewer.addUserQuery(implPlan);
+    }
 
     tmpManager = null; // release back to GC
 
@@ -88,11 +108,14 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
     auto pipeline = pipelineBuilder.build();
 
     logger.trace(pipeline);
-    logger.infof("coder Starting pipeline for query: %s", query);
+    logger.info(i"coder Starting pipeline for query: $(query)".text);
+    if (!implPlan.empty) {
+        logger.info(i"coder using plan $(planPath)".text);
+    }
     auto result = pipeline.run(interrupt);
 
-    logger.infof("coder Pipeline completed: success=%s agents=%s",
-            result.allSuccess, result.agentResults.length);
+    logger.info(i"coder Pipeline completed: success=$(result.allSuccess) agents=$(
+            result.agentResults.length)".text);
 
     return result;
 }
