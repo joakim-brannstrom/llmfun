@@ -49,6 +49,11 @@ Full details in `references/code-conventions.md`. Key rules:
 ### String Handling
 
 - **Prefer interpolated strings** over `std.format.format`.
+- **Runtime interpolated strings need `.text`:** `i"value: $(var)".text` — without `.text` you get `AliasSeq`, not `string`. Requires `import std.conv : text;`.
+- **No format specifiers in interpolated strings:** Cannot do `%.1f`, `%.80s`, `%(...)`. Keep `format!"..."` for float formatting or use alternatives:
+  - Float: `format!"%.1f"(value)` or embed: `i"$(format!"%.1f"(v)) units".text`
+  - Truncation: `str[0 .. min(str.length, 80)]` instead of `%.80s`
+  - Arrays: `.join(" ")` instead of `%(%-s %)`
 - **Prefer backtick-strings** when embedding `"` or `\`.
 
 ### Variable Initialization
