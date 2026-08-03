@@ -61,7 +61,6 @@
 - there should be something like /plan update, which goes through the pipeline but with other steering prompt such that the LLM understand that it should fix things in the system design and implementation plan.
 
 # rag
-- memories should automatically be synchronized to the RAG so they are always searchable
 - Add a warning when the DB is wiped. Need to add migration in the future.
 - use an actual regulator such as PID och kalman filter for the token window instead of the primitive "5 times and fixed step +/-"
 - a tui to inspect the rag DB such as what files are in it, the chunks etc. Look at the GUI for https://github.com/MrDoe/OpenCodeRAG
@@ -77,7 +76,7 @@
 - Glob-Triggered Skill Activation (P2)
 - `allowed-tools` Permission Bypass (P2)
 - skills should be part of the metrics that are collected. How often they are loaded etc
-- it should be possible to mark a skill, in the frontmatter, that it should not be shown in the system prompt. Only available for load on demand.
+- it should be possible to mark a skill, in the frontmatter, that it should not be shown in the system prompt (xml manifest). Only available for load on demand. But there need to be a way for the model to know there are "hidden tools" that it somehow can request the "frontmatter" for. If possible avoid creating a new tool for this but maybe that is required. Consider different design alternatives.
 
 # memory
 ## Workflow Improvements
