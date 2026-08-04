@@ -29,7 +29,8 @@
     "tmpfsOptions": "rw,noexec,nosuid,size=64m",
     "userNs": "1000:1000",
     "maxOutputBytes": 1048576,
-    "allowedImages": ["llmfun/*"]
+    "allowedImages": ["llmfun/*"],
+    "imageCatalogFile": "config/image_catalog.json"
   },
 
   "ragPrimary": {
