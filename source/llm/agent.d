@@ -537,8 +537,10 @@ private:
                 result = res.msg;
                 success = res.success;
             } catch (Exception e) {
-                result = e.msg.length > 200 ? e.msg[0 .. 200] : e.msg;
+                logger.tracef("Broken tool call. Incoming json: %s", e.msg);
+                continue;
             }
+
             immutable responseTimeMs = (Clock.currTime - startTime).total!"msecs";
             try {
                 if (monitor !is null) {

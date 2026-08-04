@@ -1,7 +1,9 @@
 module llm.tool_call.completion;
 
+import logger = std.logger;
 import std.array : empty;
 import std.string : strip;
+import std.exception : collectException;
 
 import llm.tool_call;
 
@@ -17,13 +19,21 @@ struct TaskDoneParams {
 }
 
 @Function("Call `taskDone` **only** when you have fully completed the user's request.")
-ExecuteFuncResult taskDone(Context baseCtx, TaskDoneParams params) {
+ExecuteFuncResult taskDone(Context baseCtx, TaskDoneParams params) nothrow {
     mixin(baseContextToSpecific!CompletionContext);
 
     if (params.answer.strip.empty) {
         return ExecuteFuncResult("error: 'answer' parameter is required and must not be empty",
                 success: false);
     }
-    ctx.taskDone(params.answer);
-    return ExecuteFuncResult("done", success: true);
+    try {
+        ctx.taskDone(params.answer);
+        return ExecuteFuncResult("done", success: true);
+    } catch (Exception e) {
+        logger.warning("this should never happen. Failed to call taskDone in the context")
+            .collectException;
+    }
+    return ExecuteFuncResult(
+            "error: the agent framework is broken, a severe bug has occured. Inform the user that taskDone is broken.",
+            success: true);
 }
