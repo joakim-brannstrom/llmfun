@@ -69,6 +69,9 @@ class Agent : IBasicAgent {
         static immutable ToolCallWarnInterval = 15.dur!"minutes";
         int toolCallWarnCounter = -1;
         static immutable MinToolCallInterval = 50;
+        static immutable MaxStrikes = 3;
+        int keepReasoningStrikes;
+        int continueStrikes;
 
         ReFilter toolFilter;
         bool waitingForVisionResponse;
@@ -157,13 +160,72 @@ class Agent : IBasicAgent {
     }
 
     void addKeepReasoning() @safe nothrow {
-        chat.add(Message(role: Role.user, userQuery: false, content: "Did you stop because you asked the user a question? Then call taskDone with your question. Are you done with the current task? Then call taskDone. But if you do have more work to perfom to finish the current task then please continue.",
-                thinking: null));
+        keepReasoningStrikes++;
+
+        string msg;
+        if (keepReasoningStrikes < MaxStrikes) {
+            // STRIKE 1 or 2: Gentle diagnostic (but explicitly forbids plain‑text diagnosis)
+            msg = q"(**⚠️ SYSTEM NUDGE:** You stopped generating without calling a tool.
+
+You have two possible states (choose ONLY ONE):
+1. BLOCKED – You asked a question or need user input.
+2. COMPLETE – You have fully solved the user's request.
+
+EXECUTION RULES:
+- If BLOCKED → Call taskDone immediately with your question.
+- If COMPLETE → Call taskDone immediately with your final answer.
+
+IMPORTANT: Do NOT describe your state in plain text. Your very next output MUST be a tool call (taskDone) or your next reasoning step/tool call. If you need to continue working, just output the next tool call right now.)";
+        } else {
+            // STRIKE 3+: Strict JSON force (breaks the loop)
+            msg = q"(**⚠️ SYSTEM OVERRIDE - FINAL WARNING:** You have repeatedly stopped without calling a tool.
+
+Your state is BLOCKED. Do not re‑diagnose.
+
+YOUR ENTIRE NEXT RESPONSE MUST BE EXACTLY THIS JSON (output ONLY this, no extra text):
+{"name": "taskDone", "arguments": {"answer": "<Put your exact question here>"}}
+
+ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside this JSON. Output ONLY the tool call.)";
+        }
+
+        chat.add(Message(role: Role.system, userQuery: false, content: msg, thinking: null));
     }
 
     void addContinue() @safe nothrow {
-        chat.add(Message(role: Role.user, userQuery: false, content: "You stopped without calling 'taskDone'. Please continue your work, or call 'taskDone' if you're finished.",
-                thinking: null));
+        continueStrikes++;
+
+        string msg;
+
+        if (continueStrikes < MaxStrikes) {
+            msg = q"(**⚠️ SYSTEM RECOVERY:** You stopped generating without calling taskDone.
+
+DIAGNOSE YOUR STATE (choose exactly one):
+1. BLOCKED – You need user input (e.g., a yes/no, a decision).
+2. COMPLETE – You have fully solved the user's request.
+3. ACTIVE – You are in the middle of reasoning and need more tokens.
+
+EXECUTION RULES:
+- If ACTIVE → Resume generating your next reasoning step or tool call immediately.
+- If BLOCKED or COMPLETE → Run the Reflection Gate below, then call taskDone.
+
+REFLECTION GATE (skip if ACTIVE):
+1. Scan for lessons learned → update memory via getMemoryTopics/writeMemory.
+2. Check for knowledge_retrieval violations.
+3. Call taskDone with your question (if BLOCKED) or final answer (if COMPLETE).
+
+CRITICAL: If BLOCKED, you are NOT done—but you MUST call taskDone to hand control back. Skip heavy reflection on "completed work".)";
+        } else {
+            msg = q"(**⚠️ SYSTEM OVERRIDE - FINAL WARNING:** You have repeatedly stopped without calling a tool.
+
+Your state is BLOCKED. Do not re‑diagnose.
+
+YOUR ENTIRE NEXT RESPONSE MUST BE EXACTLY THIS JSON (output ONLY this, no extra text):
+{"name": "taskDone", "arguments": {"answer": "<Put your exact question or final answer here>"}}
+
+ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside this JSON. Output ONLY the tool call.)";
+        }
+
+        chat.add(Message(Role.system, userQuery: false, thinking: null, content: msg));
     }
 
     ProcessResult process(bool delegate() interrupt) @trusted nothrow {
@@ -252,12 +314,23 @@ class Agent : IBasicAgent {
         taskDone_ = false;
         taskDoneMessage_ = null;
         ProcessResult result;
+
         bool keepRunning;
+
         ProcessResult.Status lastStatus = ProcessResult.Status.unknownFailure;
+
         size_t consecutiveSameStatus;
         immutable MaxConsecutiveSameStatus = 3;
         size_t consecutiveNoToolCallOk;
         immutable MaxConsecutiveNoToolCallOk = 5;
+
+        void resetStrikes() {
+            keepReasoningStrikes = 0;
+            continueStrikes = 0;
+        }
+
+        resetStrikes();
+
         do {
             result = this.process(interrupt);
             if (step)
@@ -274,6 +347,8 @@ class Agent : IBasicAgent {
                 } else if (!result.hasToolCall) {
                     addContinue;
                     keepRunning = true;
+                } else {
+                    resetStrikes;
                 }
                 break;
             case needCompression:
