@@ -3,7 +3,7 @@
 ## Making Changes
 
 1. Modify source code in `llmfun/source/`.
-2. Build with `executeImage(image_name="llmfun:latest", command=["dub", "build"])`.
+2. Build with `executeImage(imageName="llmfun/app:latest", command=["dub", "build"])`.
 3. Check exit code: 0 = success, non-zero = errors.
 4. If errors occur, read the error output, identify the problematic file and line, then fix.
 5. Repeat until build succeeds.
@@ -12,19 +12,25 @@
 
 ### Full Project Build
 ```
-executeImage(image_name="llmfun:latest", command=["dub", "build"])
+executeImage(imageName="llmfun/app:latest", command=["dub", "build"])
 ```
 Builds the entire llmfun project with all dependencies.
 
 ### Run Tests
 ```
-executeImage(image_name="llmfun:latest", command=["dub", "test"])
+executeImage(imageName="llmfun/app:latest", command=["dub", "test"])
 ```
 Runs the test suite.
 
+### Syntax Check
+```
+executeImage(imageName="llmfun/app:latest", command=["dub", "build", "-c", "syntax"])
+```
+Builds the entire llmfun project with all dependencies but do not generate any object code, only perform a syntax check. This is optimal for checking if the project compile.
+
 ### Single File Compilation
 ```
-executeImage(image_name="llmfun:latest", command=["ldc2", "path/to/file.d"])
+executeImage(imageName="llmfun/app:latest", command=["ldc2", "path/to/file.d"])
 ```
 For simple single-file D compilation without project dependencies.
 
@@ -32,7 +38,7 @@ For simple single-file D compilation without project dependencies.
 
 After making changes:
 
-1. **Always run `executeImage(image_name="llmfun:latest", command=["dub", "build"])`** to verify compilation succeeds.
+1. **Always run `executeImage(imageName="llmfun/app:latest", command=["dub", "build"])`** to verify compilation succeeds.
 2. Check the exit code: 0 means success, non-zero means errors.
 3. If errors occur, read the error output, identify the problematic file and line, then fix.
 4. Repeat until the build succeeds with exit code 0.

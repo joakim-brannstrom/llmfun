@@ -44,13 +44,17 @@ llmfun/
 
 ## Commands
 
+**Important**: The container image to use when running the tool `executeImage` is `llmfun/app:latest`.
+
+Example of using `executeImage`: `executeImage(imageName="llmfun/app:latest", command=["cd llmfun", "&&", "dub build --config=application"])`
+
 ```bash
 cd llmfun
 
 dub build --config=application              # Build main app (remote API only)
 dub build --config=application-with-local-model   # Build with llama.cpp support
 dub build --config=llmfun_test              # Build test utility
-./build/llmfun app                          # Run interactive agent
+./build/llmfun agent                        # Run interactive agent
 ./build/llmfun rag add <path>               # Add file to RAG index
 ./build/llmfun rag query "question"         # Query RAG knowledge base
 ./build/llmfun tools metrics                # View tool metrics

@@ -27,7 +27,7 @@ Use this skill when:
 - A **dub project** is a directory containing a `dub.sdl` or `dub.json` file.
 - Build by executing `dub build` in the project directory.
 - Use `executeImage` tool with a D language container image to compile and execute tests.
-  Example: `executeImage(image_name="dlang2:latest", command=["dub", "build"])`
+  Example: `executeImage(imageName="dlang2:latest", command=["dub", "build"])`
 
 ## Rules
 
@@ -93,7 +93,7 @@ Full details in `references/code-conventions.md`. Key rules:
 2. **Read the configuration**: Understand project name, type, dependencies, and target path.
 3. **Choose the command**: Use `build` to compile, `test` to run tests.
 4. **Execute with dub**: Use `executeImage` with a D language container image and dub command.
-   Example: `executeImage(image_name="dlang2:latest", command=["dub", "build"])`
+   Example: `executeImage(imageName="dlang2:latest", command=["dub", "build"])`
 5. **Verify results**: Check output for errors or test results.
 
 ## Utility Scripts

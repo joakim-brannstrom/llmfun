@@ -14,6 +14,8 @@ version: 1.1.0
 Explore and improve the llmfun agentic framework. This skill is for modifying
 the agent's own implementation.
 
+See AGENTS.md for llmfun for more details. It contains very important information to adhere to.
+
 ## When to Use
 
 Use this skill when:
@@ -24,23 +26,11 @@ Use this skill when:
 
 ## Project Structure
 
-```
-llmfun/
-├── source/              # Agentic framework source code
-│   └── llm/             # Core LLM modules (agent, chat, tool_call, config)
-│       └── metric/      # Self-monitoring modules (monitor, calculator)
-├── vendor/llama.cpp/    # LLM executor (REST API)
-│   └── include/         # Low-level API used by source/llm/llama
-├── build/               # Build artifacts
-├── build_llama/         # Compiled llama.cpp libraries
-├── dub.sdl              # DUB build configuration
-└── llama.mak            # Makefile for llama.cpp libraries
-```
+See AGENTS.md
 
 ## Build System
 
 - **DUB** is the build system. Config: `llmfun/dub.sdl`
-- **llama.mak** builds llama.cpp libraries (referenced in `dub.sdl` preBuildCommands)
 - Use `executeImage` with a D language container with llmfun dependencies for full project builds
 - Use `executeImage` with ldc2 command for simple single-file D compilation
 
@@ -65,7 +55,7 @@ loaded binary. After making changes:
 1. **Identify the change** — What needs to be improved or fixed.
 2. **Locate the source** — Find the relevant files in `llmfun/source/`.
 3. **Make the change** — Modify source code in `llmfun/source/`.
-4. **Build and verify** — Run `executeImage(image_name="llmfun:latest", command=["dub", "build"])`, check exit code (0 = success).
+4. **Build and verify** — Run `executeImage(imageName="llmfun:latest", command=["dub", "build"])`, check exit code (0 = success).
 5. **Fix errors** — If compilation fails, read errors, fix issues, rebuild.
 6. **Report** — Inform user of changes and remind them to merge and restart.
 
