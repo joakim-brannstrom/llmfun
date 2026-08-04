@@ -1,3 +1,3 @@
 #!/bin/bash
 
-podman build -t llmfun/python3:1.0 .
+podman build -t llmfun/python3:latest .
