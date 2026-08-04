@@ -4,12 +4,18 @@
     {
       "name": "alpine:latest",
       "description": "Minimal Linux distribution based on Alpine Linux. Lightweight and fast, ideal for simple commands and scripts.",
-      "tags": ["linux", "minimal", "base"]
+      "tags": ["linux", "minimal", "base"],
+      "workareaMountDest": "/workrea",
+      "allowedNetwork": true,
+      "readOnly": false
     },
     {
       "name": "python:3.11-slim",
       "description": "Python 3.11 runtime in a slim Debian-based image. Use for running Python scripts and applications.",
-      "tags": ["python", "dev", "debian"]
+      "tags": ["python", "dev", "debian"],
+      "workareaMountDest": "/workrea",
+      "allowedNetwork": false,
+      "readOnly": true
     },
     {
       "name": "node:20-alpine",
@@ -19,7 +25,10 @@
     {
       "name": "ubuntu:22.04",
       "description": "Ubuntu 22.04 LTS full image. General-purpose Linux environment with apt package manager and common utilities.",
-      "tags": ["linux", "ubuntu", "general"]
+      "tags": ["linux", "ubuntu", "general"],
+      "workareaMountDest": "/workrea",
+      "allowedNetwork": false,
+      "readOnly": false
     }
   ]
 }

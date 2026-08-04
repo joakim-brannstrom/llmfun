@@ -93,7 +93,7 @@ string summarizeToolCallArguments(JSONValue args, size_t maxLength) @trusted {
         foreach (key, value; args.object) {
             auto valueStr = value.toString;
             if (valueStr.length > maxLength) {
-                valueStr = format("'%s...' (%d chars)", valueStr[0 .. maxLength], valueStr.length);
+                valueStr = format("'%s...' (%s chars)", valueStr[0 .. maxLength], valueStr.length);
             }
             params ~= format("%s=%s", key, valueStr);
         }

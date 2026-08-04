@@ -67,6 +67,15 @@ struct ImageCatalogEntry {
     /// Tags for categorization and filtering (e.g., ["python", "dev"])
     string[] tags;
 
+    /// If set the workarea is mounted inside the container at this destination
+    string workareaMountDest;
+
+    /// Mount the containers root filesystem read-only
+    bool readOnly = true;
+
+    /// If network is allowed
+    bool allowNetwork;
+
     invariant {
         assert(name.length > 0, "ImageCatalogEntry name must not be empty");
     }
@@ -87,7 +96,7 @@ struct SandboxConfig {
     string runtimeCli = "docker";
 
     /// Default container image when none specified
-    string defaultImage = "alpine:latest";
+    string defaultImage;
 
     /// Execution timeout in seconds
     long timeoutSeconds = 60;
@@ -106,9 +115,6 @@ struct SandboxConfig {
 
     /// Maximum output bytes per stream (stdout/stderr)
     long maxOutputBytes = 1_048_576;
-
-    /// Allowed image list (empty = allow all). Supports exact match and prefix:* wildcard.
-    string[] allowedImages;
 
     /// Curated image catalog entries (loaded from imageCatalogFile at startup)
     ImageCatalogEntry[] imageCatalog;
@@ -725,15 +731,9 @@ ImageCatalogEntry[] loadImageCatalog(Path filePath, ref CatalogState state) {
         }
 
         // Parse name (required)
-        string name;
-        if ("name" in entry && entry["name"].type == JSONType.STRING) {
-            name = entry["name"].str;
-        } else {
-            logger.warningf("Skipping catalog entry with missing or invalid 'name' field");
-            continue;
-        }
+        string name = getValue(entry, (v) => v["name"].str, null);
         if (name.empty) {
-            logger.warningf("Skipping catalog entry with empty 'name' field");
+            logger.warningf("Skipping catalog entry with empty or invalid 'name' field");
             continue;
         }
 
@@ -746,13 +746,20 @@ ImageCatalogEntry[] loadImageCatalog(Path filePath, ref CatalogState state) {
         seenNames.add(name);
 
         // Parse optional fields
+        string workareaMountDest = getValue(entry, (v) => v["workareaMountDest"].str, null);
+        bool readOnly = getValue(entry, (v) => v["readOnly"].boolean,
+                ImageCatalogEntry.init.readOnly);
+        bool allowNetwork = getValue(entry, (v) => v["allowNetwork"].boolean,
+                ImageCatalogEntry.init.allowNetwork);
         string description = getValue(entry, (v) => v["description"].str, null);
         string[] tags = getValue(entry, (v) => v["tags"].array, null).filter!(
                 a => a.type == JSONType.STRING)
             .map!(a => a.str)
             .array;
 
-        result ~= ImageCatalogEntry(name, description, tags);
+        result ~= ImageCatalogEntry(name: name, description: description, tags: tags,
+                workareaMountDest: workareaMountDest, readOnly: readOnly,
+                allowNetwork: allowNetwork);
     }
 
     if (result.length > 100) {

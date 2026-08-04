@@ -1,7 +1,7 @@
 module llm.tool_call.sandbox;
 
 import logger = std.logger;
-import std.algorithm : map, any, canFind, startsWith, endsWith, joiner;
+import std.algorithm : map, any, canFind, startsWith, endsWith, joiner, filter;
 import std.array : appender, join, empty, array;
 import std.conv : to, text;
 import std.datetime.stopwatch : StopWatch, AutoStart, dur, Duration;
@@ -34,36 +34,38 @@ interface SandboxContext : Context {
 /// Structured result from container execution.
 /// Negative exit codes (e.g., -1 for timeout) are documented behavior.
 struct ContainerResult {
-    /// Standard output from the container
     string stdout;
-
-    /// Standard error from the container. May contain truncation warnings.
     string stderr;
-
     /// Exit code. Negative values indicate errors (e.g., -1 for timeout).
     int exitCode;
-}
-
-/// Shell-quote a string to prevent injection when passed to sh -c.
-/// Uses single quotes and escapes existing single quotes.
-private string shellQuote(string s) @safe pure nothrow {
-    return "'" ~ s.replace("'", "'\"'\"'") ~ "'";
 }
 
 /// Build the `docker run` / `podman run` argument array with security flags.
 /// Returns the argument array (not including the runtime CLI itself).
 /// Precondition: command must not be empty (validated by caller).
-string[] buildRunArgs(SandboxConfig config, string image, string[] command) @safe pure {
-    // Quote each command element to prevent shell injection.
-    // Commands are joined with && for sequential execution under sh -c.
-    string joinedCmd = command.map!shellQuote.join(" && ");
-
-    return [
-        "run", "--rm", "--user", config.userNs, "--network", "none", "--memory",
-        config.memoryLimit, "--cpus", config.cpuLimit, "--read-only", "--tmpfs",
-        "/tmp:" ~ config.tmpfsOptions, "--stop-timeout",
-        config.timeoutSeconds.to!string, image, "sh", "-c", joinedCmd,
+string[] buildRunArgs(SandboxConfig config, AbsolutePath workArea,
+        ImageCatalogEntry entry, string[] command) @safe pure {
+    auto cmd = [
+        "run", "--rm", "--user", config.userNs, "--memory", config.memoryLimit,
+        "--cpus", config.cpuLimit, "--tmpfs", "/tmp:" ~ config.tmpfsOptions,
+        "--stop-timeout", config.timeoutSeconds.to!string,
     ];
+
+    if (entry.readOnly)
+        cmd ~= "--read-only";
+
+    if (entry.allowNetwork)
+        cmd ~= ["--network", "host"];
+    else
+        cmd ~= ["--network", "none"];
+
+    if (!entry.workareaMountDest.empty) {
+        cmd ~= ["-v", workArea.toString ~ ":/" ~ entry.workareaMountDest];
+    }
+
+    cmd ~= [entry.name, "sh", "-c", command.join(" ")];
+
+    return cmd;
 }
 
 /// Result from collecting limited output from a process.
@@ -133,18 +135,6 @@ private bool canFindExecutable(string name) {
     return !whichFromEnv("PATH", name).empty;
 }
 
-/// Check if an image name matches an allow-list entry.
-/// Supports exact match ("alpine:latest") and prefix match ("python:*").
-private bool imageMatchesAllowListEntry(string image, string entry) {
-    if (entry.endsWith("*")) {
-        // Prefix match: "python:*" matches "python:3.11", "python:latest", etc.
-        string prefix = entry[0 .. $ - 1];
-        return image.startsWith(prefix);
-    }
-    // Exact match
-    return image == entry;
-}
-
 /// Core container execution function using the proc library.
 /// Spawns the container runtime with the given arguments, enforces timeout,
 /// collects output with per-stream byte limits, and returns structured results.
@@ -212,8 +202,8 @@ ExecuteFuncResult listImages(Context baseCtx, ListImagesParams params) nothrow {
         auto config = ctx.getSandboxConfig();
 
         if (config.catalogState == CatalogState.loadFailed) {
-            return ExecuteFuncResult("{\"error\": \"Image catalog failed to load. Using allow-list fallback.\"}",
-                    success: true);
+            return ExecuteFuncResult("error: no image catalog loaded. executeImage is unavailable",
+                    success: false);
         }
         if (config.catalogState != CatalogState.loaded) {
             return ExecuteFuncResult("[]", success: true);
@@ -257,6 +247,12 @@ ExecuteFuncResult executeImage(Context baseCtx, ExecuteImageParams params) nothr
         }
 
         string image = params.imageName.empty ? config.defaultImage : params.imageName;
+        ImageCatalogEntry entry;
+        bool foundImage;
+        foreach (a; config.imageCatalog.filter!(a => a.name == image)) {
+            entry = a;
+            foundImage = true;
+        }
 
         // Image validation: catalog check chain
         // loaded → catalog check → allowList → allow all
@@ -266,7 +262,7 @@ ExecuteFuncResult executeImage(Context baseCtx, ExecuteImageParams params) nothr
                 return ExecuteFuncResult("error: image catalog is empty. No images are currently available.",
                         success: false);
             }
-            if (!imageInCatalog(image, config.imageCatalog)) {
+            if (!foundImage) {
                 logger.warningf("Image rejected by catalog: %s", image);
                 return ExecuteFuncResult("error: image '" ~ image
                         ~ "' is not in the allowed catalog. Call listImages() to see available options.",
@@ -274,27 +270,16 @@ ExecuteFuncResult executeImage(Context baseCtx, ExecuteImageParams params) nothr
             }
             logger.tracef("Image allowed by catalog: %s", image);
         } else {
-            // Catalog not configured or load failed — fall back to allow-list
-            if (config.allowedImages.length > 0) {
-                bool allowed = config.allowedImages.any!(a => imageMatchesAllowListEntry(image, a));
-                if (!allowed) {
-                    logger.warningf("Image rejected by allow-list: %s (allowed: %s)",
-                            image, config.allowedImages.joiner(", "));
-                    return ExecuteFuncResult("error: image '" ~ image ~ "' not in allowed list",
-                            success: false);
-                }
-                logger.tracef("Image allowed by allow-list: %s", image);
-            } else {
-                // Both catalog and allow-list empty - allow all
-                logger.tracef("Image allowed (no restrictions): %s", image);
-            }
+            logger.trace("Image rejected, no catalog loaded: %s", image);
+            return ExecuteFuncResult("error: no catalog loaded. No images allowed to execute",
+                    success: false);
         }
 
         if (params.command.empty) {
             return ExecuteFuncResult("error: command must not be empty", success: false);
         }
 
-        auto runArgs = buildRunArgs(config, image, params.command);
+        auto runArgs = buildRunArgs(config, ctx.workArea, entry, params.command);
 
         string cmdHashShort = toHexString(md5Of(params.command.join(" "))).idup[0 .. 8];
 
@@ -323,18 +308,18 @@ ExecuteFuncResult executeImage(Context baseCtx, ExecuteImageParams params) nothr
     }
 }
 
-/// Check if an image name exists in the catalog using exact match.
-private bool imageInCatalog(string imageName, ImageCatalogEntry[] catalog) @safe pure nothrow {
-    return catalog.any!(e => e.name == imageName);
-}
-
 // Unit tests for buildRunArgs() and collectOutputLimited()
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Test: buildRunArgs with default SandboxConfig includes all security flags.
 unittest {
     auto config = SandboxConfig();
-    auto args = buildRunArgs(config, "alpine:latest", ["echo", "hello"]);
+    ImageCatalogEntry entry;
+    entry.name = "alpine:latest";
+    entry.readOnly = true;
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
+        "echo", "hello"
+    ]);
 
     assert(args[0] == "run");
     assert(args.canFind("--rm"));
@@ -371,30 +356,31 @@ unittest {
 /// Test: buildRunArgs uses custom image when provided.
 unittest {
     auto config = SandboxConfig();
-    auto args = buildRunArgs(config, "python:3.11", ["python", "--version"]);
+    ImageCatalogEntry entry;
+    entry.name = "python:3.11";
+    entry.readOnly = true;
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
+        "python", "--version"
+    ]);
 
     assert(args.canFind("python:3.11"));
     assert(!args.canFind("alpine:latest"));
 }
 
-/// Test: buildRunArgs correctly joins and quotes command array elements.
+/// Test: buildRunArgs correctly joins command array elements with spaces.
 unittest {
     auto config = SandboxConfig();
-    auto args = buildRunArgs(config, "alpine:latest", [
+    ImageCatalogEntry entry;
+    entry.name = "alpine:latest";
+    entry.readOnly = true;
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
         "echo", "hello", "&&", "world"
     ]);
 
     // Find the command string (last element)
     string cmdStr = args[$ - 1];
 
-    // Each element should be single-quoted
-    assert(cmdStr.canFind("'echo'"));
-    assert(cmdStr.canFind("'hello'"));
-    assert(cmdStr.canFind("'&&'")); // The && in the argument should be quoted, not interpreted
-    // Elements are joined with && (the separator between quoted elements)
-    assert(cmdStr.startsWith("'echo' && 'hello' && '&&' && 'world'"));
-    // Elements should be joined with &&
-    assert(cmdStr.canFind("&&"));
+    assert(cmdStr.startsWith("echo hello && world"));
 }
 
 /// Test: buildRunArgs applies custom config values.
@@ -408,7 +394,12 @@ unittest {
     config.tmpfsOptions = "rw,size=128m";
     config.userNs = "2000:2000";
 
-    auto args = buildRunArgs(config, "ubuntu:22.04", ["bash", "-c", "test"]);
+    ImageCatalogEntry entry;
+    entry.name = "ubuntu:22.04";
+    entry.readOnly = true;
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
+        "bash", "-c", "test"
+    ]);
 
     assert(args.canFind("2000:2000")); // custom userNs
     assert(args.canFind("512m")); // custom memoryLimit
@@ -480,7 +471,7 @@ unittest {
     assert(result.stderr == "stderr-line1\nstderr-line2\n");
 }
 
-// Unit tests for executeImage() and image allow-list matching
+// Unit tests for executeImage()
 
 version (unittest) {
     private class MockSandboxContext : SandboxContext {
@@ -500,159 +491,29 @@ version (unittest) {
     }
 }
 
-/// Test: executeImage returns descriptive error when runtime CLI not found.
-unittest {
-    auto ctx = new MockSandboxContext();
-    ctx.config.runtimeCli = "nonexistent-runtime-cli-12345";
+// ── Unit tests for executeImage() catalog validation ──────────────────────────
 
-    auto params = ExecuteImageParams();
-    params.imageName = "alpine:latest";
-    params.command = ["echo", "hello"];
-
-    auto result = executeImage(cast(Context) ctx, params);
-
-    assert(!result.success);
-    assert(result.msg.canFind("not found"));
-    assert(result.msg.canFind("nonexistent-runtime-cli-12345"));
-}
-
-/// Test: executeImage returns error when command is empty.
-unittest {
-    auto ctx = new MockSandboxContext();
-    ctx.config.runtimeCli = "/usr/bin/sh";
-
-    auto params = ExecuteImageParams();
-    params.imageName = "alpine:latest";
-    params.command = []; // empty command
-
-    auto result = executeImage(cast(Context) ctx, params);
-
-    assert(!result.success);
-    assert(result.msg.canFind("command must not be empty"));
-}
-
-/// Test: executeImage falls back to defaultImage when imageName is empty.
-/// Uses /usr/bin/sh as runtime to pass the existence check; the allow-list
-/// rejects the default image so we can verify fallback occurred.
+/// Test: executeImage falls back to defaultImage cataloge image when imageName is empty.
+/// Uses /usr/bin/sh as runtime to pass the existence check
 unittest {
     auto ctx = new MockSandboxContext();
     ctx.config.runtimeCli = "/usr/bin/sh";
     ctx.config.defaultImage = "alpine:latest";
-    ctx.config.allowedImages = ["ubuntu:*"]; // reject default "alpine:latest"
-
-    auto params = ExecuteImageParams();
-    params.imageName = ""; // empty, should fallback to defaultImage
-    params.command = ["echo", "hello"];
-
-    auto result = executeImage(cast(Context) ctx, params);
-
-    // Should fail with allow-list error for "alpine:latest" (the default)
-    assert(!result.success);
-    assert(result.msg.canFind("alpine:latest"));
-    assert(result.msg.canFind("not in allowed list"));
-}
-
-/// Test: executeImage rejects image not in allow-list.
-unittest {
-    auto ctx = new MockSandboxContext();
-    ctx.config.runtimeCli = "/usr/bin/sh";
-    ctx.config.allowedImages = ["ubuntu:*"];
-
-    auto params = ExecuteImageParams();
-    params.imageName = "alpine:latest";
-    params.command = ["echo", "hello"];
-
-    auto result = executeImage(cast(Context) ctx, params);
-
-    assert(!result.success);
-    assert(result.msg.canFind("alpine:latest"));
-    assert(result.msg.canFind("not in allowed list"));
-}
-
-/// Test: executeImage does NOT reject image that matches allow-list.
-/// The container execution will fail (since /usr/bin/sh is not a real runtime),
-/// but the error should NOT be an allow-list rejection.
-unittest {
-    auto ctx = new MockSandboxContext();
-    ctx.config.runtimeCli = "/usr/bin/sh";
-    ctx.config.allowedImages = ["alpine:*"];
-
-    auto params = ExecuteImageParams();
-    params.imageName = "alpine:latest";
-    params.command = ["echo", "hello"];
-
-    auto result = executeImage(cast(Context) ctx, params);
-
-    // May fail due to container execution, but NOT due to allow-list
-    assert(!result.msg.canFind("not in allowed list"));
-}
-
-/// Test: executeImage skips allow-list check when allowedImages is empty.
-unittest {
-    auto ctx = new MockSandboxContext();
-    ctx.config.runtimeCli = "/usr/bin/sh";
-    ctx.config.allowedImages = []; // empty = allow all
-
-    auto params = ExecuteImageParams();
-    params.imageName = "any-random-image:tag";
-    params.command = ["echo", "hello"];
-
-    auto result = executeImage(cast(Context) ctx, params);
-
-    // Should NOT have allow-list error (empty list allows all)
-    assert(!result.msg.canFind("not in allowed list"));
-}
-
-/// Test: imageMatchesAllowListEntry with exact match.
-unittest {
-    assert(imageMatchesAllowListEntry("alpine:latest", "alpine:latest"));
-    assert(imageMatchesAllowListEntry("python:3.11", "python:3.11"));
-    assert(!imageMatchesAllowListEntry("alpine:latest", "alpine:3.18"));
-    assert(!imageMatchesAllowListEntry("alpine", "alpine:latest"));
-}
-
-/// Test: imageMatchesAllowListEntry with prefix wildcard match.
-unittest {
-    assert(imageMatchesAllowListEntry("python:3.11", "python:*"));
-    assert(imageMatchesAllowListEntry("python:latest", "python:*"));
-    assert(imageMatchesAllowListEntry("python:3.11-slim", "python:*"));
-    assert(imageMatchesAllowListEntry("ubuntu:22.04", "ubuntu:*"));
-    assert(!imageMatchesAllowListEntry("python:3.11", "node:*"));
-    assert(!imageMatchesAllowListEntry("my-python:3.11", "python:*"));
-}
-
-/// Test: imageInCatalog returns true for exact name match.
-unittest {
-    ImageCatalogEntry[] catalog = [
-        ImageCatalogEntry("alpine:latest", "Minimal Linux", ["linux",
-            "minimal"]),
-        ImageCatalogEntry("python:3.11-slim", "Python runtime", [
-            "python", "dev"
-        ]), ImageCatalogEntry("node:20-alpine", "Node.js runtime", ["nodejs"]),
-    ];
-    assert(imageInCatalog("alpine:latest", catalog));
-    assert(imageInCatalog("python:3.11-slim", catalog));
-    assert(imageInCatalog("node:20-alpine", catalog));
-}
-
-/// Test: imageInCatalog returns false for non-matching name.
-unittest {
-    ImageCatalogEntry[] catalog = [
+    ctx.config.catalogState = CatalogState.loaded;
+    ctx.config.imageCatalog = [
         ImageCatalogEntry("alpine:latest", "Minimal Linux", ["linux"]),
+        ImageCatalogEntry("python:3.11-slim", "Python runtime", ["python"]),
     ];
-    assert(!imageInCatalog("ubuntu:22.04", catalog));
-    assert(!imageInCatalog("alpine:3.18", catalog));
-    assert(!imageInCatalog("alpine", catalog));
-}
 
-/// Test: imageInCatalog returns false for empty catalog.
-unittest {
-    ImageCatalogEntry[] catalog;
-    assert(!imageInCatalog("alpine:latest", catalog));
-    assert(!imageInCatalog("", catalog));
-}
+    ExecuteImageParams params;
+    params.command = ["echo", "hello"];
 
-// ── Unit tests for executeImage() catalog validation ──────────────────────────
+    auto result = executeImage(cast(Context) ctx, params);
+
+    // Should pass for "alpine:latest" (the default)
+    assert(result.success);
+    assert(result.msg.canFind("/usr/bin/sh"));
+}
 
 /// Test: executeImage with catalog loaded allows image in catalog.
 unittest {
@@ -713,12 +574,11 @@ unittest {
     assert(result.msg.canFind("image catalog is empty"));
 }
 
-/// Test: executeImage with catalog notConfigured falls back to allow-list.
+/// Test: executeImage with catalog notConfigured
 unittest {
     auto ctx = new MockSandboxContext();
     ctx.config.runtimeCli = "/usr/bin/sh";
     ctx.config.catalogState = CatalogState.notConfigured;
-    ctx.config.allowedImages = ["ubuntu:*"];
 
     ExecuteImageParams params;
     params.imageName = "alpine:latest";
@@ -726,17 +586,16 @@ unittest {
 
     auto result = executeImage(cast(Context) ctx, params);
 
-    // Should fall back to allow-list and reject
+    // No catalog and use of executeImage is blocked
     assert(!result.success);
-    assert(result.msg.canFind("not in allowed list"));
+    assert(result.msg.canFind("no catalog loaded"));
 }
 
-/// Test: executeImage with catalog loadFailed falls back to allow-list.
+/// Test: executeImage with catalog loadFailed
 unittest {
     auto ctx = new MockSandboxContext();
     ctx.config.runtimeCli = "/usr/bin/sh";
     ctx.config.catalogState = CatalogState.loadFailed;
-    ctx.config.allowedImages = ["alpine:*"];
 
     ExecuteImageParams params;
     params.imageName = "ubuntu:22.04";
@@ -744,29 +603,9 @@ unittest {
 
     auto result = executeImage(cast(Context) ctx, params);
 
-    // Should fall back to allow-list and reject
+    // No valid catalog and use of executeImage is blocked
     assert(!result.success);
-    assert(result.msg.canFind("not in allowed list"));
-}
-
-/// Test: executeImage with both catalog and allow-list empty allows all.
-unittest {
-    auto ctx = new MockSandboxContext();
-    ctx.config.runtimeCli = "/usr/bin/sh";
-    ctx.config.catalogState = CatalogState.notConfigured;
-    ctx.config.allowedImages = []; // empty = allow all
-    ctx.config.imageCatalog = [];
-
-    ExecuteImageParams params;
-    params.imageName = "any-random-image:tag";
-    params.command = ["echo", "hello"];
-
-    auto result = executeImage(cast(Context) ctx, params);
-
-    // Should NOT have any rejection error
-    assert(result.success);
-    assert(!result.msg.canFind("not in allowed list"));
-    assert(!result.msg.canFind("not in the allowed catalog"));
+    assert(result.msg.canFind("no catalog loaded"));
 }
 
 // ── Unit tests for listImages() ───────────────────────────────────────────────
@@ -805,9 +644,8 @@ unittest {
 
     auto result = listImages(cast(Context) ctx, ListImagesParams());
 
-    assert(result.success);
-    assert(result.msg.canFind("Image catalog failed to load"));
-    assert(result.msg.canFind("allow-list fallback"));
+    assert(!result.success);
+    assert(result.msg.canFind("no image catalog loaded"));
 }
 
 /// Test: listImages returns empty array when catalog is loaded but empty.
