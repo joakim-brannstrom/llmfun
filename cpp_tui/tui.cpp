@@ -143,7 +143,6 @@ void textUnformattedMultiline(ImGui::MarkdownConfig& mdConfig, std::string_view 
                               bool renderMarkdown = true) {
     if (renderMarkdown) {
         ImGui::Markdown(text.data(), text.length(), mdConfig);
-        ImGui::TextUnformatted(""); // ugly hack to make autoscroll work.
     } else {
         textUnformattedMultiline(text);
     }
