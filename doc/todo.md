@@ -16,12 +16,13 @@
 - workarea is not allowed to be a symlink. Security reasons
 - the 'answer' parameter in taskDone is almost a summary of everything between it and the previous user query. Maybe the summary algorithm should be updated to only keep final answers?
 - the self improvement of how to use tools should always be injected directly after the system prompt on startup if the chat is empty
-- editFile remove and replace is hard for an LLM to use incrementally because it changes the line numbers. Start by requiring that "content" contains the first line of the text that is to be removed.
 - if llmfun/data/scratch do not exist history file is loaded relative to the llmfun binary
 - replace "format!" with interpolated strings when possible
 - in tool calls and the response there is an excessive amount of escaping of slash
 - replace the grep tool with an internal implementation, to reduce the dependency on the OS
-- editFileByMarker, "replace" mode is probably bugged and is keeping the old content so it basically work as append. If the LLM gives marker "abc" and then the content "foo\nbar\smurf" it expectes abc to be replaced by "foo" and the next two lines to be replaced by "bar" and "smurf".
+- editFile remove and replace is hard for an LLM to use incrementally because it changes the line numbers. Start by requiring that "content" contains the first line of the text that is to be removed.
+    could probably be somewhat mitigate if there was a more detailed return from the tool call such as "{"status": "ok", "removed": "line1\nline2\line3\"}"
+- editFileByMarker, is hard for an llm to use because it is missing the option "count" which is the number of lines to modify and the marker line cannot contain newline. The llm continously assume that if the marker contain three lines, that those three are for example replaced with content when mode is "replace".
 - the edit... should probably all be converted to using editFileInMemory because all the edits can be reduced down to editing lines. This would reduce the code duplication in io.d
 - make sound notification configurable in json via config.d
 - merge the tools listDirectory, removeFile, checksumFile etc to one tool which take a command and then a key/value json string, which is the arguments. This approach should reduce the number of tools that is needed and thus the system prompt. Do a similar thing for sandbox.
@@ -76,6 +77,7 @@
 - `allowed-tools` Permission Bypass (P2)
 - skills should be part of the metrics that are collected. How often they are loaded etc
 - it should be possible to mark a skill, in the frontmatter, that it should not be shown in the system prompt (xml manifest). Only available for load on demand. But there need to be a way for the model to know there are "hidden tools" that it somehow can request the "frontmatter" for. If possible avoid creating a new tool for this but maybe that is required. Consider different design alternatives.
+- all skills should be added to the primary rag upon startup. Removed skills should be removed. But only if the RAG is not in-memory because otherwise it slows down startup. This is because the LLM do not always find the relevant information when it uses knowledge-retrieval because it is inside e.g. a skill's reference.
 
 # memory
 ## Workflow Improvements
