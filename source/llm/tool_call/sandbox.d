@@ -143,17 +143,9 @@ unittest {
 /// Precondition: command must not be empty (validated by caller).
 string[] buildRunArgs(SandboxConfig config, AbsolutePath workArea,
         ImageCatalogEntry entry, string[] command) @safe nothrow {
-    // Merge default options with image-specific overrides
     auto merged = mergeOptions(config.defaultOptions, entry.options);
-
-    // Substitute magic words in option values
     auto resolved = replaceContainerMagicWords(merged, workArea);
-
-    // Flatten options map to CLI argument array (sorted by numeric prefix)
-    // Keys must be prefixed with two-digit number and underscore (e.g., "01_cleanup")
-    // Invalid keys are skipped with a warning (should already be cleaned by validateAndCleanupOptions)
     string[] args;
-    // Sort keys by numeric prefix; skip invalid keys individually
     auto sortedKeys = resolved.keys.array.sort!((a, b) => a < b);
     foreach (key; sortedKeys) {
         if (key.length < 3 || key[2] != '_') {
@@ -178,7 +170,6 @@ string[] buildRunArgs(SandboxConfig config, AbsolutePath workArea,
         }
     }
 
-    // Append image name and command
     args ~= [entry.name, "sh", "-c", command.join(" ")];
 
     return args;
@@ -197,11 +188,6 @@ private struct CollectedOutput {
 /// Template accepts any range of DrainElement (streaming range or materialized array).
 CollectedOutput collectOutputLimited(R)(R elems, long maxOutputBytes) @safe
         if (isInputRange!R) {
-    // because of the logic in the function stdoutApp and stderrApp may contain
-    // a couple of bytes more than maxOutputBytes but that is okey because a
-    // couple of bytes over the limit is no problem. The limit try to guard
-    // against Mbyte of data over the limit. A couple of hundreds of byte is no
-    // problem.
     auto stdoutApp = appender!(char[])();
     auto stderrApp = appender!(char[])();
 
@@ -243,7 +229,6 @@ private bool canFindExecutable(string name) {
     import std.path : dirSeparator;
     import my.file : whichFromEnv;
 
-    // If name contains a path separator, check it directly
     if (canFind(name, dirSeparator)) {
         return exists(name);
     }

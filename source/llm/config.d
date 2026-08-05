@@ -129,7 +129,7 @@ struct SandboxConfig {
 struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
-    /// LLM save a memory to this file which is used between runs.
+    /// LLM saves memories to this area, persisted between runs.
     Path[] memoryArea;
 
     bool noMemory;
@@ -212,7 +212,7 @@ struct LlmConfig {
 
     RagConfig ragConfig;
 
-    /// Searched for in promptDir
+    /// Agent prompt filename searched for in promptDir.
     string agentPrompt = "AGENT.md";
 
     CodeModelConfig[] codeModels;
@@ -457,8 +457,7 @@ struct LlmConfig {
         });
     }
 
-    // Compose system prompt with skills
-    // Composition order: basePrompt → alwaysApplyBlock → agentMdSummary → ragInstruction → memory → timestamp → manifestXml
+    /// Compose system prompt: basePrompt → alwaysApplyBlock → agentMdSummary → ragInstruction → manifestXml.
     string getPrompt(SkillManager skillManager, string promptName = null,
             bool addSkills = true, string agentMdSummary = null) {
         import std.string : strip;
@@ -475,11 +474,9 @@ struct LlmConfig {
         if (!disableSkills && addSkills) {
             alwaysApplyBlock = buildAlwaysApplyBlock(skillManager.getAlwaysApplySkills(),
                     maxAlwaysApplyTokens);
-
             manifestXml = skillManager.getManifestXml(maxManifestSkills);
         }
 
-        // Build the prompt in the defined composition order
         bool hasAgentMd = !agentMdSummary.empty;
         string ragInstruction = hasAgentMd ? AgentMdRagInstruction : "";
 
@@ -862,25 +859,21 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
     }
 
     void layerTwoLoad() {
-        // Layer 2: Overlay config
-        // Security: If workArea resolves to CWD, skip loading .llmfun.json from CWD
-        // unless --trusted-config is explicitly set. This prevents an agent from
-        // writing a malicious config file in the workarea.
+        // Layer 2: Overlay config. Skip CWD config if workArea == CWD unless --trusted-config.
         Path overlayPath;
+
         if (!path.empty) {
             overlayPath = path; // from -c/--config (explicit path, always trusted)
         } else if (!noCwdConfig) {
             // Determine effective workArea for the CWD check.
             // CLI-specified workArea (-w) takes priority over config file workArea.
             Path effectiveWorkArea = !userCliWorkArea.empty ? userCliWorkArea : conf.workArea;
-
-            // Check if effective workArea equals "." or matches the current working directory.
             bool workAreaIsCwd = effectiveWorkArea.toString.among(".", "./")
                 || AbsolutePath(effectiveWorkArea) == AbsolutePath(cwd);
             if (workAreaIsCwd && !trustedConfig) {
                 logger.warningf(!silent, "Skipping CWD config: workarea equals CWD (%s). Use --trusted-config to allow loading .llmfun.json from CWD, or --no-cwd-config to suppress this warning.",
                         cwd);
-                overlayPath = Path(""); // Skip overlay loading
+                overlayPath = Path.init;
             } else {
                 overlayPath = buildPath(cwd, ".llmfun.json").Path;
             }
@@ -910,8 +903,6 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
     conf.resolvePaths(!noCwdConfig);
     conf.loadState();
 
-    // Validate defaultOptions from config layers
-    // Always validate, even if no catalog file is configured
     conf.sandboxConfig.defaultOptions = validateAndCleanupOptions(
             conf.sandboxConfig.defaultOptions, "config defaultOptions");
 
@@ -924,7 +915,6 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
         ImageCatalogEntry[] systemEntries;
         CatalogState systemState = CatalogState.notConfigured;
 
-        // Load system catalog (layer 1)
         if (!conf.sandboxConfig.systemImageCatalogFile.empty) {
             try {
                 auto systemPath = AbsolutePath(buildPath(configDir,
@@ -937,7 +927,6 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
             }
         }
 
-        // Load user catalog (layer 2)
         ImageCatalogEntry[] userEntries;
         CatalogState userState = CatalogState.notConfigured;
         if (!conf.sandboxConfig.userImageCatalogFile.empty) {
@@ -952,16 +941,13 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
             }
         }
 
-        // Merge: seed with user entries (they take priority), then fill in system entries
         if (systemState == CatalogState.loaded || userState == CatalogState.loaded) {
             ImageCatalogEntry[string] merged;
 
-            // Seed with user entries (they take priority over system entries)
             foreach (entry; userEntries.filter!(a => a.name !in merged)) {
                 merged[entry.name] = entry;
             }
 
-            // Fill in system entries not overridden by user
             foreach (entry; systemEntries.filter!(a => a.name !in merged)) {
                 merged[entry.name] = entry;
             }
@@ -998,7 +984,6 @@ private EmbedConfig jsonToEmbedConfig(JSONValue json) {
 auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
     import std.traits;
 
-    // Helper: extract inner type from Nullable!T, or void if not Nullable
     template NullableInner(T) {
         static if (is(T == Nullable!U_, U_))
             alias NullableInner = U_;
@@ -1006,7 +991,6 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
             alias NullableInner = void;
     }
 
-    // Helper: check if type is Nullable!Something
     template isNullableType(T) {
         enum isNullableType = is(T == Nullable!U_, U_);
     }
