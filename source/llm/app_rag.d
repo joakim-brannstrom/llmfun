@@ -27,7 +27,8 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     if (conf.setupDirs) {
         makeLocalSetupFileStructure(LlmConfig.init, rag: true);
     }
-    auto llmConf = readConfig(uconf.config, false, uconf.noCwdConfig).userToLlmConfig(conf);
+    auto llmConf = readConfig(uconf.config, false, uconf.noCwdConfig, uconf.trustedConfig)
+        .userToLlmConfig(conf);
 
     auto rag = createRag(llmConf);
     if (rag is null)

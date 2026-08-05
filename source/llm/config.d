@@ -1,15 +1,16 @@
 module llm.config;
 
 import logger = std.logger;
-import std.algorithm : filter, map;
+import std.algorithm : filter, map, sort, among;
 import std.array : array, empty, appender, join;
 import std.conv : to, text;
-import std.file : readText, exists, mkdirRecurse, rename, rmdirRecurse;
-import std.format : format;
 import std.datetime : Clock;
+import std.file : readText, exists, mkdirRecurse, rename, rmdirRecurse, thisExePath;
+import std.format : format;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
-import std.sumtype : SumType, match;
+import std.path : dirName;
 import std.string : toLower, startsWith;
+import std.sumtype : SumType, match;
 import std.typecons : Nullable;
 
 import my.path;
@@ -67,14 +68,11 @@ struct ImageCatalogEntry {
     /// Tags for categorization and filtering (e.g., ["python", "dev"])
     string[] tags;
 
-    /// If set the workarea is mounted inside the container at this destination
-    string workareaMountDest;
-
-    /// Mount the containers root filesystem read-only
-    bool readOnly = true;
-
-    /// If network is allowed
-    bool allowNetwork;
+    /// Per-image container options as tag -> CLI arguments map.
+    /// Keys are logical group names (e.g., "security", "network", "mounts").
+    /// Values are arrays of CLI arguments flattened into the command line.
+    /// Overrides defaultOptions for matching tag keys.
+    string[][string] options;
 
     invariant {
         assert(name.length > 0, "ImageCatalogEntry name must not be empty");
@@ -83,11 +81,11 @@ struct ImageCatalogEntry {
 
 /// Loading state of the image catalog.
 enum CatalogState {
-    /// No catalog file configured - falls back to allowedImages
+    /// No catalog file configured - no images allowed
     notConfigured,
     /// Catalog loaded successfully - validates against it
     loaded,
-    /// Catalog file existed but failed to parse - falls back to allowedImages
+    /// Catalog file existed but failed to parse - no images allowed
     loadFailed
 }
 
@@ -98,29 +96,25 @@ struct SandboxConfig {
     /// Default container image when none specified
     string defaultImage;
 
-    /// Execution timeout in seconds
+    /// Subprocess execution timeout in seconds
     long timeoutSeconds = 60;
 
-    /// Memory limit for containers (e.g., "256m", "1g")
-    string memoryLimit = "256m";
-
-    /// CPU limit for containers (e.g., "0.5", "1", "2")
-    string cpuLimit = "0.5";
-
-    /// tmpfs mount options for /tmp inside container
-    string tmpfsOptions = "rw,noexec,nosuid,size=64m";
-
-    /// User namespace mapping (UID:GID)
-    string userNs = "1000:1000";
+    /// Default container options as tag -> CLI arguments map.
+    /// Keys are logical group names (e.g., "security", "network", "mounts").
+    /// Values are arrays of CLI arguments flattened into the command line.
+    string[][string] defaultOptions;
 
     /// Maximum output bytes per stream (stdout/stderr)
     long maxOutputBytes = 1_048_576;
 
-    /// Curated image catalog entries (loaded from imageCatalogFile at startup)
+    /// Curated image catalog entries (loaded from catalog files at startup)
     ImageCatalogEntry[] imageCatalog;
 
-    /// Path to image catalog JSON file (relative to config directory)
-    string imageCatalogFile;
+    /// Path to system image catalog JSON file (relative to config directory)
+    string systemImageCatalogFile;
+
+    /// Path to user image catalog JSON file (relative to config directory)
+    string userImageCatalogFile;
 
     /// Loading state of the image catalog
     CatalogState catalogState = CatalogState.notConfigured;
@@ -177,13 +171,14 @@ struct LlmConfig {
                 memoryArea ~= a.get;
             }, (_) {});
         } else {
-            memoryArea = memoryArea.map!(a => replaceMagicWord(a)).array;
+            memoryArea = memoryArea.map!(a => replaceMagicWord(a,
+                    workArea.AbsolutePath).Path).array;
         }
 
         if (promptDir.empty) {
             promptDir = prioConfCwdDirs.map!(a => cast(Path)(a ~ "prompt")).array;
         } else {
-            promptDir = promptDir.map!(a => replaceMagicWord(a)).array;
+            promptDir = promptDir.map!(a => replaceMagicWord(a, workArea.AbsolutePath).Path).array;
         }
 
         if (skillPathsSystem.empty) {
@@ -193,9 +188,11 @@ struct LlmConfig {
                 skillPathsSystem ~= a.get;
             }, (_) {});
         } else {
-            skillPathsSystem = skillPathsSystem.map!(a => replaceMagicWord(a)).array;
+            skillPathsSystem = skillPathsSystem.map!(a => replaceMagicWord(a,
+                    workArea.AbsolutePath).Path).array;
         }
-        skillPathsUser = skillPathsUser.map!(a => replaceMagicWord(a)).array;
+        skillPathsUser = skillPathsUser.map!(a => replaceMagicWord(a,
+                workArea.AbsolutePath).Path).array;
 
         if (scratchArea == Path.init) {
             scratchArea = prioDataCwdDirs.resolve("scratch".Path)
@@ -565,7 +562,7 @@ struct RagFilter {
 struct CodeModelConfig {
     ServerConfig server;
     string name;
-    double temp;
+    double temp = 0.0;
     long contextSize;
     long maxTokens;
     long reasoningBudget;
@@ -576,7 +573,7 @@ struct SummaryModelConfig {
     ServerConfig server;
     string name;
     string prompt = "SUMMARY.md";
-    double temp;
+    double temp = 0.0;
     long contextSize;
     long contextChunkSize = 32768;
     long reasoningBudget;
@@ -588,7 +585,7 @@ struct VisionModelConfig {
     ServerConfig server;
     string name;
     string systemPrompt;
-    double temp;
+    double temp = 0.0;
     long contextSize;
     long maxTokens;
     long reasoningBudget;
@@ -663,15 +660,41 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
     // dfmt on
 }
 
+// remove all invalid keys from image options
+private string[][string] validateAndCleanupOptions(string[][string] options, string name) @safe {
+    string[] invalidKeys;
+    foreach (key; options.byKey) {
+        if (key.length < 3 || key[2] != '_') {
+            invalidKeys ~= key;
+        } else {
+            try {
+                auto _ = key[0 .. 2].to!int;
+            } catch (Exception e) {
+                invalidKeys ~= key;
+            }
+        }
+    }
+
+    if (!invalidKeys.empty) {
+        logger.warningf(
+                "Configuration for '%s' has invalid option key(s) removed. Keys must be prefixed with <NR>_: %s",
+                name, invalidKeys);
+    }
+    foreach (key; invalidKeys) {
+        options.remove(key);
+    }
+
+    return options;
+}
+
 /// Load the image catalog from a JSON file.
 /// Supports wrapper object with version + entries formats.
 /// Updates state to reflect loading outcome.
 ImageCatalogEntry[] loadImageCatalog(Path filePath, ref CatalogState state) {
-    import my.set : Set;
     import llm.utility : getValue;
 
     if (!filePath.exists) {
-        logger.warningf("Image catalog file not found: %s - falling back to allow-list", filePath);
+        logger.warningf("Image catalog file not found: %s - no images will be available", filePath);
         state = CatalogState.notConfigured;
         return null;
     }
@@ -680,7 +703,7 @@ ImageCatalogEntry[] loadImageCatalog(Path filePath, ref CatalogState state) {
     try {
         content = readText(filePath);
     } catch (Exception e) {
-        logger.warningf("Failed to read image catalog %s: %s - falling back to allow-list",
+        logger.warningf("Failed to read image catalog %s: %s - no images will be available",
                 filePath, e.msg);
         state = CatalogState.loadFailed;
         return null;
@@ -690,7 +713,7 @@ ImageCatalogEntry[] loadImageCatalog(Path filePath, ref CatalogState state) {
     try {
         json = parseJSON(content);
     } catch (Exception e) {
-        logger.warningf("Failed to parse image catalog %s: %s - falling back to allow-list",
+        logger.warningf("Failed to parse image catalog %s: %s - no images will be available",
                 filePath, e.msg);
         state = CatalogState.loadFailed;
         return [];
@@ -709,21 +732,19 @@ ImageCatalogEntry[] loadImageCatalog(Path filePath, ref CatalogState state) {
             }
         }
     } else {
-        logger.warningf("Image catalog %s has invalid format - expected v1 object with 'entries' field. Falling back to allow-list.",
+        logger.warningf("Image catalog %s has invalid format - expected v1 object with 'entries' field. No images will be available.",
                 filePath);
         state = CatalogState.loadFailed;
         return null;
     }
     if (entriesJson.type != JSONType.ARRAY) {
-        logger.warningf("Image catalog entries in %s is not an array - falling back to allow-list",
+        logger.warningf("Image catalog entries in %s is not an array - no images will be available",
                 filePath);
         state = CatalogState.loadFailed;
         return null;
     }
 
-    ImageCatalogEntry[] result;
-    Set!string seenNames;
-
+    ImageCatalogEntry[string] result;
     foreach (entry; entriesJson.array) {
         if (entry.type != JSONType.OBJECT) {
             logger.warningf("Skipping non-object entry in image catalog");
@@ -738,28 +759,55 @@ ImageCatalogEntry[] loadImageCatalog(Path filePath, ref CatalogState state) {
         }
 
         // Check for duplicates
-        if (name in seenNames) {
+        if (name in result) {
             logger.warningf("Duplicate image name in catalog '%s' - keeping first occurrence",
                     name);
             continue;
         }
-        seenNames.add(name);
 
         // Parse optional fields
-        string workareaMountDest = getValue(entry, (v) => v["workareaMountDest"].str, null);
-        bool readOnly = getValue(entry, (v) => v["readOnly"].boolean,
-                ImageCatalogEntry.init.readOnly);
-        bool allowNetwork = getValue(entry, (v) => v["allowNetwork"].boolean,
-                ImageCatalogEntry.init.allowNetwork);
         string description = getValue(entry, (v) => v["description"].str, null);
         string[] tags = getValue(entry, (v) => v["tags"].array, null).filter!(
                 a => a.type == JSONType.STRING)
             .map!(a => a.str)
             .array;
 
-        result ~= ImageCatalogEntry(name: name, description: description, tags: tags,
-                workareaMountDest: workareaMountDest, readOnly: readOnly,
-                allowNetwork: allowNetwork);
+        // Parse options as string[string[]] map
+        string[][string] options;
+        if ("options" in entry) {
+            auto optJson = entry["options"];
+            if (optJson.type == JSONType.OBJECT) {
+                foreach (key, val; optJson.object) {
+                    if (val.type == JSONType.ARRAY) {
+                        string[] arr;
+                        foreach (item; val.array) {
+                            if (item.type == JSONType.STRING) {
+                                arr ~= item.str;
+                            } else {
+                                logger.warningf("Skipping non-string item in options['%s'] for image '%s'",
+                                        key, name);
+                            }
+                        }
+                        if (arr.empty && val.array.length > 0) {
+                            logger.warningf("All items in options['%s'] for image '%s' were non-string and skipped",
+                                    key, name);
+                        }
+                        if (!arr.empty) {
+                            options[key] = arr;
+                        }
+                    } else {
+                        logger.warningf("Skipping non-array value for options['%s'] in image '%s'",
+                                key, name);
+                    }
+                }
+                options = validateAndCleanupOptions(options, name);
+            } else {
+                logger.warningf("Invalid options format for image '%s' - expected object", name);
+            }
+        }
+
+        result[name] = ImageCatalogEntry(name: name, description: description,
+                tags: tags, options: options);
     }
 
     if (result.length > 100) {
@@ -770,58 +818,91 @@ ImageCatalogEntry[] loadImageCatalog(Path filePath, ref CatalogState state) {
     state = CatalogState.loaded;
     logger.infof("Loaded %s entries from image catalog %s", result.length, filePath);
 
-    return result;
+    return result.byValue.array;
 }
 
-LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig = false) {
+LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig,
+        bool trustedConfig, Path userCliWorkArea = Path.init) {
+    import std.file : getcwd;
     import std.process : environment;
-    import std.path : dirName;
     import my.xdg : xdgConfigHome;
+
+    auto systemConfigPath = environment.get("LLMFUN_DEFAULT_CONFIG",
+            (xdgConfigHome ~ Path(ProgramName) ~ Path("config.json")).toString).Path;
+    return readConfigInternal(path: path, silent: silent, noCwdConfig: noCwdConfig, trustedConfig: trustedConfig,
+            userCliWorkArea: userCliWorkArea, cwd: Path(getcwd()),
+            systemConfigPath: systemConfigPath);
+}
+
+private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdConfig,
+        bool trustedConfig, Path userCliWorkArea = Path.init, Path cwd = Path.init,
+        Path systemConfigPath = Path.init) {
+    import std.path : buildPath, dirName;
 
     LlmConfig conf;
     bool loadedAnyFile = false;
     string configDir = "."; // Directory of the last successfully loaded config file
 
-    // Layer 1: Base config from LLMFUN_DEFAULT_CONFIG
-    auto basePath = environment.get("LLMFUN_DEFAULT_CONFIG",
-            (xdgConfigHome ~ Path(ProgramName) ~ Path("config.json")).toString).Path;
-    if (basePath.exists) {
-        logger.infof(!silent, "Reading base configuration from %s", basePath);
-        try {
-            conf = jsonToLlmConfig(conf, readText(basePath.toString).parseJSON);
-            loadedAnyFile = true;
-            configDir = basePath.dirName;
-        } catch (Exception e) {
-            logger.errorf(!silent, "Failed to parse base config %s: %s", basePath, e.msg);
+    void layerOneLoad() {
+        // Layer 1: Base config from LLMFUN_DEFAULT_CONFIG
+        if (systemConfigPath.exists) {
+            logger.infof(!silent, "Reading base configuration from %s", systemConfigPath);
+            try {
+                conf = jsonToLlmConfig(conf, readText(systemConfigPath).parseJSON);
+                loadedAnyFile = true;
+                configDir = systemConfigPath.dirName;
+            } catch (Exception e) {
+                logger.errorf(!silent, "Failed to parse base config %s: %s",
+                        systemConfigPath, e.msg);
+            }
+        } else {
+            logger.infof(!silent,
+                    "No base configuration found (LLMFUN_DEFAULT_CONFIG not set or file missing)");
         }
-    } else {
-        logger.infof(!silent,
-                "No base configuration found (LLMFUN_DEFAULT_CONFIG not set or file missing)");
     }
 
-    // Layer 2: Overlay config
-    Path overlayPath;
-    if (!path.empty) {
-        overlayPath = path; // from -c/--config
-    } else if (!noCwdConfig) {
-        overlayPath = Path(".llmfun.json");
-    } else {
-        logger.infof(!silent, "Skipping project configuration (--no-cwd-config)");
-    }
+    void layerTwoLoad() {
+        // Layer 2: Overlay config
+        // Security: If workArea resolves to CWD, skip loading .llmfun.json from CWD
+        // unless --trusted-config is explicitly set. This prevents an agent from
+        // writing a malicious config file in the workarea.
+        Path overlayPath;
+        if (!path.empty) {
+            overlayPath = path; // from -c/--config (explicit path, always trusted)
+        } else if (!noCwdConfig) {
+            // Determine effective workArea for the CWD check.
+            // CLI-specified workArea (-w) takes priority over config file workArea.
+            Path effectiveWorkArea = !userCliWorkArea.empty ? userCliWorkArea : conf.workArea;
 
-    if (!overlayPath.empty && overlayPath.exists) {
-        logger.infof(!silent, "Reading project configuration from %s", overlayPath);
-        try {
-            conf = jsonToLlmConfig(conf, readText(overlayPath.toString).parseJSON);
-            loadedAnyFile = true;
-            configDir = overlayPath.dirName;
-        } catch (Exception e) {
-            logger.errorf(!silent, "Failed to parse project config %s: %s", overlayPath, e.msg);
+            // Check if effective workArea equals "." or matches the current working directory.
+            bool workAreaIsCwd = effectiveWorkArea.toString.among(".", "./")
+                || AbsolutePath(effectiveWorkArea) == AbsolutePath(cwd);
+            if (workAreaIsCwd && !trustedConfig) {
+                logger.warningf(!silent, "Skipping CWD config: workarea equals CWD (%s). Use --trusted-config to allow loading .llmfun.json from CWD, or --no-cwd-config to suppress this warning.",
+                        cwd);
+                overlayPath = Path(""); // Skip overlay loading
+            } else {
+                overlayPath = buildPath(cwd, ".llmfun.json").Path;
+            }
         }
-    } else if (!overlayPath.empty) {
-        logger.infof(!silent, "No project configuration found at %s", overlayPath);
+
+        if (!overlayPath.empty && overlayPath.exists) {
+            logger.infof(!silent, "Reading project configuration from %s", overlayPath);
+            try {
+                conf = jsonToLlmConfig(conf, readText(overlayPath.toString).parseJSON);
+                loadedAnyFile = true;
+                configDir = overlayPath.dirName;
+            } catch (Exception e) {
+                logger.errorf(!silent,
+                        "Failed to parse project config %s: %s", overlayPath, e.msg);
+            }
+        } else if (!overlayPath.empty) {
+            logger.infof(!silent, "No project configuration found at %s", overlayPath);
+        }
     }
 
+    layerOneLoad();
+    layerTwoLoad();
     if (loadedAnyFile) {
         validateConfig(conf);
     }
@@ -829,21 +910,68 @@ LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig = false) {
     conf.resolvePaths(!noCwdConfig);
     conf.loadState();
 
-    // Load image catalog if configured
-    if (!conf.sandboxConfig.imageCatalogFile.empty) {
-        // Determine config directory for resolving relative paths
-        try {
-            import std.path : buildPath;
+    // Validate defaultOptions from config layers
+    // Always validate, even if no catalog file is configured
+    conf.sandboxConfig.defaultOptions = validateAndCleanupOptions(
+            conf.sandboxConfig.defaultOptions, "config defaultOptions");
 
-            auto catalogPath = AbsolutePath(buildPath(configDir,
-                    conf.sandboxConfig.imageCatalogFile));
-            conf.sandboxConfig.imageCatalog = loadImageCatalog(catalogPath,
-                    conf.sandboxConfig.catalogState);
-        } catch (Exception e) {
-            logger.warningf("Failed to validate catalog path '%s': %s - falling back to allow-list",
-                    conf.sandboxConfig.imageCatalogFile, e.msg);
-            conf.sandboxConfig.catalogState = CatalogState.notConfigured;
+    // Load image catalogs: system layer 1, user layer 2
+    // User catalog entries override system entries with the same name
+    if (!conf.sandboxConfig.systemImageCatalogFile.empty
+            || !conf.sandboxConfig.userImageCatalogFile.empty) {
+        import std.path : buildPath;
+
+        ImageCatalogEntry[] systemEntries;
+        CatalogState systemState = CatalogState.notConfigured;
+
+        // Load system catalog (layer 1)
+        if (!conf.sandboxConfig.systemImageCatalogFile.empty) {
+            try {
+                auto systemPath = AbsolutePath(buildPath(configDir,
+                        conf.sandboxConfig.systemImageCatalogFile));
+                systemEntries = loadImageCatalog(systemPath, systemState);
+            } catch (Exception e) {
+                logger.warningf("Failed to load system image catalog '%s': %s",
+                        conf.sandboxConfig.systemImageCatalogFile, e.msg);
+                systemState = CatalogState.loadFailed;
+            }
         }
+
+        // Load user catalog (layer 2)
+        ImageCatalogEntry[] userEntries;
+        CatalogState userState = CatalogState.notConfigured;
+        if (!conf.sandboxConfig.userImageCatalogFile.empty) {
+            try {
+                auto userPath = AbsolutePath(buildPath(configDir,
+                        conf.sandboxConfig.userImageCatalogFile));
+                userEntries = loadImageCatalog(userPath, userState);
+            } catch (Exception e) {
+                logger.warningf("Failed to load user image catalog '%s': %s",
+                        conf.sandboxConfig.userImageCatalogFile, e.msg);
+                userState = CatalogState.loadFailed;
+            }
+        }
+
+        // Merge: seed with user entries (they take priority), then fill in system entries
+        if (systemState == CatalogState.loaded || userState == CatalogState.loaded) {
+            ImageCatalogEntry[string] merged;
+
+            // Seed with user entries (they take priority over system entries)
+            foreach (entry; userEntries.filter!(a => a.name !in merged)) {
+                merged[entry.name] = entry;
+            }
+
+            // Fill in system entries not overridden by user
+            foreach (entry; systemEntries.filter!(a => a.name !in merged)) {
+                merged[entry.name] = entry;
+            }
+
+            conf.sandboxConfig.imageCatalog = merged.byValue.array;
+            conf.sandboxConfig.catalogState = CatalogState.loaded;
+        } else {
+            conf.sandboxConfig.catalogState = CatalogState.loadFailed;
+        }
+
     }
 
     return conf;
@@ -959,6 +1087,14 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                         } else static if (isIntegral!Type) {
                             __traits(getMember, conf, llmMemberName) = cast(Type) json[llmMemberName]
                                 .integer;
+                        } else static if (is(Type == string[][string])) {
+                            foreach (key, ref JSONValue valArr; json[llmMemberName].object) {
+                                string[] vals;
+                                foreach (v; valArr.array) {
+                                    vals ~= v.str;
+                                }
+                                __traits(getMember, conf, llmMemberName)[key] = vals;
+                            }
                         } else static if (is(Type : string[])) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(a => a.str)
                                 .array;
@@ -1090,19 +1226,104 @@ string getEnvApiKey() {
     return environment.get("OPENAI_API_KEY", null);
 }
 
-auto replaceMagicWord(T)(T variable) {
-    import std.file : thisExePath;
+/// Replace magic words in text with actual paths.
+/// Supports @{llmfun} (binary directory) and @{llmfun_workarea} (workarea path).
+auto replaceMagicWord(T)(T variable, AbsolutePath workArea) @safe nothrow {
     import std.path : dirName;
+    import std.file : thisExePath;
     import std.string : replace;
 
     immutable BinaryMagic = "@{llmfun}";
-    auto binaryDir = thisExePath.dirName;
+    immutable WorkareaMagic = "@{llmfun_workarea}";
 
+    string s;
     static if (is(T == Path) || is(T == AbsolutePath)) {
-        return T(variable.toString.replace(BinaryMagic, binaryDir));
+        s = variable.toString;
     } else {
-        return variable.replace(BinaryMagic, binaryDir);
+        s = variable;
     }
+
+    auto result = s.replace(WorkareaMagic, workArea.toString);
+    try {
+        result = result.replace(BinaryMagic, thisExePath.dirName);
+    } catch (Exception e) {
+        try {
+            logger.warningf("Unable to replace %s with llmfun executables path in variable with content: %s",
+                    WorkareaMagic, variable);
+        } catch (Exception e) {
+        }
+    }
+
+    static if (!is(T : string))
+        return T(result);
+    else
+        return result;
+}
+
+/// Apply magic word substitution to all values in an options map.
+/// Keys are not modified. Supports @{llmfun} and @{llmfun_workarea}.
+string[][string] replaceContainerMagicWords(string[][string] options, AbsolutePath workArea) @safe nothrow {
+    string[][string] result;
+    foreach (key, values; options) {
+        string[] newValues;
+        foreach (v; values) {
+            newValues ~= replaceMagicWord(v, workArea);
+        }
+        result[key] = newValues;
+    }
+    return result;
+}
+
+/// Test: @{llmfun_workarea} replaced with workarea path.
+unittest {
+    auto result = replaceMagicWord!string("@{llmfun_workarea}/file.txt",
+            AbsolutePath("/my/workarea"));
+    assert(result == "/my/workarea/file.txt", result);
+}
+
+/// Test: @{llmfun} replaced with binary directory.
+unittest {
+    auto result = replaceMagicWord!string("@{llmfun}/bin/tool", AbsolutePath("/my/workarea"));
+    assert(result == i"$(thisExePath.dirName)/bin/tool".text);
+}
+
+/// Test: both magic words in same value.
+unittest {
+    auto result = replaceMagicWord!string(
+            "-v @{llmfun_workarea}:/work -v @{llmfun}/data:/data", AbsolutePath("/my/work"));
+    assert(result == i"-v /my/work:/work -v $(thisExePath.dirName)/data:/data".text);
+}
+
+/// Test: no magic words — values unchanged.
+unittest {
+    auto result = replaceMagicWord!string("just a plain string", AbsolutePath("/my/workarea"));
+    assert(result == "just a plain string");
+}
+
+/// Test: replaceContainerMagicWords with empty options returns empty.
+unittest {
+    string[][string] options;
+    auto result = replaceContainerMagicWords(options, AbsolutePath("/work"));
+    assert(result.length == 0);
+}
+
+/// Test: keys are not modified in replaceContainerMagicWords.
+unittest {
+    string[][string] options;
+    options["@{llmfun_workarea}"] = ["@{llmfun_workarea}/path"];
+    auto result = replaceContainerMagicWords(options, AbsolutePath("/work"));
+    assert(result.length == 1);
+    assert(result["@{llmfun_workarea}"][0] == "/work/path");
+}
+
+/// Test: multiple values in array each processed.
+unittest {
+    string[][string] options;
+    options["mounts"] = ["-v", "@{llmfun_workarea}:/w", "@{llmfun}/data:/d"];
+    auto result = replaceContainerMagicWords(options, AbsolutePath("/work"));
+    assert(result["mounts"][0] == "-v");
+    assert(result["mounts"][1] == "/work:/w");
+    assert(result["mounts"][2] == i"$(thisExePath.dirName)/data:/d".text);
 }
 
 /// Test: loadImageCatalog returns empty array when file not found.
@@ -1145,7 +1366,7 @@ unittest {
     File(tmpFile, "w").write(json);
 
     CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
+    auto result = loadImageCatalog(tmpFile.Path, state).sort!((a, b) => a.name < b.name).array;
     assert(state == CatalogState.loaded);
     assert(result.length == 2);
     assert(result[0].name == "alpine:latest");
@@ -1170,15 +1391,15 @@ unittest {
     File(tmpFile, "w").write(json);
 
     CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
+    auto result = loadImageCatalog(tmpFile.Path, state).sort!((a, b) => a.name < b.name).array;
     assert(state == CatalogState.loaded);
     assert(result.length == 3);
     assert(result[0].description == "");
     assert(result[0].tags.length == 0);
-    assert(result[1].description == "Python runtime");
-    assert(result[1].tags.length == 0);
-    assert(result[2].tags.length == 1);
-    assert(result[2].tags[0] == "nodejs");
+    assert(result[1].tags.length == 1);
+    assert(result[1].tags[0] == "nodejs");
+    assert(result[2].description == "Python runtime");
+    assert(result[2].tags.length == 0);
 }
 
 /// Test: loadImageCatalog skips entries with missing or empty name.
@@ -1195,7 +1416,7 @@ unittest {
     File(tmpFile, "w").write(json);
 
     CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
+    auto result = loadImageCatalog(tmpFile.Path, state).sort!((a, b) => a.name < b.name).array;
     assert(state == CatalogState.loaded);
     assert(result.length == 2);
     assert(result[0].name == "alpine:latest");
@@ -1216,7 +1437,7 @@ unittest {
     File(tmpFile, "w").write(json);
 
     CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
+    auto result = loadImageCatalog(tmpFile.Path, state).sort!((a, b) => a.name < b.name).array;
     assert(state == CatalogState.loaded);
     assert(result.length == 1);
     assert(result[0].description == "First");
@@ -1345,4 +1566,335 @@ unittest {
     assert(result.length == 1);
     assert(state == CatalogState.loaded);
     assert(result[0].name == "alpine:latest");
+}
+
+/// Test: jsonToConfig parses string[][string] correctly.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    struct TestConfig {
+        string[][string] options;
+    }
+
+    auto tmpDir = buildPath("llmfun_test", "config_" ~ __LINE__.to!string);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.json");
+    string json = `{"options":{"security":["--read-only"],"network":["--network","none"]}}`;
+    File(tmpFile, "w").write(json);
+    auto conf = jsonToConfig!(TestConfig)(TestConfig.init, parseJSON(readText(tmpFile)));
+    assert(conf.options.length == 2);
+    assert(conf.options["security"] == ["--read-only"]);
+    assert(conf.options["network"] == ["--network", "none"]);
+}
+
+/// Test: loadImageCatalog parses options field correctly.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "catalog_1527");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "catalog.json");
+    string json = `{
+        "version": 1,
+        "entries": [
+            {
+                "name": "alpine:latest",
+                "description": "Minimal Linux",
+                "tags": ["linux"],
+                "options": {
+                    "02_security": ["--read-only"],
+                    "03_network": ["--network", "none"],
+                    "05_mounts": ["-v", "/host:/workarea"]
+                }
+            }
+        ]
+    }`;
+    File(tmpFile, "w").write(json);
+
+    CatalogState state;
+    auto result = loadImageCatalog(tmpFile.Path, state);
+    assert(state == CatalogState.loaded);
+    assert(result.length == 1);
+    assert(result[0].name == "alpine:latest");
+    assert(result[0].options.length == 3);
+    assert(result[0].options["02_security"] == ["--read-only"]);
+    assert(result[0].options["03_network"] == ["--network", "none"]);
+    assert(result[0].options["05_mounts"] == ["-v", "/host:/workarea"]);
+}
+
+/// Test: loadImageCatalog entry with no options gets empty options map.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "catalog_1566");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "catalog.json");
+    string json = `{
+        "version": 1,
+        "entries": [
+            {
+                "name": "alpine:latest",
+                "description": "No options"
+            }
+        ]
+    }`;
+    File(tmpFile, "w").write(json);
+
+    CatalogState state;
+    auto result = loadImageCatalog(tmpFile.Path, state);
+    assert(state == CatalogState.loaded);
+    assert(result.length == 1);
+    assert(result[0].options.length == 0);
+}
+
+/// Test: loadImageCatalog handles invalid options format (non-object).
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "catalog_1597");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "catalog.json");
+    // options is a string instead of an object
+    string json = `{
+        "version": 1,
+        "entries": [
+            {
+                "name": "alpine:latest",
+                "options": "invalid"
+            }
+        ]
+    }`;
+    File(tmpFile, "w").write(json);
+
+    CatalogState state;
+    auto result = loadImageCatalog(tmpFile.Path, state);
+    // Should still load, but with empty options (warning logged)
+    assert(state == CatalogState.loaded);
+    assert(result.length == 1);
+    assert(result[0].options.length == 0);
+}
+
+/// Test: loadImageCatalog handles invalid options value (non-array).
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "catalog_1626");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "catalog.json");
+    // options value is a string instead of an array
+    string json = `{
+        "version": 1,
+        "entries": [
+            {
+                "name": "alpine:latest",
+                "options": {
+                    "security": "--read-only"
+                }
+            }
+        ]
+    }`;
+    File(tmpFile, "w").write(json);
+
+    CatalogState state;
+    auto result = loadImageCatalog(tmpFile.Path, state);
+    // Should still load, but skip the invalid value
+    assert(state == CatalogState.loaded);
+    assert(result.length == 1);
+    assert(result[0].options.length == 0);
+}
+
+/// Test: loadImageCatalog handles mixed valid/invalid items in options array.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "catalog_1655");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "catalog.json");
+    // Array contains both strings and non-strings
+    string json = `{
+        "version": 1,
+        "entries": [
+            {
+                "name": "alpine:latest",
+                "options": {
+                    "02_security": ["--read-only", 123, "--network", "none"]
+                }
+            }
+        ]
+    }`;
+    File(tmpFile, "w").write(json);
+
+    CatalogState state;
+    auto result = loadImageCatalog(tmpFile.Path, state);
+    assert(state == CatalogState.loaded);
+    assert(result.length == 1);
+    // Only string items should be kept
+    assert(result[0].options["02_security"] == [
+        "--read-only", "--network", "none"
+    ]);
+}
+
+/// Test: two catalog files loaded and merged via readConfig.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "catalog_1688");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    // System catalog
+    auto systemFile = buildPath(tmpDir, "system_catalog.json");
+    string systemJson = `{
+        "version": 1,
+        "entries": [
+            {
+                "name": "alpine:latest",
+                "description": "System Alpine",
+                "tags": ["linux"],
+                "options": {"02_security": ["--read-only"]}
+            },
+            {
+                "name": "ubuntu:latest",
+                "description": "System Ubuntu",
+                "tags": ["linux"],
+                "options": {"03_network": ["--network", "none"]}
+            }
+        ]
+    }`;
+    File(systemFile, "w").write(systemJson);
+
+    // User catalog - overrides alpine, adds python
+    auto userFile = buildPath(tmpDir, "user_catalog.json");
+    string userJson = `{
+        "version": 1,
+        "entries": [
+            {
+                "name": "alpine:latest",
+                "description": "User Alpine Override",
+                "tags": ["linux", "user"],
+                "options": {"02_security": ["--read-only", "--no-new-privileges"]}
+            },
+            {
+                "name": "python:3.11-slim",
+                "description": "User Python",
+                "tags": ["python"],
+                "options": {"05_mounts": ["-v", "@{llmfun_workarea}:/workarea"]}
+            }
+        ]
+    }`;
+    File(userFile, "w").write(userJson);
+
+    // Config file referencing both catalogs with minimal required fields
+    auto configFile = buildPath(tmpDir, "config.json");
+    string configJson = `{
+        "codeModels": [{
+            "name": "test",
+            "server": { "url": "http://localhost:8080" }
+        }],
+        "sandboxConfig": {
+            "systemImageCatalogFile": "system_catalog.json",
+            "userImageCatalogFile": "user_catalog.json"
+        }
+    }`;
+    File(configFile, "w").write(configJson);
+
+    auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: false,
+            trustedConfig: false);
+
+    assert(conf.sandboxConfig.catalogState == CatalogState.loaded);
+    assert(conf.sandboxConfig.imageCatalog.length == 3);
+
+    // User override of alpine should be present
+    bool foundAlpine = false;
+    bool foundUbuntu = false;
+    bool foundPython = false;
+    foreach (entry; conf.sandboxConfig.imageCatalog) {
+        if (entry.name == "alpine:latest") {
+            foundAlpine = true;
+            assert(entry.description == "User Alpine Override");
+            assert(entry.options["02_security"] == [
+                "--read-only", "--no-new-privileges"
+            ]);
+        } else if (entry.name == "ubuntu:latest") {
+            foundUbuntu = true;
+            assert(entry.description == "System Ubuntu");
+        } else if (entry.name == "python:3.11-slim") {
+            foundPython = true;
+            assert(entry.description == "User Python");
+        }
+    }
+    assert(foundAlpine);
+    assert(foundUbuntu);
+    assert(foundPython);
+}
+
+/// Test: Explicit config path always loads regardless of trusted-config.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "trustedconfig_1");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    // Create a config file with a custom value we can check
+    auto configFile = buildPath(tmpDir, "test_config.json");
+    string configJson = `{"sandboxConfig":{"defaultImage":"custom:image"},"codeModels":[{"name":"test","server":{"url":"http://localhost:8080"}}]}`;
+    File(configFile, "w").write(configJson);
+
+    // Explicit config path should always load
+    auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: false,
+            trustedConfig: false);
+    assert(conf.sandboxConfig.defaultImage == "custom:image");
+}
+
+/// Test: --no-cwd-config skips CWD config entirely.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "trustedconfig_2");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto configFile = buildPath(tmpDir, ".llmfun.json");
+    string configJson = `{
+        "codeModels": [{
+            "name": "test",
+            "server": { "url": "http://localhost:8080" }
+        }],
+    }`;
+    File(configFile, "w").write(configJson);
+
+    // With --no-cwd-config, no CWD config should be loaded
+    auto conf = readConfigInternal(Path.init, silent: true, noCwdConfig: true, trustedConfig: false,
+            userCliWorkArea: tmpDir.Path, cwd: tmpDir.Path, systemConfigPath: Path.init);
+    assert(conf.codeModels.empty, "No config should have been loaded: " ~ conf.to!string);
+
+    // with trusted it should load
+    conf = readConfigInternal(Path.init, silent: true, noCwdConfig: false, trustedConfig: true,
+            userCliWorkArea: tmpDir.Path, cwd: tmpDir.Path, systemConfigPath: Path.init);
+    assert(!conf.codeModels.empty, "Config should have been loaded: " ~ conf.to!string);
 }

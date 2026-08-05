@@ -24,13 +24,18 @@
     "runtimeCli": "docker",
     "defaultImage": "alpine:latest",
     "timeoutSeconds": 60,
-    "memoryLimit": "256m",
-    "cpuLimit": "0.5",
-    "tmpfsOptions": "rw,noexec,nosuid,size=64m",
-    "userNs": "1000:1000",
     "maxOutputBytes": 1048576,
-    "allowedImages": ["llmfun/*"],
-    "imageCatalogFile": "config/image_catalog.json"
+    "defaultOptions": {
+      "00_subcommand": ["run"],
+      "01_cleanup": ["--rm"],
+      "02_user": ["--user", "1000:1000"],
+      "03_resources": ["--memory", "256m", "--cpus", "0.5"],
+      "04_tmpfs": ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"],
+      "05_timeout": ["--stop-timeout", "60"],
+      "06_network": ["--network", "none"]
+    },
+    "systemImageCatalogFile": "config/image_catalog.json",
+    "userImageCatalogFile": ""
   },
 
   "ragPrimary": {

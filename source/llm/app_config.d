@@ -30,6 +30,10 @@ struct UserConfig {
             .Description("Do not read .llmfun.json from current directory (security)"))
     bool noCwdConfig;
 
+    @(NamedArgument("trusted-config")
+            .Description("Allow loading .llmfun.json from CWD when workarea equals CWD"))
+    bool trustedConfig;
+
     @(Command("agent"))
     struct AgentChatConfig {
         @(NamedArgument("workarea", "w")

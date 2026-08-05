@@ -1,15 +1,16 @@
 module llm.tool_call.sandbox;
 
 import logger = std.logger;
-import std.algorithm : map, any, canFind, startsWith, endsWith, joiner, filter;
+import std.algorithm : map, any, canFind, startsWith, endsWith, joiner, filter, sort;
 import std.array : appender, join, empty, array;
 import std.conv : to, text;
 import std.datetime.stopwatch : StopWatch, AutoStart, dur, Duration;
 import std.digest : toHexString;
 import std.digest.md : md5Of;
 import std.exception : collectException;
-import std.file : exists;
+import std.file : exists, thisExePath;
 import std.json : JSONValue, JSONOptions;
+import std.path : dirName;
 import std.range : isInputRange;
 import std.string : replace;
 
@@ -17,7 +18,7 @@ import proc;
 
 import my.path : AbsolutePath, Path;
 
-import llm.config : SandboxConfig, ImageCatalogEntry, CatalogState;
+import llm.config : SandboxConfig, ImageCatalogEntry, CatalogState, replaceContainerMagicWords;
 import llm.tool_call;
 import llm.tool_call.utility;
 
@@ -40,32 +41,147 @@ struct ContainerResult {
     int exitCode;
 }
 
-/// Build the `docker run` / `podman run` argument array with security flags.
+/// Merge default options with image-specific overrides.
+/// Image options completely replace defaults for matching tag keys.
+/// Non-overlapping keys from both maps are preserved.
+string[][string] mergeOptions(string[][string] defaults, string[][string] overrides) @safe pure nothrow {
+    string[][string] result;
+    foreach (key, values; defaults) {
+        result[key] = values.dup;
+    }
+    foreach (key, values; overrides) {
+        result[key] = values.dup;
+    }
+    return result;
+}
+
+/// Test: mergeOptions with empty defaults and empty overrides returns empty.
+unittest {
+    string[][string] defaults;
+    string[][string] overrides;
+    auto result = mergeOptions(defaults, overrides);
+    assert(result.length == 0);
+}
+
+/// Test: mergeOptions with defaults only returns copy of defaults.
+unittest {
+    string[][string] defaults;
+    defaults["security"] = ["--read-only"];
+    defaults["network"] = ["--network", "none"];
+    string[][string] overrides;
+    auto result = mergeOptions(defaults, overrides);
+    assert(result.length == 2);
+    assert(result["security"] == ["--read-only"]);
+    assert(result["network"] == ["--network", "none"]);
+}
+
+/// Test: mergeOptions with overrides only returns copy of overrides.
+unittest {
+    string[][string] defaults;
+    string[][string] overrides;
+    overrides["mounts"] = ["-v", "/host:/container"];
+    auto result = mergeOptions(defaults, overrides);
+    assert(result.length == 1);
+    assert(result["mounts"] == ["-v", "/host:/container"]);
+}
+
+/// Test: mergeOptions with overlapping keys — override completely replaces defaults.
+unittest {
+    string[][string] defaults;
+    defaults["security"] = ["--read-only"];
+    defaults["network"] = ["--network", "none"];
+    string[][string] overrides;
+    overrides["security"] = ["--privileged"];
+    auto result = mergeOptions(defaults, overrides);
+    assert(result.length == 2);
+    assert(result["security"] == ["--privileged"]);
+    assert(result["network"] == ["--network", "none"]);
+}
+
+/// Test: mergeOptions with non-overlapping keys — both preserved.
+unittest {
+    string[][string] defaults;
+    defaults["security"] = ["--read-only"];
+    string[][string] overrides;
+    overrides["mounts"] = ["-v", "/host:/container"];
+    auto result = mergeOptions(defaults, overrides);
+    assert(result.length == 2);
+    assert(result["security"] == ["--read-only"]);
+    assert(result["mounts"] == ["-v", "/host:/container"]);
+}
+
+/// Test: mergeOptions produces independent copies (no aliasing).
+unittest {
+    string[][string] defaults;
+    defaults["security"] = ["--read-only"];
+    string[][string] overrides;
+    auto result = mergeOptions(defaults, overrides);
+    // Modify original and verify result is unchanged
+    defaults["security"] = ["--privileged"];
+    assert(result["security"] == ["--read-only"]);
+}
+
+/// Test: mergeOptions produces independent copies of inner arrays.
+unittest {
+    string[][string] defaults;
+    defaults["security"] = ["--read-only"];
+    string[][string] overrides;
+    auto result = mergeOptions(defaults, overrides);
+    // Modify the inner array of the original defaults and verify result is unchanged
+    defaults["security"][0] = "--privileged";
+    assert(result["security"][0] == "--read-only");
+}
+
+/// Build the `docker run` / `podman run` argument array from options maps.
+/// Pipeline: merge defaults with image options -> substitute magic words -> flatten to CLI args.
 /// Returns the argument array (not including the runtime CLI itself).
+/// Params:
+///     config = Sandbox configuration with defaultOptions
+///     workArea = Workarea path for @{llmfun_workarea} substitution
+///     entry = Image catalog entry with per-image options
+///     command = Command to execute inside container
 /// Precondition: command must not be empty (validated by caller).
 string[] buildRunArgs(SandboxConfig config, AbsolutePath workArea,
-        ImageCatalogEntry entry, string[] command) @safe pure {
-    auto cmd = [
-        "run", "--rm", "--user", config.userNs, "--memory", config.memoryLimit,
-        "--cpus", config.cpuLimit, "--tmpfs", "/tmp:" ~ config.tmpfsOptions,
-        "--stop-timeout", config.timeoutSeconds.to!string,
-    ];
+        ImageCatalogEntry entry, string[] command) @safe nothrow {
+    // Merge default options with image-specific overrides
+    auto merged = mergeOptions(config.defaultOptions, entry.options);
 
-    if (entry.readOnly)
-        cmd ~= "--read-only";
+    // Substitute magic words in option values
+    auto resolved = replaceContainerMagicWords(merged, workArea);
 
-    if (entry.allowNetwork)
-        cmd ~= ["--network", "host"];
-    else
-        cmd ~= ["--network", "none"];
-
-    if (!entry.workareaMountDest.empty) {
-        cmd ~= ["-v", workArea.toString ~ ":/" ~ entry.workareaMountDest];
+    // Flatten options map to CLI argument array (sorted by numeric prefix)
+    // Keys must be prefixed with two-digit number and underscore (e.g., "01_cleanup")
+    // Invalid keys are skipped with a warning (should already be cleaned by validateAndCleanupOptions)
+    string[] args;
+    // Sort keys by numeric prefix; skip invalid keys individually
+    auto sortedKeys = resolved.keys.array.sort!((a, b) => a < b);
+    foreach (key; sortedKeys) {
+        if (key.length < 3 || key[2] != '_') {
+            try {
+                logger.warningf("Skipping option key '%s': missing numeric prefix", key);
+            } catch (Exception) {
+            }
+            continue;
+        }
+        try {
+            int prefix = key[0 .. 2].to!int;
+        } catch (Exception e) {
+            try {
+                logger.warningf("Skipping option key '%s': invalid numeric prefix", key);
+            } catch (Exception) {
+            }
+            continue;
+        }
+        auto values = resolved[key];
+        if (!values.empty) {
+            args ~= values;
+        }
     }
 
-    cmd ~= [entry.name, "sh", "-c", command.join(" ")];
+    // Append image name and command
+    args ~= [entry.name, "sh", "-c", command.join(" ")];
 
-    return cmd;
+    return args;
 }
 
 /// Result from collecting limited output from a process.
@@ -311,102 +427,213 @@ ExecuteFuncResult executeImage(Context baseCtx, ExecuteImageParams params) nothr
 // Unit tests for buildRunArgs() and collectOutputLimited()
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test: buildRunArgs with default SandboxConfig includes all security flags.
+/// Test: empty options produces [image, "sh", "-c", cmd].
 unittest {
     auto config = SandboxConfig();
+    config.defaultOptions["00_subcommand"] = ["run"];
     ImageCatalogEntry entry;
     entry.name = "alpine:latest";
-    entry.readOnly = true;
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
+        "echo", "hello"
+    ]);
+
+    assert(args == ["run", "alpine:latest", "sh", "-c", "echo hello"]);
+}
+
+/// Test: tag with empty value array produces no output.
+unittest {
+    auto config = SandboxConfig();
+    config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["99_empty"] = [];
+    ImageCatalogEntry entry;
+    entry.name = "alpine:latest";
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
+        "echo", "hi"
+    ]);
+
+    assert(args == ["run", "alpine:latest", "sh", "-c", "echo hi"]);
+}
+
+/// Test: tag with CLI args produces flattened output.
+unittest {
+    auto config = SandboxConfig();
+    config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["01_cleanup"] = ["--rm"];
+    config.defaultOptions["02_security"] = ["--read-only"];
+    config.defaultOptions["03_network"] = ["--network", "none"];
+    ImageCatalogEntry entry;
+    entry.name = "alpine:latest";
     auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
         "echo", "hello"
     ]);
 
     assert(args[0] == "run");
     assert(args.canFind("--rm"));
-    assert(args.canFind("--user"));
+    assert(args.canFind("--read-only"));
     assert(args.canFind("--network"));
     assert(args.canFind("none"));
-    assert(args.canFind("--memory"));
-    assert(args.canFind("--cpus"));
-    assert(args.canFind("--read-only"));
-    assert(args.canFind("--tmpfs"));
-    assert(args.canFind("--stop-timeout"));
-
-    // Verify default values are used
-    assert(args.canFind("1000:1000")); // userNs
-    assert(args.canFind("256m")); // memoryLimit
-    // Verify --stop-timeout is followed by "60" (positional check avoids false positives)
-    long timeoutIdx = -1;
-    foreach (i, arg; args) {
-        if (arg == "--stop-timeout") {
-            timeoutIdx = i;
-            break;
-        }
-    }
-    assert(timeoutIdx >= 0); // --stop-timeout exists
-    assert(args[timeoutIdx + 1] == "60"); // timeoutSeconds
-    assert(args.canFind("/tmp:rw,noexec,nosuid,size=64m")); // tmpfsOptions
-
-    // Verify image and shell are present
     assert(args.canFind("alpine:latest"));
     assert(args.canFind("sh"));
     assert(args.canFind("-c"));
 }
 
-/// Test: buildRunArgs uses custom image when provided.
+/// Test: magic words are substituted in output.
 unittest {
     auto config = SandboxConfig();
+    config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["05_mounts"] = [
+        "-v", "@{llmfun_workarea}:/workarea", "-v", "@{llmfun}/data:/data"
+    ];
+    ImageCatalogEntry entry;
+    entry.name = "alpine:latest";
+    auto args = buildRunArgs(config, AbsolutePath("/my/work"), entry, [
+        "echo", "hello"
+    ]);
+
+    assert(args.canFind("/my/work:/workarea"));
+    assert(args.canFind(i"$(thisExePath.dirName)/data:/data".text));
+}
+
+/// Test: image options override default options for same tag key.
+unittest {
+    auto config = SandboxConfig();
+    config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["03_network"] = ["--network", "none"];
+    config.defaultOptions["02_security"] = ["--read-only"];
+    ImageCatalogEntry entry;
+    entry.name = "alpine:latest";
+    entry.options["03_network"] = ["--network", "host"];
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
+        "echo", "hello"
+    ]);
+
+    // Image override: network should be "host", not "none"
+    assert(args.canFind("host"));
+    assert(!args.canFind("none"));
+    // Default preserved: security should still be present
+    assert(args.canFind("--read-only"));
+}
+
+/// Test: image name and command appended correctly.
+unittest {
+    auto config = SandboxConfig();
+    config.defaultOptions["00_subcommand"] = ["run"];
     ImageCatalogEntry entry;
     entry.name = "python:3.11";
-    entry.readOnly = true;
     auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
         "python", "--version"
     ]);
 
-    assert(args.canFind("python:3.11"));
-    assert(!args.canFind("alpine:latest"));
+    assert(args[$ - 4] == "python:3.11");
+    assert(args[$ - 3] == "sh");
+    assert(args[$ - 2] == "-c");
+    assert(args[$ - 1] == "python --version");
 }
 
-/// Test: buildRunArgs correctly joins command array elements with spaces.
+/// Test: command array elements joined with spaces.
 unittest {
     auto config = SandboxConfig();
+    config.defaultOptions["00_subcommand"] = ["run"];
     ImageCatalogEntry entry;
     entry.name = "alpine:latest";
-    entry.readOnly = true;
     auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
         "echo", "hello", "&&", "world"
     ]);
 
-    // Find the command string (last element)
     string cmdStr = args[$ - 1];
-
-    assert(cmdStr.startsWith("echo hello && world"));
+    assert(cmdStr == "echo hello && world");
 }
 
-/// Test: buildRunArgs applies custom config values.
+// ── Numeric prefix ordering tests ──────────────────────────────────────────
+
+/// Test: numeric-prefixed keys sort correctly (00 < 01 < 02 < 03).
 unittest {
     auto config = SandboxConfig();
-    config.runtimeCli = "podman";
-    config.defaultImage = "ubuntu:22.04";
-    config.timeoutSeconds = 120;
-    config.memoryLimit = "512m";
-    config.cpuLimit = "1.0";
-    config.tmpfsOptions = "rw,size=128m";
-    config.userNs = "2000:2000";
-
+    config.defaultOptions["03_network"] = ["--network", "none"];
+    config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["01_cleanup"] = ["--rm"];
+    config.defaultOptions["02_security"] = ["--read-only"];
     ImageCatalogEntry entry;
-    entry.name = "ubuntu:22.04";
-    entry.readOnly = true;
+    entry.name = "alpine:latest";
     auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
-        "bash", "-c", "test"
+        "echo", "hello"
     ]);
 
-    assert(args.canFind("2000:2000")); // custom userNs
-    assert(args.canFind("512m")); // custom memoryLimit
-    assert(args.canFind("1.0")); // custom cpuLimit
-    assert(args.canFind("120")); // custom timeoutSeconds
-    assert(args.canFind("/tmp:rw,size=128m")); // custom tmpfsOptions
-    assert(args.canFind("ubuntu:22.04")); // custom image
+    // Verify exact order: 00, 01, 02, 03, image, sh, -c, cmd
+    assert(args[0] == "run");
+    assert(args[1] == "--rm");
+    assert(args[2] == "--read-only");
+    assert(args[3] == "--network");
+    assert(args[4] == "none");
+    assert(args[5] == "alpine:latest");
+}
+
+/// Test: numeric-prefixed keys are processed correctly.
+unittest {
+    auto config = SandboxConfig();
+    config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["01_cleanup"] = ["--rm"];
+    // This test verifies that numeric-prefixed keys are processed correctly.
+    // Non-numeric keys would be skipped by the validation in buildRunArgs.
+    ImageCatalogEntry entry;
+    entry.name = "alpine:latest";
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
+        "echo", "hello"
+    ]);
+
+    // Only numeric-prefixed keys should appear
+    assert(args[0] == "run");
+    assert(args[1] == "--rm");
+    assert(args[2] == "alpine:latest");
+}
+
+/// Test: mixed prefix ordering with many keys.
+unittest {
+    auto config = SandboxConfig();
+    config.defaultOptions["05_mounts"] = ["-v", "/host:/container"];
+    config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["03_network"] = ["--network", "none"];
+    config.defaultOptions["01_cleanup"] = ["--rm"];
+    config.defaultOptions["04_tmpfs"] = ["--tmpfs", "/tmp"];
+    config.defaultOptions["02_security"] = ["--read-only"];
+    ImageCatalogEntry entry;
+    entry.name = "alpine:latest";
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
+        "echo", "hello"
+    ]);
+
+    // Verify order: 00, 01, 02, 03, 04, 05, image, sh, -c, cmd
+    assert(args[0] == "run");
+    assert(args[1] == "--rm");
+    assert(args[2] == "--read-only");
+    assert(args[3] == "--network");
+    assert(args[4] == "none");
+    assert(args[5] == "--tmpfs");
+    assert(args[6] == "/tmp");
+    assert(args[7] == "-v");
+    assert(args[8] == "/host:/container");
+    assert(args[9] == "alpine:latest");
+}
+
+/// Test: two-digit numeric prefixes sort correctly (09 < 10 < 99).
+unittest {
+    auto config = SandboxConfig();
+    config.defaultOptions["10_late"] = ["--late"];
+    config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["99_final"] = ["--final"];
+    config.defaultOptions["09_early"] = ["--early"];
+    ImageCatalogEntry entry;
+    entry.name = "alpine:latest";
+    auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
+        "echo", "hello"
+    ]);
+
+    // Verify order: 00, 09, 10, 99, image, sh, -c, cmd
+    assert(args[0] == "run");
+    assert(args[1] == "--early");
+    assert(args[2] == "--late");
+    assert(args[3] == "--final");
+    assert(args[4] == "alpine:latest");
 }
 
 /// Test: collectOutputLimited collects all output when within limit.

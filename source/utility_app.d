@@ -135,7 +135,7 @@ int appMain(UserConfig uconf, UserConfig.ChatTestConfig conf) {
     import llm.chat;
     import llm.query;
 
-    auto llmConf = readConfig(conf.config, false, true).userToLlmConfig(conf);
+    auto llmConf = readConfig(conf.config, false, true, false).userToLlmConfig(conf);
     llmConf.codeModels[0].server.httpVerbosity = 2;
     Chat chat;
     chat.add(Message(Role.system, readText(llmConf.agentPrompt)));
@@ -165,7 +165,7 @@ int appMain(UserConfig uconf, UserConfig.SummaryTestConfig conf) {
     import llm.query;
     import llm.summary_agent;
 
-    auto llmConf = readConfig(conf.config, false, true).userToLlmConfig(conf);
+    auto llmConf = readConfig(conf.config, false, true, false).userToLlmConfig(conf);
     llmConf.summaryModel.server.httpVerbosity = 2;
 
     Chat chat;
@@ -185,7 +185,7 @@ int appMain(UserConfig uconf, UserConfig.TestSlotApiConfig conf) {
     import llm.chat;
     import llm.query;
 
-    auto llmConf = readConfig(Path("config/remote.json"), false, true).userToLlmConfig(conf);
+    auto llmConf = readConfig(Path("config/remote.json"), false, true, false).userToLlmConfig(conf);
     auto slot = LlmSlotRequester(llmConf.codeModels[0].toRequestConfig);
     auto res = slot.request();
     res.match!((JSONValue j) { writeln(j.toPrettyString); }, (LlamaRequestError e) {
@@ -203,7 +203,7 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
     import llm.tool_call.completion : CompletionContext;
     import llm.config;
 
-    auto llmConf = readConfig(Path(), false, true).userToLlmConfig(conf);
+    auto llmConf = readConfig(Path(), false, true, false).userToLlmConfig(conf);
 
     writeln(getFunctions);
 
@@ -283,7 +283,7 @@ int appMain(UserConfig uconf, UserConfig.TestPipelineConfig conf) {
     // string query = "Explain how BFS graph traversal works";
     string query = "count from 1 to 5. Only output 1,2,3,4,5 and nothing else";
 
-    auto llmConf = readConfig(conf.config.Path, false, true).userToLlmConfig(conf);
+    auto llmConf = readConfig(conf.config.Path, false, true, false).userToLlmConfig(conf);
     auto monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor_pipeline_test.jsonl");
 
     auto writer = new Agent("writer", llmConf, monitor);
@@ -337,7 +337,7 @@ int appMain(UserConfig uconf, UserConfig.TestRagSqliteConfig conf) {
     import llm.rag.rag;
     import d2sqlite3 : ResultRange;
 
-    auto llmConf = readConfig(conf.config.Path, false, true).userToLlmConfig(conf);
+    auto llmConf = readConfig(conf.config.Path, false, true, false).userToLlmConfig(conf);
     auto embedder = createEmbedder(llmConf.embedConfig);
 
     // auto db = openDatabase("smurf.sqlite3".Path, 768);

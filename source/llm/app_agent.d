@@ -391,8 +391,8 @@ struct AgentApp {
         if (conf_.setupDirs)
             makeLocalSetupFileStructure(LlmConfig.init);
 
-        llmConf = readConfig(uconf.config, !conf_.prompt.empty, uconf.noCwdConfig).userToLlmConfig(
-                conf_);
+        llmConf = readConfig(uconf.config, !conf_.prompt.empty,
+                uconf.noCwdConfig, uconf.trustedConfig, conf_.workArea).userToLlmConfig(conf_);
 
         rag = createRag(llmConf);
         if (rag is null)
