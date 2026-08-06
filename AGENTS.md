@@ -23,6 +23,8 @@ llmfun/
 │       ├── agent_pool.d           # Thread pool for agent execution
 │       ├── app_agent.d            # Agent subcommand handler + TUI
 │       ├── app_rag.d              # RAG subcommand handler
+│       ├── app_mcp.d              # MCP server subcommand handler
+│       ├── app_tool_metrics.d     # Tool metrics subcommand handler
 │       ├── config.d               # Multi-layer configuration
 │       ├── chat.d                 # Chat history / message management
 │       ├── query.d                # HTTP client with retry, streaming
@@ -32,6 +34,7 @@ llmfun/
 │       ├── pipeline/              # Pipeline engine & DAG
 │       ├── rag/                   # RAG database and query logic
 │       ├── tool_call/             # Tool registration and implementations
+│       ├── mcp_server/            # MCP server (JSON-RPC 2.0 over stdio)
 │       ├── metric/                # Metrics aggregation and monitoring
 │       └── tui/                   # TUI D bindings
 ├── common/                        # Shared embedder interface and config types
@@ -58,6 +61,8 @@ dub build --config=llmfun_test              # Build test utility
 ./build/llmfun rag add <path>               # Add file to RAG index
 ./build/llmfun rag query "question"         # Query RAG knowledge base
 ./build/llmfun tool_metrics --data llmfun/data/scratch/monitor.jsonl   # View tool metrics
+./build/llmfun mcp --stdio                                              # Run MCP server over stdio
+./build/llmfun mcp --list-tools                                         # List available MCP tools
 ```
 
 ## Code Conventions
@@ -200,7 +205,7 @@ dub build --config=llmfun_test              # Build test utility
 
 ### Entry Point
 
-`app.d` is an ultra-thin dispatcher. It parses CLI args via `argparse` and routes to `appMain` overloads in `app_agent.d`, `app_rag.d`, and `app_tool_metrics.d`.
+`app.d` is an ultra-thin dispatcher. It parses CLI args via `argparse` and routes to `appMain` overloads in `app_agent.d`, `app_rag.d`, `app_mcp.d`, and `app_tool_metrics.d`.
 
 ### Agent System
 
@@ -244,6 +249,18 @@ dub build --config=llmfun_test              # Build test utility
 - C++ TUI library (`cpp_tui/`) provides Dear ImGui-based terminal UI with markdown rendering.
 - D bindings in `tui/package.d` handle streaming and inter-thread message passing.
 - Exposed via pure C API (`tui_api.h` / `tui_api.cpp`) for D interop.
+
+### MCP Server
+
+- Implements the Model Context Protocol (MCP) over stdio using JSON-RPC 2.0.
+- `mcp_server/` package: `types.d` (JSON-RPC types), `protocol.d` (parsing/serialization), `transport.d` (stdio transport), `package.d` (MCPServer class + actor).
+- Bridges MCP's JSON-RPC protocol to llmfun's existing tool infrastructure via `descAllFunctions()` and `executeFunc()`.
+- Uses `ReFilter` for tool visibility control (`--include`/`--exclude` CLI flags).
+- Runs as a `std.concurrency` actor: the main thread spawns `runMcpServer` and communicates via messages (`McpServerConfig`, `McpShutdown`, `McpStarted`, `McpStopped`, `McpFailed`).
+- No shared state between threads; termination signals (SIGINT/SIGTERM) are blocked and consumed by the main thread via `sigtimedwait`.
+- Stdio transport uses unbuffered POSIX reads to avoid the poll/FILE buffering race that causes stalls.
+- Supports MCP methods: `initialize`, `tools/list`, `tools/call`, `ping`, `resources/list` (empty), `prompts/list` (empty).
+- See `doc/mcp.md` for protocol details and usage examples.
 
 ## Testing
 

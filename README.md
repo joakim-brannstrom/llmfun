@@ -30,7 +30,7 @@ dub build
 
 ## CLI Commands
 
-llmfun supports three subcommands:
+llmfun supports four subcommands:
 
 ### `agent` (default)
 
@@ -91,6 +91,43 @@ llmfun tool_metrics [options]
 | `--number <n>` | `-n` | Number of tools to print in the report |
 | `--follow` | `-f` | Live monitor the tool calls (tail mode) |
 
+### `mcp`
+
+Run llmfun as an MCP (Model Context Protocol) server over stdio. Exposes all registered tools to MCP-compatible clients via JSON-RPC 2.0.
+
+```bash
+llmfun mcp [options]
+```
+
+#### Parameters
+
+| Parameter | Short | Description |
+|-----------|-------|-------------|
+| `--stdio` | *none* | Use stdio transport (required; mutually exclusive with `--list-tools`) |
+| `--list-tools` | *none* | List available tools matching the filter and exit (diagnostic mode) |
+| `--include <pattern>` | *none* | Include tool name regex pattern (repeatable) |
+| `--exclude <pattern>` | *none* | Exclude tool name regex pattern (repeatable) |
+| `--host <addr>` | *none* | Host for HTTP transport (not yet implemented) |
+| `--port <num>` | *none* | Port for HTTP transport (not yet implemented) |
+
+**Note**: `--stdio` and `--list-tools` are mutually exclusive.
+
+#### Usage
+
+Pipe JSON-RPC 2.0 requests to stdin and read responses from stdout:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | llmfun mcp --stdio
+```
+
+List available tools without starting the server:
+
+```bash
+llmfun mcp --list-tools
+llmfun mcp --list-tools --include "^read.*"
+llmfun mcp --list-tools --exclude "executeImage"
+```
+
 ## Examples
 
 ### Start interactive agent with local setup
@@ -133,6 +170,24 @@ llmfun tool_metrics --data llmfun/data/scratch/monitor.jsonl --number 10
 
 ```bash
 llmfun tool_metrics --data llmfun/data/scratch/monitor.jsonl --follow
+```
+
+### Start MCP server over stdio
+
+```bash
+llmfun mcp --stdio
+```
+
+### List available MCP tools
+
+```bash
+llmfun mcp --list-tools
+```
+
+### List tools matching a filter
+
+```bash
+llmfun mcp --list-tools --include "^read.*" --exclude "readMemory"
 ```
 
 ## Global CLI Parameters

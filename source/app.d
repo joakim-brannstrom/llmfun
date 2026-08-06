@@ -39,3 +39,9 @@ int appMain(UserConfig uconf, UserConfig.PrintToolMetricsConfig conf) {
 
     return llm.app_tool_metrics.appMain(uconf, conf);
 }
+
+int appMain(UserConfig uconf, UserConfig.Mcp conf) {
+    static import llm.app_mcp;
+
+    return llm.app_mcp.appMain(uconf, conf);
+}

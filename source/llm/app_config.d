@@ -14,7 +14,7 @@ import llm.config : RagDatabaseConfig, LlmConfig, EmbedConfig, RemoteEmbedConfig
 import llm.rag.rag : RAG;
 
 struct UserConfig {
-    SubCommand!(Default!AgentChatConfig, Rag, PrintToolMetricsConfig) cmd;
+    SubCommand!(Default!AgentChatConfig, Rag, PrintToolMetricsConfig, Mcp) cmd;
 
     @(NamedArgument("v", "verbose").Description("Log verbosity level"))
     VerboseMode verbosity;
@@ -110,6 +110,29 @@ struct UserConfig {
 
         @(NamedArgument("follow", "f").Description("Live monitor the tool calls"))
         bool follow;
+    }
+
+    @(Command("mcp"))
+    struct Mcp {
+        @MutuallyExclusive() {
+            @(NamedArgument("stdio").Description("Use stdio transport"))
+            bool stdio;
+
+            @(NamedArgument("list-tools").Description("List available tools and exit (diagnostic)"))
+            bool listTools;
+        }
+
+        @(NamedArgument("host").Description("Host for HTTP transport (future)"))
+        string host = "127.0.0.1";
+
+        @(NamedArgument("port").Description("Port for HTTP transport (future)"))
+        int port = 8787;
+
+        @(NamedArgument("include").Description("Include tool name regex pattern (can be repeated)"))
+        string[] include;
+
+        @(NamedArgument("exclude").Description("Exclude tool name regex pattern (can be repeated)"))
+        string[] exclude;
     }
 }
 
