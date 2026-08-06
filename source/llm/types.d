@@ -108,4 +108,8 @@ struct ProcessResult {
     long totalTokens() @safe pure nothrow const {
         return stat.context;
     }
+
+    bool empty() @safe pure nothrow const {
+        return chat.length == 0;
+    }
 }

@@ -22,7 +22,7 @@ struct RequestConfig {
     string slotUrl;
     int verbosity;
     int timeoutS;
-    bool keepAlive = true;
+    bool keepAlive;
     bool verifySslCert = true;
     string apiKey;
 

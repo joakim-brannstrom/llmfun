@@ -344,6 +344,7 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
                 if (!result.hasToolCall && waitingForVisionResponse) {
                     waitingForVisionResponse = false;
                     keepRunning = true;
+                    resetStrikes;
                 } else if (!result.hasToolCall) {
                     addContinue;
                     keepRunning = true;
@@ -354,6 +355,7 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
             case needCompression:
                 this.compress(force: true, callback: compressCallback);
                 keepRunning = true;
+                resetStrikes;
                 break;
             case unknownFailure:
                 keepRunning = false;
