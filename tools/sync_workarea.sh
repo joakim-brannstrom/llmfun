@@ -5,11 +5,14 @@ rsync -va --delete source/ llmfun/workarea/llmfun/source/
 rsync -va --delete cpp_tui/ llmfun/workarea/llmfun/cpp_tui/
 rsync -va --delete common/ llmfun/workarea/llmfun/common/
 rsync -va --delete local_model/ llmfun/workarea/llmfun/local_model/
+mkdir -p llmfun/workarea/llmfun/llmfun/
+rsync -va --delete llmfun/config/ llmfun/workarea/llmfun/llmfun/config/
+rsync -va --delete llmfun/skills/ llmfun/workarea/llmfun/llmfun/skills/
 rsync -va --delete doc/ llmfun/workarea/llmfun/doc/
+rsync -va --delete config/ llmfun/workarea/llmfun/config/
 rsync -a dub.sdl llmfun/workarea/llmfun/dub.sdl
 rsync -a README.md llmfun/workarea/llmfun/
 rsync -a AGENTS.md llmfun/workarea/llmfun/
-rsync -a config/ llmfun/workarea/llmfun/config/
 rsync -a *.mak llmfun/workarea/llmfun/
 rsync -a --delete --exclude ".git" vendor/ llmfun/workarea/llmfun/vendor/
 rm -rf llmfun/workarea/llmfun/vendor/imtui/test/build
