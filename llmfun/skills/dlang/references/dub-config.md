@@ -20,8 +20,16 @@ The `executeImage` tool runs commands in a container image. Use a D language ima
 
 **Example usage:**
 ```
-executeImage(image_name="dlang2:latest", command=["dub", "build"])
-executeImage(image_name="dlang2:latest", command=["dub", "test"])
+executeImage(image_name="dlang2:latest", command=["cd", "<project-dir>", "&&", "dub", "build"])
+executeImage(image_name="dlang2:latest", command=["cd", "<project-dir>", "&&", "dub", "test"])
+```
+
+The build target "syntax" is excellent for checking the syntax of the code
+without generating any object code. Prefer using it if you do not need to
+execute the tests.
+
+```
+executeImage(image_name="dlang2:latest", command=["cd", "<project-dir>", "&&", "dub", "build", "-b", "syntax"])
 ```
 
 ## Minimal dub.sdl

@@ -46,7 +46,7 @@ llmfun/
 
 **Important**: The container image to use when running the tool `executeImage` is `llmfun/app:latest`.
 
-Example of using `executeImage`: `executeImage(imageName="llmfun/app:latest", command=["cd llmfun", "&&", "dub build --config=application"])`
+Example of using `executeImage`: `executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "dub", "build", "--config=application"])`
 
 ```bash
 cd llmfun
