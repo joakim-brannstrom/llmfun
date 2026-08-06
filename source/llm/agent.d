@@ -31,15 +31,15 @@ import llm.rag.rag : RAG;
 import llm.skill : SkillManager, makeSkillManager;
 import llm.summary_agent;
 import llm.tool_call : FunctionCall, Context;
-import llm.tool_call.io : FileContext, VisionContext;
-import llm.tool_call.vision : DedicatedVisionAgent, DefaultVisionSystemPrompt;
+import llm.tool_call.completion : CompletionContext;
+import llm.tool_call.io : FileContext;
 import llm.tool_call.memory : MemoryContext;
 import llm.tool_call.metrics : MetricsContext;
 import llm.tool_call.pipeline : PipelineControlContext;
 import llm.tool_call.rag : RAGContext;
 import llm.tool_call.sandbox : SandboxContext;
 import llm.tool_call.skill : SkillContext;
-import llm.tool_call.completion : CompletionContext;
+import llm.tool_call.vision : DedicatedVisionAgent, DefaultVisionSystemPrompt, VisionContext;
 import llm.utility : getValue;
 import llm.workarea;
 

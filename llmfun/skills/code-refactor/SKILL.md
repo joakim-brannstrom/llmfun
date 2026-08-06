@@ -6,7 +6,7 @@ description: >-
   refactor, refactoring, code cleanup, improve code structure, simplify code,
   extract function, rename, reorganize, code smells, reduce complexity,
   code-refactor, refactor-code.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Code Refactor Skill

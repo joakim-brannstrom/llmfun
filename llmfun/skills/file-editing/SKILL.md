@@ -1,13 +1,13 @@
 ---
 name: file-editing
-description: >
+description: >-
   Guide for editing files correctly using the universal editing workflow.
   Ensures edits are applied safely with proper tool selection and verification.
   Use when modifying any file, applying changes, or writing new files.
   Triggers on: file editing, edit file, modify file, file change, apply diff,
   write file, file modification, code change, update file, replace file content,
   file-editing, edit-file.
-version: 2.0.0
+version: 3.3.0
 ---
 
 # File Editing
@@ -19,7 +19,6 @@ Structured protocol for editing files safely and correctly.
 - Modifying an existing file (any type)
 - Writing a new file
 - Applying multi-line changes with diffs
-- Debugging file-related errors
 
 ## Core Principle
 
@@ -28,30 +27,14 @@ Structured protocol for editing files safely and correctly.
 ## Universal Editing Workflow
 
 1. **Read** the current state with `readFile`.
-2. **Choose the right tool** (see Tool Reference):
-   - `editFileByMarker` — find by marker text, insert/replace/remove (preferred)
-   - `searchAndReplace` — replace a known code block by content (first match)
-   - `searchAndReplaceAll` — replace all occurrences of a code block
-   - `editFile` — position-based edits when you know exact line numbers
+2. **Choose the right tool** (see Tool Selection below):
+   - `writeFile` — new files or complete rewrites
+   - `editFile` — targeted edits (line numbers, markers, or code blocks)
    - `applyDiff` — multi-line changes via unified diff
-   - `writeFile` — new files or complete rewrites only; never for partial edits
-3. **Optional: Dry-run** — use `*DryRun` variants to preview before applying.
-   Available for: `editFileByMarker`, `searchAndReplace`, `applyDiff`.
+3. **Optional: Dry-run** — use `dryRun=true` to preview before applying.
+   Available for: `editFile`, `applyDiff`. (`writeFile` has no dry-run option.)
 4. **Apply** the edit.
 5. **Verify immediately**: run executables, re-read others. If wrong, go to step 1.
-
-## Tool Reference
-
-| Tool | Use When |
-|------|----------|
-| `editFileByMarker` | Insert/replace/remove at a marker line (preferred) |
-| `searchAndReplace` | Replace a known code block (first match) |
-| `searchAndReplaceAll` | Replace all occurrences of a code block |
-| `editFile` | You know exact line numbers (fallback) |
-| `applyDiff` | Multi-line changes with mixed additions/deletions |
-| `writeFile` | New files or complete rewrites |
-
-Dry-run variants (`*DryRun`) exist for `editFileByMarker`, `searchAndReplace`, `applyDiff`.
 
 ## Tool Selection Decision Tree
 
@@ -60,29 +43,57 @@ File new?
   → YES: writeFile
   → NO: Continue...
 
-Know a unique marker in the target line?
-  → YES: editFileByMarker (modes: insert_before, insert_after, replace, remove)
-  → NO: Continue...
-
-Replacing a known code block?
-  → YES: searchAndReplace (first) or searchAndReplaceAll (all)
-  → NO: Continue...
-
 Know exact line numbers?
-  → YES: editFile (modes: replace, append, remove)
+  → YES: editFile(startLine, count)
   → NO: Continue...
 
-Multi-line with mixed additions/deletions?
+Know a unique marker?
+  → YES: editFile(marker) [+ count if replacing a block]
+  → NO: Continue...
+
+Know the exact code block?
+  → YES: editFile(searchContent)
+  → NO: Continue...
+
+Have a pre-computed unified diff?
   → YES: applyDiff
-  → NO: Re-read file, find a marker or code block, try again. Last resort: applyDiff.
+  → NO: Re-read file, find a marker or code block, try again.
 ```
 
-## Matching Behavior
+## Quick Tool Reference
 
-- **Trimmed equality** (searchAndReplace): `fileLine.strip == searchLine.strip`. Tolerates indentation differences. Empty search lines are flexible. Full line match prevents false positives.
-- **Marker matching** (editFileByMarker): Case-sensitive substring match. Only first occurrence is used. Use unique, specific markers.
-- **applyDiff**: Context lines must match file exactly. Always `readFile` first.
+### editFile — Unified file editing
+
+- **Targeting** (exactly one required): `byLine` (startLine+count), `byMarker` (substring), `byContent` (code block).
+- **Modes**: `replace`, `remove`, `append`, `insert_before`, `insert_after` (=append alias).
+- **Options**: `dryRun`, `replaceAll` (byContent/byMarker only), `matchIndex` (Nth occurrence, 1-based; default 1; cannot be combined with replaceAll when > 1; ignored by byLine), `scopeStart`/`scopeEnd` (limit search range).
+- **Auto-count**: byMarker+replace auto-derives count from content lines. Set `count` explicitly to override.
+- **byContent**: trimmed equality; empty search lines skipped (but file empty lines still must match next non-empty search line); full-line match (not substring).
+- **Returns**: JSON with `ok`, `matchedAt`, `matchedLines`, `linesChanged`, `operations`. On failure: `error` + `diagnostic`.
+- **Full details**: `references/tool-reference.md`
+
+### applyDiff — Unified diff patch
+
+- **Parameters**: `path`, `diff` (unified diff), `dryRun` (default false), `fuzzy` (default true).
+- Hunk header counts are advisory. Fuzzy matching uses trimmed equality.
+- **Returns**: JSON with `ok`, `hunksApplied`, `linesChanged`, `warnings`.
+- **Full details**: `references/tool-reference.md`
+
+### writeFile — Write or create files
+
+Creates file with parent directories. Replaces entire content if file exists — never use for partial edits.
+
+## Matching & Dry-Run
+
+- **byContent**: Trimmed equality; empty search lines skipped (file empty lines still match next non-empty search). See `references/tool-reference.md`.
+- **byMarker**: Case-sensitive substring, first occurrence default; `matchIndex=N` for Nth.
+- **applyDiff**: Fuzzy by default (`fuzzy=false` for exact).
+- **Always dry-run first**, then apply. See `references/pitfalls.md` for edge cases.
+
+See `references/patterns.md` for common usage patterns.
 
 ## References
 
-- Detailed pitfalls, gotchas, and edge cases: `references/pitfalls.md`
+- Full tool reference: `references/tool-reference.md`
+- Common patterns: `references/patterns.md`
+- Pitfalls and edge cases: `references/pitfalls.md`

@@ -6,7 +6,7 @@ description: >-
   Triggers on: self improvement, improve framework, enhance agent, fix llmfun,
   agent capabilities, framework changes, llmfun source, self-improve,
   improve myself.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # Self Improve Skill
@@ -56,6 +56,10 @@ After the skill is loaded the scripts are at `skills/llmfun-self-improve/scripts
 - `scripts/build.sh [--config=<name>]` - build the project
 - `scripts/test.sh` - run the test suite
 - `scripts/git.sh <args>` - run git in the repo (e.g. `git.sh status`)
+
+Invoke scripts with `bash` or `sh` (exec bit may be lost when copied):
+`command=["bash", ".../scripts/build.sh"]`. See `references/build-guide.md`
+for `executeImage` argument semantics and command forms.
 
 Example:
 ```

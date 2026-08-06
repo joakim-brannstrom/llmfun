@@ -3,7 +3,7 @@
 set -e
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-repo=$("$SCRIPT_DIR/find-repo.sh") || exit 1
+repo=$(sh "$SCRIPT_DIR/find-repo.sh") || exit 1
 echo "Building in $repo"
 cd "$repo"
 exec dub build "$@"

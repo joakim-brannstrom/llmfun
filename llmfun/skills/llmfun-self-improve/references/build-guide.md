@@ -10,7 +10,8 @@
 ## Making Changes
 
 1. Modify source code in `llmfun/source/`.
-2. Build with `executeImage(imageName="llmfun/app:latest", command=["dub", "build"])`.
+2. Build with `executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "dub", "build"])`
+   (dub must run inside the repo — see "Common Error Patterns").
 3. Check exit code: 0 = success, non-zero = errors.
 4. If errors occur, read the error output, identify the problematic file and line, then fix.
 5. Repeat until build succeeds.
@@ -42,6 +43,19 @@ executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "ldc2
 ```
 For simple single-file D compilation without project dependencies.
 
+## executeImage Argument Semantics
+
+`executeImage` joins the `command` array elements with spaces and runs the result
+through a shell. Consequences:
+
+- `command=["cd", "llmfun", "&&", "dub", "build"]` works (joined: `cd llmfun && dub build`).
+- Do NOT use `command=["bash", "-c", "multi word command"]`: only the first word
+  becomes the `-c` script and the rest are passed as positional args, so the
+  command silently fails or runs in the wrong directory. Use the plain
+  `["cd", "llmfun", "&&", ...]` form instead.
+- A single-element command like `command=["bash /workarea/skills/llmfun-self-improve/scripts/build.sh"]`
+  runs as-is.
+
 ## Helper Scripts
 
 The scripts in `scripts/` wrap the verified commands and auto-locate the repo
@@ -55,6 +69,12 @@ Example:
 ```
 executeImage(imageName="llmfun/app:latest", command=["bash", "/workarea/skills/llmfun-self-improve/scripts/build.sh"])
 ```
+
+The scripts may lose their executable bit when the skill is copied into the
+workarea, so always invoke them explicitly with `bash` or `sh`:
+`command=["bash", ".../scripts/build.sh"]` or `command=["sh", ".../scripts/build.sh"]`.
+The scripts themselves invoke `find-repo.sh` via `sh` and therefore do not
+require any exec permission.
 
 If the scripts cannot locate the repo, fall back to the explicit
 `cd llmfun && dub build` command form.

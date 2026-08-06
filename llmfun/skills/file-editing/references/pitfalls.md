@@ -3,10 +3,10 @@
 ## Common Mistakes
 
 ### Using writeFile on existing files
-`writeFile` replaces the entire file. If you only need to change a few lines, use `editFile`, `editFileByMarker`, or `searchAndReplace` instead. Accidental `writeFile` on an existing file destroys all content not included in the new content.
+`writeFile` replaces the entire file. If you only need to change a few lines, use `editFile` instead. Accidental `writeFile` on an existing file destroys all content not included in the new content.
 
 ### Skipping readFile before applyDiff
-Context lines in a diff must match the file exactly. If the file has changed since you last read it, your diff will fail silently or apply incorrectly. **Always read first.**
+Context lines in a diff must match the file (fuzzy by default). If the file has changed since you last read it, your diff will fail. **Always read first.**
 
 ### Forgetting to verify after edit
 An edit may look correct in your diff but fail at the tool level. Always verify:
@@ -14,148 +14,166 @@ An edit may look correct in your diff but fail at the tool level. Always verify:
 - Data files: re-read and validate structure
 - Config files: re-read and check syntax
 
-### Over-editing with editFile
-`editFile` is for small, targeted changes. For large multi-line changes, `applyDiff` or `searchAndReplace` is more reliable and easier to review.
+## byMarker + Multi-line Content (Auto-Count)
 
-### Under-using editFile
-For single-line replacements, `editFile` with mode "replace" is simpler than crafting a full diff. Don't over-engineer simple changes.
+### Auto-derived count from content lines
+When using `byMarker` targeting with `replace` mode and multi-line content, the tool auto-derives `count` from the number of content lines. If your replacement has 3 lines, it replaces 3 lines starting at the marker.
 
-## Trimmed Equality Gotchas (searchAndReplace / searchAndReplaceAll)
+### If you want ONLY the marker line replaced
+Set `count=1` explicitly when using multi-line content with `byMarker`:
+```
+editFile(path="file.txt", mode="replace", marker="the line", count=1,
+         content="replacement line 1\nreplacement line 2")
+```
+This replaces only 1 line (the marker line) with your multi-line content.
+
+### If the original block is larger than your replacement
+If the original block has 10 lines but your replacement has 3, auto-count will only replace 3 lines. To replace the full original block, either:
+- Set `count` explicitly to the original block size
+- Use `byContent` targeting, which auto-derives count from the matched block size
+
+## byContent Matching Rules
+
+### Uses trimmed equality
+`fileLine.strip == searchLine.strip`. Leading/trailing whitespace is ignored on both sides. This means searching for unindented code matches indented code.
+
+### Empty lines in search are skipped, but file empty lines are not
+Empty lines in your search block are **skipped** during matching (they don't consume file lines). This allows searching for code blocks with variable spacing. However, empty lines in the **file** still need to match the next non-empty search line.
+
+**Example that fails**: File has `line1\n\nline3`, search is `line1\nline3`. The search line `line3` tries to match file line 2 (empty) → no match.
+
+**Solution**: Either include the empty line in your search (`line1\n\nline3`), or search for just the non-empty lines you need.
+
+### Full line matching (not substring)
+Each non-empty search line must match a complete file line (after trimming). This prevents accidentally matching code inside comments or strings.
 
 ### Search block must have at least one non-empty line
-If all lines in your search content are empty or whitespace-only, the tool rejects it with an error. Include at least one substantive line in the search block.
+If all lines in your search content are empty or whitespace-only, the tool rejects it with an error. Include at least one substantive line.
 
-### Trimmed equality prevents comment false matches
-Searching for `"foo"` will NOT match `"// call fooBar()"` because trimmed equality requires `line.strip == searchLine.strip`. This prevents accidentally matching code inside comments or strings.
+## replaceAll Constraints
 
-### Leading empty lines in search are skipped
-The matching algorithm skips leading empty lines in the search block to find the anchor line. If your search content starts with blank lines, they are ignored during matching.
+### replaceAll with byLine is not supported
+`replaceAll` only works with `byContent` and `byMarker` targeting. Using it with `byLine` returns an error.
 
-Example:
-```
-Search block:
-    (empty line)
-    (empty line)
-    int x = 1;
-    int y = 2;
+### replaceAll with byMarker
+Only replaces lines where the marker substring appears. Consider `byContent` for more precise multi-line targeting.
 
-The two leading empty lines are skipped. Matching starts with "int x = 1;".
-```
+### replaceAll is non-overlapping
+After replacing one occurrence, search resumes from the line after the replacement. Replacements cannot overlap with previously replaced content.
 
-### Empty lines in the middle are flexible
-Empty lines within the search block don't need to match. This allows you to search for code blocks with variable spacing between lines.
+### matchIndex and replaceAll conflict
+`replaceAll=true` with `matchIndex > 1` returns an error. Use either `replaceAll=true` (all occurrences) or `matchIndex=N` (single occurrence), not both.
 
-## applyDiff Rules
+## applyDiff Behavior
 
-- Must be a **valid unified diff** with `--- a/path` and `+++ b/path` headers
-- Context lines (starting with space) **must match the file exactly**
-- Always call `readFile` first to ensure context lines are accurate
-- Mismatched context lines cause silent failures — verify after applying
+### Hunk header counts are advisory
+The `@@ -oldStart,oldCount +newStart,newCount @@` counts are advisory. The tool counts actual body lines and uses those. Mismatches produce warnings (not errors) in the `warnings` array.
+
+### Fuzzy context matching by default
+Context lines (starting with ` `) use trimmed equality by default. Leading/trailing whitespace differences are tolerated. Set `fuzzy=false` for exact matching.
+
+### Fuzzy matching does NOT change what's written
+Only the matching is fuzzy — the file content written is always the `+` lines from the diff exactly as provided.
+
+### Multi-hunk diffs preserve content between hunks
+When applying multiple hunks, lines between hunks are preserved. Each hunk is applied independently.
+
+### applyDiff no longer has strictCounts parameter
+Hunk counts are always advisory; use `fuzzy` to control context matching strictness.
+
+## Mode-Specific Gotchas
+
+### remove mode requires empty content
+When using `mode="remove"`, the `content` parameter must be empty. Providing content with remove mode returns an error.
+
+### remove mode count defaults to 1
+When using `byMarker` targeting with `remove` mode and no explicit `count`, only the marker line is removed (`count=1`). Set `count` explicitly to remove a larger block. The auto-count heuristic only applies to `replace` mode, not `remove`.
+
+### insert_after is an alias for append
+`insert_after` behaves identically to `append`. Prefer `append` for clarity.
+
+### Content is preserved exactly
+The content you provide is written to the file exactly as given. No extra whitespace or indentation is added.
+
+### Empty content in replace mode
+Passing `content=""` for `replace` mode effectively deletes the targeted lines (same as `remove` but without the empty-content requirement).
+
+## Diagnostic Error Messages
+
+### Read the diagnostic field on failure
+When a `byMarker` or `byContent` search fails, the error includes a `diagnostic` field with:
+- Which lines were searched
+- The closest matching line (if any)
+- Details about what didn't match
+
+Use this information to adjust your search — the closest match often reveals a typo or whitespace difference.
+
+### Ambiguous targeting error
+If you provide multiple targeting methods (e.g., both `startLine` and `marker`), the tool returns an error. Provide exactly one targeting method.
+
+### Missing targeting error
+If you provide no targeting method, the tool returns an error. Provide exactly one of: `startLine`, `marker`, or `searchContent`.
+
+## Edge Cases
+
+### Empty files
+- `byLine` on empty file: error (no lines exist)
+- `byMarker` on empty file: error (marker not found)
+- `byContent` on empty file: error (block not found)
+
+### Single-line files
+All targeting methods work on single-line files. Verify `matchedLines` in the return value.
+
+### Duplicate markers
+When multiple lines contain your marker string, only the **first** occurrence is targeted by default. Use more specific markers or `matchIndex` to target later occurrences.
+
+### Trailing newline preservation
+The file's trailing-newline state is preserved. If the original file ended with a newline, the edited file will too.
 
 ## Dry-Run Pattern
 
-Before applying any edit, use the dry-run variant to preview:
-
-1. Call `*DryRun` to preview the change
-2. Inspect the `preview` field to verify correctness
-3. Check `matchedAt` to confirm the right location was found
-4. Check `linesChanged` to understand the scope of the change
-5. If satisfied, call the non-dry-run version to apply
-
-Dry-run variants exist for: `editFileByMarkerDryRun`, `searchAndReplaceDryRun`, `applyDiffDryRun`.
-`editFile` and `writeFile` have no dry-run variants.
-
-## Marker Matching Details (editFileByMarker)
-
-- **Case-sensitive substring** matching: finds the first line containing the marker
-- Use unique, specific markers to avoid matching the wrong line
-- When multiple lines contain the marker, only the **first match** is used
-- Modes: `insert_before`, `insert_after`, `replace`, `remove`
-
-## Tool-Specific Notes
-
-### editFile (position-based)
-- Modes: `replace`, `append`, `remove`
-- Line numbers are 1-based
-- No dry-run variant — verify after applying
-- Risk: line numbers shift if file changes between read and edit
-
-### searchAndReplace vs searchAndReplaceAll
-- `searchAndReplace`: replaces only the **first** occurrence
-- `searchAndReplaceAll`: replaces **all non-overlapping** occurrences
-- Both use trimmed equality matching
-
-### writeFile
-- Creates the file (including parent directories) if it doesn't exist
-- **Replaces entire content** if file exists — use only for new files or complete rewrites
-- Never use for partial edits
-
-### Indentation differences are tolerated
-Since matching uses `strip`, searching for unindented code will match indented code. This is usually desired but can cause unexpected matches if indentation is semantically important.
-
-### Multi-line search blocks require all non-empty lines to match in order
-For a multi-line search block, each non-empty line must match a corresponding file line in sequence. If any non-empty line doesn't match, the entire block fails.
-
-## First-Match Behavior
-
-### editFileByMarker targets the first matching line
-If multiple lines contain your marker string, only the **first** occurrence is edited. Use more specific markers to target the correct line.
-
-### searchAndReplace only replaces the first occurrence
-Use `searchAndReplaceAll` if you need to replace multiple occurrences. `searchAndReplace` stops after the first match.
-
-### searchAndReplaceAll is non-overlapping
-After replacing one occurrence, search resumes from the line after the replacement. This means replacements cannot overlap with previously replaced content.
-
-## Marker-Based Editing Gotchas
-
-### Case-sensitive matching
-Marker matching is case-sensitive. Searching for `"Foo"` will not match `"foo"`. Use the exact casing from the file.
-
-### Substring matching
-The marker is matched as a substring. Searching for `"appMain"` will match `"void appMain()"`, `"// appMain implementation"`, etc. Use sufficiently unique markers.
-
-### insert_before and insert_after keep the marker line
-Unlike `replace` mode, `insert_before` and `insert_after` preserve the marker line. Content is added before or after it.
-
-### remove mode requires empty content
-When using `mode=remove`, the `content` parameter must be empty. Providing content with remove mode returns an error.
-
-### Mode name formats
-Marker-based tools accept both `snake_case` (e.g. `insert_before`) and `kebab-case` (e.g. `insert-before`). The original `editFile` tool supports only `replace`, `append`, and `remove` modes — it does NOT support `insert_before` or `insert_after`. Use `editFileByMarker` for those modes.
-
-## Dry-Run Tools
-
-### Dry-run tools never modify files
-`*DryRun` tools return a preview of the modified content but do NOT write to disk. Always follow up with the non-dry-run version to actually apply the change.
+### Dry-run never modifies files
+`dryRun=true` returns a preview of the modified content but does NOT write to disk. Always follow up without `dryRun` to actually apply the change.
 
 ### Preview shows full file content
 The `preview` field in dry-run responses contains the complete modified file content, not just the changed lines.
 
 ### matchedAt is 1-based
-The `matchedAt` field returns the 1-based line number where the match was found. Convert to 0-based if needed for other tools.
+The `matchedAt` field returns the 1-based line number where the match was found.
 
-## Tool Selection Mistakes
+## Nth-Occurrence Targeting (matchIndex)
 
-### Using editFile for insert_before/insert_after
-`editFile` does not support `insert_before` or `insert_after` modes. Use `editFileByMarker` for these operations.
+### byMarker targets the Nth matching line with matchIndex
+By default only the **first** line containing your marker is edited. Pass `matchIndex=N` (1-based) to target the Nth matching line instead. If `matchIndex` exceeds the number of matching lines the error reports the actual count, e.g. `matchIndex=3 but only 2 occurrences of marker 'X' were found`. Occurrences are counted **per line**: a marker appearing twice on one line counts once. `matchIndex > 1` cannot be combined with `replaceAll`. Use more specific markers to reduce ambiguity.
 
-### Using searchAndReplace for marker-based insertion
-`searchAndReplace` replaces matched blocks. If you need to insert content before/after a marker without replacing it, use `editFileByMarker` with `insert_before` or `insert_after`.
+### byContent targets the Nth matching block with matchIndex
+By default only the **first** matching block is replaced. Pass `matchIndex=N` (1-based) to target the Nth non-overlapping block instead. If `matchIndex` exceeds the number of matching blocks the error reports the actual count, e.g. `matchIndex=3 but only 2 occurrences of the search block were found`. Use `replaceAll=true` (with default `matchIndex=1`) to replace all occurrences.
 
-### Using applyDiff for simple replacements
-For replacing a known code block, `searchAndReplace` is simpler than crafting a unified diff. Use `applyDiff` for complex multi-hunk changes.
+## Scope Limiting (scopeStart / scopeEnd)
 
-## Tool Selection Decision Tree
+### Use scope for large files when you know the approximate location
+Pass `scopeStart`/`scopeEnd` (1-based, inclusive) to restrict the byMarker/byContent search:
+```json
+editFile(path="big.c", mode="replace", marker="target",
+         scopeStart=120, scopeEnd=180, content="new")
+```
+Either or both bounds may be given. `scopeStart` alone searches from that line to EOF; `scopeEnd` alone searches from line 1 to that line.
 
-See `SKILL.md` for the full decision tree. This section highlights common mistakes when selecting tools.
+### Scope constrains the anchor, not the whole match
+Only the **first line** of a match must be inside the range. A byContent block whose anchor is in scope may extend past `scopeEnd`. The same applies to byMarker: with `count > 1` (or auto-count from multi-line content), the replaced region may extend past `scopeEnd`. If you need the whole replaced region inside the range, widen `scopeEnd`.
 
-## Verification Checklist
+### Not-found errors mention the scope
+When a marker/block is outside the scope, the error says e.g. `marker 'X' not found in file within scope [10, 20]` and the `diagnostic` includes a `scope` field (`start`/`end`). The error message echoes the range you requested; the `diagnostic.scope` field reports the **effective** (clamped to the file) range. If you didn't intend a scope, you passed the wrong `scopeStart`/`scopeEnd` — widen or remove it.
 
-After every file edit:
-1. [ ] Did I verify the result?
-2. [ ] For code: did it execute successfully?
-3. [ ] For data: is the format valid?
-4. [ ] For config: does it parse correctly?
-5. [ ] Did I handle any errors from the previous step?
-6. [ ] Did I use the correct tool for the edit type?
+### Invalid scope values are rejected
+`scopeStart` must be >= 1, `scopeEnd` must be >= 1, and `scopeStart` must be <= `scopeEnd`. `scopeEnd` beyond the file is clamped to the file end (no error). `scopeStart` is **not** clamped — if it exceeds the file length, the search range becomes empty and the search fails.
+
+### Scope is ignored by byLine
+`byLine` does not search, so `scopeStart`/`scopeEnd` have no effect with it. A *valid* scope is silently ignored; an *invalid* one still errors.
+
+### Scope combines with matchIndex and replaceAll
+`matchIndex` counts occurrences **within the scope**; `replaceAll` replaces only in-scope occurrences and preserves lines outside the scope. Out-of-scope matches are never touched.
+
+## Atomicity Guarantee
+
+All edits are applied in memory first. The file is written only if the entire edit succeeds. Partial edits never occur.
