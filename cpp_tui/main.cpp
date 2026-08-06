@@ -68,6 +68,96 @@ int main() {
                     "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n"),
             TuiChatMessageType_Assistant});
 
+    // not using markdown for long line, which should mean it uses automatic line break
+    tuiAddChatMessage(
+        state,
+        ChatMessageParam{
+            makeStr("a long line"),
+            makeStr(
+                "# Heading1\nsmurf\n[a link](to somewhere)\n\n## Heading2\nsmurf\n\n"
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat\n"),
+            makeStr(
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                "long cat, long cat\n"),
+            TuiChatMessageType_Assistant});
+
+    // using markdown for long line, which should mean it should not automatically line break
+    tuiAddChatMessage(
+        state,
+        ChatMessageParam{
+            makeStr("a long line"),
+            makeStr(
+                "# Heading1\nsmurf\n[a link](to somewhere)\n\n## Heading2\nsmurf\n\n"
+                "```\nlong cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat\n```\n"),
+            makeStr(
+                "```\nlong cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
+                "cat, long cat, long cat\n```\n"),
+            TuiChatMessageType_Assistant});
+
     auto addPipelineAgents = [&state]() {
         for (int ii = 0; ii < 40; ++ii) {
             const auto i = ii % 16;

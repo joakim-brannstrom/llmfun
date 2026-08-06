@@ -809,6 +809,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
             ImGui::Text("%s%ds", "Thinking ",
                         (std::chrono::system_clock::now() - state.startProcesssingTime).count() /
                             1000000000);
+            ImGui::TextUnformatted("");
         }
 
         if (autoScroll) {
