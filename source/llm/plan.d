@@ -1,10 +1,11 @@
 module llm.plan;
 
 import logger = std.logger;
+import std.conv : text;
+import std.datetime : Clock, dur;
+import std.file : exists, timeLastModified;
 
 import my.filter : ReFilter;
-import std.file : exists, timeLastModified;
-import std.datetime : Clock, dur;
 
 import llm.agent : Agent;
 import llm.config : LlmConfig;
@@ -46,7 +47,7 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
         "You are a System Design Reviewer. Your job is to review a system design plan, critique it, and provide actionable feedback for improvement.\n\n" ~
         "## Instructions\n" ~
         "1. The source code may exist in the primary RAG database. Use it when unclear about details in the source code that you need to analyze.\n" ~
-        "2. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
+        "2. Read the system design document from `plan/system_design.md` using `readFile` and understand the task the user gave the designer agent.\n" ~
         "3. Call `loadSkill(\"system-design\", \"skills/system-design\")` to load the system design skill for review guidance.\n" ~
         "4. Follow the template to thoroughly analyze the design across dimensions such as requirements clarity, architecture, scalability, reliability, security, cost-efficiency, maintainability, and documentation quality.\n" ~
         "5. Produce a detailed review document that:\n" ~
@@ -79,6 +80,8 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
     auto designReview = new Agent("system_design_review", llmConf, monitor, rag, toolFilter);
     designReview.setSystemPrompt(llmConf.getPrompt(tmpManager));
     designReview.addUserQuery(systemDesignerFeedbackPrompt);
+    designReview.addUserQuery(i"The users task for the system_designer agent was the following:\n\n---\n\n$(
+            query)\n\n---\n".text);
 
     auto planner = new Agent("implementation_planner", llmConf, monitor, rag, toolFilter);
     planner.setSystemPrompt(llmConf.getPrompt(tmpManager));

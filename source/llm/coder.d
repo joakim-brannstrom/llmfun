@@ -40,7 +40,7 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
         "You are a Coder. Your job is to implement working code based on the user's request.\n\n" ~
         "## Instructions\n" ~
         "1. The source code may exist in the primary RAG database. Use it when unclear about details in the source code that you need to analyze.\n" ~
-        "2. Call `loadSkill(\"code-task\", \"skills/code-task\")` to load the code task skill.\n" ~
+        "2. Call `loadSkill(\"code-task\", \"skills/code-task\")` to load the code task skill. Look at available skills and load additional depending on the code task such as programming language and project.\n" ~
         "3. Analyze the user's request and plan your implementation.\n" ~
         "4. Write clean, well-structured code.\n" ~
         "5. Save your implementation to `code/implementation.md` using `writeFile`.\n" ~
@@ -53,7 +53,7 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
         "## Instructions\n" ~
         "1. The source code may exist in the primary RAG database. Use it when unclear about details in the source code that you need to analyze.\n" ~
         "   Note: the state of the source code in the primary RAG database do not contain the latest changes. You have to read the files manually to see the latest changes.\n" ~
-        "2. Read the implementation from `code/implementation.md` using `readFile`.\n" ~
+        "2. Read the implementation from `code/implementation.md` using `readFile` and understand the task the user gave the coder agent.\n" ~
         "3. Call `loadSkill(\"code-review\", \"skills/code-review\")` to load the code review skill.\n" ~
         "4. Follow the template to thoroughly analyze the code for bugs, security issues, style violations, performance problems, and improvements.\n" ~
         "5. Produce a detailed review that:\n" ~
@@ -81,11 +81,14 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
 
     auto coder = new Agent("coder", llmConf, monitor, rag, toolFilter);
     coder.setSystemPrompt(llmConf.getPrompt(tmpManager));
+    coder.addUserQuery(codeQuery);
     coder.addUserQuery(query);
 
     auto reviewer = new Agent("code_reviewer", llmConf, monitor, rag, toolFilter);
     reviewer.setSystemPrompt(llmConf.getPrompt(tmpManager));
     reviewer.addUserQuery(reviewerQuery);
+    reviewer.addUserQuery(i"The users task for the coder agent was the following:\n\n---\n\n$(query)\n\n---\n"
+            .text);
 
     if (!implPlan.empty) {
         coder.addUserQuery(implPlan);
