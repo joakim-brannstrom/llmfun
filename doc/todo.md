@@ -59,6 +59,7 @@
 - live agent status update in a new imgui window while it is working
 - there should be a mode where the pipeline execute all tasks and then optionally ask the user for input
 - there should be something like /plan update, which goes through the pipeline but with other steering prompt such that the LLM understand that it should fix things in the system design and implementation plan.
+- use the memory system for transporting "code/implementation.md" between agents. It should be a checksum of the implementation_plan.md
 
 # rag
 - Add a warning when the DB is wiped. Need to add migration in the future.
