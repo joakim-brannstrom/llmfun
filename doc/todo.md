@@ -27,6 +27,23 @@
 - make sound notification configurable in json via config.d
 - merge the tools listDirectory, removeFile, checksumFile etc to one tool which take a command and then a key/value json string, which is the arguments. This approach should reduce the number of tools that is needed and thus the system prompt. Do a similar thing for sandbox.
 - when summarizing the agent context add all messages, excluding the system prompt, to the RAG in one large document under the topic "agent_context". Protect this topic. This should then also be added to the summarized context that all details are saved in the RAG under this topic. Each time an agent is summarized or /new is called the topic is either replaced or deleted.
+- modify imgui_markdown to render code blocks with Text so we get line break in them. That fix the side scrolling issue and ugly rendering on long lines.
+
+- this may be a problem
+```
+executeImage Argument Semantics
+
+`executeImage` joins the `command` array elements with spaces and runs the result
+through a shell. Consequences:
+
+- `command=["cd", "llmfun", "&&", "dub", "build"]` works (joined: `cd llmfun && dub build`).
+- Do NOT use `command=["bash", "-c", "multi word command"]`: only the first word
+  becomes the `-c` script and the rest are passed as positional args, so the
+  command silently fails or runs in the wrong directory. Use the plain
+  `["cd", "llmfun", "&&", ...]` form instead.
+- A single-element command like `command=["bash /workarea/skills/llmfun-self-improve/scripts/build.sh"]`
+  runs as-is.
+```
 
 # ui
 - change the background color for the input field to dark grey
@@ -79,6 +96,7 @@
 - skills should be part of the metrics that are collected. How often they are loaded etc
 - it should be possible to mark a skill, in the frontmatter, that it should not be shown in the system prompt (xml manifest). Only available for load on demand. But there need to be a way for the model to know there are "hidden tools" that it somehow can request the "frontmatter" for. If possible avoid creating a new tool for this but maybe that is required. Consider different design alternatives.
 - all skills should be added to the primary rag upon startup. Removed skills should be removed. But only if the RAG is not in-memory because otherwise it slows down startup. This is because the LLM do not always find the relevant information when it uses knowledge-retrieval because it is inside e.g. a skill's reference.
+- when copying scripts also set the executable bit
 
 # memory
 ## Workflow Improvements
