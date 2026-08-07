@@ -1248,12 +1248,16 @@ auto replaceMagicWord(T)(T variable, AbsolutePath workArea) @safe nothrow {
 /// Keys are not modified. Supports @{llmfun} and @{llmfun_workarea}.
 string[][string] replaceContainerMagicWords(string[][string] options, AbsolutePath workArea) @safe nothrow {
     string[][string] result;
-    foreach (key, values; options) {
-        string[] newValues;
-        foreach (v; values) {
-            newValues ~= replaceMagicWord(v, workArea);
+    try {
+        foreach (key, values; options) {
+            string[] newValues;
+            foreach (v; values) {
+                newValues ~= replaceMagicWord(v, workArea);
+            }
+            result[key] = newValues;
         }
-        result[key] = newValues;
+    } catch (Exception e) {
+        // fix for ldc-1.40. Remove when min compiler is updated
     }
     return result;
 }
