@@ -46,11 +46,15 @@ struct ContainerResult {
 /// Non-overlapping keys from both maps are preserved.
 string[][string] mergeOptions(string[][string] defaults, string[][string] overrides) @safe pure nothrow {
     string[][string] result;
-    foreach (key, values; defaults) {
-        result[key] = values.dup;
-    }
-    foreach (key, values; overrides) {
-        result[key] = values.dup;
+    try {
+        foreach (key, values; defaults) {
+            result[key] = values.dup;
+        }
+        foreach (key, values; overrides) {
+            result[key] = values.dup;
+        }
+    } catch (Exception e) {
+        // fix for ldc-1.40. Remove when min compiler is updated
     }
     return result;
 }
