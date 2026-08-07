@@ -12,6 +12,7 @@ immutable ApproxTokenSize = 2;
 
 enum EndpointType {
     unknown,
+    openAiv1,
     llamaCpp,
     deepseek
 }

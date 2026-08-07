@@ -615,6 +615,7 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
 
         final switch (cfg.toType) {
         case EndpointType.unknown:
+        case EndpointType.openAiv1:
             break;
         case EndpointType.llamaCpp:
             if (conf.reasoningBudget != 0 || conf.preserveThinking) {
