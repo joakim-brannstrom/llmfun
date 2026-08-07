@@ -188,7 +188,7 @@ YOUR ENTIRE NEXT RESPONSE MUST BE EXACTLY THIS JSON (output ONLY this, no extra 
 ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside this JSON. Output ONLY the tool call.)";
         }
 
-        chat.add(Message(role: Role.system, userQuery: false, content: msg, thinking: null));
+        chat.add(Message(role: Role.user, userQuery: false, content: msg, thinking: null));
     }
 
     void addContinue() @safe nothrow {
@@ -225,7 +225,7 @@ YOUR ENTIRE NEXT RESPONSE MUST BE EXACTLY THIS JSON (output ONLY this, no extra 
 ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside this JSON. Output ONLY the tool call.)";
         }
 
-        chat.add(Message(Role.system, userQuery: false, thinking: null, content: msg));
+        chat.add(Message(Role.user, userQuery: false, thinking: null, content: msg));
     }
 
     ProcessResult process(bool delegate() interrupt) @trusted nothrow {
