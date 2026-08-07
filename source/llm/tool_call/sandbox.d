@@ -151,6 +151,7 @@ string[] buildRunArgs(SandboxConfig config, AbsolutePath workArea,
     auto resolved = replaceContainerMagicWords(merged, workArea);
     string[] args;
     auto sortedKeys = resolved.keys.array.sort!((a, b) => a < b);
+    string[] shell;
     foreach (key; sortedKeys) {
         if (key.length < 3 || key[2] != '_') {
             try {
@@ -161,6 +162,10 @@ string[] buildRunArgs(SandboxConfig config, AbsolutePath workArea,
         }
         try {
             int prefix = key[0 .. 2].to!int;
+            if (prefix == 99) {
+                shell = resolved[key];
+                continue;
+            }
         } catch (Exception e) {
             try {
                 logger.warningf("Skipping option key '%s': invalid numeric prefix", key);
@@ -174,7 +179,7 @@ string[] buildRunArgs(SandboxConfig config, AbsolutePath workArea,
         }
     }
 
-    args ~= [entry.name, "sh", "-c", command.join(" ")];
+    args ~= [entry.name] ~ shell ~ [command.join(" ")];
 
     return args;
 }
@@ -334,11 +339,11 @@ struct ExecuteImageParams {
     @ParamDescription("Container image to run (e.g., 'alpine:latest', 'python:3.11')")
     string imageName;
 
-    @ParamDescription("Command elements to execute inside the container")
+    @ParamDescription("Command elements, joined with spaces and executed via a shell. Shell metacharacters work: `|`, `&&`, `;`, `$()`, `>`. Example: `['ls -la | grep foo']`")
     string[] command;
 }
 
-@Function("Execute a command in a container image. Returns JSON with exit_code, stdout, and stderr")
+@Function("Execute a command in a container image. The specific shell varies per image. Returns JSON with exit_code, stdout, and stderr")
 ExecuteFuncResult executeImage(Context baseCtx, ExecuteImageParams params) nothrow {
     mixin(baseContextToSpecific!SandboxContext);
 

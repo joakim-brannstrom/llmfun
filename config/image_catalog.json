@@ -3,7 +3,7 @@
   "entries": [
     {
       "name": "alpine:latest",
-      "description": "Minimal Linux distribution based on Alpine Linux. Lightweight and fast, ideal for simple commands and scripts.",
+      "description": "Minimal Linux distribution based on Alpine Linux. Lightweight and fast, ideal for simple commands and scripts. **shell: sh**",
       "tags": ["linux", "minimal", "base"],
       "options": {
         "02_security": ["--read-only"],
@@ -13,7 +13,7 @@
     },
     {
       "name": "python:3.11-slim",
-      "description": "Python 3.11 runtime in a slim Debian-based image. Use for running Python scripts and applications.",
+      "description": "Python 3.11 runtime in a slim Debian-based image. Use for running Python scripts and applications. **shell: sh**",
       "tags": ["python", "dev", "debian"],
       "options": {
         "02_security": ["--read-only"],
@@ -24,7 +24,7 @@
     },
     {
       "name": "node:20-alpine",
-      "description": "Node.js 20 LTS runtime on Alpine Linux. Use for running Node.js applications and JavaScript/TypeScript code.",
+      "description": "Node.js 20 LTS runtime on Alpine Linux. Use for running Node.js applications and JavaScript/TypeScript code. **shell: sh**",
       "tags": ["nodejs", "javascript", "typescript", "dev"],
       "options": {
         "02_security": ["--read-only"],
@@ -35,7 +35,7 @@
     },
     {
       "name": "ubuntu:22.04",
-      "description": "Ubuntu 22.04 LTS full image. General-purpose Linux environment with apt package manager and common utilities.",
+      "description": "Ubuntu 22.04 LTS full image. General-purpose Linux environment with apt package manager and common utilities. **shell: sh**",
       "tags": ["linux", "ubuntu", "general"],
       "options": {
         "06_network": ["--network", "none"],

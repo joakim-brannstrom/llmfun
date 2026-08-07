@@ -40,7 +40,8 @@
       "03_resources": ["--memory", "256m", "--cpus", "0.5"],
       "04_tmpfs": ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"],
       "05_timeout": ["--stop-timeout", "60"],
-      "06_network": ["--network", "none"]
+      "06_network": ["--network", "none"],
+      "99_shell": ["sh", "-c"]
     },
     "systemImageCatalogFile": "config/image_catalog.json",
     "userImageCatalogFile": ""
