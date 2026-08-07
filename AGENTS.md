@@ -57,7 +57,7 @@ dub build --config=llmfun_test              # Build test utility
 ./build/llmfun agent                        # Run interactive agent
 ./build/llmfun rag add <path>               # Add file to RAG index
 ./build/llmfun rag query "question"         # Query RAG knowledge base
-./build/llmfun tools metrics                # View tool metrics
+./build/llmfun tool_metrics --data llmfun/data/scratch/monitor.jsonl   # View tool metrics
 ```
 
 ## Code Conventions
@@ -234,7 +234,10 @@ dub build --config=llmfun_test              # Build test utility
 ### Configuration
 
 - Multi-layer config in `config.d`: CLI args override file config, file config overrides defaults.
-- Supports `ToolLimits`, `RagConfig`, skill paths, and endpoint settings.
+- Two-layer loading: base config from `LLMFUN_DEFAULT_CONFIG` / system path, overlay from `--config` / `.llmfun.json` in CWD.
+- Security: CWD config skipped when workarea == CWD unless `--trusted-config` is used.
+- Supports `ToolLimits`, `RagConfig`, `SandboxConfig` with image catalogs, skill paths, consolidation settings, and endpoint types (`llamaCpp`, `deepseek`).
+- Magic word substitution: `@{llmfun_workarea}` and `@{llmfun}` in container options.
 
 ### TUI
 

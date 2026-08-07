@@ -2,12 +2,20 @@
   "dataDir": "llmfun/data",
   "memoryArea": "llmfun/data/memory",
   "scratchArea": "llmfun/data/scratch",
-  "thinkingTemplatesDir": "llmfun/config/thinking",
   "promptDir": "llmfun/config/prompt",
   "workArea": "llmfun/workarea",
   "agentPrompt": "AGENT.md",
   "activeCodeModelIndex": 0,
   "warnIfNoApiKey": true,
+  "noMemory": false,
+
+  "skillPathsUser": [],
+  "skillPathsSystem": [],
+  "maxManifestSkills": 200,
+  "maxAlwaysApplyTokens": 4000,
+  "disableSkills": false,
+
+  "consolidationInterval": 10,
 
   "toolLimits": {
     "readFileMaxLines": 20,
@@ -55,9 +63,7 @@
     "include": [
       ".*"
     ],
-    "exclude": [
-    ]
-    ]
+    "exclude": []
   },
 
   "ragFilter": {
@@ -85,7 +91,7 @@
         "promptUrl": "v1/completion",
         "chatUrl": "v1/chat/completions",
         "slotUrl": "slots",
-        "embedUrl": "embeddings",
+        "embedUrl": "v1/embeddings",
         "timeoutSeconds": 3600,
         "httpVerbosity": 0,
         "verifySslCert": true,
@@ -108,7 +114,7 @@
       "promptUrl": "v1/completion",
       "chatUrl": "v1/chat/completions",
       "slotUrl": "slots",
-      "embedUrl": "embeddings",
+      "embedUrl": "v1/embeddings",
       "timeoutSeconds": 60,
       "httpVerbosity": 0,
       "verifySslCert": true,
@@ -134,7 +140,7 @@
       "promptUrl": "v1/completion",
       "chatUrl": "v1/chat/completions",
       "slotUrl": "slots",
-      "embedUrl": "embeddings",
+      "embedUrl": "v1/embeddings",
       "timeoutSeconds": 60,
       "httpVerbosity": 0,
       "verifySslCert": true,

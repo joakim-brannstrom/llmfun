@@ -48,6 +48,7 @@ llmfun agent [options]
 | `--local-setup` | *none* | Create the `llmfun/...` directory structure in the current working directory |
 | `--db <path>` | *none* | RAG database path(s). The first DB is primary (read/write); additional DBs are read-only |
 | `--prompt <text>` | `-p` | One-shot prompt for the agent (non-interactive mode) |
+| `--no-memory` | *none* | Deactivate the persistent read/write memory |
 
 ### `rag`
 
@@ -65,6 +66,7 @@ llmfun rag [options]
 | `--rm` | *none* | Remove files from the RAG index |
 | `--list` | *none* | List all indexed sources |
 | `--sync` | *none* | Synchronize files with the RAG index (add or remove as needed) |
+| `--dry-run` | *none* | Preview changes without modifying the database |
 | `--path <path>` | *none* | Recursively add all text files from the specified path |
 | `--db <path>` | *none* | RAG database path(s) |
 | `--include <pattern>` | `-i` | Include regex pattern for RAG files (repeatable). Overrides config file |
@@ -87,6 +89,7 @@ llmfun tool_metrics [options]
 |-----------|-------|-------------|
 | `--data <path>` | *none* | **(Required)** Path to the metric data file (JSONL format) |
 | `--number <n>` | `-n` | Number of tools to print in the report |
+| `--follow` | `-f` | Live monitor the tool calls (tail mode) |
 
 ## Examples
 
@@ -126,6 +129,12 @@ llmfun rag --rm --include ".*deprecated.*"
 llmfun tool_metrics --data llmfun/data/scratch/monitor.jsonl --number 10
 ```
 
+### Live monitor tool calls
+
+```bash
+llmfun tool_metrics --data llmfun/data/scratch/monitor.jsonl --follow
+```
+
 ## Global CLI Parameters
 
 These parameters apply to all commands:
@@ -134,6 +143,8 @@ These parameters apply to all commands:
 |-----------|-------|-------------|
 | `--config <path>` | `-c` | Path to a configuration file to read |
 | `--verbose` | `-v` | Set log verbosity level (repeat for more verbosity) |
+| `--no-cwd-config` | *none* | Do not read `.llmfun.json` from current directory |
+| `--trusted-config` | *none* | Allow loading `.llmfun.json` from CWD when workarea equals CWD |
 
 ## Slash Commands
 
@@ -157,7 +168,18 @@ When in interactive agent mode (`agent` command), the following slash commands a
 
 ## Configuration
 
-llmfun is configured via a JSON configuration file specified with `--config <path>` or the `LLMFUN_DEFAULT_CONFIG` environment variable. See `example.json` for a complete reference of all available options.
+llmfun is configured via a JSON configuration file specified with `--config <path>` or the `LLMFUN_DEFAULT_CONFIG` environment variable. See `config/example.json` for a complete reference of all available options.
+
+### Multi-Layer Configuration
+
+llmfun uses a two-layer configuration system:
+
+1. **Layer 1 (Base)**: Loaded from `LLMFUN_DEFAULT_CONFIG` environment variable or `$XDG_CONFIG_HOME/llmfun/config.json`.
+2. **Layer 2 (Overlay)**: Loaded from `--config` CLI argument or `.llmfun.json` in the current working directory.
+
+Layer 2 values override Layer 1 values. This allows global defaults with project-specific overrides.
+
+**Security**: By default, if the workarea equals the current working directory, `.llmfun.json` in the CWD is NOT loaded (to prevent malicious projects from injecting config). Use `--trusted-config` to allow this, or `--no-cwd-config` to suppress the warning.
 
 ### Configuration Structure
 
@@ -166,12 +188,19 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
   "dataDir": "llmfun/data",
   "memoryArea": "llmfun/data/memory",
   "scratchArea": "llmfun/data/scratch",
-  "thinkingTemplatesDir": "llmfun/config/thinking",
   "promptDir": "llmfun/config/prompt",
   "workArea": "llmfun/workarea",
   "sandboxConfig": {"runtimeCli": "docker", "defaultImage": "alpine:latest", ...},
   "agentPrompt": "AGENT.md",
   "activeCodeModelIndex": 0,
+  "noMemory": false,
+  "warnIfNoApiKey": true,
+  "skillPathsUser": [],
+  "skillPathsSystem": [],
+  "maxManifestSkills": 200,
+  "maxAlwaysApplyTokens": 4000,
+  "disableSkills": false,
+  "consolidationInterval": 10,
   "toolLimits": {...},
   "ragPrimary": {...},
   "ragSecondary": {...},
@@ -190,18 +219,73 @@ llmfun is configured via a JSON configuration file specified with `--config <pat
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dataDir` | string | `llmfun/data` | Base directory for data files |
-| `memoryArea` | string | `llmfun/data/memory` | Path to persistent memory file |
+| `memoryArea` | string[] | `llmfun/data/memory` | Path(s) to persistent memory area(s) |
 | `scratchArea` | string | `llmfun/data/scratch` | Temporary workspace and runtime data |
-| `thinkingTemplatesDir` | string | `llmfun/config/thinking` | Directory with thinking strategy templates |
-| `promptDir` | string | `llmfun/config/prompt` | Directory with prompt templates |
+| `promptDir` | string/[] | `llmfun/config/prompt` | Directory with prompt templates |
 | `workArea` | string | `llmfun/workarea` | Agent working directory for file operations |
-| `sandboxConfig` | object | defaults | Container runtime config (runtimeCli, defaultImage, timeoutSeconds, memoryLimit, cpuLimit, tmpfsOptions, userNs, maxOutputBytes, allowedImages) |
+| `sandboxConfig` | object | defaults | Container runtime config (see below) |
 | `agentPrompt` | string | `AGENT.md` | Agent system prompt file name (searched in promptDir) |
 | `activeCodeModelIndex` | long | `0` | Index of the active code model in `codeModels` array |
+| `noMemory` | bool | `false` | Deactivate persistent read/write memory |
 | `warnIfNoApiKey` | bool | `true` | Emit warnings when no API key is configured for model servers |
+| `skillPathsUser` | string/[] | `[]` | User skill directories |
+| `skillPathsSystem` | string/[] | system defaults | System skill directories |
+| `maxManifestSkills` | long | `200` | Maximum skills shown in the manifest |
+| `maxAlwaysApplyTokens` | long | `4000` | Max tokens for always-apply skill blocks (0 = unlimited) |
+| `disableSkills` | bool | `false` | Disable all skills |
+| `consolidationInterval` | uint | `10` | Memory consolidation trigger interval (sessions). 0 = disabled |
 | `ragPrimary` | object | `llmfun/data/rag.sqlite3` | Primary RAG database (read/write) |
 | `ragSecondary` | object | `{}` | Additional read-only RAG databases |
-| `toolLimits` | object | `{}` | Tool execution limits (see below) |
+| `toolLimits` | object | defaults | Tool execution limits (see below) |
+
+### Sandbox Configuration (`sandboxConfig`)
+
+Configures the container runtime for code execution.
+
+```json
+"sandboxConfig": {
+  "runtimeCli": "docker",
+  "defaultImage": "alpine:latest",
+  "timeoutSeconds": 60,
+  "maxOutputBytes": 1048576,
+  "defaultOptions": {
+    "00_subcommand": ["run"],
+    "01_cleanup": ["--rm"],
+    "02_user": ["--user", "1000:1000"],
+    "03_resources": ["--memory", "256m", "--cpus", "0.5"],
+    "04_tmpfs": ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"],
+    "05_timeout": ["--stop-timeout", "60"],
+    "06_network": ["--network", "none"]
+  },
+  "systemImageCatalogFile": "config/image_catalog.json",
+  "userImageCatalogFile": ""
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `runtimeCli` | string | `docker` | Container runtime CLI command (e.g. "docker", "podman") |
+| `defaultImage` | string | *(empty)* | Default container image when none specified |
+| `timeoutSeconds` | long | `60` | Subprocess execution timeout in seconds |
+| `maxOutputBytes` | long | `1048576` | Maximum output bytes per stream (stdout/stderr) |
+| `defaultOptions` | object | defaults | Default container options as tagged key-value map |
+| `systemImageCatalogFile` | string | *(empty)* | Path to system image catalog JSON file |
+| `userImageCatalogFile` | string | *(empty)* | Path to user image catalog JSON file |
+
+#### Default Options
+
+The `defaultOptions` object uses numbered keys to control the order of CLI arguments. Keys must be prefixed with `<NR>_` (e.g. `00_subcommand`, `01_cleanup`). Values are arrays of CLI arguments.
+
+#### Image Catalog
+
+Image catalogs define which container images are allowed for `executeImage` and `listImages` tools. The catalog format is a JSON file with a `version` and `entries` array. Each entry has:
+
+- `name` (string, required): Full image reference (e.g. "python:3.11-slim")
+- `description` (string, optional): Human-readable description
+- `tags` (string[], optional): Tags for categorization and filtering
+- `options` (object, optional): Per-image container options (same format as `defaultOptions`)
+
+User catalog entries override system catalog entries with the same name. See `config/image_catalog.json` for an example.
 
 ### Tool Limits (`toolLimits`)
 
@@ -210,6 +294,13 @@ Configures per-tool limits.
 ```json
 "toolLimits": {
   "readFileMaxLines": 20
+  "editFileMaxLines": 80,
+  "maxDirEntries": 50,
+  "grepMaxResults": 1000,
+  "maxSummaryLength": 200,
+  "maxTopicLength": 100,
+  "maxTopK": 20,
+  "maxArgLength": 200
 }
 ```
 
@@ -234,7 +325,7 @@ The primary database is used for indexing and retrieval.
 ```json
 "ragPrimary": {
   "path": "llmfun/data/rag.sqlite3",
-  "description": "Primary RAG database (read/write)"
+  "description": "Recent project source code, documentation and files added with tools loadFileToRAG, loadContentToRAG"
 }
 ```
 
@@ -295,7 +386,7 @@ Controls which files are indexed into the RAG database.
 }
 ```
 
-- `include` (string[]): Regex patterns for files to include (default: `.*\.txt`, `.*\.md`)
+- `include` (string[]): Regex patterns for files to include (default: `.*\\.txt`, `.*\\.md`)
 - `exclude` (string[]): Regex patterns for files to exclude
 
 ### Code Models (`codeModels`)
@@ -336,14 +427,15 @@ Used by `codeModels`, `summaryModel`, and `embedConfig`.
   "promptUrl": "v1/completion",
   "chatUrl": "v1/chat/completions",
   "slotUrl": "slots",
-  "embedUrl": "embeddings",
+  "embedUrl": "v1/embeddings",
   "timeoutSeconds": 3600,
   "httpVerbosity": 0,
   "verifySslCert": true,
   "keepAlive": true,
   "maxRetries": 3,
   "backoffMs": 500,
-  "apiKey": ""
+  "apiKey": "",
+  "type": "llamaCpp"
 }
 ```
 
@@ -353,7 +445,7 @@ Used by `codeModels`, `summaryModel`, and `embedConfig`.
 | `promptUrl` | string | `v1/completion` | Endpoint for prompt completion |
 | `chatUrl` | string | `v1/chat/completions` | Endpoint for chat completion |
 | `slotUrl` | string | `slots` | Endpoint for slot management |
-| `embedUrl` | string | `embeddings` | Endpoint for embeddings |
+| `embedUrl` | string | `v1/embeddings` | Endpoint for embeddings |
 | `timeoutSeconds` | long | 0 | Request timeout in seconds |
 | `httpVerbosity` | long | 0 | HTTP logging verbosity level |
 | `verifySslCert` | bool | true | Verify SSL/TLS certificates |
@@ -361,6 +453,11 @@ Used by `codeModels`, `summaryModel`, and `embedConfig`.
 | `maxRetries` | long | 3 | Maximum retries for transient failures |
 | `backoffMs` | long | 500 | Initial backoff in milliseconds (exponential) |
 | `apiKey` | string | "" | API key for Bearer token auth (falls back to `OPENAI_API_KEY` env var) |
+| `type` | string | "" | Endpoint type: `llamaCpp`, `deepseek`, or empty for generic |
+
+**Endpoint Types:**
+- `llamaCpp`: Uses `chat_template_kwargs` with `reasoning_budget` and `preserve_thinking` for reasoning models
+- `deepseek`: Uses `thinking` block with `reasoning_effort` levels (high/max) for reasoning
 
 ### Summary Model (`summaryModel`)
 
@@ -414,7 +511,7 @@ Optional dedicated vision model for image processing. When configured, `loadImag
 |-------|------|---------|-------------|
 | `server` | object | (required) | Server configuration (see Server Configuration) |
 | `name` | string | (required) | Vision model name (e.g. "llava", "qwen2.5-vl") |
-| `systemPrompt` | string | built-in default | Custom system prompt for image description. Empty uses built-in prompt |
+| `systemPrompt` | string | "" | Custom system prompt for image description. Empty uses built-in prompt |
 | `temp` | double | 0 | Temperature for generation |
 | `contextSize` | long | 0 | Context window size in tokens |
 | `maxTokens` | long | -1 | Maximum tokens to generate (-1 = unlimited) |
@@ -472,28 +569,31 @@ llmfun uses a local directory structure for data and configuration. The structur
 ```
 llmfun/
 ├── config/
-│   ├── prompt/          # Prompt templates and system prompts
-│   │   └── *.md         # Markdown prompt files
-│   └── thinking/        # Thinking templates for structured reasoning
-│       └── *.md         # Structured reasoning strategy templates
+│   ├── example.json         # Complete configuration reference
+│   ├── image_catalog.json   # Curated container image catalog
+│   ├── prompt/              # Prompt templates and system prompts
+│   │   └── *.md             # Markdown prompt files
+│   └── thinking/            # Thinking templates for structured reasoning
+│       └── *.md             # Structured reasoning strategy templates
 ├── data/
-│   ├── memory           # LLM-persisted memory file (shared across sessions)
-│   ├── rag.sqlite3      # RAG database (SQLite with FTS5 and vector search)
-│   ├── state.json       # Active model selection state (auto-saved)
-│   └── scratch/         # Temporary workspace and runtime data
-│       └── monitor.jsonl # Tool call metrics log (JSONL format)
-└── workarea/            # Agent working directory for file operations
+│   ├── memory               # LLM-persisted memory file (shared across sessions)
+│   ├── rag.sqlite3          # RAG database (SQLite with FTS5 and vector search)
+│   ├── state.json           # Active model selection state (auto-saved)
+│   └── scratch/             # Temporary workspace and runtime data
+│       └── monitor.jsonl    # Tool call metrics log (JSONL format)
+└── workarea/                # Agent working directory for file operations
 ```
 
 ### Directory Details
 
 | Path | Purpose |
 |------|---------|
+| `llmfun/config/` | Configuration files and templates |
 | `llmfun/config/prompt/` | System prompt templates loaded at startup |
 | `llmfun/config/thinking/` | Thinking templates accessible via `getThinkingTemplate()` tool |
 | `llmfun/data/memory` | Persistent memory file where the LLM stores cross-session information |
 | `llmfun/data/rag.sqlite3` | SQLite database for RAG with full-text search (FTS5) and vector embeddings |
-| `llmfun/data/state.json` | Auto-saved state (active model index) |
+| `llmfun/data/state.json` | Auto-saved state (active model index, session count, consolidation lock) |
 | `llmfun/data/scratch/` | Temporary runtime data, including tool call monitoring logs |
 | `llmfun/workarea/` | Sandbox directory where the agent can create and modify files |
 
@@ -504,6 +604,15 @@ llmfun resolves paths with the following priority:
 1. **Local directory** (`./llmfun/`) in the current working directory
 2. **System search paths** (standard configuration and data directories)
 3. **Embedded resource files** (bundled with the application)
+
+### Magic Words
+
+Configuration values support magic word substitution:
+
+- `@{llmfun_workarea}`: Replaced with the configured workarea path
+- `@{llmfun}`: Replaced with the directory of the llmfun executable
+
+These are useful in `sandboxConfig.defaultOptions` for mount paths.
 
 ## Security & Configuration
 
@@ -521,9 +630,17 @@ llmfun requires API keys for LLM providers. These should be configured via:
   ```
   llmfun/config/
   llmfun/data/
+  .llmfun.json
   ```
 - Use environment variables for sensitive credentials when possible
 - The `OPENAI_API_KEY` environment variable is automatically checked as a fallback if no API key is specified in the configuration
+
+### CWD Config Security
+
+When the workarea is set to the current working directory (or `.`), llmfun will NOT load `.llmfun.json` from the CWD by default. This prevents malicious projects from injecting configuration. To allow CWD config loading:
+
+- Use `--trusted-config` flag
+- Set workarea to a different directory than CWD
 
 ## Tools
 
@@ -587,6 +704,7 @@ The agent has access to the following tools:
 | Tool | Description |
 |------|-------------|
 | `executeImage` | Execute a command in a container image with security hardening (read-only rootfs, network isolation, resource limits) |
+| `listImages` | List available container images from the curated catalog |
 
 ### Pipeline
 
@@ -607,4 +725,3 @@ The agent has access to the following tools:
 | Tool | Description |
 |------|-------------|
 | `currentDateTime` | Get current date/time as ISO 8601 string |
-
