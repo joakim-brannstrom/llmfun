@@ -19,7 +19,9 @@ llmfun/
 │   ├── app.d                      # Thin command dispatcher
 │   ├── utility_app.d              # Test utility entry point
 │   └── llm/                       # Main package
-│       ├── agent.d                # Core Agent class
+│       ├── agent/                 # Agent package
+│       │   ├── package.d          # Core Agent class (module llm.agent)
+│       │   └── context.d          # Tool-execution context (AgentContext, VisionImage)
 │       ├── agent_pool.d           # Thread pool for agent execution
 │       ├── app_agent.d            # Agent subcommand handler + TUI
 │       ├── app_rag.d              # RAG subcommand handler
@@ -209,7 +211,7 @@ dub build --config=llmfun_test              # Build test utility
 
 ### Agent System
 
-- `Agent` class in `agent.d` is the core. Handles vision, streaming, feedback, and stuck-loop detection.
+- `Agent` class in `agent/package.d` (module `llm.agent`) is the core. Handles vision, streaming, feedback, and stuck-loop detection. `AgentContext` in `agent/context.d` is the tool-execution context; it is decoupled from `Agent` and can be constructed standalone with injected RAG/metrics dependencies.
 - `AgentPool` manages concurrent agent execution via a thread pool.
 - Agents communicate through a `Chat` history with role-based messages.
 
