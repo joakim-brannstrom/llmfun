@@ -152,10 +152,8 @@ struct LlmConfig {
         import my.resource;
         import my.optional;
 
-        AbsolutePath[] prioDataCwdDirs = dataSearch(ProgramName);
         AbsolutePath[] prioConfCwdDirs = configSearch(ProgramName);
         if (cwdConfig) {
-            prioDataCwdDirs = AbsolutePath(ProgramName ~ "/data") ~ prioDataCwdDirs;
             prioConfCwdDirs = AbsolutePath(ProgramName ~ "/config") ~ prioConfCwdDirs;
         }
 
@@ -194,9 +192,8 @@ struct LlmConfig {
         skillPathsUser = skillPathsUser.map!(a => replaceMagicWord(a,
                 workArea.AbsolutePath).Path).array;
 
-        if (scratchArea == Path.init) {
-            scratchArea = prioDataCwdDirs.resolve("scratch".Path)
-                .orElse(ResourceFile(scratchArea.AbsolutePath)).get.Path;
+        if (scratchArea == Path.init && (AbsolutePath(ProgramName ~ "/data")).exists) {
+            scratchArea = AbsolutePath(ProgramName ~ "/data");
         }
     }
 
