@@ -26,7 +26,6 @@ struct ServerConfig {
     long timeoutSeconds;
     long httpVerbosity;
     bool verifySslCert = true;
-    bool keepAlive = true;
     long maxRetries = 3; // maximum number of retries for transient failures
     long backoffMs = 500; // initial backoff in milliseconds (exponential)
 

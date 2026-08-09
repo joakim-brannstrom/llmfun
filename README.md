@@ -486,7 +486,6 @@ Used by `codeModels`, `summaryModel`, and `embedConfig`.
   "timeoutSeconds": 3600,
   "httpVerbosity": 0,
   "verifySslCert": true,
-  "keepAlive": true,
   "maxRetries": 3,
   "backoffMs": 500,
   "apiKey": "",
@@ -504,7 +503,6 @@ Used by `codeModels`, `summaryModel`, and `embedConfig`.
 | `timeoutSeconds` | long | 0 | Request timeout in seconds |
 | `httpVerbosity` | long | 0 | HTTP logging verbosity level |
 | `verifySslCert` | bool | true | Verify SSL/TLS certificates |
-| `keepAlive` | bool | true | Keep HTTP connections alive |
 | `maxRetries` | long | 3 | Maximum retries for transient failures |
 | `backoffMs` | long | 500 | Initial backoff in milliseconds (exponential) |
 | `apiKey` | string | "" | API key for Bearer token auth (falls back to `OPENAI_API_KEY` env var) |

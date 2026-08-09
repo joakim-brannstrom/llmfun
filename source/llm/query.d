@@ -2,17 +2,16 @@ module llm.query;
 
 import core.thread : Thread;
 import core.time : dur, Duration;
+import etc.c.curl : CurlError;
 import logger = std.logger;
 import std.array : empty;
 import std.conv : to, text;
 import std.exception : collectException;
 import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
-import std.stdio : writeln;
+import std.net.curl;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable;
-import std.utf : byUTF;
-
-import requests;
+import std.utf : byUTF, validate, UTFException;
 
 import llm.chat;
 
@@ -22,7 +21,6 @@ struct RequestConfig {
     string slotUrl;
     int verbosity;
     int timeoutS;
-    bool keepAlive;
     bool verifySslCert = true;
     string apiKey;
 
@@ -58,7 +56,6 @@ struct LlmRequester {
 
     private {
         LibRequestConfig rqCfg;
-        Request rq;
     }
 
     this(RequestConfig cfg) {
@@ -69,12 +66,12 @@ struct LlmRequester {
         this.cfg = cfg;
         this.tools = tools;
 
-        auto headers = ["Content-Type": "application/json"];
+        auto headers = string[string].init;
         if (!cfg.apiKey.empty)
             headers["Authorization"] = "Bearer " ~ cfg.apiKey;
-        this.rqCfg = LibRequestConfig(headers: headers, maxRetries: cfg.maxRetries, timeout: cfg.timeoutS
-                .dur!"seconds", sslSetVerifyPeer: cfg.verifySslCert, backoffBaseMs: cfg.backoffBaseMs,
-                verbosity: cfg.verbosity, keepAlive: cfg.keepAlive);
+        this.rqCfg = LibRequestConfig(headers: headers, maxRetries: cfg.maxRetries, timeout: cfg
+                .timeoutS.dur!"seconds", sslSetVerifyPeer: cfg.verifySslCert,
+                backoffBaseMs: cfg.backoffBaseMs, verbosity: cfg.verbosity);
     }
 
     void setCallbacks(void delegate(const(char)[]) stream, bool delegate() interrupt) {
@@ -96,7 +93,7 @@ struct LlmRequester {
             if (cfg.verbosity >= 2)
                 logger.trace(jsonReq.toPrettyString);
 
-            return httpPostWithRetry(rq, cfg.chatUrl,
+            return httpPostWithRetry(cfg.chatUrl,
                     jsonReq.toString(JSONOptions.doNotEscapeSlashes), rqCfg);
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
@@ -131,18 +128,17 @@ struct LlmSlotRequester {
 
     private {
         LibRequestConfig rqCfg;
-        Request rq;
     }
 
     this(RequestConfig cfg) {
         this.cfg = cfg;
 
-        auto headers = ["Content-Type": "application/json"];
+        auto headers = string[string].init;
         if (!cfg.apiKey.empty)
             headers["Authorization"] = "Bearer " ~ cfg.apiKey;
-        this.rqCfg = LibRequestConfig(headers: headers, maxRetries: cfg.maxRetries, timeout: cfg.timeoutS
-                .dur!"seconds", sslSetVerifyPeer: cfg.verifySslCert, backoffBaseMs: cfg.backoffBaseMs,
-                verbosity: cfg.verbosity, keepAlive: cfg.keepAlive);
+        this.rqCfg = LibRequestConfig(headers: headers, maxRetries: cfg.maxRetries, timeout: cfg
+                .timeoutS.dur!"seconds", sslSetVerifyPeer: cfg.verifySslCert,
+                backoffBaseMs: cfg.backoffBaseMs, verbosity: cfg.verbosity);
     }
 
     SumType!(JSONValue, LlamaRequestError) request() nothrow {
@@ -153,7 +149,7 @@ struct LlmSlotRequester {
             if (auto model = "model" in cfg.header)
                 url ~= i"?model=$(model.str)".text;
 
-            auto result = httpGetWithRetry(rq, url, rqCfg);
+            auto result = httpGetWithRetry(url, rqCfg);
 
             return result.match!((HttpResult r) {
                 if (r.statusCode == 200) {
@@ -220,40 +216,23 @@ struct LibRequestConfig {
     bool sslSetVerifyPeer = true;
     long backoffBaseMs = 500;
     long verbosity;
-    bool keepAlive;
 
-    bool isConfigured;
-
-    void conf(ref Request rq) {
-        if (isConfigured)
-            return;
-        isConfigured = true;
-        reconfigure(rq);
-    }
-
-    void reconfigure(ref Request rq) {
-        rq.addHeaders(headers);
-        rq.timeout = timeout;
-        rq.sslSetVerifyPeer = sslSetVerifyPeer;
-        rq.verbosity = cast(uint) verbosity;
-        rq.keepAlive = keepAlive;
-        rq.useStreaming = true;
-        isConfigured = true;
+    /// Configure a fresh std.net.curl HTTP instance with the static settings.
+    /// URL, method and POST body are set per call in httpWithRetry.
+    void applyTo(ref HTTP http) {
+        http.operationTimeout = timeout;
+        http.connectTimeout = timeout;
+        http.verifyPeer = sslSetVerifyPeer;
+        http.verbose = (verbosity >= 1);
+        foreach (key, value; headers)
+            http.addRequestHeader(key, value);
     }
 }
 
 /// Execute an HTTP request with retry and exponential backoff.
-SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(ref Request rq,
-        string url, string body, ref LibRequestConfig cfg) {
-    import std.algorithm : canFind;
-    import std.array : appender;
-    import std.conv : to;
-    import std.utf : validate;
-    import llm.utility : isSignalSIGPIPETriggered, clearSignalSIGPIPE;
-
+SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(string url,
+        string body, ref LibRequestConfig cfg) {
     alias ReturnT = typeof(return);
-
-    cfg.conf(rq);
 
     int attempt = 0;
     HttpError lastError;
@@ -263,49 +242,62 @@ SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(ref Request rq
             long backoff = cfg.backoffBaseMs * (1L << (attempt - 1));
             Thread.sleep(backoff.dur!"msecs");
         }
-        if (isSignalSIGPIPETriggered) {
-            logger.trace("SIGPIPE detected. Resetting Request instance");
-            rq = Request();
-            cfg.reconfigure(rq);
-            clearSignalSIGPIPE;
-        }
 
         attempt++;
         try {
-            static if (HttpReqType == "POST")
-                auto rs = rq.exec!HttpReqType(url, body);
-            else static if (HttpReqType == "GET")
-                auto rs = rq.exec!HttpReqType(url);
-            else
+            // Note: 3xx redirects are NOT followed (std.net.curl has no
+            // redirect support). A redirect response is returned as-is, so
+            // configured endpoints must not redirect.
+            HTTP http = HTTP();
+            cfg.applyTo(http);
+            http.url = url;
+            static if (HttpReqType == "POST") {
+                http.method = HTTP.Method.post;
+                // setPostData adds a Content-Type header itself, so the
+                // configured header map must NOT contain one (curl would
+                // send it twice).
+                http.setPostData(body, "application/json");
+            } else static if (HttpReqType == "GET") {
+                http.method = HTTP.Method.get;
+            } else {
                 static assert(0, "Unknown request type: " ~ HttpReqType);
-            const int code = rs.code;
+            }
 
-            auto streamData = appender!(const(ubyte)[])();
-            StreamByLine sbl;
-            sbl.receive(rs, (const(ubyte)[] chunk) {
-                if (cfg.interrupt !is null && cfg.interrupt()) {
+            auto sbl = StreamByLine(cfg.stream, cfg.interrupt);
+            http.onReceive = (ubyte[] data) {
+                if (sbl.checkInterrupt()) {
                     logger.trace("user interrupted stream");
-                    return false;
+                    return 0;
                 }
-                if (chunk.empty) {
-                    return true;
-                }
-                if (cfg.stream is null) {
-                    streamData.put(chunk);
-                } else {
-                    const(char)[] str;
-                    try {
-                        validate(cast(const(char)[]) chunk);
-                        str = cast(const(char)[]) chunk;
-                    } catch (Exception e) {
-                    }
-                    if (!str.empty)
-                        cfg.stream(str);
-                }
-                return true;
+                sbl.feed(data);
+                return data.length;
+            };
 
-            });
-            auto response = (cast(const(char)[])(streamData[])).byUTF!char.text;
+            auto curlCode = http.perform(ThrowOnError.no);
+            // On user interrupt, stop immediately: no partial-line flush and
+            // no retry. Otherwise flush any trailing partial line first.
+            if (sbl.checkInterrupt())
+                return ReturnT(HttpError(0, "", "user interrupted stream"));
+            sbl.flush();
+            if (curlCode != CurlError.ok) {
+                // Full messages would require linking libcurl directly
+                // (etc.c.curl.curl_easy_strerror), which the project avoids
+                // because std.net.curl loads libcurl dynamically. Map the
+                // common codes to readable text, fall back to the number.
+                lastError = HttpError(0, "", curlErrorText(curlCode));
+                continue;
+            }
+
+            const int code = http.statusLine.code;
+            string response;
+            try {
+                response = (cast(const(char)[])(sbl.fullResponse)).byUTF!char.text;
+            } catch (UTFException e) {
+                // Malformed body on a completed transfer: keep the HTTP status
+                // instead of retrying a request that already got a response.
+                logger.tracef("invalid UTF-8 in response body: %s", e.msg);
+                response = "";
+            }
 
             if (code >= 500) {
                 lastError = HttpError(code, response, i"HTTP $(code) (server error, retryable): $(
@@ -319,60 +311,108 @@ SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(ref Request rq
             return ReturnT(HttpResult(code, response));
         } catch (Exception e) {
             lastError = HttpError(0, "", e.msg);
-            rq = Request();
-            cfg.reconfigure(rq);
         }
     }
     return ReturnT(lastError);
 }
 
 /// Execute an HTTP POST with retry and exponential backoff.
-SumType!(HttpResult, HttpError) httpPostWithRetry(ref Request rq, string url,
-        string body, ref LibRequestConfig cfg) {
-    return httpWithRetry!"POST"(rq, url, body, cfg);
+SumType!(HttpResult, HttpError) httpPostWithRetry(string url, string body, ref LibRequestConfig cfg) {
+    return httpWithRetry!"POST"(url, body, cfg);
 }
 
-/// Execute an HTTP POST with retry and exponential backoff.
-SumType!(HttpResult, HttpError) httpGetWithRetry(ref Request rq, string url,
-        ref LibRequestConfig cfg) {
-    return httpWithRetry!"GET"(rq, url, "", cfg);
+/// Execute an HTTP GET with retry and exponential backoff.
+SumType!(HttpResult, HttpError) httpGetWithRetry(string url, ref LibRequestConfig cfg,
+        string body = "") {
+    return httpWithRetry!"GET"(url, body, cfg);
+}
+
+/// Human-readable text for common curl error codes. std.net.curl loads
+/// libcurl dynamically, so curl_easy_strerror is not available without
+/// linking libcurl directly; this covers the codes users actually hit and
+/// falls back to the numeric code.
+private string curlErrorText(int code) {
+    static immutable string[int] msgs = [
+        6: "could not resolve host", 7: "could not connect",
+        28: "operation timed out", 42: "transfer aborted",
+    ];
+    if (auto p = code in msgs)
+        return *p;
+    return to!string(code);
 }
 
 private:
 
+/// Line-buffering helper for std.net.curl's onReceive callback. Accumulates
+/// raw response bytes, splits on '\n', validates UTF-8 and forwards complete
+/// lines (without the trailing newline) to the stream delegate.
 struct StreamByLine {
-    const(ubyte)[] app;
+    private {
+        void delegate(const(char)[]) stream;
+        bool delegate() interrupt;
+        const(ubyte)[] app; // working buffer for line splitting
+        const(ubyte)[] full; // complete raw response body
+    }
 
-    void receive(ref Response rs, bool delegate(const(ubyte)[] data) callback) {
-        auto stream = rs.receiveAsRange();
-        try {
-            while (!stream.empty) {
-                app ~= stream.front;
-                stream.popFront;
+    this(void delegate(const(char)[]) stream, bool delegate() interrupt) {
+        this.stream = stream;
+        this.interrupt = interrupt;
+    }
 
-                for (size_t pos; pos < app.length; ++pos) {
-                    if (app[pos] == '\n') {
-                        if (!callback(app[0 .. pos])) {
-                            return;
-                        }
-                        app = app[pos + 1 .. $];
-                        pos = 0;
-                    }
-                }
-            }
-        } catch (Exception e) {
-        }
+    /// Returns true if the interrupt delegate is set and requests an abort.
+    bool checkInterrupt() {
+        return interrupt !is null && interrupt();
+    }
 
-        for (size_t pos; pos < app.length; ++pos) {
+    /// Accumulate a chunk of raw response bytes and deliver complete lines
+    /// (ending in '\n') to the stream delegate.
+    void feed(const(ubyte)[] chunk) {
+        // Note: the full body is buffered in memory even when streaming, so
+        // the response body stays available for the HttpResult. An unbounded
+        // stream will grow without limit.
+        full ~= chunk;
+        app ~= chunk;
+        size_t pos = 0;
+        while (pos < app.length) {
             if (app[pos] == '\n') {
-                callback(app[0 .. pos]);
+                deliver(app[0 .. pos]);
                 app = app[pos + 1 .. $];
-                pos = 0;
+                pos = 0; // re-check index 0 (handles consecutive '\n')
+            } else {
+                ++pos;
             }
         }
+    }
+
+    /// Deliver any remaining partial line (no trailing '\n') after the
+    /// transfer has finished.
+    void flush() {
         if (!app.empty) {
-            callback(app);
+            deliver(app);
+            app = null;
         }
+    }
+
+    /// The complete raw response body accumulated so far.
+    const(ubyte)[] fullResponse() const {
+        return full;
+    }
+
+    private void deliver(const(ubyte)[] line) {
+        if (stream is null)
+            return;
+        const(char)[] str;
+        try {
+            validate(cast(const(char)[]) line);
+            str = cast(const(char)[]) line;
+        } catch (Exception e) {
+            // Invalid UTF-8: drop the line instead of crashing the transfer.
+            // Deliberate asymmetry with httpWithRetry, where a malformed
+            // response body (built from fullResponse) fails wholesale and
+            // yields an empty body.
+        }
+        if (!str.empty)
+            stream(str);
     }
 }
 

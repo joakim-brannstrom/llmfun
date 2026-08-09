@@ -1,4 +1,4 @@
-// HTTP-based embedder using the requests library.
+// HTTP-based embedder using the curl.
 
 module llm.rag.embedder_http;
 
@@ -10,8 +10,6 @@ import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
 import std.string : split;
 import std.sumtype : SumType, match;
 import core.time : dur;
-
-import requests;
 
 import llm.common.embedder;
 import llm.query;
@@ -26,7 +24,6 @@ private immutable MaxRetryEmbedder = 3;
 class RemoteEmbedder : Embedder {
     private {
         RemoteEmbedConfig cfg;
-        Request rq;
         LibRequestConfig rqCfg;
     }
 
@@ -36,14 +33,13 @@ class RemoteEmbedder : Embedder {
         this.cfg = cfg;
 
         auto apiKey = cfg.server.apiKey.empty ? getEnvApiKey() : cfg.server.apiKey;
-        auto headers = ["Content-Type": "application/json"];
+        // No "Content-Type" here: setPostData adds it for POST requests.
+        auto headers = string[string].init;
         if (!apiKey.empty)
             headers["Authorization"] = "Bearer " ~ apiKey;
         this.rqCfg = LibRequestConfig(headers: headers, maxRetries: cfg.server.maxRetries,
                 timeout: cfg.server.timeoutSeconds.dur!"seconds", sslSetVerifyPeer: cfg.server.verifySslCert,
-                backoffBaseMs: cfg.server.backoffMs, verbosity: cfg.server.httpVerbosity,
-                // must be turned off or llama.cpp server return null when connection is reused
-                keepAlive: false);
+                backoffBaseMs: cfg.server.backoffMs, verbosity: cfg.server.httpVerbosity);
     }
 
     override void destroy() {
@@ -105,7 +101,7 @@ class RemoteEmbedder : Embedder {
         EmbedResult rval;
         for (int i = 0; i < MaxRetryEmbedder && hasError; ++i) {
             hasError = false;
-            auto result = httpPostWithRetry(rq, cfg.server.toEmbedUrl,
+            auto result = httpPostWithRetry(cfg.server.toEmbedUrl,
                     jsonReq.toString(JSONOptions.doNotEscapeSlashes), rqCfg);
             result.match!((HttpResult r) { rval = parseHttp(r); }, (HttpError e) {
                 hasError = true;

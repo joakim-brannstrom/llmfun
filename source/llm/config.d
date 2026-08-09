@@ -651,7 +651,6 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
          slotUrl: conf.server.toSlotUrl,
          timeoutS: cast(int) conf.server.timeoutSeconds,
          verifySslCert: conf.server.verifySslCert,
-         keepAlive: conf.server.keepAlive,
          verbosity: cast(int) conf.server.httpVerbosity,
          apiKey: conf.server.apiKey.empty ? getEnvApiKey() : conf.server.apiKey,
          header: makeHeader(conf.name, conf.temp, conf.maxTokens, conf.server));

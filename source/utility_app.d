@@ -13,7 +13,6 @@ import std.utf : decode, UseReplacementDchar, byUTF;
 import argparse : CLI, NamedArgument, PositionalArgument, ArgumentGroup,
     ansiStylingArgument, Command, Description, Required,
     Optional, Parse, SubCommand, Placeholder, Default, matchCmd, MutuallyExclusive;
-import requests;
 import my.term_color;
 import my.path;
 import colorlog;
