@@ -82,6 +82,9 @@ private string toResult(Document[] docs) @safe {
  * - Only vectorQuery present → querySemantic
  */
 private ExecuteFuncResult queryFunc(P)(RAGContext ctx, P params) {
+    if (ctx.getRAG() is null) {
+        return ExecuteFuncResult("error: RAG not available", success: false);
+    }
     if (params.topK < 1 || params.topK > ctx.getToolLimits().maxTopK) {
         return ExecuteFuncResult(i"error: params.topK parameter must be in range [1, $(
                 ctx.getToolLimits().maxTopK)]".text, success: false);
@@ -209,6 +212,9 @@ struct ListRAGDatabasesParams {
 @Function("List all available RAG databases with their names and file paths. Use this to discover database names for filtering queries.")
 ExecuteFuncResult listRAGDatabases(Context baseCtx, ListRAGDatabasesParams params) {
     mixin(baseContextToSpecific!RAGContext);
+    if (ctx.getRAG() is null) {
+        return ExecuteFuncResult("error: RAG not available", success: false);
+    }
 
     try {
         auto infos = ctx.getRAG.getDatabaseInfo();
@@ -241,6 +247,9 @@ struct LoadFileToRAGParams {
 ExecuteFuncResult loadFileToRAG(Context baseCtx, LoadFileToRAGParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
+    if (ctx.getRAG() is null) {
+        return ExecuteFuncResult("error: RAG not available", success: false);
+    }
     auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
@@ -272,6 +281,10 @@ struct LoadContentToRAGParams {
 @Function("Load content into RAG index with a topic name.")
 ExecuteFuncResult loadContentToRAG(Context baseCtx, LoadContentToRAGParams params) {
     mixin(baseContextToSpecific!RAGContext);
+
+    if (ctx.getRAG() is null) {
+        return ExecuteFuncResult("error: RAG not available", success: false);
+    }
 
     if (auto e = checkTopic(ctx, params.topic)) {
         return ExecuteFuncResult(e, success: false);
@@ -309,6 +322,10 @@ struct RemoveTopicFromRAGParams {
 @Function("Remove topic from RAG index.")
 ExecuteFuncResult removeTopicFromRAG(Context baseCtx, RemoveTopicFromRAGParams params) {
     mixin(baseContextToSpecific!RAGContext);
+
+    if (ctx.getRAG() is null) {
+        return ExecuteFuncResult("error: RAG not available", success: false);
+    }
 
     if (auto e = checkTopic(ctx, params.topic)) {
         return ExecuteFuncResult(e, success: false);
@@ -367,6 +384,9 @@ struct QueryReadFileParams {
 ExecuteFuncResult queryReadFile(Context baseCtx, QueryReadFileParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
+    if (ctx.getRAG() is null) {
+        return ExecuteFuncResult("error: RAG not available", success: false);
+    }
     if (params.filePath.empty) {
         return ExecuteFuncResult("error: filePath must not be empty", success: false);
     }

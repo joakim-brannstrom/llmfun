@@ -8,7 +8,6 @@ import logger = std.logger;
 import std.algorithm : map;
 import std.array : array;
 import std.datetime : Clock, SysTime, dur;
-import std.exception : enforce;
 import std.path : baseName, stripExtension;
 import std.range : empty;
 import std.sumtype : match;
@@ -62,9 +61,8 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             SkillManager skillManager;
         }
 
-        /// RAG is required: RAG/memory tools (getRAG, saveMemoryFile, removeMemory) need it.
+        /// RAG is optional: when null, RAG-dependent tools degrade gracefully.
         this(LlmConfig conf, RAG rag, MetricMonitor monitor = null) {
-            enforce(rag !is null, "AgentContext requires a non-null RAG");
             this.conf = conf;
             this.workArea_ = conf.workArea.AbsolutePath;
             this.rag = rag;
@@ -168,7 +166,11 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             auto rval = memoryVfs.save(topic ~ ".md", content);
             if (rval) {
                 memoryVfs.query(topic ~ ".md").match!((AbsolutePath a) {
-                    rag.add(Document(Origin(a), content, Offset.init), conf.ragConfig);
+                    if (rag !is null) {
+                        rag.add(Document(Origin(a), content, Offset.init), conf.ragConfig);
+                    } else {
+                        logger.warning("RAG not available, skipping RAG index update");
+                    }
                 }, (_) {});
             }
             return rval;
@@ -182,7 +184,11 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             import llm.rag.rag : Origin;
 
             memoryVfs.query(topic ~ ".md").match!((AbsolutePath a) {
-                rag.removeSource(Origin(a));
+                if (rag !is null) {
+                    rag.removeSource(Origin(a));
+                } else {
+                    logger.warning("RAG not available, skipping RAG source removal");
+                }
             }, (_) {});
 
             return memoryVfs.remove(topic ~ ".md");
