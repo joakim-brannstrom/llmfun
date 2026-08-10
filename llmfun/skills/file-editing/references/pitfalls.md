@@ -14,6 +14,9 @@ An edit may look correct in your diff but fail at the tool level. Always verify:
 - Data files: re-read and validate structure
 - Config files: re-read and check syntax
 
+### Successive byLine edits corrupt files silently
+When making multiple byLine edits from a single readFile, the first edit shifts line numbers — subsequent edits target wrong content without any error. **Always re-read the file between byLine edits**, or better: **use byMarker or byContent** which search for content, not line numbers. If you must use byLine for successive edits, use the `verifyContent` parameter as a safety guard.
+
 ## byMarker + Multi-line Content (Auto-Count)
 
 ### Auto-derived count from content lines
@@ -37,10 +40,10 @@ If the original block has 10 lines but your replacement has 3, auto-count will o
 ### Uses trimmed equality
 `fileLine.strip == searchLine.strip`. Leading/trailing whitespace is ignored on both sides. This means searching for unindented code matches indented code.
 
-### Empty lines in search are skipped, but file empty lines are not
-Empty lines in your search block are **skipped** during matching (they don't consume file lines). This allows searching for code blocks with variable spacing. However, empty lines in the **file** still need to match the next non-empty search line.
+### Empty lines in search and file are both skipped
+Empty lines in your search block are skipped during matching, AND empty lines in the file are also skipped. This means blocks match regardless of blank line differences.
 
-**Example that fails**: File has `line1\n\nline3`, search is `line1\nline3`. The search line `line3` tries to match file line 2 (empty) → no match.
+**Example that works**: File has `line1\n\nline3`, search is `line1\nline3`. Both the search blank line and the file blank line are skipped. Non-empty lines (`line1`, `line3`) match → success.
 
 **Solution**: Either include the empty line in your search (`line1\n\nline3`), or search for just the non-empty lines you need.
 

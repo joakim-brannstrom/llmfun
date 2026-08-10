@@ -50,6 +50,29 @@ editFile(path="file.txt", mode="remove", startLine=10, count=3, content="")
 
 applyDiff(path="file.txt", diff="--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n old\n-new\n+changed\n context")
 
+## Successive edits (preferred: use byMarker)
+
+editFile(path="file.txt", mode="replace", marker="void setTimer", content="...")
+// Then for the next edit, use byMarker again — it searches for content, not line numbers:
+editFile(path="file.txt", mode="replace", marker="void enableVerbose", content="...")
+// byMarker and byContent are self-correcting: they find content regardless of line shifts.
+
+## Successive edits with byLine (use verifyContent guard)
+
+editFile(path="file.txt", mode="replace", startLine=29, count=3,
+         verifyContent="void setTimer(int ms) {\n    // TODO: implement\n}",
+         content="void setTimer(int ms) {\n    timer = new Timer(ms);\n    timer.start();\n}")
+// verifyContent ensures the target lines haven't changed since you last read them.
+// If they have, the tool errors out instead of silently corrupting the file.
+
+## Multi-line marker pattern
+
+editFile(path="file.txt", mode="replace",
+         marker="void setTimer(int ms) {\n    // TODO: implement",
+         content="void setTimer(int ms) {\n    timer = new Timer(ms);\n    timer.start();\n}")
+// First marker line ("void setTimer...") is found, then the second line ("    // TODO")
+// must also match the consecutive file line. Up to 20 marker lines supported.
+
 ## Write a new file
 
 writeFile(path="newfile.txt", content="full file content here")

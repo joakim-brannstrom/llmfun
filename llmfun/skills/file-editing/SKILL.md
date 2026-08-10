@@ -7,7 +7,7 @@ description: >-
   Triggers on: file editing, edit file, modify file, file change, apply diff,
   write file, file modification, code change, update file, replace file content,
   file-editing, edit-file.
-version: 3.3.0
+version: 3.4.0
 ---
 
 # File Editing
@@ -38,16 +38,11 @@ Structured protocol for editing files safely and correctly.
 
 ## Tool Selection Decision Tree
 
-```
 File new?
   → YES: writeFile
   → NO: Continue...
 
-Know exact line numbers?
-  → YES: editFile(startLine, count)
-  → NO: Continue...
-
-Know a unique marker?
+Know a unique marker (single or multi-line)?
   → YES: editFile(marker) [+ count if replacing a block]
   → NO: Continue...
 
@@ -55,21 +50,25 @@ Know the exact code block?
   → YES: editFile(searchContent)
   → NO: Continue...
 
+Know exact line numbers?
+  → YES: editFile(startLine, count)
+         ⚠ Re-read the file between successive byLine edits — line numbers shift!
+  → NO: Continue...
+
 Have a pre-computed unified diff?
   → YES: applyDiff
   → NO: Re-read file, find a marker or code block, try again.
-```
 
 ## Quick Tool Reference
 
 ### editFile — Unified file editing
 
-- **Targeting** (exactly one required): `byLine` (startLine+count), `byMarker` (substring), `byContent` (code block).
+- **Targeting** (exactly one required): `byLine` (startLine+count), `byMarker` (substring, single or multi-line up to 20 lines), `byContent` (code block).
 - **Modes**: `replace`, `remove`, `append`, `insert_before`, `insert_after` (=append alias).
-- **Options**: `dryRun`, `replaceAll` (byContent/byMarker only), `matchIndex` (Nth occurrence, 1-based; default 1; cannot be combined with replaceAll when > 1; ignored by byLine), `scopeStart`/`scopeEnd` (limit search range).
-- **Auto-count**: byMarker+replace auto-derives count from content lines. Set `count` explicitly to override.
-- **byContent**: trimmed equality; empty search lines skipped (but file empty lines still must match next non-empty search line); full-line match (not substring).
-- **Returns**: JSON with `ok`, `matchedAt`, `matchedLines`, `linesChanged`, `operations`. On failure: `error` + `diagnostic`.
+- **Options**: `dryRun`, `replaceAll` (byContent/byMarker only), `matchIndex` (Nth occurrence, 1-based; default 1; cannot be combined with replaceAll when > 1; ignored by byLine), `scopeStart`/`scopeEnd` (limit search range), `verifyContent` (byLine guard — verify target lines before editing).
+- **Auto-count**: byMarker+replace auto-derives count from content lines. Set `count` explicitly to override. Multi-line markers use marker line count instead.
+- **byContent**: trimmed equality; empty lines skipped in both search and file; full-line match (not substring).
+- **Returns**: JSON with `ok`, `matchedAt`, `matchedLines`, `linesChanged`, `operations`, `lineShift`, `autoCountUsed`/`note` (when auto-count active). On failure: `error` + `diagnostic`.
 - **Full details**: `references/tool-reference.md`
 
 ### applyDiff — Unified diff patch
@@ -85,9 +84,7 @@ Creates file with parent directories. Replaces entire content if file exists —
 
 ## Matching & Dry-Run
 
-- **byContent**: Trimmed equality; empty search lines skipped (file empty lines still match next non-empty search). See `references/tool-reference.md`.
-- **byMarker**: Case-sensitive substring, first occurrence default; `matchIndex=N` for Nth.
-- **applyDiff**: Fuzzy by default (`fuzzy=false` for exact).
+- **byContent**: Trimmed equality; empty lines skipped in both search and file; full-line match (not substring).
 - **Always dry-run first**, then apply. See `references/pitfalls.md` for edge cases.
 
 See `references/patterns.md` for common usage patterns.
