@@ -5,7 +5,7 @@ module llm.agent.context;
 
 import core.time : dur;
 import logger = std.logger;
-import std.algorithm : map;
+import std.algorithm : map, filter;
 import std.array : array;
 import std.datetime : Clock, SysTime, dur;
 import std.path : baseName, stripExtension;
@@ -15,7 +15,9 @@ import std.sumtype : match;
 import my.optional : Optional;
 import my.path : AbsolutePath;
 
-import llm.config : LlmConfig, ToolLimits, SandboxConfig, RagConfig;
+import llm.config : LlmConfig, ToolLimits, RagConfig;
+import llm.environment.config : EnvironmentBackend;
+import llm.environment.dispatch : EnvironmentContext;
 import llm.metric.calculator : MetricsCalculator;
 import llm.metric.monitor : MetricMonitor, ToolCallEvent;
 import llm.rag.rag : RAG;
@@ -27,7 +29,6 @@ import llm.tool_call.memory : MemoryContext;
 import llm.tool_call.metrics : MetricsContext;
 import llm.tool_call.pipeline : PipelineControlContext;
 import llm.tool_call.rag : RAGContext;
-import llm.tool_call.sandbox : SandboxContext;
 import llm.tool_call.skill : SkillContext;
 import llm.tool_call.vision : VisionContext, DedicatedVisionAgent, DefaultVisionSystemPrompt;
 import llm.types : IAgent;
@@ -40,8 +41,8 @@ struct VisionImage {
     }
 }
 
-class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryContext,
-    CompletionContext, MetricsContext, PipelineControlContext, VisionContext, SkillContext {
+class AgentContext : Context, FileContext, RAGContext, MemoryContext, CompletionContext,
+    MetricsContext, PipelineControlContext, VisionContext, SkillContext, EnvironmentContext {
         import llm.vfs : FlatVfs;
 
         private {
@@ -59,6 +60,8 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             VisionImage pendingVisionImage;
 
             SkillManager skillManager;
+
+            EnvironmentBackend[string] envLookup_;
         }
 
         /// RAG is optional: when null, RAG-dependent tools degrade gracefully.
@@ -68,12 +71,35 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
             this.rag = rag;
             this.monitor = monitor;
             this.memoryVfs = FlatVfs(conf.memoryArea);
-            // calculator is a value-type struct field; no initialization needed
+
+            foreach (e; conf.sandboxConfig.executionEnvironments) {
+                envLookup_[e.tag] = e;
+            }
         }
 
         /// Set the skill manager used by the skill tool.
         void setSkillManager(SkillManager mgr) {
             skillManager = mgr;
+        }
+
+        /// Look up an environment by its tag using a pre-built AA.
+        /// Returns the matching backend, or `.init` if not found.
+        override EnvironmentBackend getEnvironment(string tag) @safe nothrow {
+            auto p = tag in envLookup_;
+            return p ? *p : EnvironmentBackend.init;
+        }
+
+        /// List all loaded execution environments.
+        override EnvironmentBackend[] listEnvironments() @trusted nothrow {
+            import std.algorithm : sort;
+
+            return envLookup_.byValue.array.sort!((a, b) => a.tag < b.tag).array;
+        }
+
+        /// Get the default environment tag.
+        /// Returns: The default tag, or null if not configured.
+        override string getDefaultEnvironmentTag() @safe nothrow {
+            return conf.sandboxConfig.defaultEnvironmentTag;
         }
 
         /// Set the pipeline control context for pipeline output propagation.
@@ -123,10 +149,6 @@ class AgentContext : Context, FileContext, SandboxContext, RAGContext, MemoryCon
 
         override ToolLimits getToolLimits() {
             return conf.toolLimits;
-        }
-
-        override SandboxConfig getSandboxConfig() {
-            return conf.sandboxConfig;
         }
 
         override bool hasVisionModel() {

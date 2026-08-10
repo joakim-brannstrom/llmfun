@@ -27,8 +27,8 @@ import llm.query;
 import llm.rag.rag : RAG;
 import llm.skill : SkillManager, buildAlwaysApplyBlock, makeSkillManager;
 import llm.tui;
-import llm.utility;
 import llm.types : ServerStat, StreamMessage, StreamToolCall;
+import llm.utility;
 import llmfun_tui;
 
 import my.path : Path, AbsolutePath;

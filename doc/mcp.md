@@ -55,7 +55,7 @@ The MCP server constructs a full `AgentContext` inside the actor thread. `AgentC
 | Context Interface | Tools | Availability in MCP |
 |-------------------|-------|---------------------|
 | `FileContext` | `readFile`, `writeFile`, `editFile`, `listDirectory`, `removeFile`, `countLinesInFile`, `md5HashFile`, `grepFiles` | Always available |
-| `SandboxContext` | `executeImage`, `listImages` | Always available |
+| `EnvironmentContext` | `executeCommand`, `listEnvironments` | Always available |
 | `RAGContext` | `querySemantic`, `queryTextSearch`, `queryBestMatch`, `listRAGDatabases`, `loadFileToRAG`, `loadContentToRAG`, `removeTopicFromRAG`, `queryReadFile` | Available if RAG is configured, graceful degradation otherwise |
 | `MemoryContext` | `writeMemory`, `readMemory`, `removeMemory`, `getMemoryTopics` | Always available |
 | `CompletionContext` | `taskDone` | Always available (no-op with logging) |
@@ -248,7 +248,7 @@ llmfun mcp --list-tools
 llmfun mcp --stdio --include "^read.*" --include "^write.*" --include "^list.*"
 
 # Exclude dangerous tools
-llmfun mcp --stdio --exclude "executeImage" --exclude "removeFile"
+llmfun mcp --stdio --exclude "executeCommand" --exclude "removeFile"
 ```
 
 ### Pipe Requests

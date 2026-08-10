@@ -29,9 +29,6 @@
   },
 
   "sandboxConfig": {
-    "runtimeCli": "docker",
-    "defaultImage": "alpine:latest",
-    "timeoutSeconds": 60,
     "maxOutputBytes": 1048576,
     "defaultOptions": {
       "00_subcommand": ["run"],
@@ -41,10 +38,10 @@
       "04_tmpfs": ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"],
       "05_timeout": ["--stop-timeout", "60"],
       "06_network": ["--network", "none"],
-      "99_shell": ["sh", "-c"]
+      "entrypoint_shell": ["sh", "-c"]
     },
-    "systemImageCatalogFile": "config/image_catalog.json",
-    "userImageCatalogFile": ""
+    "systemExecutionEnvironmentsFile": "config/execution_environments.json",
+    "userExecutionEnvironmentsFile": ""
   },
 
   "ragPrimary": {

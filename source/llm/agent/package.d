@@ -34,6 +34,8 @@ import llm.tool_call : FunctionCall, Context;
 import llm.tool_call.pipeline : PipelineControlContext;
 import llm.utility : getValue;
 
+import llm.environment.config : EnvironmentBackend;
+
 public import llm.types : IBasicAgent, IAgent, ProcessResult, IStreamCallback,
     ServerStat, StreamToolCall;
 public import llm.agent.context : AgentContext, VisionImage;

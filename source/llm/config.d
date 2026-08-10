@@ -17,6 +17,7 @@ import my.path;
 
 import llm.query : RequestConfig;
 import llm.skill : SkillManager;
+import llm.environment.config : EnvironmentBackend, ExecutionConfigState, loadExecutionBackends;
 public import llm.common.embedder;
 public import llm.common.config;
 
@@ -57,48 +58,7 @@ struct RagConfig {
     }
 }
 
-/// Single entry in the curated image catalog.
-struct ImageCatalogEntry {
-    /// Full image reference (e.g., "python:3.11-slim")
-    string name;
-
-    /// Human-readable description of what this image is for
-    string description;
-
-    /// Tags for categorization and filtering (e.g., ["python", "dev"])
-    string[] tags;
-
-    /// Per-image container options as tag -> CLI arguments map.
-    /// Keys are logical group names (e.g., "security", "network", "mounts").
-    /// Values are arrays of CLI arguments flattened into the command line.
-    /// Overrides defaultOptions for matching tag keys.
-    string[][string] options;
-
-    invariant {
-        assert(name.length > 0, "ImageCatalogEntry name must not be empty");
-    }
-}
-
-/// Loading state of the image catalog.
-enum CatalogState {
-    /// No catalog file configured - no images allowed
-    notConfigured,
-    /// Catalog loaded successfully - validates against it
-    loaded,
-    /// Catalog file existed but failed to parse - no images allowed
-    loadFailed
-}
-
 struct SandboxConfig {
-    /// Container runtime CLI command (e.g., "docker" or "podman")
-    string runtimeCli = "docker";
-
-    /// Default container image when none specified
-    string defaultImage;
-
-    /// Subprocess execution timeout in seconds
-    long timeoutSeconds = 60;
-
     /// Default container options as tag -> CLI arguments map.
     /// Keys are logical group names (e.g., "security", "network", "mounts").
     /// Values are arrays of CLI arguments flattened into the command line.
@@ -107,21 +67,25 @@ struct SandboxConfig {
     /// Maximum output bytes per stream (stdout/stderr)
     long maxOutputBytes = 1_048_576;
 
-    /// Curated image catalog entries (loaded from catalog files at startup)
-    ImageCatalogEntry[] imageCatalog;
+    /// Path to system execution environments JSON file (relative to config directory).
+    /// Loaded as layer 1; user file entries override system entries with the same tag.
+    string systemExecutionEnvironmentsFile;
 
-    /// Path to system image catalog JSON file (relative to config directory)
-    string systemImageCatalogFile;
+    /// Path to user execution environments JSON file (relative to config directory).
+    /// Loaded as layer 2; entries with the same tag override system entries.
+    string userExecutionEnvironmentsFile;
 
-    /// Path to user image catalog JSON file (relative to config directory)
-    string userImageCatalogFile;
+    /// Execution environments (loaded from configured JSON files at startup).
+    EnvironmentBackend[] executionEnvironments;
 
-    /// Loading state of the image catalog
-    CatalogState catalogState = CatalogState.notConfigured;
+    /// Loading state of the execution environments config.
+    ExecutionConfigState executionConfigState = ExecutionConfigState.notConfigured;
+
+    /// Default environment tag from the execution environments config.
+    /// Only set when the config loaded successfully.
+    string defaultEnvironmentTag;
 
     invariant {
-        assert(runtimeCli.length > 0, "runtimeCli must not be empty");
-        assert(timeoutSeconds > 0, i"timeoutSeconds must be positive, got $(timeoutSeconds)".text);
         assert(maxOutputBytes > 0, i"maxOutputBytes must be positive, got $(maxOutputBytes)".text);
     }
 }
@@ -654,165 +618,89 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
     // dfmt on
 }
 
-// remove all invalid keys from image options
-private string[][string] validateAndCleanupOptions(string[][string] options, string name) @safe {
-    string[] invalidKeys;
-    foreach (key; options.byKey) {
-        if (key.length < 3 || key[2] != '_') {
-            invalidKeys ~= key;
-        } else {
+/// Load execution environments into `conf.sandboxConfig`, mirroring the image
+/// catalog loading done in `readConfigInternal`. Supports system/user split
+/// with user entries overriding system entries by tag.
+///
+/// When `systemExecutionEnvironmentsFile` or `userExecutionEnvironmentsFile`
+/// are configured in `SandboxConfig`, they are loaded from paths relative to
+/// `configDir` and merged (user overrides system).
+///
+/// A missing config file disables command execution (empty backend list,
+/// `ExecutionConfigState.notConfigured`). `loadExecutionBackends` handles all
+/// logging; this function only applies the results.
+private void loadExecutionEnvironments(ref LlmConfig conf,
+        Path explicitConfigFile, string configDir, bool loadedAnyFile) {
+    import std.path : buildPath;
+
+    // If system/user files are configured, use them with merge logic.
+    if (!conf.sandboxConfig.systemExecutionEnvironmentsFile.empty
+            || !conf.sandboxConfig.userExecutionEnvironmentsFile.empty) {
+
+        EnvironmentBackend[] systemEntries;
+        ExecutionConfigState systemState = ExecutionConfigState.notConfigured;
+        string systemDefaultTag;
+
+        if (!conf.sandboxConfig.systemExecutionEnvironmentsFile.empty) {
             try {
-                auto _ = key[0 .. 2].to!int;
+                auto systemPath = AbsolutePath(buildPath(configDir,
+                        conf.sandboxConfig.systemExecutionEnvironmentsFile));
+                systemEntries = loadExecutionBackends(systemPath,
+                        conf.sandboxConfig.defaultOptions, systemState, systemDefaultTag);
             } catch (Exception e) {
-                invalidKeys ~= key;
+                logger.warningf("Failed to load system execution environments '%s': %s",
+                        conf.sandboxConfig.systemExecutionEnvironmentsFile, e.msg);
+                systemState = ExecutionConfigState.loadFailed;
             }
         }
-    }
 
-    if (!invalidKeys.empty) {
-        logger.warningf(
-                "Configuration for '%s' has invalid option key(s) removed. Keys must be prefixed with <NR>_: %s",
-                name, invalidKeys);
-    }
-    foreach (key; invalidKeys) {
-        options.remove(key);
-    }
+        EnvironmentBackend[] userEntries;
+        ExecutionConfigState userState = ExecutionConfigState.notConfigured;
+        string userDefaultTag;
 
-    return options;
-}
-
-/// Load the image catalog from a JSON file.
-/// Supports wrapper object with version + entries formats.
-/// Updates state to reflect loading outcome.
-ImageCatalogEntry[] loadImageCatalog(Path filePath, ref CatalogState state) {
-    import llm.utility : getValue;
-
-    if (!filePath.exists) {
-        logger.warningf("Image catalog file not found: %s - no images will be available", filePath);
-        state = CatalogState.notConfigured;
-        return null;
-    }
-
-    string content;
-    try {
-        content = readText(filePath);
-    } catch (Exception e) {
-        logger.warningf("Failed to read image catalog %s: %s - no images will be available",
-                filePath, e.msg);
-        state = CatalogState.loadFailed;
-        return null;
-    }
-
-    JSONValue json;
-    try {
-        json = parseJSON(content);
-    } catch (Exception e) {
-        logger.warningf("Failed to parse image catalog %s: %s - no images will be available",
-                filePath, e.msg);
-        state = CatalogState.loadFailed;
-        return [];
-    }
-
-    // Validate v1 format: object with "entries" array
-    JSONValue entriesJson;
-    if (json.type == JSONType.OBJECT && "entries" in json) {
-        // { "version": 1, "entries": [...] }
-        entriesJson = json["entries"];
-        if ("version" in json) {
-            auto ver = json["version"].integer;
-            if (ver != 1) {
-                logger.warningf("Image catalog version %s is unknown - attempting to parse anyway",
-                        ver);
+        if (!conf.sandboxConfig.userExecutionEnvironmentsFile.empty) {
+            try {
+                auto userPath = AbsolutePath(buildPath(configDir,
+                        conf.sandboxConfig.userExecutionEnvironmentsFile));
+                userEntries = loadExecutionBackends(userPath,
+                        conf.sandboxConfig.defaultOptions, userState, userDefaultTag);
+            } catch (Exception e) {
+                logger.warningf("Failed to load user execution environments '%s': %s",
+                        conf.sandboxConfig.userExecutionEnvironmentsFile, e.msg);
+                userState = ExecutionConfigState.loadFailed;
             }
         }
-    } else {
-        logger.warningf("Image catalog %s has invalid format - expected v1 object with 'entries' field. No images will be available.",
-                filePath);
-        state = CatalogState.loadFailed;
-        return null;
-    }
-    if (entriesJson.type != JSONType.ARRAY) {
-        logger.warningf("Image catalog entries in %s is not an array - no images will be available",
-                filePath);
-        state = CatalogState.loadFailed;
-        return null;
-    }
 
-    ImageCatalogEntry[string] result;
-    foreach (entry; entriesJson.array) {
-        if (entry.type != JSONType.OBJECT) {
-            logger.warningf("Skipping non-object entry in image catalog");
-            continue;
-        }
+        if (systemState == ExecutionConfigState.loaded || userState == ExecutionConfigState.loaded) {
+            EnvironmentBackend[string] merged;
 
-        // Parse name (required)
-        string name = getValue(entry, (v) => v["name"].str, null);
-        if (name.empty) {
-            logger.warningf("Skipping catalog entry with empty or invalid 'name' field");
-            continue;
-        }
-
-        // Check for duplicates
-        if (name in result) {
-            logger.warningf("Duplicate image name in catalog '%s' - keeping first occurrence",
-                    name);
-            continue;
-        }
-
-        // Parse optional fields
-        string description = getValue(entry, (v) => v["description"].str, null);
-        string[] tags = getValue(entry, (v) => v["tags"].array, null).filter!(
-                a => a.type == JSONType.STRING)
-            .map!(a => a.str)
-            .array;
-
-        // Parse options as string[string[]] map
-        string[][string] options;
-        if ("options" in entry) {
-            auto optJson = entry["options"];
-            if (optJson.type == JSONType.OBJECT) {
-                foreach (key, val; optJson.object) {
-                    if (val.type == JSONType.ARRAY) {
-                        string[] arr;
-                        foreach (item; val.array) {
-                            if (item.type == JSONType.STRING) {
-                                arr ~= item.str;
-                            } else {
-                                logger.warningf("Skipping non-string item in options['%s'] for image '%s'",
-                                        key, name);
-                            }
-                        }
-                        if (arr.empty && val.array.length > 0) {
-                            logger.warningf("All items in options['%s'] for image '%s' were non-string and skipped",
-                                    key, name);
-                        }
-                        if (!arr.empty) {
-                            options[key] = arr;
-                        }
-                    } else {
-                        logger.warningf("Skipping non-array value for options['%s'] in image '%s'",
-                                key, name);
-                    }
+            // User entries take priority (inserted first, not overwritten by system)
+            foreach (entry; userEntries) {
+                if (entry.tag !in merged) {
+                    merged[entry.tag] = entry;
                 }
-                options = validateAndCleanupOptions(options, name);
-            } else {
-                logger.warningf("Invalid options format for image '%s' - expected object", name);
             }
+
+            // System entries fill gaps not covered by user entries
+            foreach (entry; systemEntries) {
+                if (entry.tag !in merged) {
+                    merged[entry.tag] = entry;
+                }
+            }
+
+            conf.sandboxConfig.executionEnvironments = merged.byValue.array;
+            conf.sandboxConfig.executionConfigState = ExecutionConfigState.loaded;
+
+            // defaultEnvironment: user file takes priority, fall back to system
+            conf.sandboxConfig.defaultEnvironmentTag = !userDefaultTag.empty
+                ? userDefaultTag : systemDefaultTag;
+        } else {
+            conf.sandboxConfig.executionConfigState = ExecutionConfigState.loadFailed;
+            conf.sandboxConfig.defaultEnvironmentTag = null;
         }
 
-        result[name] = ImageCatalogEntry(name: name, description: description,
-                tags: tags, options: options);
+        return;
     }
-
-    if (result.length > 100) {
-        logger.warningf("Image catalog contains %s entries (exceeds 100) - this may impact performance",
-                result.length);
-    }
-
-    state = CatalogState.loaded;
-    logger.infof("Loaded %s entries from image catalog %s", result.length, filePath);
-
-    return result.byValue.array;
 }
 
 LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig,
@@ -900,63 +788,9 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
     conf.resolvePaths(!noCwdConfig);
     conf.loadState();
 
-    conf.sandboxConfig.defaultOptions = validateAndCleanupOptions(
-            conf.sandboxConfig.defaultOptions, "config defaultOptions");
-
-    // Load image catalogs: system layer 1, user layer 2
-    // User catalog entries override system entries with the same name
-    if (!conf.sandboxConfig.systemImageCatalogFile.empty
-            || !conf.sandboxConfig.userImageCatalogFile.empty) {
-        import std.path : buildPath;
-
-        ImageCatalogEntry[] systemEntries;
-        CatalogState systemState = CatalogState.notConfigured;
-
-        if (!conf.sandboxConfig.systemImageCatalogFile.empty) {
-            try {
-                auto systemPath = AbsolutePath(buildPath(configDir,
-                        conf.sandboxConfig.systemImageCatalogFile));
-                systemEntries = loadImageCatalog(systemPath, systemState);
-            } catch (Exception e) {
-                logger.warningf("Failed to load system image catalog '%s': %s",
-                        conf.sandboxConfig.systemImageCatalogFile, e.msg);
-                systemState = CatalogState.loadFailed;
-            }
-        }
-
-        ImageCatalogEntry[] userEntries;
-        CatalogState userState = CatalogState.notConfigured;
-        if (!conf.sandboxConfig.userImageCatalogFile.empty) {
-            try {
-                auto userPath = AbsolutePath(buildPath(configDir,
-                        conf.sandboxConfig.userImageCatalogFile));
-                userEntries = loadImageCatalog(userPath, userState);
-            } catch (Exception e) {
-                logger.warningf("Failed to load user image catalog '%s': %s",
-                        conf.sandboxConfig.userImageCatalogFile, e.msg);
-                userState = CatalogState.loadFailed;
-            }
-        }
-
-        if (systemState == CatalogState.loaded || userState == CatalogState.loaded) {
-            ImageCatalogEntry[string] merged;
-
-            foreach (entry; userEntries.filter!(a => a.name !in merged)) {
-                merged[entry.name] = entry;
-            }
-
-            foreach (entry; systemEntries.filter!(a => a.name !in merged)) {
-                merged[entry.name] = entry;
-            }
-
-            conf.sandboxConfig.imageCatalog = merged.byValue.array;
-            conf.sandboxConfig.catalogState = CatalogState.loaded;
-        } else {
-            conf.sandboxConfig.catalogState = CatalogState.loadFailed;
-        }
-
-    }
-
+    // Load execution environments: system layer 1, user layer 2.
+    // User environment entries override system entries with the same tag.
+    loadExecutionEnvironments(conf, path, configDir, loadedAnyFile);
     return conf;
 }
 
@@ -1056,9 +890,6 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                         } else static if (is(Type == CodeModelConfig[])) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(
                                     a => jsonToConfig(CodeModelConfig.init, a)).array;
-                        } else static if (is(Type == ImageCatalogEntry[])) {
-                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(
-                                    a => jsonToConfig(ImageCatalogEntry.init, a)).array;
                         } else static if (is(Type : string)) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].str;
                         } else static if (is(Type : bool)) {
@@ -1311,248 +1142,6 @@ unittest {
     assert(result["mounts"][2] == i"$(thisExePath.dirName)/data:/d".text);
 }
 
-/// Test: loadImageCatalog returns empty array when file not found.
-unittest {
-    CatalogState state;
-    auto result = loadImageCatalog("/nonexistent/path/to/catalog.json".Path, state);
-    assert(result.length == 0);
-    assert(state == CatalogState.notConfigured);
-}
-
-/// Test: loadImageCatalog returns empty array with loadFailed on invalid JSON.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "bad.json");
-    File(tmpFile, "w").write("{ invalid json }");
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(result.length == 0);
-    assert(state == CatalogState.loadFailed);
-}
-
-/// Test: loadImageCatalog parses v1 format correctly.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    string json = `{"version":1,"entries":[{"name":"alpine:latest","description":"Minimal Linux","tags":["linux"]},{"name":"python:3.11-slim","description":"Python runtime","tags":["python","dev"]}]}`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state).sort!((a, b) => a.name < b.name).array;
-    assert(state == CatalogState.loaded);
-    assert(result.length == 2);
-    assert(result[0].name == "alpine:latest");
-    assert(result[0].description == "Minimal Linux");
-    assert(result[0].tags.length == 1);
-    assert(result[0].tags[0] == "linux");
-    assert(result[1].name == "python:3.11-slim");
-    assert(result[1].tags.length == 2);
-}
-
-/// Test: loadImageCatalog handles missing optional fields (description, tags).
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    string json = `{"version":1,"entries":[{"name":"alpine:latest"},{"name":"python:3.11-slim","description":"Python runtime"},{"name":"node:20-alpine","tags":["nodejs"]}]}`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state).sort!((a, b) => a.name < b.name).array;
-    assert(state == CatalogState.loaded);
-    assert(result.length == 3);
-    assert(result[0].description == "");
-    assert(result[0].tags.length == 0);
-    assert(result[1].tags.length == 1);
-    assert(result[1].tags[0] == "nodejs");
-    assert(result[2].description == "Python runtime");
-    assert(result[2].tags.length == 0);
-}
-
-/// Test: loadImageCatalog skips entries with missing or empty name.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    string json = `{"version":1,"entries":[{"name":"alpine:latest","description":"Good"},{"description":"Missing name"},{"name":"","description":"Empty name"},{"name":"python:3.11-slim","description":"Good2"}]}`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state).sort!((a, b) => a.name < b.name).array;
-    assert(state == CatalogState.loaded);
-    assert(result.length == 2);
-    assert(result[0].name == "alpine:latest");
-    assert(result[1].name == "python:3.11-slim");
-}
-
-/// Test: loadImageCatalog detects duplicate names and keeps first.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    string json = `{"version":1,"entries":[{"name":"alpine:latest","description":"First"},{"name":"alpine:latest","description":"Duplicate"}]}`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state).sort!((a, b) => a.name < b.name).array;
-    assert(state == CatalogState.loaded);
-    assert(result.length == 1);
-    assert(result[0].description == "First");
-}
-
-/// Test: loadImageCatalog rejects invalid format (no entries field).
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    string json = `{"version":1,"items":[]}`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(result.empty);
-    assert(state == CatalogState.loadFailed);
-}
-
-/// Test: loadImageCatalog returns loadFailed on empty file.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "empty.json");
-    File(tmpFile, "w").write("");
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(result.empty);
-    assert(state == CatalogState.loadFailed);
-}
-
-/// Test: loadImageCatalog handles empty entries array.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "empty_entries.json");
-    string json = `{"version":1,"entries":[]}`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(result.empty);
-    assert(state == CatalogState.loaded);
-}
-
-/// Test: loadImageCatalog handles entries with empty tags array.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "empty_tags.json");
-    string json = `{"version":1,"entries":[{"name":"alpine:latest","description":"Minimal","tags":[]}]}`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(result.length == 1);
-    assert(state == CatalogState.loaded);
-    assert(result[0].name == "alpine:latest");
-    assert(result[0].tags.length == 0);
-}
-
-/// Test: loadImageCatalog warns on large catalog (>100 entries) but still loads.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "large.json");
-
-    // Build a catalog with 105 entries
-    string entries;
-    foreach (i; 0 .. 105) {
-        if (i > 0)
-            entries ~= ",";
-        entries ~= `{"name":"image` ~ i.to!string
-            ~ `:latest","description":"Image ` ~ i.to!string ~ `","tags":["test"]}`;
-    }
-    string json = `{"version":1,"entries":[` ~ entries ~ `]}`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(result.length == 105);
-    assert(state == CatalogState.loaded);
-}
-
-/// Test: loadImageCatalog handles unknown version (warns, parses anyway).
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "unknown_version.json");
-    string json = `{"version":99,"entries":[{"name":"alpine:latest","description":"Test","tags":["linux"]}]}`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(result.length == 1);
-    assert(state == CatalogState.loaded);
-    assert(result[0].name == "alpine:latest");
-}
-
 /// Test: jsonToConfig parses string[][string] correctly.
 unittest {
     import std.path : buildPath;
@@ -1575,264 +1164,6 @@ unittest {
     assert(conf.options["network"] == ["--network", "none"]);
 }
 
-/// Test: loadImageCatalog parses options field correctly.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_1527");
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    string json = `{
-        "version": 1,
-        "entries": [
-            {
-                "name": "alpine:latest",
-                "description": "Minimal Linux",
-                "tags": ["linux"],
-                "options": {
-                    "02_security": ["--read-only"],
-                    "03_network": ["--network", "none"],
-                    "05_mounts": ["-v", "/host:/workarea"]
-                }
-            }
-        ]
-    }`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(state == CatalogState.loaded);
-    assert(result.length == 1);
-    assert(result[0].name == "alpine:latest");
-    assert(result[0].options.length == 3);
-    assert(result[0].options["02_security"] == ["--read-only"]);
-    assert(result[0].options["03_network"] == ["--network", "none"]);
-    assert(result[0].options["05_mounts"] == ["-v", "/host:/workarea"]);
-}
-
-/// Test: loadImageCatalog entry with no options gets empty options map.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_1566");
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    string json = `{
-        "version": 1,
-        "entries": [
-            {
-                "name": "alpine:latest",
-                "description": "No options"
-            }
-        ]
-    }`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(state == CatalogState.loaded);
-    assert(result.length == 1);
-    assert(result[0].options.length == 0);
-}
-
-/// Test: loadImageCatalog handles invalid options format (non-object).
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_1597");
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    // options is a string instead of an object
-    string json = `{
-        "version": 1,
-        "entries": [
-            {
-                "name": "alpine:latest",
-                "options": "invalid"
-            }
-        ]
-    }`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    // Should still load, but with empty options (warning logged)
-    assert(state == CatalogState.loaded);
-    assert(result.length == 1);
-    assert(result[0].options.length == 0);
-}
-
-/// Test: loadImageCatalog handles invalid options value (non-array).
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_1626");
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    // options value is a string instead of an array
-    string json = `{
-        "version": 1,
-        "entries": [
-            {
-                "name": "alpine:latest",
-                "options": {
-                    "security": "--read-only"
-                }
-            }
-        ]
-    }`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    // Should still load, but skip the invalid value
-    assert(state == CatalogState.loaded);
-    assert(result.length == 1);
-    assert(result[0].options.length == 0);
-}
-
-/// Test: loadImageCatalog handles mixed valid/invalid items in options array.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_1655");
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "catalog.json");
-    // Array contains both strings and non-strings
-    string json = `{
-        "version": 1,
-        "entries": [
-            {
-                "name": "alpine:latest",
-                "options": {
-                    "02_security": ["--read-only", 123, "--network", "none"]
-                }
-            }
-        ]
-    }`;
-    File(tmpFile, "w").write(json);
-
-    CatalogState state;
-    auto result = loadImageCatalog(tmpFile.Path, state);
-    assert(state == CatalogState.loaded);
-    assert(result.length == 1);
-    // Only string items should be kept
-    assert(result[0].options["02_security"] == [
-        "--read-only", "--network", "none"
-    ]);
-}
-
-/// Test: two catalog files loaded and merged via readConfig.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "catalog_1688");
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-
-    // System catalog
-    auto systemFile = buildPath(tmpDir, "system_catalog.json");
-    string systemJson = `{
-        "version": 1,
-        "entries": [
-            {
-                "name": "alpine:latest",
-                "description": "System Alpine",
-                "tags": ["linux"],
-                "options": {"02_security": ["--read-only"]}
-            },
-            {
-                "name": "ubuntu:latest",
-                "description": "System Ubuntu",
-                "tags": ["linux"],
-                "options": {"03_network": ["--network", "none"]}
-            }
-        ]
-    }`;
-    File(systemFile, "w").write(systemJson);
-
-    // User catalog - overrides alpine, adds python
-    auto userFile = buildPath(tmpDir, "user_catalog.json");
-    string userJson = `{
-        "version": 1,
-        "entries": [
-            {
-                "name": "alpine:latest",
-                "description": "User Alpine Override",
-                "tags": ["linux", "user"],
-                "options": {"02_security": ["--read-only", "--no-new-privileges"]}
-            },
-            {
-                "name": "python:3.11-slim",
-                "description": "User Python",
-                "tags": ["python"],
-                "options": {"05_mounts": ["-v", "@{llmfun_workarea}:/workarea"]}
-            }
-        ]
-    }`;
-    File(userFile, "w").write(userJson);
-
-    // Config file referencing both catalogs with minimal required fields
-    auto configFile = buildPath(tmpDir, "config.json");
-    string configJson = `{
-        "codeModels": [{
-            "name": "test",
-            "server": { "url": "http://localhost:8080" }
-        }],
-        "sandboxConfig": {
-            "systemImageCatalogFile": "system_catalog.json",
-            "userImageCatalogFile": "user_catalog.json"
-        }
-    }`;
-    File(configFile, "w").write(configJson);
-
-    auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: false,
-            trustedConfig: false);
-
-    assert(conf.sandboxConfig.catalogState == CatalogState.loaded);
-    assert(conf.sandboxConfig.imageCatalog.length == 3);
-
-    // User override of alpine should be present
-    bool foundAlpine = false;
-    bool foundUbuntu = false;
-    bool foundPython = false;
-    foreach (entry; conf.sandboxConfig.imageCatalog) {
-        if (entry.name == "alpine:latest") {
-            foundAlpine = true;
-            assert(entry.description == "User Alpine Override");
-            assert(entry.options["02_security"] == [
-                "--read-only", "--no-new-privileges"
-            ]);
-        } else if (entry.name == "ubuntu:latest") {
-            foundUbuntu = true;
-            assert(entry.description == "System Ubuntu");
-        } else if (entry.name == "python:3.11-slim") {
-            foundPython = true;
-            assert(entry.description == "User Python");
-        }
-    }
-    assert(foundAlpine);
-    assert(foundUbuntu);
-    assert(foundPython);
-}
-
 /// Test: Explicit config path always loads regardless of trusted-config.
 unittest {
     import std.path : buildPath;
@@ -1845,13 +1176,13 @@ unittest {
 
     // Create a config file with a custom value we can check
     auto configFile = buildPath(tmpDir, "test_config.json");
-    string configJson = `{"sandboxConfig":{"defaultImage":"custom:image"},"codeModels":[{"name":"test","server":{"url":"http://localhost:8080"}}]}`;
+    string configJson = `{"sandboxConfig":{"maxOutputBytes":42},"codeModels":[{"name":"test","server":{"url":"http://localhost:8080"}}]}`;
     File(configFile, "w").write(configJson);
 
     // Explicit config path should always load
     auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: false,
             trustedConfig: false);
-    assert(conf.sandboxConfig.defaultImage == "custom:image");
+    assert(conf.sandboxConfig.maxOutputBytes == 42);
 }
 
 /// Test: --no-cwd-config skips CWD config entirely.

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the threat model for the sandbox container configuration system. The system allows users to configure container runtime options through a flexible options map (`defaultOptions` in `SandboxConfig`, `options` in `ImageCatalogEntry`). These options are flattened into CLI arguments passed to the container runtime (Docker/Podman).
+This document describes the threat model for the sandbox container configuration system. The system allows users to configure container runtime options through a flexible options map (`defaultOptions` in `SandboxConfig`, `options` in `ContainerConfig`). These options are flattened into CLI arguments passed to the container runtime (Docker/Podman).
 
 **Security model**: The configuration system operates on a **trust boundary** model. Configuration files are trusted input. The system does not validate the safety of container options — that is the user's responsibility.
 
@@ -175,5 +175,5 @@ Options map keys are **tag names** (logical groups like `"security"`, `"network"
 ## References
 
 - Configuration format: `config/example.json`
-- Image catalog format: `config/image_catalog.json`
-- Implementation: `source/llm/config.d`, `source/llm/tool_call/sandbox.d`
+- Execution environments format: `execution_environments.json`
+- Implementation: `source/llm/config.d`, `source/llm/environment/`

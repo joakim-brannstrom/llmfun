@@ -2,7 +2,7 @@
 
 ## Verified Environment
 
-- Container image: `llmfun/app:latest`.
+- Container image: `llmfun/app:latest` (configured as an execution environment).
 - Container working directory is `/workarea` (the workspace root). The repo is a
   subdirectory: `/workarea/llmfun`. All dub/git commands must `cd llmfun` first.
 - git, dub, ldc2 and bash are installed in the image.
@@ -10,7 +10,7 @@
 ## Making Changes
 
 1. Modify source code in `llmfun/source/`.
-2. Build with `executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "dub", "build"])`
+2. Build with `executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "dub", "build"])`
    (dub must run inside the repo — see "Common Error Patterns").
 3. Check exit code: 0 = success, non-zero = errors.
 4. If errors occur, read the error output, identify the problematic file and line, then fix.
@@ -20,32 +20,32 @@
 
 ### Full Project Build
 ```
-executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "dub", "build"])
+executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "dub", "build"])
 ```
 Builds the entire llmfun project. `dub build` defaults to the `application`
 configuration (main app, remote API only).
 
 ### Specific Configurations
 ```
-executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "dub", "build", "--config=application-with-local-model"])
-executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "dub", "build", "--config=llmfun_test"])
+executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "dub", "build", "--config=application-with-local-model"])
+executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "dub", "build", "--config=llmfun_test"])
 ```
 
 ### Run Tests
 ```
-executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "dub", "test"])
+executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "dub", "test"])
 ```
 Runs the inline unit tests.
 
 ### Single File Compilation
 ```
-executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "ldc2", "path/to/file.d"])
+executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "ldc2", "path/to/file.d"])
 ```
 For simple single-file D compilation without project dependencies.
 
-## executeImage Argument Semantics
+## executeCommand Argument Semantics
 
-`executeImage` joins the `command` array elements with spaces and runs the result
+`executeCommand` joins the `command` array elements with spaces and runs the result
 through a shell. Consequences:
 
 - `command=["cd", "llmfun", "&&", "dub", "build"]` works (joined: `cd llmfun && dub build`).
@@ -67,7 +67,7 @@ The scripts in `scripts/` wrap the verified commands and auto-locate the repo
 
 Example:
 ```
-executeImage(imageName="llmfun/app:latest", command=["bash", "/workarea/skills/llmfun-self-improve/scripts/build.sh"])
+executeCommand(environmentTag="llmfun", command=["bash", "/workarea/skills/llmfun-self-improve/scripts/build.sh"])
 ```
 
 The scripts may lose their executable bit when the skill is copied into the
@@ -84,9 +84,9 @@ If the scripts cannot locate the repo, fall back to the explicit
 The git repo root is `llmfun/` (= `/workarea/llmfun` in the container):
 
 ```
-executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "git", "status"])
-executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "git", "diff"])
-executeImage(imageName="llmfun/app:latest", command=["cd", "llmfun", "&&", "git", "log", "--oneline", "-10"])
+executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "git", "status"])
+executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "git", "diff"])
+executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "git", "log", "--oneline", "-10"])
 ```
 
 Read-only git commands are always safe. NEVER commit or push without explicit
@@ -104,15 +104,7 @@ After making changes:
 ## Common Error Patterns
 
 - **"No valid root package found"**: You ran dub outside the repo. Prefix the command with `cd llmfun &&` or use the helper scripts.
-- **"Image 'X' is not in the allowed catalog"**: Use `llmfun/app:latest`. Run `listImages()` to see the available catalog entries.
+- **"Environment 'X' not found"**: Use the configured environment tag. Run `listEnvironments()` to see the available entries.
 - **Import errors**: Check that module names match the pattern `import llm.module_name;`
 - **Path errors**: Use `my.path.Path` for file paths
 - **Logger errors**: Use `logger = std.logger` aliased import
-
-## Important: Changes Do Not Take Effect Automatically
-
-The build system compiles the project, but the running agent continues using the
-previously loaded binary. To make changes effective:
-
-1. **Review and merge** the changes into the main branch (human approval required)
-2. **Restart the agentic framework** to load the new binary (the user do this)

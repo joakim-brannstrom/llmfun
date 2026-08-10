@@ -25,22 +25,7 @@
 - when summarizing the agent context add all messages, excluding the system prompt, to the RAG in one large document under the topic "agent_context". Protect this topic. This should then also be added to the summarized context that all details are saved in the RAG under this topic. Each time an agent is summarized or /new is called the topic is either replaced or deleted.
 - modify imgui_markdown to render code blocks with Text so we get line break in them. That fix the side scrolling issue and ugly rendering on long lines.
 - editFile when matching should ignore empty lines. Because it doesn't it lead to a lot of tool call errors.
-
-- this may be a problem
-```
-executeImage Argument Semantics
-
-`executeImage` joins the `command` array elements with spaces and runs the result
-through a shell. Consequences:
-
-- `command=["cd", "llmfun", "&&", "dub", "build"]` works (joined: `cd llmfun && dub build`).
-- Do NOT use `command=["bash", "-c", "multi word command"]`: only the first word
-  becomes the `-c` script and the rest are passed as positional args, so the
-  command silently fails or runs in the wrong directory. Use the plain
-  `["cd", "llmfun", "&&", ...]` form instead.
-- A single-element command like `command=["bash /workarea/skills/llmfun-self-improve/scripts/build.sh"]`
-  runs as-is.
-```
+- editFile when matching should ignore empty lines. Because it doesn't it lead to a lot of tool call errors.
 
 # ui
 - change the background color for the input field to dark grey

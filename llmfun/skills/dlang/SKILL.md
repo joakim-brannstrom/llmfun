@@ -26,13 +26,13 @@ Use this skill when:
 
 - A **dub project** is a directory containing a `dub.sdl` or `dub.json` file.
 - Build by executing `dub build` in the project directory.
-- Use `executeImage` tool with a D language container image to compile and execute tests.
-  Example: `executeImage(imageName="dlang2:latest", command=["cd", "<project-dir>", "&&", "dub", "build"])`
+- Use `executeCommand` tool with a D language container environment to compile and execute tests.
+  Example: `executeCommand(environmentTag="dlang", command=["cd", "<project-dir>", "&&", "dub", "build"])`
 
 ## Rules
 
 - **Always use dub**: Build and test through dub, not manual compilation.
-- **Use executeImage**: Use `executeImage` with a D language container to run dub commands.
+- **Use executeCommand**: Use `executeCommand` with a D language container environment to run dub commands.
 - **Check dub config first**: Read `dub.sdl` or `dub.json` before building to understand project structure.
 - **Verify build output**: Check the `targetPath` directory (default: `./`) for compiled artifacts.
 
@@ -92,8 +92,8 @@ Full details in `references/code-conventions.md`. Key rules:
 1. **Identify the project**: Locate the `dub.sdl` or `dub.json` file.
 2. **Read the configuration**: Understand project name, type, dependencies, and target path.
 3. **Choose the command**: Use `build` to compile, `test` to run tests.
-4. **Execute with dub**: Use `executeImage` with a D language container image and dub command.
-  Example: `executeImage(imageName="dlang2:latest", command=["cd", "<project-dir>", "&&", "dub", "build"])`
+4. **Execute with dub**: Use `executeCommand` with a D language container environment and dub command.
+  Example: `executeCommand(environmentTag="dlang", command=["cd", "<project-dir>", "&&", "dub", "build"])`
 5. **Verify results**: Check output for errors or test results.
 
 ## Utility Scripts

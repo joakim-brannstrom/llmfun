@@ -190,7 +190,6 @@ mixin template RegisterLlmFunctions() {
     }
 }
 
-package:
 string baseContextToSpecific(TargetT, string func = __PRETTY_FUNCTION__)() {
     return `auto ctx = cast(` ~ TargetT.stringof ~ `) baseCtx;
     if (ctx is null)
