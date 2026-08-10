@@ -127,12 +127,6 @@ struct UserConfig {
 
         @(NamedArgument("port").Description("Port for HTTP transport (future)"))
         int port = 8787;
-
-        @(NamedArgument("include").Description("Include tool name regex pattern (can be repeated)"))
-        string[] include;
-
-        @(NamedArgument("exclude").Description("Exclude tool name regex pattern (can be repeated)"))
-        string[] exclude;
     }
 }
 

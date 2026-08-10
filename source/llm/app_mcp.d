@@ -16,69 +16,80 @@ import core.sys.posix.signal : SIG_BLOCK, SIGINT, SIGTERM, pthread_sigmask,
     sigaddset, sigemptyset, sigset_t, sigtimedwait;
 import core.sys.posix.time : timespec;
 
+import my.path : Path;
+
 import llm.app_config : UserConfig;
-import llm.mcp_server : McpFailed, McpServerConfig, McpShutdown, McpStarted,
-    McpStopped, runMcpServer;
+import llm.config : LlmConfig, readConfig;
+import llm.mcp_server : McpConfigData, McpFailed, McpServerConfig, McpShutdown,
+    McpStarted, McpStopped, runMcpServer;
 
 int appMain(UserConfig uconf, UserConfig.Mcp conf) {
-    if (conf.listTools) {
-        listTools(conf);
+    LlmConfig llmConf;
+    try {
+        llmConf = readConfig(uconf.config.Path, silent: true, noCwdConfig: uconf.noCwdConfig,
+                trustedConfig: uconf.trustedConfig);
+    } catch (Exception e) {
+        logger.errorf("Failed to read configuration: %s", e.msg).collectException;
+        return 1;
     }
-    return runServer(conf);
+
+    if (conf.listTools) {
+        listTools(uconf, conf, llmConf);
+    }
+    return runServer(uconf, conf, llmConf);
 }
 
 private:
 
 // Diagnostic mode: print filtered tool list and exit.
-int listTools(UserConfig.Mcp conf) nothrow {
+int listTools(UserConfig uconf, UserConfig.Mcp conf, LlmConfig llmConf) nothrow {
     import std.algorithm : sort;
     import std.array : array, empty;
     import std.json : JSONType;
     import std.stdio : writeln;
 
-    import my.filter : ReFilter;
     import llm.tool_call : descAllFunctions, filterToolDescriptions;
 
     try {
-        auto filter_ = ReFilter(conf.include, conf.exclude);
         auto allTools = descAllFunctions();
-        auto filtered = filterToolDescriptions(allTools, filter_);
+        auto filtered = filterToolDescriptions(allTools, llmConf.toolFilter.to);
 
         if (filtered.array.length == 0) {
-            writeln("No tools match the filter (include: ",
-                    conf.include.length, ", exclude: ", conf.exclude.length, ")");
-        } else {
-            writeln("Available tools (", filtered.array.length, "):");
-            writeln();
-            foreach (tool; filtered.array) {
-                auto func = tool["function"];
-                auto name = func["name"].str;
-                auto desc = func["description"].str;
-                writeln("  ", name);
-                if (!desc.empty) {
-                    writeln("    ", desc);
-                }
-                // Print parameters if any (sorted for deterministic output).
-                if ("parameters" in func && "properties" in func["parameters"]) {
-                    auto props = func["parameters"]["properties"];
-                    if (props.type == JSONType.object && !props.object.empty) {
-                        auto paramNames = props.object.byKey.array;
-                        paramNames.sort();
-                        foreach (paramName; paramNames) {
-                            auto param = props[paramName];
-                            string paramType = "string";
-                            if ("type" in param)
-                                paramType = param["type"].str;
-                            string paramDesc = "";
-                            if ("description" in param)
-                                paramDesc = param["description"].str;
-                            string extra = paramDesc.empty ? "" : " - " ~ paramDesc;
-                            writeln("      ", paramName, " (", paramType, ")", extra);
-                        }
+            logger.errorf("No tools match the filter (include: %s, , exclude: %s)",
+                    llmConf.toolFilter.include, llmConf.toolFilter.exclude);
+            return 1;
+        }
+
+        writeln("Available tools (", filtered.array.length, "):");
+        writeln();
+        foreach (tool; filtered.array) {
+            auto func = tool["function"];
+            auto name = func["name"].str;
+            auto desc = func["description"].str;
+            writeln("  ", name);
+            if (!desc.empty) {
+                writeln("    ", desc);
+            }
+            // Print parameters if any (sorted for deterministic output).
+            if ("parameters" in func && "properties" in func["parameters"]) {
+                auto props = func["parameters"]["properties"];
+                if (props.type == JSONType.object && !props.object.empty) {
+                    auto paramNames = props.object.byKey.array;
+                    paramNames.sort();
+                    foreach (paramName; paramNames) {
+                        auto param = props[paramName];
+                        string paramType = "string";
+                        if ("type" in param)
+                            paramType = param["type"].str;
+                        string paramDesc = "";
+                        if ("description" in param)
+                            paramDesc = param["description"].str;
+                        string extra = paramDesc.empty ? "" : " - " ~ paramDesc;
+                        writeln("      ", paramName, " (", paramType, ")", extra);
                     }
                 }
-                writeln();
             }
+            writeln();
         }
     } catch (Exception e) {
         logger.error("Error listing tools: ", e.msg).collectException;
@@ -87,15 +98,19 @@ int listTools(UserConfig.Mcp conf) nothrow {
     return 0;
 }
 
-int runServer(UserConfig.Mcp conf) {
+int runServer(UserConfig uconf, UserConfig.Mcp conf, LlmConfig llmConf) {
     // Only stdio transport is implemented; require the flag.
     if (!conf.stdio) {
         logger.error("--stdio flag is required (HTTP transport not yet implemented)");
         return 1;
     }
 
-    logger.infof("MCP server starting (stdio, include: %d patterns, exclude: %d patterns)",
-            conf.include.length, conf.exclude.length);
+    // Extract config parameters for passing to the actor thread.
+    // The actor will call readConfig() to reconstruct LlmConfig.
+    McpConfigData configData;
+    configData.configPath = uconf.config.toString;
+    configData.noCwdConfig = uconf.noCwdConfig;
+    configData.trustedConfig = uconf.trustedConfig;
 
     // Block termination signals in this thread BEFORE spawning so that every
     // actor thread inherits the blocked mask and the default signal action
@@ -114,7 +129,8 @@ int runServer(UserConfig.Mcp conf) {
     // Spawn the MCP server actor. It owns the transport and the MCPServer
     // instance; the main thread only communicates with it via messages.
     auto serverTid = spawn(&runMcpServer, thisTid);
-    send(serverTid, McpServerConfig(conf.include.idup, conf.exclude.idup));
+    send(serverTid, cast(immutable) McpServerConfig(filter: llmConf.toolFilter,
+            configData: configData));
 
     logger.info("MCP server running in actor thread, press Ctrl+C to stop");
 

@@ -20,18 +20,41 @@ import std.datetime : dur;
 import std.json : JSONType, JSONValue;
 
 import my.filter : ReFilter;
+import my.path : Path;
 
+import llm.agent.context : AgentContext;
+import llm.app_config : createRag;
+import llm.config : LlmConfig, readConfig, ToolFilter;
 import llm.mcp_server.protocol;
-import llm.mcp_server.transport : EOFException, StdioTransport;
+import llm.mcp_server.transport : EOFException, StdioTransport, Transport;
 import llm.mcp_server.types;
+import llm.rag.rag : RAG;
+import llm.skill : SkillManager, makeSkillManager;
 import llm.tool_call : Context, descAllFunctions, executeFunc, filterToolDescriptions;
 
+/// Carries only the scalar parameters needed to reconstruct LlmConfig
+/// inside the actor thread. Avoids passing complex structs with associative
+/// arrays that would violate std.concurrency aliasing requirements.
+///
+/// Note: userCliWorkArea is intentionally omitted because the MCP subcommand
+/// has no --workarea CLI flag. The work area is read from the config file.
+/// If MCP ever needs CLI work area override, extend this struct.
+///
+/// Note: userToLlmConfig() is not called in the actor because UserConfig.Mcp
+/// has no fields that overlap with LlmConfig. Config file values are used as-is.
+struct McpConfigData {
+    string configPath;
+    bool noCwdConfig;
+    bool trustedConfig;
+}
+
 /// Sent from the main thread to the MCP server actor with the tool filter
-/// configuration (include/exclude regex patterns). Uses immutable arrays so
-/// the message satisfies std.concurrency's no-unshared-aliasing requirement.
+/// configuration (include/exclude regex patterns) and LLM configuration data.
+/// Uses immutable arrays so the message satisfies std.concurrency's
+/// no-unshared-aliasing requirement.
 struct McpServerConfig {
-    immutable(string)[] include;
-    immutable(string)[] exclude;
+    ToolFilter filter;
+    McpConfigData configData;
 }
 
 /// Sent from the MCP server actor to the main thread when the server is ready.
@@ -114,37 +137,104 @@ struct McpFailed {
 void runMcpServer(Tid ownerTid) {
     // Wait for the initial configuration from the owner thread.
     McpServerConfig conf;
-    receive((McpServerConfig c) { conf = c; });
+    receive((immutable McpServerConfig c) { conf = cast() c; });
 
-    // Build the tool filter; report startup failures to the owner.
-    ReFilter filter;
+    // Reconstruct LlmConfig from the config data passed from the main thread.
+    // This is fatal if it fails - we cannot operate without configuration.
+    LlmConfig llmConf;
     try {
-        // idup each string instead of casting away immutable -- safer and
-        // self-documenting. ReFilter only compiles regexes from the
-        // patterns and never stores or mutates the strings.
-        // Note: the .idup chain here duplicates the strings that were
-        // already .idup'd in app_mcp.d (McpServerConfig requires immutable
-        // for std.concurrency message safety; ReFilter expects mutable).
-        filter = ReFilter(conf.include.map!(s => s.idup).array,
-                conf.exclude.map!(s => s.idup).array);
+        llmConf = readConfig(conf.configData.configPath.Path, silent: true, noCwdConfig: conf.configData.noCwdConfig,
+                trustedConfig: conf.configData.trustedConfig);
     } catch (Exception e) {
-        logger.errorf("Invalid regex pattern in --include/--exclude: %s", e.msg);
-        send(ownerTid, McpFailed("Invalid regex pattern in --include/--exclude: " ~ e.msg));
+        logger.errorf("Failed to read configuration: %s", e.msg);
+        send(ownerTid, McpFailed("Failed to read configuration: " ~ e.msg));
+        return;
+    }
+
+    // Create RAG instance - non-fatal if it fails (graceful degradation).
+    RAG rag;
+    try {
+        rag = createRag(llmConf);
+        if (rag is null) {
+            logger.warningf("RAG creation returned null, MCP will operate without RAG");
+        }
+    } catch (Exception e) {
+        logger.warningf("Failed to create RAG: %s. MCP will operate without RAG.", e.msg);
+        rag = null;
+    }
+
+    // Create AgentContext - fatal if it fails.
+    AgentContext agentCtx;
+    try {
+        agentCtx = new AgentContext(llmConf, rag);
+    } catch (Exception e) {
+        logger.errorf("Failed to create AgentContext: %s", e.msg);
+        send(ownerTid, McpFailed("Failed to create AgentContext: " ~ e.msg));
+        if (rag !is null)
+            rag.destroy;
+        rag = null;
+        return;
+    }
+
+    // Create SkillManager - non-fatal if it fails (graceful degradation).
+    SkillManager skillMgr;
+    try {
+        skillMgr = makeSkillManager(llmConf);
+        agentCtx.setSkillManager(skillMgr);
+    } catch (Exception e) {
+        skillMgr = null;
+        logger.warningf("Failed to create SkillManager: %s. MCP will operate without skills.",
+                e.msg);
+    }
+
+    // Set taskDone handler - logs the answer rather than triggering framework behavior.
+    // Fatal if it fails - cannot operate without taskDone handler.
+    try {
+        agentCtx.setTaskDoneHandler((string answer) {
+            logger.infof("MCP taskDone called: %s", answer);
+        });
+    } catch (Exception e) {
+        logger.errorf("Failed to set taskDone handler: %s", e.msg);
+        send(ownerTid, McpFailed("Failed to set taskDone handler: " ~ e.msg));
+        if (rag !is null)
+            rag.destroy;
+        rag = null;
         return;
     }
 
     // The actor owns the transport and the server instance.
-    auto transport = new StdioTransport();
-    auto server = new MCPServer(filter);
+    // Wrap construction in try-catch - fatal if it fails.
+    Transport transport;
+    MCPServer server;
+    try {
+        transport = new StdioTransport();
+        server = new MCPServer(llmConf.toolFilter.to, agentCtx);
+    } catch (Exception e) {
+        logger.errorf("Failed to create MCP server: %s", e.msg);
+        send(ownerTid, McpFailed("Failed to create MCP server: " ~ e.msg));
+        if (rag !is null)
+            rag.destroy;
+        rag = null;
+        return;
+    }
 
     bool running = true;
     bool hadError = false;
+    bool started = false;
+    // Clean up RAG and transport on exit; send appropriate shutdown message.
     scope (exit) {
         transport.close();
-        send(ownerTid, McpStopped(hadError));
+        if (rag !is null)
+            rag.destroy;
+        if (!started) {
+            send(ownerTid, McpFailed("Server failed to start"));
+        } else {
+            send(ownerTid, McpStopped(hadError));
+        }
     }
 
     send(ownerTid, McpStarted());
+    started = true;
     logger.info("MCP server actor started");
 
     // Poll interval between control-message checks; transport input is

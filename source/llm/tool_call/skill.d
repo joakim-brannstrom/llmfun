@@ -44,6 +44,9 @@ ExecuteFuncResult loadSkill(Context baseCtx, LoadSkillParams params) {
         try {
             // fallback to only loading the body but not the full skill
             auto mgr = ctx.getSkillManager();
+            if (mgr is null) {
+                return ExecuteFuncResult("error: skill manager not available", success: false);
+            }
             auto body = mgr.loadSkillBody(params.skillName);
             return ExecuteFuncResult(i"Skill loaded: $(params.skillName)\nFailed to copy skill to: $(
                     params.destDir)\n\n$(body)".text, success: true);
@@ -69,6 +72,9 @@ ExecuteFuncResult loadSkill(Context baseCtx, LoadSkillParams params) {
     try {
         // try to load the full skill
         auto mgr = ctx.getSkillManager();
+        if (mgr is null) {
+            return ExecuteFuncResult("error: skill manager not available", success: false);
+        }
         auto body = mgr.loadSkill(params.skillName, destDir_, params.overwrite);
         if (body.length > 4096) {
             // TODO: should count grapheme so chinese letters work correctly

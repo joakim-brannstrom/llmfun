@@ -6,6 +6,8 @@ llmfun implements an MCP (Model Context Protocol) server that exposes its tool s
 
 The MCP server bridges MCP's JSON-RPC protocol to llmfun's existing `@Function`/`RegisterLlmFunctions` tool infrastructure. It reuses `descAllFunctions()` for tool discovery and `executeFunc()` for tool execution, with `ReFilter` for tool visibility control.
 
+The server constructs a full `AgentContext` inside the actor thread, providing all tools with their required context. Dependencies like RAG and SkillManager are created with graceful degradation — if unavailable, tools return clear error messages instead of crashing.
+
 ## Architecture
 
 ### Modules
@@ -23,11 +25,16 @@ The MCP server bridges MCP's JSON-RPC protocol to llmfun's existing `@Function`/
 The MCP server runs as a `std.concurrency` actor:
 
 1. **Main thread** spawns `runMcpServer` via `std.concurrency.spawn`
-2. **Main thread** sends `McpServerConfig` with include/exclude filter patterns
-3. **Actor** creates `StdioTransport` and `MCPServer`, sends `McpStarted`
-4. **Actor** polls for transport input (`hasData()`) and control messages (`receiveTimeout`)
-5. **Main thread** sends `McpShutdown` on SIGINT/SIGTERM
-6. **Actor** drains pending messages, closes transport, sends `McpStopped`
+2. **Main thread** sends `McpServerConfig` with include/exclude filter patterns and `McpConfigData`
+3. **Actor** reconstructs `LlmConfig` from `McpConfigData`
+4. **Actor** creates `RAG` (may be null — graceful degradation)
+5. **Actor** constructs `AgentContext` with all dependencies
+6. **Actor** creates `SkillManager` (may be null — graceful degradation)
+7. **Actor** sets `taskDone` handler (no-op with logging)
+8. **Actor** creates `StdioTransport` and `MCPServer`, sends `McpStarted`
+9. **Actor** polls for transport input (`hasData()`) and control messages (`receiveTimeout`)
+10. **Main thread** sends `McpShutdown` on SIGINT/SIGTERM
+11. **Actor** drains pending messages, closes transport, sends `McpStopped`
 
 No shared state exists between threads. All communication uses typed messages.
 
@@ -35,11 +42,45 @@ No shared state exists between threads. All communication uses typed messages.
 
 | Message | Direction | Purpose |
 |---------|-----------|---------|
-| `McpServerConfig` | Main -> Actor | Initial config (include/exclude regex patterns) |
+| `McpServerConfig` | Main -> Actor | Initial config (include/exclude regex patterns, `McpConfigData`) |
 | `McpStarted` | Actor -> Main | Server is ready to accept requests |
 | `McpShutdown` | Main -> Actor | Request graceful shutdown |
 | `McpStopped` | Actor -> Main | Server has stopped (includes error flag) |
-| `McpFailed` | Actor -> Main | Startup failed (e.g., invalid regex) |
+| `McpFailed` | Actor -> Main | Startup failed (e.g., invalid regex, fatal construction error) |
+
+### AgentContext Integration
+
+The MCP server constructs a full `AgentContext` inside the actor thread. `AgentContext` implements all tool context interfaces:
+
+| Context Interface | Tools | Availability in MCP |
+|-------------------|-------|---------------------|
+| `FileContext` | `readFile`, `writeFile`, `editFile`, `listDirectory`, `removeFile`, `countLinesInFile`, `md5HashFile`, `grepFiles` | Always available |
+| `SandboxContext` | `executeImage`, `listImages` | Always available |
+| `RAGContext` | `querySemantic`, `queryTextSearch`, `queryBestMatch`, `listRAGDatabases`, `loadFileToRAG`, `loadContentToRAG`, `removeTopicFromRAG`, `queryReadFile` | Available if RAG is configured, graceful degradation otherwise |
+| `MemoryContext` | `writeMemory`, `readMemory`, `removeMemory`, `getMemoryTopics` | Always available |
+| `CompletionContext` | `taskDone` | Always available (no-op with logging) |
+| `MetricsContext` | `getMetrics` | Always available |
+| `PipelineControlContext` | `pipelineOutput` | Always available (no-op) |
+| `VisionContext` | `loadImageApi` | Always available (inline mode works without vision model) |
+| `SkillContext` | `loadSkill` | Available if SkillManager is configured, graceful degradation otherwise |
+
+### Graceful Degradation
+
+The MCP server starts even when optional dependencies are unavailable:
+
+**RAG not available**: RAG-dependent tools (`querySemantic`, `queryTextSearch`, `queryBestMatch`, `listRAGDatabases`, `loadFileToRAG`, `loadContentToRAG`, `removeTopicFromRAG`, `queryReadFile`) return `"error: RAG not available"` instead of crashing. The tools still appear in `tools/list` since `AgentContext` implements `RAGContext`.
+
+**SkillManager not available**: `loadSkill` returns `"error: skill manager not available"` instead of crashing. The tool still appears in `tools/list` since `AgentContext` implements `SkillContext`.
+
+**Vision model not configured**: `loadImageApi` operates in inline mode — it loads and base64-encodes the image, returning the data URL directly. No external vision model is called.
+
+### taskDone Behavior
+
+In the MCP context, `taskDone` is a no-op that logs the answer. It does not trigger framework-level task completion behavior. When called, the server logs the answer at INFO level and returns `"done"` to the MCP client. This allows MCP clients to call `taskDone` without causing the server to terminate or change state.
+
+### pipelineOutput Behavior
+
+In the MCP context, `pipelineOutput` returns a success message but does not propagate output to downstream nodes (there is no pipeline). The output is logged at TRACE level and discarded. This allows MCP clients to call `pipelineOutput` without side effects.
 
 ### Stdio Transport
 
@@ -261,9 +302,13 @@ Add to `.cursor/mcp.json`:
 
 The implementation uses `std.json.JSONValue` instead of `mir.algebraic_alias.json.JsonAlgebraic`. This avoids the `mir` dependency and keeps the MCP server self-contained within Phobos.
 
-### No Context Object
+### AgentContext with Graceful Degradation
 
-The MCP server passes `null` as the `Context` to `executeFunc()`. Most tools don't dereference Context (stateless tools like file I/O, encoding, memory). Tools that require Context (RAG queries, agent interactions) may not work correctly via MCP.
+The MCP server constructs `AgentContext` with all dependencies. RAG and SkillManager are optional — if creation fails, the server logs a warning and continues. Tools that depend on these services return clear error messages when invoked, rather than crashing. This allows the MCP server to start in environments where RAG embeddings or skill paths are not configured.
+
+### McpConfigData for Actor Boundary
+
+Configuration is passed across the actor boundary via `McpConfigData`, a struct containing only scalar/immutable fields. This avoids `std.concurrency` aliasing violations that would occur with complex structs containing associative arrays. The actor reconstructs `LlmConfig` from this data.
 
 ### Arguments Pass-Through
 

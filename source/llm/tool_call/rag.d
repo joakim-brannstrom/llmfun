@@ -217,7 +217,7 @@ ExecuteFuncResult listRAGDatabases(Context baseCtx, ListRAGDatabasesParams param
     }
 
     try {
-        auto infos = ctx.getRAG.getDatabaseInfo();
+        auto infos = ctx.getRAG().getDatabaseInfo();
         if (infos.empty) {
             return ExecuteFuncResult("No RAG databases loaded", success: true);
         }
