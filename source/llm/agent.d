@@ -838,12 +838,21 @@ struct StreamResponse {
 
         immutable prefix = "data: ";
         immutable llamaErrorPrefix = "error: ";
+        immutable openAiv1Prefix = "{\"error\":";
 
         response = response.strip;
         if (response.startsWith(llamaErrorPrefix)) {
             response = response[llamaErrorPrefix.length .. $];
             parseLlamaCppError(response);
             return;
+        } else if (response.startsWith(openAiv1Prefix)) {
+            try {
+                auto j = parseJSON(response);
+                parseOpenAiError(j);
+                return;
+            } catch (Exception e) {
+                logger.tracef("error parse of OpenAI error mesage: '%s': %s", response, e.msg);
+            }
         } else if (response.startsWith(prefix)) {
             response = response[prefix.length .. $];
         } else {
@@ -992,7 +1001,7 @@ struct StreamResponse {
         try {
             error.type = json["error"]["type"].str;
             error.message = json["error"]["message"].str;
-            error.code = json["error"]["code"].str;
+            error.code = getValue(json, (v) => v["error"]["code"].str, null);
         } catch (Exception e) {
             logger.tracef("invalid error structure '%s': %s", json, e.msg);
         }
