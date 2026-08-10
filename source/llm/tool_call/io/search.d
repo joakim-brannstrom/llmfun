@@ -7,6 +7,9 @@ import std.conv : text;
 import std.exception : enforce;
 import std.string : strip;
 
+/// Maximum number of lines allowed in a multi-line marker.
+package enum size_t maxMarkerLines = 20;
+
 /// Effective 0-based half-open search window [begin, endExclusive), clamped
 /// to the file length.
 package struct ScopeWindow {
@@ -115,6 +118,103 @@ package long countMarkerOccurrences(string[] lines, string marker,
     return n;
 }
 
+/// Find the first occurrence of a multi-line marker. Uses the first line of
+/// the marker as an anchor via `findMarkerLine`, then verifies subsequent
+/// marker lines are substrings of consecutive file lines (matching the
+/// substring semantics of single-line markers).
+///
+/// Parameters:
+///     markerLines:  pre-split marker lines (length > 1, <= maxMarkerLines)
+///     start:        first line index to search from (0-based, default 0)
+///     endExclusive: last line index the anchor may appear at (0-based,
+///                   exclusive; default size_t.max = search to end of file)
+///
+/// Returns 0-based index of the anchor line, or -1 if not found.
+package long findMultiLineMarkerLine(string[] lines, const(string[]) markerLines,
+        size_t start = 0, size_t endExclusive = size_t.max) @safe {
+    enforce(markerLines.length > 1, "findMultiLineMarkerLine called with single-line marker");
+    enforce(markerLines.length <= maxMarkerLines, "marker exceeds max marker lines");
+
+    size_t pos = start;
+    while (pos < endExclusive && pos < lines.length) {
+        const anchorIdx = findMarkerLine(lines, markerLines[0], pos, endExclusive);
+        if (anchorIdx < 0)
+            return -1;
+
+        // Not enough file lines left for the full marker.
+        if (cast(size_t) anchorIdx + markerLines.length > lines.length) {
+            pos = cast(size_t) anchorIdx + 1;
+            continue;
+        }
+
+        // Verify subsequent marker lines are substrings of consecutive
+        // file lines. An empty marker line matches only an empty
+        // (or whitespace-only) file line, avoiding canFind("") = true.
+        bool allMatch = true;
+        foreach (j; 1 .. markerLines.length) {
+            if (markerLines[j].length == 0) {
+                if (lines[anchorIdx + j].strip.length != 0) {
+                    allMatch = false;
+                    break;
+                }
+            } else if (!lines[anchorIdx + j].canFind(markerLines[j])) {
+                allMatch = false;
+                break;
+            }
+        }
+        if (allMatch)
+            return anchorIdx;
+        pos = cast(size_t) anchorIdx + 1;
+    }
+    return -1;
+}
+
+/// Find the Nth (1-based) occurrence of a multi-line marker.
+///
+/// Parameters:
+///     start:        first line index to search from (0-based, default 0)
+///     endExclusive: last line index the anchor may appear at (0-based,
+///                   exclusive; default size_t.max = search to end of file)
+///
+/// Returns the 0-based index of the Nth matching anchor line, or -1 if
+/// fewer than `nth` occurrences exist within the range.
+package long findNthMultiLineMarkerLine(string[] lines, const(string[]) markerLines,
+        long nth, size_t start = 0, size_t endExclusive = size_t.max) @safe {
+    enforce(nth >= 1, "nth must be >= 1");
+    long found = 0;
+    size_t pos = start;
+    while (pos < endExclusive && pos < lines.length) {
+        const idx = findMultiLineMarkerLine(lines, markerLines, pos, endExclusive);
+        if (idx < 0)
+            return -1;
+        found++;
+        if (found == nth)
+            return idx;
+        pos = cast(size_t) idx + 1;
+    }
+    return -1;
+}
+
+/// Count occurrences of a multi-line marker (each anchor match counted once).
+///
+/// Parameters:
+///     start:        first line index to search from (0-based, default 0)
+///     endExclusive: last line index the anchor may appear at (0-based,
+///                   exclusive; default size_t.max = search to end of file)
+package long countMultiLineMarkerOccurrences(string[] lines,
+        const(string[]) markerLines, size_t start = 0, size_t endExclusive = size_t.max) @safe {
+    long n = 0;
+    size_t pos = start;
+    while (pos < endExclusive && pos < lines.length) {
+        const idx = findMultiLineMarkerLine(lines, markerLines, pos, endExclusive);
+        if (idx < 0)
+            break;
+        n++;
+        pos = cast(size_t) idx + 1;
+    }
+    return n;
+}
+
 /**
  * Range representing a matched code block within a file.
  *
@@ -186,6 +286,13 @@ package CodeBlockRange findCodeBlock(const(char[])[] fileLines,
             if (searchStripped.length == 0) {
                 // Empty search line is flexible — skip without consuming file lines
                 continue;
+            }
+
+            // Skip empty file lines — symmetric with empty search lines above.
+            // This ensures that a blank line in the file but not in the search
+            // block (or vice versa) doesn't cause a false mismatch.
+            while (filePos < fileLines.length && fileLines[filePos].strip.length == 0) {
+                filePos++;
             }
 
             if (filePos >= fileLines.length) {

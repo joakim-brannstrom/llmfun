@@ -38,11 +38,10 @@ struct UnifiedEditFileParams {
             "byLine targeting: first line of the range (1-based, must be >= 1; omitted by default)")
     @ParamOptional long startLine = -1;
 
-    @ParamDescription("Number of lines to replace/remove from the target. byLine: required for replace/remove. byMarker: default 1, auto-derived from content line count when replacing with multi-line content. byContent: auto-derived from matched block size (explicit count overrides for single edits; not supported with replaceAll). Ignored for insert modes.")
+    @ParamDescription("Number of lines to replace/remove from the target. byLine: required for replace/remove. byMarker: default 1, auto-derived from content line count when replacing with multi-line content; for multi-line markers, count auto-derives from the marker line count. byContent: auto-derived from matched block size (explicit count overrides for single edits; not supported with replaceAll). Ignored for insert modes.")
     @ParamOptional long count;
 
-    @ParamDescription(
-            "byMarker targeting: case-sensitive substring to find (single line, no newlines)")
+    @ParamDescription("byMarker targeting: case-sensitive substring to find; multi-line markers (up to 20 lines) are also supported — the first line is used as an anchor and subsequent lines are verified as substrings of consecutive file lines")
     @ParamOptional string marker;
 
     @ParamDescription(
@@ -66,6 +65,9 @@ struct UnifiedEditFileParams {
     @ParamDescription(
             "Scope limiting: end of the search range (1-based, inclusive). See scopeStart.")
     @ParamOptional long scopeEnd = -1;
+
+    @ParamDescription("byLine guard: verify that the target lines match this content before editing. When non-empty, the lines at [startLine, startLine+count) are compared (trimmed equality) against verifyContent. Mismatch throws an error with the actual content found, preventing silent corruption from stale line numbers after successive edits. Only valid with byLine targeting.")
+    @ParamOptional string verifyContent;
 }
 
 /// Resolve the targeting method of the unified editFile params for logging.
@@ -96,7 +98,7 @@ package string scopeLogValue(long scopeStart, long scopeEnd) @safe {
     return "none";
 }
 
-@Function("Edit a file by applying a change to a target. " ~ "Target the file with exactly one method: startLine+count (byLine, 1-based; startLine must be >= 1), " ~ "marker (byMarker, first line containing the substring, single line), or " ~ "searchContent (byContent, code block matched by trimmed equality). " ~ "Modes: replace (replace targeted lines with content), remove (delete targeted lines, content must be empty), " ~ "append (keep target line, add content after it), insert_after (same as append), " ~ "insert_before (add content before target line, keep target line). " ~ "byMarker replace auto-derives count from the number of content lines when content is multi-line and count is omitted; set count=1 to replace only the marker line; empty content replaces exactly the marker line. " ~ "byContent auto-derives count from the matched block size; an explicit count overrides for single edits but is not supported with replaceAll. " ~ "byContent append/insert_after inserts content after the matched block; insert_before inserts before it. " ~ "replaceAll replaces every non-overlapping occurrence (byContent and byMarker only, replace/remove modes). " ~ "matchIndex selects the Nth occurrence (1-based, must be >= 1; matchIndex > 1 targets a single occurrence, cannot be combined with replaceAll, and is ignored by byLine targeting). " ~ "scopeStart/scopeEnd (1-based, inclusive) limit the byMarker/byContent search to a line range for large files; either or both may be given (scopeStart alone searches from that line to EOF, scopeEnd alone searches from line 1 to that line); the first line of a match must be inside the range; ignored by byLine. " ~ "The file's trailing-newline state is preserved, and the dryRun preview matches the exact bytes that would be written. " ~ "Returns a JSON object with fields: ok (bool), matchedAt (1-based line), matchedLines (int), linesChanged (int), operations (int). " ~ "When dryRun is true, also includes: preview (string). " ~ "On failure returns JSON with ok=false, an error string, and a diagnostic field with closest-match details.")
+@Function("Edit a file by applying a change to a target. " ~ "Target the file with exactly one method: startLine+count (byLine, 1-based; startLine must be >= 1), " ~ "marker (byMarker, substring to find; multi-line markers up to 20 lines are also supported — first line is an anchor, subsequent lines verified against consecutive file lines), or " ~ "searchContent (byContent, code block matched by trimmed equality). " ~ "Modes: replace (replace targeted lines with content), remove (delete targeted lines, content must be empty), " ~ "append (keep target line, add content after it), insert_after (same as append), " ~ "insert_before (add content before target line, keep target line). " ~ "byMarker replace auto-derives count from the number of content lines when content is multi-line and count is omitted; for multi-line markers, count auto-derives from the marker line count; set count=1 to replace only the marker line; empty content replaces exactly the marker line. " ~ "byContent auto-derives count from the matched block size; an explicit count overrides for single edits but is not supported with replaceAll. " ~ "byContent append/insert_after inserts content after the matched block; insert_before inserts before it. " ~ "replaceAll replaces every non-overlapping occurrence (byContent and byMarker only, replace/remove modes). " ~ "matchIndex selects the Nth occurrence (1-based, must be >= 1; matchIndex > 1 targets a single occurrence, cannot be combined with replaceAll, and is ignored by byLine targeting). " ~ "scopeStart/scopeEnd (1-based, inclusive) limit the byMarker/byContent search to a line range for large files; either or both may be given (scopeStart alone searches from that line to EOF, scopeEnd alone searches from line 1 to that line); the first line of a match must be inside the range; the match may extend past scopeEnd; ignored by byLine. " ~ "byLine targeting can optionally verify target content with verifyContent to prevent silent corruption from stale line numbers. " ~ "The file's trailing-newline state is preserved, and the dryRun preview matches the exact bytes that would be written. " ~ "Returns a JSON object with fields: ok (bool), matchedAt (1-based line), matchedLines (int), linesChanged (int), operations (int), lineShift (int, net line count change). " ~ "When auto-count is used, also includes: autoCountUsed (true) and note (string). " ~ "When dryRun is true, also includes: preview (string). " ~ "On failure returns JSON with ok=false, an error string, and a diagnostic field with closest-match details.")
 ExecuteFuncResult editFile(Context baseCtx, UnifiedEditFileParams params) {
     mixin(baseContextToSpecific!FileContext);
 
@@ -125,15 +127,20 @@ ExecuteFuncResult editFile(Context baseCtx, UnifiedEditFileParams params) {
     try {
         fileLines = File(path_.toString).byLineCopy.array;
         auto outcome = editFileUnifiedMemory(fileLines, mode_, params.content, params.startLine, params.count,
-                params.marker, params.searchContent, params.replaceAll,
-                params.matchIndex, params.scopeStart, params.scopeEnd);
+                params.marker, params.searchContent, params.replaceAll, params.matchIndex,
+                params.scopeStart, params.scopeEnd, params.verifyContent);
 
         auto json = JSONValue.emptyObject;
         json["ok"] = true;
+        json["lineShift"] = outcome.linesChanged;
         json["matchedAt"] = outcome.matched.matchedAt;
         json["matchedLines"] = outcome.matched.matchedLines;
         json["linesChanged"] = outcome.linesChanged;
         json["operations"] = outcome.operations;
+        if (outcome.autoCountUsed) {
+            json["autoCountUsed"] = true;
+            json["note"] = outcome.note;
+        }
 
         // Preserve the original file's trailing-newline state so an edit
         // never changes it, and the dryRun preview matches the exact bytes

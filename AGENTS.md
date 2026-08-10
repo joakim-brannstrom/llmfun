@@ -56,9 +56,10 @@ Example of using `executeImage`: `executeImage(imageName="llmfun/app:latest", co
 ```bash
 cd llmfun
 
+dub test                                     # Run all unit tests
 dub build --config=application              # Build main app (remote API only)
 dub build --config=application-with-local-model   # Build with llama.cpp support
-dub build --config=llmfun_test              # Build test utility
+dub build --config=llmfun_test              # Build test utility (manual testing)
 ./build/llmfun agent                        # Run interactive agent
 ./build/llmfun rag add <path>               # Add file to RAG index
 ./build/llmfun rag query "question"         # Query RAG knowledge base
@@ -266,10 +267,11 @@ dub build --config=llmfun_test              # Build test utility
 
 ## Testing
 
-- Test binary built via `dub build --config=llmfun_test`.
-- Entry point: `source/utility_app.d`.
-- Inline unit tests exist in some modules (e.g., `rag/rag.d`).
-- Test coverage is currently low — new code should include inline `unittest` blocks.
+- **Run all unit tests**: `dub test` (no configuration parameter). This compiles and runs all inline `unittest` blocks across all modules. This is the primary test command.
+- **Build test utility**: `dub build --config=llmfun_test`. This configuration builds a separate test utility binary (`utility_app.d`) for manually testing implementation details. It does NOT run the unit test suite.
+- Entry point for test utility: `source/utility_app.d`.
+- Inline unit tests exist in most modules (e.g., `rag/rag.d`, `llm/tool_call/io/tests.d`).
+- New code should include inline `unittest` blocks.
 
 ## Agent Rules
 

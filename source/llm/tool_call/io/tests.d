@@ -2987,3 +2987,247 @@ unittest {
     auto content = readTestFile(ctx, "test.txt");
     assert(content == original, content); // dryRun never writes
 }
+
+// === Task 5: verifyContent match — edit proceeds normally ===
+unittest {
+    string[] fileLines = ["header", "line1", "line2", "line3", "footer"];
+    auto outcome = executeByLine(fileLines, EditMode.replace, "new", 2, 2, false, "line1\nline2");
+    assert(outcome.lines == ["header", "new", "line3", "footer"], outcome.lines.to!string);
+    assert(outcome.linesChanged == -1); // 1 content line replaces 2 lines
+}
+
+// === Task 5: verifyContent mismatch — throws with actual content ===
+unittest {
+    string[] fileLines = ["header", "line1", "line2", "line3", "footer"];
+    bool threw = false;
+    try {
+        executeByLine(fileLines, EditMode.replace, "new", 2, 2, false, "wrong content");
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("verifyContent mismatch"), e.msg);
+        assert(e.msg.canFind("line1"), e.msg); // actual content in error
+        assert(e.msg.canFind("wrong content"), e.msg); // expected in error
+    }
+    assert(threw);
+}
+
+// === Task 5: verifyContent with startLine past end of file ===
+unittest {
+    string[] fileLines = ["header"];
+    bool threw = false;
+    try {
+        executeByLine(fileLines, EditMode.replace, "new", 100, 1, false, "target");
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("verifyContent mismatch"), e.msg);
+        assert(e.msg.canFind("beyond end of file"), e.msg);
+    }
+    assert(threw);
+}
+
+// === Task 5: lineShift in success response via editFileUnifiedMemory ===
+unittest {
+    // Replace: contentLineCount=3, matchedLines=2 -> linesChanged=1
+    auto outcome = editFileUnifiedMemory(["a", "b", "c", "d"],
+            EditMode.replace, "X\nY\nZ", startLine: 2, count: 2);
+    assert(outcome.linesChanged == 1);
+    // Append: contentLineCount=2 -> linesChanged=2
+    auto outcome2 = editFileUnifiedMemory(["a", "b", "c"], EditMode.append, "X\nY", startLine: 2);
+    assert(outcome2.linesChanged == 2);
+    // Remove: contentLineCount=0, matchedLines=1 -> linesChanged=-1
+    auto outcome3 = editFileUnifiedMemory(["a", "b", "c"], EditMode.remove, "",
+            startLine: 2, count: 1);
+    assert(outcome3.linesChanged == -1);
+    // Insert before: contentLineCount=2 -> linesChanged=2
+    auto outcome4 = editFileUnifiedMemory(["a", "b", "c"],
+            EditMode.insert_before, "X\nY", startLine: 2);
+    assert(outcome4.linesChanged == 2);
+}
+
+// === Task 6: empty-line symmetric matching — file has blank line, search does not ===
+unittest {
+    // File has empty line between "foo" and "bar", search skips it
+    string[] fileLines = ["foo", "", "bar"];
+    string[] searchLines = ["foo", "bar"];
+    auto result = findCodeBlock(fileLines, searchLines);
+    assert(result.found);
+    assert(result.start == 0);
+    assert(result.end == 3); // range includes the empty line
+}
+
+// === Task 6: empty-line symmetric matching — search has blank line, file does not ===
+unittest {
+    // Search has empty line, file doesn't — empty search line is skipped
+    string[] fileLines = ["foo", "bar"];
+    string[] searchLines = ["foo", "", "bar"];
+    auto result = findCodeBlock(fileLines, searchLines);
+    assert(result.found);
+    assert(result.start == 0);
+    assert(result.end == 2);
+}
+
+// === Task 6: empty-line symmetric matching — both have blank lines ===
+unittest {
+    string[] fileLines = ["foo", "", "bar"];
+    string[] searchLines = ["foo", "", "bar"];
+    auto result = findCodeBlock(fileLines, searchLines);
+    assert(result.found);
+    assert(result.start == 0);
+    assert(result.end == 3);
+}
+
+// === Task 6: empty-line symmetric matching — asymmetric blanks ===
+unittest {
+    // Two empty lines in file, one in search — all skipped
+    string[] fileLines = ["foo", "", "", "bar"];
+    string[] searchLines = ["foo", "", "bar"];
+    auto result = findCodeBlock(fileLines, searchLines);
+    assert(result.found);
+    assert(result.start == 0);
+    assert(result.end == 4); // range includes both empty lines
+}
+
+// === Task 6: empty-line symmetric matching — non-matching file line after skipped empties ===
+unittest {
+    // The second non-empty file line doesn't match search — should fail
+    string[] fileLines = ["foo", "", "wrong", "bar"];
+    string[] searchLines = ["foo", "bar"];
+    auto result = findCodeBlock(fileLines, searchLines);
+    assert(!result.found); // "wrong" != "bar" — no false match
+}
+
+// === Task 9: multi-line marker success — 3-line marker matches consecutive file lines ===
+unittest {
+    string[] fileLines = [
+        "header", "void setTimer(int ms) {", "    // TODO: implement",
+        "    timer = null;", "footer"
+    ];
+    auto outcome = editFileUnifiedMemory(fileLines, EditMode.replace,
+            "void setTimer(int ms) {\n    timer = new Timer(ms);\n    timer.start();",
+            marker: "void setTimer(int ms) {\n    // TODO: implement");
+    // Auto-count from marker line count (2): replaces 2 lines with 3 → net +1 line
+    assert(outcome.lines == [
+        "header", "void setTimer(int ms) {", "    timer = new Timer(ms);",
+        "    timer.start();", "    timer = null;", "footer"
+    ], outcome.lines.to!string);
+    assert(outcome.matched.matchedAt == 2);
+    assert(outcome.matched.matchedLines == 2); // matched 2 marker lines
+    assert(outcome.linesChanged == 1); // 3 content lines replace 2 matched lines
+}
+
+// === Task 9: multi-line marker partial fail — first line found, second line doesn't match ===
+unittest {
+    // First marker line "foo" matches at index 1; second marker line "wrong" does
+    // NOT match "bar" → continues search. Eventually no full match is found.
+    string[] fileLines = ["a", "foo", "bar", "foo", "baz", "end"];
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(fileLines, EditMode.replace, "X", marker: "foo\nwrong");
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("not found"), e.msg);
+    }
+    assert(threw);
+}
+
+// === Task 9: multi-line marker not found — first anchor line never found ===
+unittest {
+    string[] fileLines = ["a", "b", "c"];
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(fileLines, EditMode.replace, "X", marker: "zzz\nyyy");
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("not found"), e.msg);
+    }
+    assert(threw);
+}
+
+// === Task 9: multi-line marker with replaceAll — only full-anchor positions replaced ===
+unittest {
+    // Three "foo" lines, but only two have the matching second line "bar".
+    // The middle "foo" has "baz" as the next line, so it is skipped.
+    string[] fileLines = ["foo", "bar", "foo", "baz", "foo", "bar", "end"];
+    auto outcome = editFileUnifiedMemory(fileLines, EditMode.replace, "X\nY",
+            marker: "foo\nbar", replaceAll: true);
+    assert(outcome.lines == ["X", "Y", "foo", "baz", "X", "Y", "end"], outcome.lines.to!string);
+    assert(outcome.operations == 2);
+}
+
+// === Task 9: multi-line marker with scope — search limited to scope, anchor inside ===
+unittest {
+    // "foo\nbar" appears at lines 1-2 and 4-5. scopeStart=3, scopeEnd=5
+    // restricts the anchor search to [2..5) (0-based), so only the second
+    // occurrence (anchor at line 4, 0-based index 3) is targeted.
+    string[] fileLines = ["foo", "bar", "header", "foo", "bar", "end"];
+    auto outcome = editFileUnifiedMemory(fileLines, EditMode.replace, "X\nY",
+            marker: "foo\nbar", scopeStart: 3, scopeEnd: 5);
+    assert(outcome.lines == ["foo", "bar", "header", "X", "Y", "end"], outcome.lines.to!string);
+    assert(outcome.matched.matchedAt == 4);
+}
+
+// === Task 9: multi-line marker > 20 lines — rejected ===
+unittest {
+    import std.algorithm : map;
+    import std.array : join;
+    import std.range : iota;
+
+    // Build a 21-line marker (each line is unique)
+    auto longMarker = iota(1, 22).map!(i => "line " ~ i.to!string).join("\n");
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(["a", "b"], EditMode.replace, "X", marker: longMarker);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("exceeds") || e.msg.canFind("20 lines")
+                || e.msg.canFind("marker"), e.msg);
+    }
+    assert(threw);
+}
+
+// === Task 9: auto-count note — note describes marker-line auto-count ===
+unittest {
+    // Multi-line marker: count auto-derived from marker line count (2 lines)
+    string[] fileLines = ["a", "step1", "    // details", "b"];
+    auto outcome = editFileUnifiedMemory(fileLines, EditMode.replace,
+            "new line", marker: "step1\n    // details");
+    assert(outcome.autoCountUsed);
+    assert(outcome.note.canFind("marker line count"), outcome.note);
+    assert(outcome.matched.matchedLines == 2);
+}
+
+// === Task 9: auto-count note — note describes content-line auto-count ===
+unittest {
+    // Single-line marker with 2-line content: count auto-derived from content
+    string[] fileLines = ["a", "marker", "old1", "old2", "b"];
+    auto outcome = editFileUnifiedMemory(fileLines, EditMode.replace,
+            "new1\nnew2", marker: "marker");
+    assert(outcome.autoCountUsed);
+    assert(outcome.note.canFind("content line count"), outcome.note);
+    assert(outcome.matched.matchedLines == 2);
+}
+
+// === Task 9: byLine count missing — error message includes suggestion ===
+unittest {
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(["a", "b"], EditMode.replace, "x", startLine: 1);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("count must be >= 1"), e.msg);
+        assert(e.msg.canFind("Specify how many lines"), e.msg);
+        assert(e.msg.canFind("byMarker"), e.msg);
+        assert(e.msg.canFind("byContent"), e.msg);
+    }
+    assert(threw);
+}
+
+// === Task 9: multi-line marker with explicit count — autoCountUsed is false ===
+unittest {
+    string[] fileLines = ["a", "step1", "    // details", "extra", "b"];
+    auto outcome = editFileUnifiedMemory(fileLines, EditMode.replace, "X\nY",
+            marker: "step1\n    // details", count: 3);
+    assert(!outcome.autoCountUsed);
+    assert(outcome.note.empty);
+    assert(outcome.matched.matchedLines == 3);
+}

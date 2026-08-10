@@ -12,38 +12,72 @@ import llm.tool_call.io : EditMode;
 import llm.tool_call.io.diagnostic : appendScope;
 import llm.tool_call.io.edit_engine : EditTarget, EditFileOutcome,
     editContentLines, editFileInMemory;
-import llm.tool_call.io.search : CodeBlockRange, ScopeWindow, findMarkerLine, findNthMarkerLine,
-    countMarkerOccurrences, findCodeBlock, findNthCodeBlock,
-    countCodeBlockOccurrences, resolveScope;
+import llm.tool_call.io.search : CodeBlockRange, findMarkerLine, findNthMarkerLine,
+    countMarkerOccurrences, findMultiLineMarkerLine, findNthMultiLineMarkerLine,
+    countMultiLineMarkerOccurrences, findCodeBlock,
+    findNthCodeBlock, countCodeBlockOccurrences, resolveScope, maxMarkerLines;
 
 /// byLine targeting: validate startLine/count and apply the edit to the
 /// resolved 1-based line range.
-package EditFileOutcome executeByLine(string[] fileLines, EditMode mode,
-        string content, long startLine, long count, bool replaceAll) @safe {
+package EditFileOutcome executeByLine(string[] fileLines, EditMode mode, string content,
+        long startLine, long count, bool replaceAll, string verifyContent = null) @safe {
     enforce(!replaceAll,
             "replaceAll is not supported with byLine targeting (there is no search pattern)");
     enforce(startLine >= 1, i"parameter startLine $(startLine) must be > 0".text);
     const isRangeMode = mode == EditMode.replace || mode == EditMode.remove;
     if (isRangeMode)
-        enforce(count >= 1, i"parameter count $(count) must be > 0 for byLine $(mode) mode".text);
+        enforce(count >= 1, i"parameter count must be >= 1 for byLine $(mode) mode. Specify how many lines to replace starting at startLine. Alternatively, use marker (byMarker) or searchContent (byContent) targeting to auto-detect the target range."
+                .text);
+
+    if (isRangeMode && verifyContent.length > 0) {
+        string actualContent;
+        if (startLine - 1 >= cast(long) fileLines.length) {
+            // startLine is past end of file — the mismatch error below
+            // will produce a clear diagnostic instead of an inverted range.
+            actualContent = i"(line $(startLine) is beyond end of file at line $(fileLines.length))"
+                .text;
+        } else {
+            const endIdxCheck = startLine - 1 + count > cast(long) fileLines.length
+                ? cast(long) fileLines.length : startLine - 1 + count;
+            if (startLine - 1 < endIdxCheck)
+                actualContent = fileLines[startLine - 1 .. endIdxCheck].join("\n");
+        }
+        if (actualContent.strip != verifyContent.strip)
+            throw new Exception(i"byLine verifyContent mismatch: expected target lines to match verifyContent, but found different content. Actual content:\n$(
+                    actualContent)\n\nExpected verifyContent:\n$(verifyContent)\n\nSuggestion: re-read the file to get current line numbers, or use byMarker/byContent targeting which searches for content rather than relying on line numbers."
+                    .text);
+    }
+
     const startIdx = startLine - 1;
     const endIdx = isRangeMode ? startIdx + count : startIdx;
     const matchedLines = isRangeMode ? count : 1;
     auto res = editFileInMemory(fileLines, mode, content, EditTarget(startIdx,
             endIdx, startLine, matchedLines));
-    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, false);
+    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, false, "");
 }
 
 /// byMarker targeting: auto-count heuristic, replaceAll with scope pre-copy.
+/// Supports both single-line markers (substring match on one line) and
+/// multi-line markers (first line as anchor, subsequent lines verified as
+/// substrings of consecutive file lines).
 package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, string content,
         const(string[]) contentLines, long contentLineCount, string marker, long count, bool replaceAll, long matchIndex,
         size_t scopeBegin, size_t scopeEndExclusive, long scopeStart, long scopeEnd) @safe {
-    enforce(!marker.canFind("\n"), "marker must be a single line, it may NOT contain newlines");
+    const isMultiLine = marker.canFind("\n");
+    string[] markerLines;
+    if (isMultiLine) {
+        markerLines = marker.splitLines;
+        enforce(markerLines.length <= maxMarkerLines, i"marker must not exceed $(maxMarkerLines) lines (got $(
+                markerLines.length))".text);
+    }
     const isRangeMode = mode == EditMode.replace || mode == EditMode.remove;
     long targetCount = count;
     bool autoCount = false;
     if (isRangeMode && targetCount < 1) {
-        if (mode == EditMode.replace && contentLineCount > 1) {
+        if (isMultiLine) {
+            targetCount = cast(long) markerLines.length; // auto-count from marker lines
+            autoCount = true;
+        } else if (mode == EditMode.replace && contentLineCount > 1) {
             targetCount = contentLineCount; // auto-count heuristic
             autoCount = true;
         } else {
@@ -53,9 +87,20 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
     if (!isRangeMode)
         targetCount = 1;
 
+    string note;
+    if (autoCount) {
+        if (isMultiLine)
+            note = i"count was auto-derived as $(targetCount) from marker line count".text;
+        else
+            note = i"count was auto-derived as $(targetCount) from content line count".text;
+    }
+
     const scopeActive = scopeStart != -1 || scopeEnd != -1;
-    const markerNotFound = scopeActive ? appendScope(i"marker '$(marker)' not found in file".text,
-            scopeStart, scopeEnd) : i"marker '$(marker)' not found in file".text;
+    // Truncate multi-line markers in error messages for readability.
+    const markerDisplay = isMultiLine ? i"'$(markerLines[0])' (+$(markerLines.length - 1) more lines)".text
+        : i"'$(marker)'".text;
+    const markerNotFound = scopeActive ? appendScope(i"marker $(markerDisplay) not found in file".text,
+            scopeStart, scopeEnd) : i"marker $(markerDisplay) not found in file".text;
 
     if (replaceAll) {
         // Replace every in-scope occurrence; each match replaces
@@ -69,7 +114,12 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
         EditTarget firstMatch;
         bool first = true;
         while (pos < scopeEndExclusive && pos < fileLines.length) {
-            const idx = findMarkerLine(fileLines, marker, pos, scopeEndExclusive);
+            long idx;
+            if (isMultiLine) {
+                idx = findMultiLineMarkerLine(fileLines, markerLines, pos, scopeEndExclusive);
+            } else {
+                idx = findMarkerLine(fileLines, marker, pos, scopeEndExclusive);
+            }
             if (idx < 0)
                 break;
             const absEnd = idx + targetCount;
@@ -88,22 +138,34 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
             throw new Exception(markerNotFound);
         app.put(fileLines[pos .. $]);
         return EditFileOutcome(app[], firstMatch,
-                cast(long) app[].length - cast(long) fileLines.length, ops, autoCount);
+                cast(long) app[].length - cast(long) fileLines.length, ops, autoCount, note);
     }
 
     long markerIdx;
     if (matchIndex > 1) {
-        markerIdx = findNthMarkerLine(fileLines, marker, matchIndex,
-                scopeBegin, scopeEndExclusive);
+        if (isMultiLine) {
+            markerIdx = findNthMultiLineMarkerLine(fileLines, markerLines,
+                    matchIndex, scopeBegin, scopeEndExclusive);
+        } else {
+            markerIdx = findNthMarkerLine(fileLines, marker, matchIndex,
+                    scopeBegin, scopeEndExclusive);
+        }
         if (markerIdx < 0) {
-            const occ = countMarkerOccurrences(fileLines, marker, scopeBegin, scopeEndExclusive);
+            const occ = isMultiLine ? countMultiLineMarkerOccurrences(fileLines,
+                    markerLines, scopeBegin, scopeEndExclusive) : countMarkerOccurrences(fileLines,
+                    marker, scopeBegin, scopeEndExclusive);
             const occWord = occ == 1 ? "occurrence" : "occurrences";
             const verbWord = occ == 1 ? "was" : "were";
-            throw new Exception(appendScope(i"matchIndex=$(matchIndex) but only $(occ) $(occWord) of marker '$(
-                    marker)' $(verbWord) found".text, scopeStart, scopeEnd));
+            throw new Exception(appendScope(i"matchIndex=$(matchIndex) but only $(occ) $(occWord) of marker $(
+                    markerDisplay) $(verbWord) found".text, scopeStart, scopeEnd));
         }
     } else {
-        markerIdx = findMarkerLine(fileLines, marker, scopeBegin, scopeEndExclusive);
+        if (isMultiLine) {
+            markerIdx = findMultiLineMarkerLine(fileLines, markerLines,
+                    scopeBegin, scopeEndExclusive);
+        } else {
+            markerIdx = findMarkerLine(fileLines, marker, scopeBegin, scopeEndExclusive);
+        }
         if (markerIdx < 0)
             throw new Exception(markerNotFound);
     }
@@ -112,7 +174,7 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
             targetCount) exceeds file length".text);
     auto res = editFileInMemory(fileLines, mode, content, EditTarget(markerIdx,
             isRangeMode ? absEnd : markerIdx, markerIdx + 1, isRangeMode ? targetCount : 1));
-    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, autoCount);
+    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, autoCount, note);
 }
 
 /// byContent targeting: block search, replaceAll loop, matchIndex, insert anchor.
@@ -167,8 +229,8 @@ package EditFileOutcome executeByContent(string[] fileLines, EditMode mode, stri
         if (ops == 0)
             throw new Exception(blockNotFound);
         app.put(fileLines[pos .. $]);
-        return EditFileOutcome(app[], firstMatch,
-                cast(long) app[].length - cast(long) fileLines.length, ops, true);
+        return EditFileOutcome(app[], firstMatch, cast(long) app[].length - cast(long) fileLines.length,
+                ops, true, "count auto-derived from matched block size (replaceAll)");
     }
 
     CodeBlockRange range;
@@ -192,6 +254,10 @@ package EditFileOutcome executeByContent(string[] fileLines, EditMode mode, stri
         targetCount = cast(long) range.end - cast(long) range.start;
         autoCount = true;
     }
+
+    string note;
+    if (autoCount)
+        note = i"count was auto-derived as $(targetCount) from matched block size".text;
     const absStart = cast(long) range.start;
     long absEnd;
     if (isRangeMode) {
@@ -208,7 +274,7 @@ package EditFileOutcome executeByContent(string[] fileLines, EditMode mode, stri
     auto res = editFileInMemory(fileLines, mode, content, EditTarget(insertAnchor, isRangeMode
             ? absEnd : insertAnchor, absStart + 1, isRangeMode ? targetCount
             : cast(long)(range.end - range.start)));
-    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, autoCount);
+    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, autoCount, note);
 }
 
 /// Validate exactly one targeting method and replaceAll/matchIndex combos.
@@ -250,7 +316,8 @@ package void resolveTargeting(long startLine, string marker, string searchConten
 ///     the unified editFile tool converts exceptions into diagnostic JSON.
 package EditFileOutcome editFileUnifiedMemory(string[] fileLines, EditMode mode, string content,
         long startLine = -1, long count = 0, string marker = null, string searchContent = null,
-        bool replaceAll = false, long matchIndex = 1, long scopeStart = -1, long scopeEnd = -1) @safe {
+        bool replaceAll = false, long matchIndex = 1, long scopeStart = -1,
+        long scopeEnd = -1, string verifyContent = null) @safe {
     enforce(matchIndex >= 1, i"parameter matchIndex $(matchIndex) must be >= 1".text);
     enforce(!(mode == EditMode.remove && content.length > 0),
             "parameter mode is 'remove' but content is not empty");
@@ -266,7 +333,8 @@ package EditFileOutcome editFileUnifiedMemory(string[] fileLines, EditMode mode,
     const hasMarker = marker.length > 0;
     resolveTargeting(startLine, marker, searchContent, replaceAll, matchIndex);
     if (hasStartLine)
-        return executeByLine(fileLines, mode, content, startLine, count, replaceAll);
+        return executeByLine(fileLines, mode, content, startLine, count,
+                replaceAll, verifyContent);
     if (hasMarker)
         return executeByMarker(fileLines, mode, content, contentLines, contentLineCount, marker, count, replaceAll,
                 matchIndex, scopeWindow.begin, scopeWindow.endExclusive, scopeStart, scopeEnd);

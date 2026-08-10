@@ -10,11 +10,11 @@ import std.stdio : writeln, writefln, write;
 import std.sumtype : SumType, match;
 import std.utf : decode, UseReplacementDchar, byUTF;
 
-import argparse : CLI, NamedArgument, PositionalArgument, ArgumentGroup,
-    ansiStylingArgument, Command, Description, Required,
-    Optional, Parse, SubCommand, Placeholder, Default, matchCmd, MutuallyExclusive;
+import argparse : CLI, NamedArgument, PositionalArgument, ArgumentGroup, ansiStylingArgument, Command, Description,
+    Required, Parse, SubCommand, Placeholder, Default, matchCmd, MutuallyExclusive;
 import my.term_color;
 import my.path;
+import my.optional;
 import colorlog;
 
 int main(string[] args) {
@@ -137,20 +137,23 @@ int appMain(UserConfig uconf, UserConfig.ChatTestConfig conf) {
     auto llmConf = readConfig(conf.config, false, true, false).userToLlmConfig(conf);
     llmConf.codeModels[0].server.httpVerbosity = 2;
     Chat chat;
-    chat.add(Message(Role.system, readText(llmConf.agentPrompt)));
-    chat.add(Message(Role.user, "who are you"));
+    chat.add(Message(Role.system, false, readText(llmConf.agentPrompt), ""));
+    chat.add(Message(Role.user, true, "who are you", ""));
 
     auto requester = LlmRequester(llmConf.codeModels[0].toRequestConfig);
     auto resp = requester.request(chat);
     logger.info(resp);
-    resp.match!((JSONValue j) {
+    import std.json : parseJSON;
+
+    resp.match!((HttpResult r) {
+        auto j = parseJSON(r.body);
         logger.info(j);
         foreach (a; j["choices"].array.retro.take(1)) {
-            chat.add(Message(Role.assistant, a["message"]["content"].str));
+            chat.add(Message(Role.assistant, false, a["message"]["content"].str, ""));
         }
-    }, (LlamaRequestError e) { logger.warning(e); });
+    }, (HttpError e) { logger.warning(e); });
 
-    chat.add(Message(Role.user, "what is your age"));
+    chat.add(Message(Role.user, true, "what is your age", ""));
     resp = requester.request(chat);
     logger.info(resp);
 
@@ -235,7 +238,19 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
             return null;
         }
 
-        override Path getMemoryFile(string topic) {
+        override bool saveMemoryFile(string topic, string content) {
+            return false;
+        }
+
+        override Optional!string readMemory(string topic) {
+            return Optional!string();
+        }
+
+        override bool removeMemory(string topic) {
+            return false;
+        }
+
+        Path getMemoryFile(string topic) {
             return Path("scratch/memory") ~ (topic ~ ".md");
         }
 
@@ -332,7 +347,7 @@ int appMain(UserConfig uconf, UserConfig.TestPipelineConfig conf) {
 int appMain(UserConfig uconf, UserConfig.TestRagSqliteConfig conf) {
     import llm.rag.database;
     import llm.config;
-    import llm.rag.embedder : createEmbedder;
+    import llm.rag : createEmbedder;
     import llm.rag.rag;
     import d2sqlite3 : ResultRange;
 
@@ -340,10 +355,8 @@ int appMain(UserConfig uconf, UserConfig.TestRagSqliteConfig conf) {
     auto embedder = createEmbedder(llmConf.embedConfig);
 
     // auto db = openDatabase("smurf.sqlite3".Path, 768);
-    auto rag = new RAG(embedder, [
-        RagDatabaseConfig("smurf.sqlite3".Path, ""),
-        RagDatabaseConfig("llmfun/data/rag.sqlite3".Path, "")
-    ]);
+    auto rag = new RAG(embedder, RagDatabaseConfig("smurf.sqlite3".Path, ""),
+            [RagDatabaseConfig("llmfun/data/rag.sqlite3".Path, "")]);
     // logger.warning(llmConf);
     scope (exit)
         rag.destroy;

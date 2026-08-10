@@ -6,8 +6,6 @@ shared static this() {
     registerEmbedderFactory("remote", &createEmbedder);
 }
 
-private:
-
 import std.sumtype : match;
 import llm.common.config : EmbedConfig, LocalEmbedConfig, RemoteEmbedConfig;
 import llm.common.embedder : Embedder, registerEmbedderFactory;

@@ -421,10 +421,11 @@ ExecuteFuncResult executeImage(Context baseCtx, ExecuteImageParams params) nothr
 // Unit tests for buildRunArgs() and collectOutputLimited()
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test: empty options produces [image, "sh", "-c", cmd].
+/// Test: empty options produces [image] + shell + [cmd].
 unittest {
     auto config = SandboxConfig();
     config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["99_shell"] = ["sh", "-c"];
     ImageCatalogEntry entry;
     entry.name = "alpine:latest";
     auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
@@ -439,6 +440,7 @@ unittest {
     auto config = SandboxConfig();
     config.defaultOptions["00_subcommand"] = ["run"];
     config.defaultOptions["99_empty"] = [];
+    config.defaultOptions["99_shell"] = ["sh", "-c"];
     ImageCatalogEntry entry;
     entry.name = "alpine:latest";
     auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
@@ -455,6 +457,7 @@ unittest {
     config.defaultOptions["01_cleanup"] = ["--rm"];
     config.defaultOptions["02_security"] = ["--read-only"];
     config.defaultOptions["03_network"] = ["--network", "none"];
+    config.defaultOptions["99_shell"] = ["sh", "-c"];
     ImageCatalogEntry entry;
     entry.name = "alpine:latest";
     auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
@@ -512,6 +515,7 @@ unittest {
 unittest {
     auto config = SandboxConfig();
     config.defaultOptions["00_subcommand"] = ["run"];
+    config.defaultOptions["99_shell"] = ["sh", "-c"];
     ImageCatalogEntry entry;
     entry.name = "python:3.11";
     auto args = buildRunArgs(config, AbsolutePath("/workarea"), entry, [
@@ -609,12 +613,12 @@ unittest {
     assert(args[9] == "alpine:latest");
 }
 
-/// Test: two-digit numeric prefixes sort correctly (09 < 10 < 99).
+/// Test: two-digit numeric prefixes sort correctly (09 < 10 < 98).
 unittest {
     auto config = SandboxConfig();
     config.defaultOptions["10_late"] = ["--late"];
     config.defaultOptions["00_subcommand"] = ["run"];
-    config.defaultOptions["99_final"] = ["--final"];
+    config.defaultOptions["98_final"] = ["--final"];
     config.defaultOptions["09_early"] = ["--early"];
     ImageCatalogEntry entry;
     entry.name = "alpine:latest";
@@ -622,7 +626,7 @@ unittest {
         "echo", "hello"
     ]);
 
-    // Verify order: 00, 09, 10, 99, image, sh, -c, cmd
+    // Verify order: 00, 09, 10, 98, image, cmd
     assert(args[0] == "run");
     assert(args[1] == "--early");
     assert(args[2] == "--late");

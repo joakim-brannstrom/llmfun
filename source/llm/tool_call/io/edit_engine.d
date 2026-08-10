@@ -166,4 +166,6 @@ package struct EditFileOutcome {
     long operations;
     /// True when count was auto-derived from the content line count
     bool autoCountUsed;
+    /// Human-readable note describing the auto-count derivation (empty when not auto-derived)
+    string note;
 }
