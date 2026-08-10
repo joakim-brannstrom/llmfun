@@ -108,3 +108,46 @@ Call `writeMemory` with the formatted content.
 - Consider if the topic might be needed in future sessions
 
 Call `removeMemory` for obsolete topics.
+
+## Memory Consolidation & Cleanup Protocol
+
+When cleaning up or consolidating memory topics, follow this process:
+
+### Categorize Each Memory Topic
+
+Every memory topic falls into one of two categories:
+
+1. **Reusable Lessons** — Language quirks, tool behavior, environment facts, patterns that apply across tasks. These should be KEPT (distilled to essentials).
+2. **Ephemeral Notes** — Task-by-task implementation details, specific bug fixes, one-time design decisions, review outcomes. These should be REMOVED.
+
+### Signs a Memory is Reusable
+
+- Documents a language feature or quirk (e.g., D AA literal syntax, C++ inline static constexpr)
+- Describes tool behavior that affects how you work (e.g., editFile line-shift corruption)
+- Captures environment quirks (e.g., container shell joining, grep failures)
+- Contains a pattern or anti-pattern that applies to future work
+- Would be useful to someone new to the codebase or environment
+
+### Signs a Memory is Ephemeral
+
+- References specific task numbers (e.g., "Tasks 1-6", "Task 9")
+- Documents a completed implementation's step-by-step process
+- Contains review outcomes or approval notes
+- Describes a one-time bug fix with no generalizable lesson
+- Is a "consolidated" version of many task notes that are now done
+
+### Consolidation Rules
+
+1. **Distill, don't copy:** When recreating a memory from an ephemeral one, extract only the reusable lessons. Strip task references, review notes, and implementation specifics.
+2. **Verify before storing:** If a lesson depends on environment state (e.g., a tool bug, a broken build config), verify it's still true before storing. Stale lessons are worse than no lessons.
+3. **Merge duplicates:** If multiple memories cover the same topic, merge into one and remove the rest.
+4. **Rename for clarity:** Use `category_specifics` naming (e.g., `d_language_lessons`, `tool_usage_lessons`) instead of implementation-specific names (e.g., `io_edit_refactor_consolidated`).
+5. **Keep it lean:** A memory should be readable in a few seconds. If it's longer than a page, it's probably too detailed.
+
+### Verification Checklist
+
+Before storing a consolidated memory, verify:
+- [ ] Does this lesson still apply to the current codebase/environment?
+- [ ] Would a future session actually use this information?
+- [ ] Is the lesson stated generally (not tied to a specific task)?
+- [ ] Is the entry concise and scannable?

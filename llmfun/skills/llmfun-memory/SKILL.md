@@ -7,7 +7,7 @@ description: >-
   Triggers on: update memory, store memory, remember, lesson learned, common
   pitfall, memory entry, llmfun-memory, write memory, remove memory, memory
   management.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Llmfun Memory Skill
@@ -75,7 +75,10 @@ Follow the protocol. See `references/workflow.md` for detailed steps.
 - **Too verbose**: Keep entries concise and scannable
 - **Missing context**: Include when/why lessons apply, not just what
 - **Forgetting to update date**: Always set `Last updated` to current date
+- **Keeping ephemeral notes**: Task-specific implementation details, review outcomes, and one-time bug fixes should NOT be stored. Only reusable lessons survive consolidation.
+- **Stale environment lessons**: Before storing a lesson about tool behavior or environment quirks, verify it's still true. A lesson about a fixed bug is worse than no lesson.
 
 ## References
 
 - Detailed workflow and decision criteria: `references/workflow.md`
+- Consolidation protocol (appended to `references/workflow.md`)
