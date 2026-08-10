@@ -93,8 +93,13 @@ struct LlmRequester {
             if (cfg.verbosity >= 2)
                 logger.trace(jsonReq.toPrettyString);
 
-            return httpPostWithRetry(cfg.chatUrl,
+            auto res = httpPostWithRetry(cfg.chatUrl,
                     jsonReq.toString(JSONOptions.doNotEscapeSlashes), rqCfg);
+
+            if (cfg.verbosity >= 2)
+                logger.trace(res);
+
+            return res;
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
