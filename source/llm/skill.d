@@ -418,60 +418,17 @@ string stripFrontmatter(string content) {
     return bodyLines.join("\n").strip;
 }
 
-/// Validate skill name: 1-64 lowercase alphanumeric chars with hyphens (no leading/trailing/consecutive).
-bool isValidName(string name) {
-    if (name.length > 64) {
-        return false;
-    }
-
-    static auto namePattern = regex(r"^[a-z0-9]+(-[a-z0-9]+)*$");
-    return cast(bool) matchFirst(name, namePattern);
-}
-
-/// Check if directory base name matches skill name. Uses `.toString` because `AbsolutePath` lacks `.baseName`.
-bool dirNameMatches(AbsolutePath dir, string name) {
-    auto dirBaseName = dir.toString.baseName;
-    return dirBaseName == name;
-}
-
-string xmlEscape(string s) {
-    auto ap = appender!string();
-    foreach (c; s) {
-        switch (c) {
-        case '&':
-            ap.put("&amp;");
-            break;
-        case '<':
-            ap.put("&lt;");
-            break;
-        case '>':
-            ap.put("&gt;");
-            break;
-        case '"':
-            ap.put("&quot;");
-            break;
-        case '\'':
-            ap.put("&apos;");
-            break;
-        default:
-            ap.put(c);
-            break;
-        }
-    }
-    return ap[];
-}
-
 class SkillManager {
     private {
         Skill[string] skills; // name -> Skill, first wins
-        string manifestXmlCache;
+        string manifestCache;
         size_t skippedCount;
     }
 
     /// Discover skills from search paths. Clears previous skills (idempotent).
     void discover(AbsolutePath[] searchPaths) {
         skills = null;
-        manifestXmlCache = null;
+        manifestCache = null;
         skippedCount = 0;
 
         try {
@@ -535,6 +492,16 @@ class SkillManager {
     }
 
     private SkillResult parseSkillMd(AbsolutePath skillMdPath) {
+        /// Validate skill name: 1-64 lowercase alphanumeric chars with hyphens (no leading/trailing/consecutive).
+        bool isValidName(string name) {
+            if (name.length > 64) {
+                return false;
+            }
+
+            static auto namePattern = regex(r"^[a-z0-9]+(-[a-z0-9]+)*$");
+            return cast(bool) matchFirst(name, namePattern);
+        }
+
         enum size_t maxSize = 1_048_576; // 1MB
         auto fileSize = getSize(skillMdPath.toString);
         if (fileSize > maxSize) {
@@ -684,10 +651,12 @@ class SkillManager {
         return skill.loadBody();
     }
 
-    /// Cached XML manifest. maxEntries=0 means unlimited. Adds truncation notice if clipped.
+    /// Cached XML manifest. maxEntries=0 means unlimited. No truncation notice if clipped.
     string getManifestXml(long maxEntries) {
-        if (!manifestXmlCache.empty) {
-            return manifestXmlCache;
+        import std.algorithm : sort;
+
+        if (!manifestCache.empty) {
+            return manifestCache;
         }
 
         auto allSkills = skills.values.array;
@@ -701,35 +670,16 @@ class SkillManager {
         }
 
         auto ap = appender!string();
-        ap.put("<available_skills>\n");
-        ap.put("Use the loadSkill tool to load the full instructions for any skill\n");
-        ap.put("when its description matches the current task.\n");
+        ap.put("\n\n\n");
+        ap.put("[SKILLS]\n");
+        ap.put("Use the loadSkill tool to load the full instructions for any skill when its description matches the current task.\n");
         ap.put("\n");
-        foreach (skill; skillsToInclude) {
-            ap.put("  <skill alwaysApply=\"");
-            ap.put(skill.alwaysApply ? "true" : "false");
-            ap.put("\">\n");
-            ap.put("    <name>");
-            ap.put(xmlEscape(skill.name));
-            ap.put("</name>\n");
-            ap.put("    <description>");
-            ap.put(xmlEscape(skill.description));
-            ap.put("</description>\n");
-            ap.put("  </skill>\n");
-        }
-        ap.put("</available_skills>\n");
-
-        if (maxEntries > 0 && allSkills.length > cast(size_t) maxEntries) {
-            long remaining = cast(long) allSkills.length - maxEntries;
-            ap.put("<!-- ");
-            ap.put(i"$(remaining) more skills available. Use loadSkill with the skill name to see them."
-                    .text);
-            ap.put(" -->\n");
+        foreach (skill; skillsToInclude.sort!((a, b) => a.name < b.name)) {
+            ap.put(i"- $(skill.name): $(skill.description)\n\n".text);
         }
 
-        auto result = ap[];
-        manifestXmlCache = result;
-        return result;
+        manifestCache = ap[];
+        return manifestCache;
     }
 }
 
