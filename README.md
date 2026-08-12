@@ -125,7 +125,7 @@ List available tools without starting the server:
 ```bash
 llmfun mcp --list-tools
 llmfun mcp --list-tools --include "^read.*"
-llmfun mcp --list-tools --exclude "executeImage"
+llmfun mcp --list-tools --exclude "executeCommand"
 ```
 
 ## Examples
@@ -245,7 +245,7 @@ Layer 2 values override Layer 1 values. This allows global defaults with project
   "scratchArea": "llmfun/data/scratch",
   "promptDir": "llmfun/config/prompt",
   "workArea": "llmfun/workarea",
-  "sandboxConfig": {"runtimeCli": "docker", "defaultImage": "alpine:latest", ...},
+  "sandboxConfig": {"systemExecutionEnvironmentsFile": "execution_environments.json", ...},
   "agentPrompt": "AGENT.md",
   "activeCodeModelIndex": 0,
   "noMemory": false,
@@ -295,13 +295,10 @@ Layer 2 values override Layer 1 values. This allows global defaults with project
 
 ### Sandbox Configuration (`sandboxConfig`)
 
-Configures the container runtime for code execution.
+Configures the execution environments for command execution. Supports both container-based (Docker, Podman) and host-based execution.
 
 ```json
 "sandboxConfig": {
-  "runtimeCli": "docker",
-  "defaultImage": "alpine:latest",
-  "timeoutSeconds": 60,
   "maxOutputBytes": 1048576,
   "defaultOptions": {
     "00_subcommand": ["run"],
@@ -310,37 +307,95 @@ Configures the container runtime for code execution.
     "03_resources": ["--memory", "256m", "--cpus", "0.5"],
     "04_tmpfs": ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"],
     "05_timeout": ["--stop-timeout", "60"],
-    "06_network": ["--network", "none"]
+    "06_network": ["--network", "none"],
+    "entrypoint_cmd": ["sh", "-c"]
   },
-  "systemImageCatalogFile": "config/image_catalog.json",
-  "userImageCatalogFile": ""
+  "systemExecutionEnvironmentsFile": "execution_environments.json",
+  "userExecutionEnvironmentsFile": ""
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `runtimeCli` | string | `docker` | Container runtime CLI command (e.g. "docker", "podman") |
-| `defaultImage` | string | *(empty)* | Default container image when none specified |
-| `timeoutSeconds` | long | `60` | Subprocess execution timeout in seconds |
 | `maxOutputBytes` | long | `1048576` | Maximum output bytes per stream (stdout/stderr) |
-| `defaultOptions` | object | defaults | Default container options as tagged key-value map |
-| `systemImageCatalogFile` | string | *(empty)* | Path to system image catalog JSON file |
-| `userImageCatalogFile` | string | *(empty)* | Path to user image catalog JSON file |
+| `defaultOptions` | object | defaults | Default container options merged into container environments |
+| `systemExecutionEnvironmentsFile` | string | *(empty)* | Path to system execution environments JSON file |
+| `userExecutionEnvironmentsFile` | string | *(empty)* | Path to user execution environments JSON file |
 
 #### Default Options
 
-The `defaultOptions` object uses numbered keys to control the order of CLI arguments. Keys must be prefixed with `<NR>_` (e.g. `00_subcommand`, `01_cleanup`). Values are arrays of CLI arguments.
+The `defaultOptions` object uses numbered keys to control the order of CLI arguments. Keys must be prefixed with `<NN>_` (e.g. `00_subcommand`, `01_cleanup`). Values are arrays of CLI arguments. These options are merged into container-type environments at load time.
 
-#### Image Catalog
+#### Execution Environments
 
-Image catalogs define which container images are allowed for `executeImage` and `listImages` tools. The catalog format is a JSON file with a `version` and `entries` array. Each entry has:
+Execution environments define how commands are executed. They are loaded from JSON files configured via `systemExecutionEnvironmentsFile` and `userExecutionEnvironmentsFile`. User entries override system entries with the same tag.
 
-- `name` (string, required): Full image reference (e.g. "python:3.11-slim")
-- `description` (string, optional): Human-readable description
-- `tags` (string[], optional): Tags for categorization and filtering
-- `options` (object, optional): Per-image container options (same format as `defaultOptions`)
+The environment config format is a JSON file with `version`, `defaultEnvironment`, and `environments` array:
 
-User catalog entries override system catalog entries with the same name. See `config/image_catalog.json` for an example.
+```json
+{
+  "version": 1,
+  "defaultEnvironment": "alpine",
+  "environments": [
+    {
+      "tag": "alpine",
+      "description": "Minimal Linux environment. **shell: sh**",
+      "capabilities": ["linux", "minimal"],
+      "isIsolated": true,
+      "timeout": 120,
+      "commandJoinMode": "whitespace",
+      "config": {
+        "type": "container",
+        "runtimeCli": "docker",
+        "image": "alpine:latest",
+        "options": {
+          "02_security": ["--read-only"],
+          "04_tmpfs": ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"],
+          "05_mounts": ["-v", "@{llmfun_workarea}:/workarea"],
+          "06_network": ["--network", "none"]
+        }
+      }
+    }
+  ]
+}
+```
+
+**Environment entry fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `tag` | string | yes | Unique identifier used in `executeCommand` calls |
+| `description` | string | no | Human-readable description shown by `listEnvironments` |
+| `capabilities` | string[] | no | Tags for categorization (e.g. "dev", "python", "isolated") |
+| `isIsolated` | bool | no | Whether the environment provides isolation (default: false) |
+| `timeout` | int | yes | Maximum execution time in seconds |
+| `commandJoinMode` | string | no | How command array elements are joined: `"whitespace"` (join with spaces, default) or `"append"` (each element as separate argument) |
+| `config` | object | yes | Environment-specific configuration (see below) |
+
+**Container config** (`type: "container"`):
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | yes | Must be `"container"` |
+| `runtimeCli` | string | yes | Container runtime (e.g. "docker", "podman") |
+| `image` | string | yes | Container image reference (e.g. "alpine:latest") |
+| `options` | object | no | Container CLI options (merged with `sandboxConfig.defaultOptions`) |
+
+**Host config** (`type: "host"`):
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | yes | Must be `"host"` |
+| `options` | object | no | Shell command prefix options (e.g. `{"00_shell": ["sh", "-c"]}`) |
+| `workingDir` | string | no | Working directory for the subprocess (supports magic words) |
+| `envVars` | object or array | no | Environment variables (map: `{"KEY": "VALUE"}` or list: `["KEY=VALUE"]`) |
+| `allowedCommandPrefixes` | string[] | no | Restrict commands to these prefixes (placeholder, not enforced yet) |
+
+**Magic words** in environment config values:
+- `@{llmfun_workarea}`: Replaced with the configured workarea path
+- `@{llmfun}`: Replaced with the directory of the llmfun executable
+
+See `config/execution_environments.json` for a complete example with multiple environments.
 
 ### Tool Limits (`toolLimits`)
 
@@ -423,7 +478,7 @@ Controls which tools the agent can access via regex include/exclude patterns.
 ```json
 "toolFilter": {
   "include": [".*"],
-  "exclude": ["executeImage"]
+  "exclude": ["executeCommand"]
 }
 ```
 
@@ -623,7 +678,7 @@ llmfun uses a local directory structure for data and configuration. The structur
 llmfun/
 ├── config/
 │   ├── example.json         # Complete configuration reference
-│   ├── image_catalog.json   # Curated container image catalog
+│   ├── execution_environments.json   # Curated execution environments
 │   ├── prompt/              # Prompt templates and system prompts
 │   │   └── *.md             # Markdown prompt files
 │   └── thinking/            # Thinking templates for structured reasoning
@@ -756,8 +811,8 @@ The agent has access to the following tools:
 
 | Tool | Description |
 |------|-------------|
-| `executeImage` | Execute a command in a container image with security hardening (read-only rootfs, network isolation, resource limits) |
-| `listImages` | List available container images from the curated catalog |
+| `executeCommand` | Execute a command in an execution environment (container or host). Returns JSON with exitCode, stdout, and stderr. Use `environmentTag` to select the environment |
+| `listEnvironments` | List available execution environments with tag, description, capabilities, and configuration details |
 
 ### Pipeline
 
