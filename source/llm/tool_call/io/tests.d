@@ -55,7 +55,6 @@ version (unittest) {
         }
     }
 
-    // Helper: create a test file with given content
     void createTestFile(TestFileContext ctx, string relativePath, string content) {
         assert(!relativePath.startsWith("/"), "relativePath must not be absolute: " ~ relativePath);
         auto fullPath = (ctx.workArea ~ relativePath).AbsolutePath;
@@ -64,13 +63,11 @@ version (unittest) {
         f.write(content);
     }
 
-    // Helper: read file content for verification
     string readTestFile(TestFileContext ctx, string relativePath) {
         auto fullPath = (ctx.workArea ~ relativePath).AbsolutePath;
         return readText(fullPath.toString);
     }
 
-    // Helper: create a test context with a unique directory name
     TestFileContext makeTestContext(string testName) {
         import std.datetime : Clock;
 
@@ -160,7 +157,6 @@ unittest {
     assert(findNthMarkerLine(lines, "a", 4) == -1); // only 3 occurrences
     assert(findNthMarkerLine(lines, "zzz", 1) == -1); // not found at all
 
-    // countMarkerOccurrences
     assert(countMarkerOccurrences(lines, "a") == 3);
     assert(countMarkerOccurrences(lines, "b") == 1);
     assert(countMarkerOccurrences(lines, "zzz") == 0);
@@ -178,7 +174,7 @@ unittest {
 }
 
 unittest {
-    // === Exact match ===
+    // findCodeBlock: exact/whitespace/tab tolerance
     {
         string[] fileLines = ["foo", "bar", "baz"];
         string[] searchLines = ["foo", "bar"];
@@ -188,7 +184,7 @@ unittest {
         assert(result.end == 2);
     }
 
-    // === Whitespace tolerance via strip ===
+    // Whitespace tolerance via strip
     {
         string[] fileLines = ["    foo", "  bar  ", "baz"];
         string[] searchLines = ["foo", "bar"];
@@ -198,7 +194,7 @@ unittest {
         assert(result.end == 2);
     }
 
-    // === Tabs vs spaces tolerance ===
+    // findCodeBlock: tabs/spaces tolerance & comment avoidance
     {
         string[] fileLines = ["\t\tfoo", "\tbar"];
         string[] searchLines = ["foo", "bar"];
@@ -208,8 +204,7 @@ unittest {
         assert(result.end == 2);
     }
 
-    // === Comment false positive prevention ===
-    // Searching for "foo" should NOT match "// call fooBar()"
+    // Comment false positive prevention: "// call fooBar()" should NOT match "foo"
     {
         string[] fileLines = ["// call fooBar()", "other"];
         string[] searchLines = ["foo"];
@@ -235,19 +230,19 @@ unittest {
         assert(result.end == 2);
     }
 
-    // === Empty search block returns not found ===
+    // findCodeBlock: empty/whitespace/multi-line/anchor checks
     {
         auto result = findCodeBlock(["foo"], cast(string[])[]);
         assert(!result.found);
     }
 
-    // === All-empty search block returns not found ===
+    // All-empty search block returns not found
     {
         auto result = findCodeBlock(["foo"], ["", "  ", "\t"]);
         assert(!result.found);
     }
 
-    // === Leading empty lines in search content ===
+    // Leading empty lines in search content
     {
         string[] fileLines = ["foo", "bar"];
         string[] searchLines = ["", "", "foo", "bar"];
@@ -257,7 +252,7 @@ unittest {
         assert(result.end == 2);
     }
 
-    // === Multi-line search block matching ===
+    // Multi-line search block matching
     {
         string[] fileLines = ["function foo() {", "    return bar;", "}"];
         string[] searchLines = ["function foo() {", "    return bar;", "}"];
@@ -267,7 +262,7 @@ unittest {
         assert(result.end == 3);
     }
 
-    // === Empty search lines in middle (flexible) ===
+    // Empty search lines in middle (flexible)
     {
         string[] fileLines = ["function foo() {", "    return bar;", "}"];
         string[] searchLines = [
@@ -417,7 +412,7 @@ unittest {
         assert(res.linesChanged == -1, res.linesChanged.to!string);
     }
 
-    // === remove: 5 lines deleted -> linesChanged = -5 ===
+    // remove: verifies deletion and linesChanged update
     {
         string[] fileLines = ["a", "b", "c", "d", "e", "f", "g"];
         auto res = editFileInMemory(fileLines, EditMode.remove, "", EditTarget(1, 6, 2, 5));
@@ -425,7 +420,7 @@ unittest {
         assert(res.linesChanged == -5, res.linesChanged.to!string);
     }
 
-    // === append: content inserted after line -> linesChanged = contentLineCount ===
+    // append: verifies content insertion and linesChanged update
     {
         string[] fileLines = ["a", "b", "c"];
         auto res = editFileInMemory(fileLines, EditMode.append, "x\ny", EditTarget(1, 1, 2, 1));
@@ -433,7 +428,7 @@ unittest {
         assert(res.linesChanged == 2, res.linesChanged.to!string);
     }
 
-    // === insert_after: alias for append ===
+    // insert_after: alias for append
     {
         string[] fileLines = ["a", "b", "c"];
         auto res = editFileInMemory(fileLines, EditMode.insert_after, "x", EditTarget(1, 1, 2, 1));
@@ -2366,11 +2361,9 @@ unittest {
             mode: "replace", marker: "hello world", dryRun: true));
     assert(result.success, result.msg);
 
-    // Verify file was NOT modified
     auto content = readTestFile(ctx, "test.txt");
     assert(content == original, content);
 
-    // Verify preview contains modified content
     auto json = parseJSON(result.msg);
     assert(json["preview"].str.canFind("replaced"), result.msg);
     assert(json["matchedAt"].integer == 2, result.msg);
@@ -2740,11 +2733,9 @@ unittest {
     auto result = applyDiff(ctx, ApplyDiffParams("test.txt", diff, dryRun: true));
     assert(result.success, result.msg);
 
-    // Verify file was NOT modified
     auto content = readTestFile(ctx, "test.txt");
     assert(content == original, content);
 
-    // Verify preview contains modified content
     auto json = parseJSON(result.msg);
     assert(json["preview"].str.canFind("line2modified"), json.toString);
     assert(!json["preview"].str.canFind("-line2"), json.toString);
@@ -2774,7 +2765,6 @@ unittest {
     assert(json["warnings"][1].str.canFind("new lines"), json.toString);
     assert(json["linesChanged"].integer == 1, json.toString);
 
-    // File content updated using body counts
     auto content = readTestFile(ctx, "test.txt");
     assert(content == "line1a\nline1b\nline1c\nline3\nline4\n", content);
 }
@@ -2800,7 +2790,6 @@ unittest {
 
     createTestFile(ctx, "test.txt", "line1\n");
 
-    // Absolute path should be rejected
     auto result = editFile(ctx, UnifiedEditFileParams(path: "/etc/passwd",
             content: "x", mode: "replace", marker: "marker"));
     assert(!result.success);
@@ -2815,7 +2804,6 @@ unittest {
 
     createTestFile(ctx, "test.txt", "line1\n");
 
-    // Path traversal should be rejected
     auto result = editFile(ctx, UnifiedEditFileParams(path: "../test.txt",
             content: "x", mode: "replace", marker: "marker"));
     assert(!result.success);

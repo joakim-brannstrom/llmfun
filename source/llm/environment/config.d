@@ -28,9 +28,9 @@ enum ExecutionType {
 
 /// Strategy for combining the LLM's command array into the final command line.
 enum CommandJoinMode {
-    /// Join all elements with spaces into a single argument.
+    /// Join all elements with spaces into a single argument string.
     whitespace,
-    /// Append each element as a separate argument.
+    /// Each element of the array is treated as a separate argument.
     append
 }
 
@@ -42,8 +42,8 @@ struct ContainerConfig {
     /// Container image name (e.g., "alpine:latest").
     string image;
 
-    /// Default container options as tag -> CLI arguments map.
-    /// Keys are logical group names (e.g., "security", "network", "mounts").
+    /// Default container options as a map from logical group names to CLI arguments.
+    /// Keys are logical groups (e.g., "security", "network", "mounts").
     /// Values are arrays of CLI arguments flattened into the command line.
     string[][string] options;
 
@@ -55,18 +55,18 @@ struct ContainerConfig {
 
 /// Configuration for host-based execution environments.
 struct HostConfig {
-    /// Host subprocess options as tag -> CLI arguments map.
-    /// Keys are logical group names; values are arrays of CLI arguments.
+    /// Host subprocess options as a map from logical group names to CLI arguments.
+    /// Keys are logical groups; values are arrays of CLI arguments.
     string[][string] options;
 
     /// Working directory for the subprocess (supports magic words).
-    /// Empty string means use the current directory.
+    /// An empty string defaults to the current directory.
     string workingDir;
 
-    /// Environment variables to set for the subprocess (supports magic words in values).
+    /// Environment variables for the subprocess (supports magic and magic word substitution in values).
     string[string] envVars;
 
-    /// Phase 5 placeholder: restrict commands to these prefixes.
+    /// Restrict commands to these specific prefixes.
     string[] allowedCommandPrefixes;
 }
 
@@ -148,7 +148,6 @@ private string[][string] parseEnvOptions(JSONValue optJson, string tagName, stri
     string[] invalidKeys;
     foreach (key; result.byKey) {
         if (key.startsWith("entrypoint_")) {
-            // do nothing
         } else if (key.length < 3 || key[2] != '_') {
             invalidKeys ~= key;
         } else {
@@ -230,7 +229,6 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
         return null;
     }
 
-    // Validate top-level structure: object with "environments" array
     if (json.type != JSONType.OBJECT || !("environments" in json)) {
         logger.warningf("Execution environments config %s has invalid format - "
                 ~ "expected object with 'environments' field", filePath);
@@ -243,8 +241,6 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
                 filePath);
         return null;
     }
-
-    // Read defaultEnvironment (optional)
 
     if ("version" in json) {
         auto ver = json["version"].integer;
@@ -264,14 +260,12 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
             continue;
         }
 
-        // Parse tag (required)
         string tag = getValue(entry, (v) => v["tag"].str, null);
         if (tag.empty) {
             logger.warningf("Skipping environment entry with empty or missing 'tag' field");
             continue;
         }
 
-        // Check for duplicate tags — warn and skip (keep first occurrence)
         if (tag in seenTags) {
             logger.warningf("Duplicate environment tag '%s' in config - keeping first occurrence",
                     tag);
@@ -279,7 +273,6 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
         }
         seenTags[tag] = true;
 
-        // Parse optional fields
         string description = getValue(entry, (v) => v["description"].str, null);
 
         string[] capabilities = getValue(entry, (v) => v["capabilities"].array, null).filter!(
@@ -300,7 +293,6 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
                     joinModeStr, tag);
         }
 
-        // Parse config (SumType: ContainerConfig or HostConfig). Required.
         if ("config" !in entry) {
             logger.warningf("Environment entry '%s' has no 'config' field - skipping", tag);
             continue;
@@ -321,11 +313,9 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
                 continue;
             }
 
-            // Determine type by "type" field or by distinguishing fields
             string configType = getValue(configJson, (v) => v["type"].str, null);
 
             if (configType == "container") {
-                // ContainerConfig
                 string runtimeCli = getValue(configJson, (v) => v["runtimeCli"].str, null);
                 if (runtimeCli.empty) {
                     logger.warningf("Missing runtimeCli for container environment '%s' - skipping",
@@ -347,7 +337,6 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
 
                 config = EnvironmentConfig(ContainerConfig(runtimeCli, image, options));
             } else if (configType == "host") {
-                // HostConfig
                 string[][string] options;
                 if ("options" in configJson) {
                     options = parseEnvOptions(configJson["options"], tag, "host");
@@ -355,12 +344,10 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
 
                 string workingDir = getValue(configJson, (v) => v["workingDir"].str, null);
 
-                // Parse envVars — accept both map and list formats, normalize to map
                 string[string] envVars;
                 if ("envVars" in configJson) {
                     auto envVarsJson = configJson["envVars"];
                     if (envVarsJson.type == JSONType.OBJECT) {
-                        // Map format: { "KEY": "VALUE", ... }
                         foreach (key, val; envVarsJson.object) {
                             if (val.type == JSONType.STRING) {
                                 envVars[key] = val.str;
@@ -371,7 +358,6 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
                             }
                         }
                     } else if (envVarsJson.type == JSONType.ARRAY) {
-                        // List format: ["KEY=VALUE", ...]
                         foreach (item; envVarsJson.array) {
                             if (item.type == JSONType.STRING) {
                                 auto str = item.str;

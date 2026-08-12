@@ -46,7 +46,7 @@ private struct CollectedOutput {
 /// Collect output from a proc drain range with per-stream byte limits.
 /// Appends truncation warnings to stderr when limits are exceeded.
 /// Continues draining after truncation to prevent pipe blocking.
-/// Note: Assumes output is text (UTF-8). Binary output will produce garbage.
+/// Note: Assumes UTF-8 text; binary output may result in corrupted data.
 /// Template accepts any range of DrainElement (streaming range or materialized array).
 /// Marked @trusted because it casts string literals to ubyte[] for efficient appending.
 CollectedOutput collectOutputLimited(R)(R elems, long maxOutputBytes) @trusted
@@ -143,10 +143,7 @@ class ContainerRunner : RunnerBackend {
     ExecutionResult execute(string[] command) nothrow {
         auto result = ExecutionResult(exitCode: -1);
         try {
-            // Apply magic word substitution to options values
             auto resolved = replaceContainerMagicWords(options_, workArea_);
-
-            // Build command from sorted options + image + command elements
             auto args = buildCommand(resolved, command, commandJoinMode_, image: image_);
 
             return runContainerCommand(runtimeCli_, args, timeout, maxOutputBytes_, image_);
@@ -162,13 +159,9 @@ class ContainerRunner : RunnerBackend {
 
     /// No-op dispose. ContainerRunner holds no persistent resources.
     void dispose() @safe nothrow {
-        // Nothing to clean up
     }
 }
 
-/// Core container execution function using the proc library.
-
-/// Host command runner implementing the RunnerBackend interface.
 /// Executes commands via native subprocess using proc.pipeProcess,
 /// with configurable working directory, environment variables, and timeout.
 class HostRunner : RunnerBackend {
@@ -262,7 +255,6 @@ class HostRunner : RunnerBackend {
 
     /// No-op dispose. HostRunner holds no persistent resources.
     void dispose() @safe nothrow {
-        // Nothing to clean up
     }
 }
 

@@ -40,7 +40,6 @@ interface EnvironmentContext : Context {
 }
 
 /// Parameters for the listEnvironments tool.
-/// Intentionally empty — no parameters are needed.
 struct ListEnvironmentsParams {
 }
 
@@ -100,12 +99,10 @@ ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) n
     mixin(baseContextToSpecific!EnvironmentContext);
 
     try {
-        // Validate command is not empty
         if (params.command.empty) {
             return ExecuteFuncResult("error: command must not be empty.", success: false);
         }
 
-        // Resolve environment tag
         string tag = params.environmentTag;
         if (tag.empty) {
             tag = ctx.getDefaultEnvironmentTag();
@@ -116,7 +113,6 @@ ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) n
             }
         }
 
-        // Look up environment
         auto env = ctx.getEnvironment(tag);
         if (env.tag == "") {
             return ExecuteFuncResult(
@@ -124,7 +120,6 @@ ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) n
                     success: false);
         }
 
-        // Instantiate the appropriate runner based on SumType
         auto runner = env.config.match!((ContainerConfig c) {
             return cast(RunnerBackend) new ContainerRunner(c.runtimeCli, c.image, c.options, ctx.workArea(),
                 env.commandJoinMode, timeout: env.timeout, maxOutputBytes: 1_048_576);
@@ -138,10 +133,8 @@ ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) n
         scope (exit)
             runner.dispose();
 
-        // Execute command
         auto result = runner.execute(params.command);
 
-        // Return JSON result
         return ExecuteFuncResult(JSONValue([
             "exitCode": JSONValue(result.exitCode),
             "stdout": JSONValue(result.stdout),
