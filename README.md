@@ -9,6 +9,7 @@ An interactive AI agent with tool calling, RAG (Retrieval-Augmented Generation),
 - [Examples](#examples)
 - [CLI Parameters](#cli-parameters)
 - [Slash Commands](#slash-commands)
+- [Chat Sessions](#chat-sessions)
 - [Configuration](#configuration)
 - [Configuration Directory Structure](#configuration-directory-structure)
 - [Security & Configuration](#security--configuration)
@@ -211,7 +212,12 @@ When in interactive agent mode (`agent` command), the following slash commands a
 | `/help` | Show the help message with all slash commands |
 | `/quit`, `/q`, `/exit` | Exit the agent |
 | `/compact` | Force compress the chat history (summarize older messages to save context space) |
-| `/new` | Clear history and start a new conversation |
+| `/sessions` | List chat sessions (index, id, title, preview) |
+| `/switch <n\|id\|title>` | Switch to another session |
+| `/new` | Start a new chat session |
+| `/rename <title>` | Rename the current session |
+| `/delete <n>` | Delete a session (repeat to confirm) |
+| `/clear` | Clear the current chat history |
 | `/plan <query>` | Run the plan pipeline (System Designer → Implementation Planner) |
 | `/code <query>` | Run the coder pipeline (Coder → Code Reviewer loop) |
 
@@ -220,6 +226,18 @@ When in interactive agent mode (`agent` command), the following slash commands a
 - **`/plan <query>`**: Executes a two-stage pipeline where a System Designer agent produces a design document, and an Implementation Planner agent converts it into actionable tasks. Results are saved to `plan/`.
 
 - **`/code <query>`**: Executes a coder-reviewer loop pipeline. The Coder agent implements code, saves it to `code/implementation.md`, and a Code Reviewer agent provides feedback. The loop runs up to 3 iterations.
+
+## Chat Sessions
+
+The agent persists chat history as sessions — one JSON file per session under the chat directory `<scratchArea>/chat/` (with the example configuration that is `llmfun/data/scratch/chat/`; without a configured `scratchArea` it falls back to `llmfun/data/chat/`). Sessions can be listed, switched, renamed, and deleted with the slash commands above.
+
+- Each session is `<scratchArea>/chat/<id>.json` with header fields `title`, `createdAt`, `updatedAt`, and `messages`.
+- The session id is the filename (immutable), format `<YYYYMMDD-HHMMSS>-<4hex>` (e.g. `20260618-153045-a1b2`); renaming a session changes the header title only.
+- The active session id is persisted in `llmfun/data/state.json` (`activeChatSessionId`) and reopened on startup. One-shot mode (`-p`) appends to the last active session.
+- `/delete <n>` asks twice before deleting. Deleting the active session switches to the most recently updated remaining session.
+- System-prompt entries are stripped from `messages` before saving; the prompt is re-set at startup.
+
+See `doc/sessions.md` for the full design and the `SessionStore` API.
 
 ## Configuration
 
@@ -686,8 +704,9 @@ llmfun/
 ├── data/
 │   ├── memory               # LLM-persisted memory file (shared across sessions)
 │   ├── rag.sqlite3          # RAG database (SQLite with FTS5 and vector search)
-│   ├── state.json           # Active model selection state (auto-saved)
+│   ├── state.json           # Active model selection and chat session state (auto-saved)
 │   └── scratch/             # Temporary workspace and runtime data
+│       ├── chat/            # Chat sessions (one JSON file per session)
 │       └── monitor.jsonl    # Tool call metrics log (JSONL format)
 └── workarea/                # Agent working directory for file operations
 ```
@@ -699,9 +718,10 @@ llmfun/
 | `llmfun/config/` | Configuration files and templates |
 | `llmfun/config/prompt/` | System prompt templates loaded at startup |
 | `llmfun/config/thinking/` | Thinking templates accessible via `getThinkingTemplate()` tool |
+| `<scratchArea>/chat/` | Chat sessions: one JSON file per session (see `doc/sessions.md`) |
 | `llmfun/data/memory` | Persistent memory file where the LLM stores cross-session information |
 | `llmfun/data/rag.sqlite3` | SQLite database for RAG with full-text search (FTS5) and vector embeddings |
-| `llmfun/data/state.json` | Auto-saved state (active model index, session count, consolidation lock) |
+| `llmfun/data/state.json` | Auto-saved state (active model index, active chat session id, session count, consolidation lock) |
 | `llmfun/data/scratch/` | Temporary runtime data, including tool call monitoring logs |
 | `llmfun/workarea/` | Sandbox directory where the agent can create and modify files |
 

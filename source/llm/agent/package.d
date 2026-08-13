@@ -435,6 +435,12 @@ Output only the taskDone tool call. No other text.)";
 
     void clearHistory() @safe {
         chat.clear;
+        syncContextFromChat();
+    }
+
+    /// Sync prevStat.context from current chat context size.
+    /// Called after loading chat history so the agent knows the starting context.
+    void syncContextFromChat() @safe {
         prevStat = ServerStat(startContext: chat.approxContextSize);
     }
 
@@ -466,7 +472,7 @@ Output only the taskDone tool call. No other text.)";
             auto j = readText(historyPath.toString).parseJSON;
             chat.load(j);
             chat.resetResponseIndex;
-            prevStat = ServerStat(startContext: chat.approxContextSize);
+            syncContextFromChat();
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }

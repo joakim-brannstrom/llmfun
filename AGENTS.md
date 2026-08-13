@@ -33,6 +33,7 @@ llmfun/
 │       ├── skill.d                # Skill management system
 │       ├── summary_agent.d        # Context compression / summarization
 │       ├── memory.d               # Memory consolidation orchestrator
+│       ├── session/               # Chat session persistence (SessionStore)
 │       ├── pipeline/              # Pipeline engine & DAG
 │       ├── rag/                   # RAG database and query logic
 │       ├── tool_call/             # Tool registration and implementations
@@ -44,7 +45,7 @@ llmfun/
 ├── cpp_tui/                       # C++ TUI library with C API for D interop
 ├── vendor/                        # Vendored C/C++ libraries
 ├── config/                        # Runtime configuration templates
-└── doc/                           # Documentation (database, skills, TUI design)
+└── doc/                           # Documentation (database, sessions, skills, TUI design)
 ```
 
 ## Commands
@@ -216,6 +217,22 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 - `AgentPool` manages concurrent agent execution via a thread pool.
 - Agents communicate through a `Chat` history with role-based messages.
 
+### Chat Sessions
+
+- Multi-history chat storage: one JSON file per session under `data/chat/<id>.json` with header `{title, createdAt, updatedAt, messages}`.
+- Implementation: `source/llm/session/` package (module `llm.session`). `package.d` re-exports `types.d` (`SessionMeta`, `SessionFile`, the `SessionId` strong type, id generation/validation), `store.d` (`SessionStore`: create/load/save/rename/remove/list), `resolve.d` (`resolveSessionRef`: index -> id -> title, pure), `tests.d` (unit tests).
+- Chat-free by design: the module only speaks JSON. `app_agent.d` bridges `SessionFile.doc` to `agent_.chat.load()` / `agent_.chat.toSaveJson()`.
+- Naming rule: "session" already means app-launch in `config.d` (`sessionCount` drives memory consolidation). The chat-history concept uses `SessionStore` / `SessionMeta` / `SessionFile` only.
+- `SessionId` is a `NamedType!string` strong type (mylib): a session id is not interchangeable with titles, previews, or other strings. `state.json` still stores the plain string (`activeChatSessionId`); conversion happens at the config boundary.
+- Session id = filename (immutable), format `<YYYYMMDD-HHMMSS>-<4hex>`; D12 regex validation at every store entry point prevents path traversal. Title lives in the header; rename edits the header only.
+- The store resolves its directory to an `AbsolutePath` (independent of the CWD); file paths are built as `AbsolutePath`.
+- Unknown header keys round-trip through `SessionMeta.extra` (D2), so future per-session settings need no format migration.
+- Active session id is persisted in `state.json` as `activeChatSessionId` and reopened on startup. One-shot mode (`-p`) appends to the last active session.
+- Slash commands: `/sessions`, `/switch <n|id|title>`, `/new`, `/rename <title>`, `/delete <n>` (repeat to confirm), `/clear`. Handlers are reusable private `AgentApp` methods (`doListSessions`, `switchToSession`, etc.) so the future TUI sidebar can share the same code path.
+- System-prompt entries are stripped from `messages` before save (D13); the prompt is re-set at startup.
+- Single writer (the agent thread); all writes are atomic (tmp file + rename).
+- Full documentation: `doc/sessions.md`.
+
 ### Tool Call System
 
 - Tools are registered via `@Function` attribute and `RegisterLlmFunctions!()` mixin in `tool_call/package.d`.
@@ -354,6 +371,7 @@ nTokens = 0;
 ## References
 
 - `doc/database.md` — Database schema and RAG details
+- `doc/sessions.md` — Chat session storage and agent integration
 - `doc/skills.md` — Skills system documentation
 - `doc/tui_design.md` — TUI architecture
 - `doc/todo.md` — Task tracking and known gaps

@@ -6,11 +6,12 @@ import std.algorithm;
 import std.array : empty, array, appender;
 import std.concurrency;
 import std.conv : to, text;
-import std.exception : ifThrown;
-import std.file : exists, readText;
+import std.exception : collectException, ifThrown;
+import std.datetime : Clock, SysTime, DateTime, UTC, dur;
 import std.format : format;
+import std.json : JSONType;
 import std.stdio : writeln, writefln, readln, writef, stdout;
-import std.string : strip, startsWith, join, toStringz, split;
+import std.string : strip, startsWith, join;
 import std.sumtype : match;
 
 import llm.agent;
@@ -25,21 +26,69 @@ import llm.pipeline : prettyPrint;
 import llm.plan;
 import llm.query;
 import llm.rag.rag : RAG;
-import llm.skill : SkillManager, buildAlwaysApplyBlock, makeSkillManager;
+import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, resolveSessionRef;
+import llm.skill;
 import llm.tui;
 import llm.types : ServerStat, StreamMessage, StreamToolCall;
 import llm.utility;
 import llmfun_tui;
 
 import my.path : Path, AbsolutePath;
+import my.optional : Optional, hasValue, orElse;
+
+/// Unix epoch for timestamp conversion (1970-01-01T00:00:00Z).
+private immutable SysTime UnixEpoch = SysTime(DateTime(1970, 1, 1), UTC());
+
+/// Month abbreviation lookup table (1-indexed: Month.feb == 2, so index 1).
+private immutable(string[]) MonthAbbr = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+    "Dec"
+];
+
+/// Result of deciding a `/delete` command against the pending confirmation state.
+private enum PendingDeleteAction {
+    ignore, // no pending confirmation
+    confirm, // resolved id matches the pending id
+    clear // pending exists but a different id was given
+}
+
+/** Build the static `/help` text (module-level so unit tests need no AgentApp). */
+private string buildHelpText() {
+    string[] s;
+    s ~= "llmfun agent mode - type a query and press Tab to start.";
+    s ~= " Use /commands for special actions:";
+    s ~= "";
+    s ~= "   (bare query)       Send a message to the agent";
+    s ~= "   /help              Show this help message";
+    s ~= "   /quit, /q, /exit   Exit the agent";
+    s ~= "   /stop              Stop processing the currently active query";
+    s ~= "   /compact           Force compress the chat history";
+    s ~= "   /sessions          List chat sessions (index, id, title, preview)";
+    s ~= "   /switch <n|id|title>  Switch to another session";
+    s ~= "   /new               Start a new chat session";
+    s ~= "   /rename <title>    Rename the current session";
+    s ~= "   /delete <n>        Delete a session (repeat to confirm)";
+    s ~= "   /clear             Clear the current chat history";
+    s ~= "   /model             List available models";
+    s ~= "   /model <index>     Select model by index";
+    s ~= "   /model <name>      Select model by exact name (case-insensitive)";
+    s ~= "   /plan <query>      Run the plan pipeline";
+    s ~= "   /code <query>      Run the coder pipeline";
+    s ~= "   /debug             Toggle verbose debug output";
+    s ~= "   /skills            List available skills";
+    s ~= "   /refresh-agent-md  Force re-summarize AGENTS.md";
+    return s.join("\n");
+}
 
 struct AgentApp {
     private {
         LlmConfig llmConf;
         RAG rag;
-        Path agentHistory;
         MetricMonitor monitor;
         Agent agent_;
+        SessionStore sessionStore;
+        SessionMeta activeSession;
+        SessionId pendingDeleteId; // session id awaiting /delete confirmation (Task 10)
         bool oneShotQuery;
         Tid uiTid;
         ServerStat lastServerStat;
@@ -75,7 +124,13 @@ struct AgentApp {
             rag = null;
         }
         if (agent_) {
-            agent_.saveHistory(agentHistory);
+            if (activeSession.id.length > 0) {
+                // processResult already commits after every query; this second
+                // save is a safety net for error/early-exit paths (harmless
+                // rewrite that bumps updatedAt once more).
+                commitActiveSession();
+            }
+            llmConf.saveState();
             agent_ = null;
         }
     }
@@ -88,25 +143,7 @@ struct AgentApp {
         if (environment.get("LLMFUN_NO_SPLASH") || !conf.prompt.empty)
             return null;
 
-        string[] s;
-        s ~= "llmfun agent mode - type a query and press Tab to start.";
-        s ~= " Use /commands for special actions:";
-        s ~= "";
-        s ~= "   (bare query)       Send a message to the agent";
-        s ~= "   /help              Show this help message";
-        s ~= "   /quit, /q, /exit   Exit the agent";
-        s ~= "   /stop              Stop processing the currently active query";
-        s ~= "   /compact           Force compress the chat history";
-        s ~= "   /new               Clear history and start a new conversation";
-        s ~= "   /model             List available models";
-        s ~= "   /model <index>     Select model by index";
-        s ~= "   /model <name>      Select model by exact name (case-insensitive)";
-        s ~= "   /plan <query>      Run the plan pipeline";
-        s ~= "   /code <query>      Run the coder pipeline";
-        s ~= "   /debug             Toggle verbose debug output";
-        s ~= "   /skills            List available skills";
-        s ~= "   /refresh-agent-md  Force re-summarize AGENTS.md";
-        return s.join("\n");
+        return buildHelpText();
     }
 
     private string formatSkillsList() {
@@ -220,25 +257,300 @@ struct AgentApp {
     }
 
     private void processResult(ProcessResult result) {
+        logger.trace(result.status != ProcessResult.Status.ok, result);
+        lastServerStat = result.stat;
         foreach (m; result.chat) {
             this.processChatMessage(m, printUser: false);
         }
-        agent_.saveHistory(agentHistory);
-        logger.trace(result.status != ProcessResult.Status.ok, result);
-        lastServerStat = result.stat;
+        commitActiveSession();
+    }
+
+    /// Save the current agent chat to the active session file.
+    /// Strips system messages (D13) before persisting.
+    private void commitActiveSession() @trusted nothrow {
+        try {
+            auto doc = agent_.chat.toSaveJson();
+
+            // D13: strip role: "system" entries from messages
+            auto msgs = doc["messages"].array.filter!(entry => entry.type != JSONType.object
+                    || !("role" in entry.object) || entry["role"].str != "system").array;
+            doc["messages"] = msgs;
+
+            activeSession = sessionStore.save(activeSession.id, activeSession, doc);
+        } catch (Exception e) {
+            logger.trace(e.msg).collectException;
+        }
+    }
+
+    // =========================================================================
+    // Session orchestration methods (Task 8) — D5/D6
+    // =========================================================================
+
+    /** Activate a session by id: load into memory, clear UI, replay history.
+     *
+     * Loads the session FIRST — on failure: send error and abort, keeping
+     * the current in-memory chat and active id (W4). On success: clear
+     * history, load doc, reset response index, sync context, clear UI,
+     * replay messages, resend UiInitHistory, update status and state.
+     */
+    private void activateSession(SessionId id) {
+        // Commit current session was already done by caller (switchToSession)
+        // or this is a fresh activation (startup/delete-active fallback).
+
+        auto sfOpt = sessionStore.load(id);
+        if (!hasValue(sfOpt)) {
+            this.sendChatMessage("error: Cannot load session '%s' (not found or corrupt). Staying in current session.",
+                    TuiChatMessageType_Assistant, id);
+            return; // W4: keep current session unchanged
+        }
+
+        auto sf = orElse(sfOpt, SessionFile());
+
+        // Clear chat history, keeping system prompt at history[0] (I1: use chat.clear
+        // directly instead of clearHistory() to avoid redundant syncContextFromChat)
+        agent_.chat.clear;
+        // Load the session doc into chat
+        agent_.chat.load(sf.doc);
+        // W1: prevent replay of old history on next query
+        agent_.chat.resetResponseIndex();
+        // W5: sync context size from loaded chat
+        agent_.syncContextFromChat();
+        // Status bar must reflect the target session, not the previous one
+        lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
+
+        // Clear UI chat and pipeline
+        uiMsg.clearChat();
+        uiMsg.pipelineClear();
+
+        // Replay messages through the UI
+        foreach (m; agent_.chat.getMessages()) {
+            this.processChatMessage(m, printUser: true);
+        }
+
+        // Resend UiInitHistory (UI mode only)
+        if (uiMsg.isActive()) {
+            send(uiTid, UiInitHistory(agent_.getUserQueries.map!(a => a.content).array.idup));
+        }
+
+        // Update active session and status
+        activeSession = sf.meta;
+        setStatusText(true);
+
+        // Persist active session id
+        llmConf.activeChatSessionId = id.get;
+        llmConf.saveState();
+    }
+
+    /** Switch to a different session: commit current + activate target.
+     *
+     * Single commit of the current session (W11), then activate the target.
+     * A no-op switch to the already-active session still commits so pending
+     * changes are persisted.
+     */
+    private void switchToSession(SessionId id) {
+        if (id == activeSession.id) {
+            commitActiveSession(); // persist pending changes on a no-op switch
+        } else {
+            commitActiveSession();
+            activateSession(id);
+        }
+    }
+
+    /** Format a unix timestamp as a human-readable relative or absolute date. */
+    private string formatSessionDate(long unixSec) @trusted {
+        if (unixSec == 0)
+            return "never";
+        // C1: use proper Unix epoch (1970-01-01), not DateTime.init (year 0)
+        auto dt = (UnixEpoch + unixSec.dur!"seconds").toLocalTime();
+        auto now = Clock.currTime();
+
+        // Same day: show time only
+        if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
+            return format("%02d:%02d", dt.hour, dt.minute);
+        }
+        // Same year: show month abbreviation and day (M1: use lookup table)
+        if (dt.year == now.year) {
+            return format("%s %02d", MonthAbbr[cast(size_t)(dt.month - 1)], dt.day);
+        }
+        // Different year: full date
+        return format("%04d-%02d-%02d", dt.year, dt.month, dt.day);
+    }
+
+    /** Extract the short id (hex suffix) from a full session id. */
+    private static string shortSessionId(SessionId id) @safe pure nothrow {
+        // Format: YYYYMMDD-HHMMSS-NNNN — return the last 4 hex chars
+        auto idStr = id.get;
+        ptrdiff_t pos = -1;
+        foreach (i, c; idStr) {
+            if (c == '-')
+                pos = cast(ptrdiff_t) i;
+        }
+        if (pos >= 0 && pos < idStr.length) {
+            return idStr[pos + 1 .. $];
+        }
+        return idStr;
+    }
+
+    /** List all sessions with index, active marker, id, title, preview, count, date. */
+    private void doListSessions() {
+        auto sessions = sessionStore.list();
+
+        if (sessions.length == 0) {
+            this.sendChatMessage("No sessions found.", TuiChatMessageType_Assistant);
+            return;
+        }
+
+        auto lines = appender!(string[])();
+        lines.put("Sessions (most recent first):");
+
+        foreach (i, s; sessions) {
+            // Fixed-width marker keeps the short-id column aligned
+            auto marker = (s.id == activeSession.id) ? " [*]" : "    ";
+            auto shortId = shortSessionId(s.id);
+            auto preview = s.preview.length > 0 ? s.preview : "(empty)";
+            auto dateStr = formatSessionDate(s.updatedAt);
+
+            lines.put(format("  %d.%s %-4s  %-25s — %-25s — %s msgs (updated %s)",
+                    i + 1, marker, shortId, s.title, preview, s.messageCount, dateStr));
+        }
+
+        this.sendChatMessage(lines[].join("\n"), TuiChatMessageType_Assistant);
+    }
+
+    /** Create a new session and switch to it.
+     *
+     * Exactly one save of the current session (W11).
+     * The confirmation message appears in the new session's chat view (I2).
+     */
+    private void doCreateSession() {
+        auto newMeta = sessionStore.create();
+        switchToSession(newMeta.id);
+        // Confirmation message sent in the new session's context (I2)
+        this.sendChatMessage("Created new session: '%s' (%s)",
+                TuiChatMessageType_Assistant, newMeta.title, shortSessionId(newMeta.id));
+    }
+
+    /** Rename the active session.
+     *
+     * Strips whitespace; rejects empty title (keeps previous).
+     */
+    private void doRenameSession(string title) {
+        auto stripped = title.strip;
+        if (stripped.length == 0) {
+            // runAgent already rejects empty args; this guards direct callers
+            // (e.g. Phase 2 sidebar reuse, D5).
+            this.sendChatMessage("error: Rename rejected — empty title, keeping previous title '%s'.",
+                    TuiChatMessageType_Assistant, activeSession.title);
+            return;
+        }
+
+        auto result = sessionStore.rename(activeSession.id, stripped);
+        if (hasValue(result)) {
+            activeSession = orElse(result, SessionMeta());
+            this.sendChatMessage("Session renamed to '%s'.",
+                    TuiChatMessageType_Assistant, activeSession.title);
+        } else {
+            this.sendChatMessage("error: Failed to rename session '%s'.",
+                    TuiChatMessageType_Assistant, shortSessionId(activeSession.id));
+        }
+    }
+    /** Decide how a `/delete` command proceeds given the pending state (pure).
+     *
+     * Params:
+     *   pendingId = session id awaiting confirmation (SessionId.init = none)
+     *   resolvedId = id resolved from this command's argument
+     *
+     * Returns: confirm when the ids match, clear when a different id is
+     *          given, ignore when there is no pending confirmation.
+     */
+    private static PendingDeleteAction decideDeleteCommand(SessionId pendingId, SessionId resolvedId) @safe pure nothrow {
+        if (pendingId.length == 0)
+            return PendingDeleteAction.ignore;
+        if (pendingId == resolvedId)
+            return PendingDeleteAction.confirm;
+        return PendingDeleteAction.clear;
+    }
+
+    /** Pick the fallback session after deleting the active one (pure).
+     *
+     * Params:
+     *   remaining = sessions that still exist (after the delete)
+     *
+     * Returns: id of the most recently updated remaining session, or
+     *          `SessionId.init` when the list is empty (the caller then
+     *          creates a fresh one).
+     */
+    private static SessionId pickFallbackAfterDelete(const SessionMeta[] remaining) @safe pure nothrow {
+        if (remaining.length == 0)
+            return SessionId.init;
+        size_t best = 0;
+        foreach (i, s; remaining) {
+            if (s.updatedAt > remaining[best].updatedAt)
+                best = i;
+        }
+        return remaining[best].id;
+    }
+
+    /** Delete a session by id.
+     *
+     * If the deleted session is the active one, activates a fallback WITHOUT
+     * committing first (W2 skip-save: the deleted file must not be recreated
+     * by the fallback switch). Fallback = most recently updated remaining
+     * session, else a fresh session.
+     */
+    private void doDeleteSession(SessionId id) {
+        auto wasActive = (id == activeSession.id);
+        sessionStore.remove(id);
+
+        bool createdFresh = false;
+        if (wasActive) {
+            auto remaining = sessionStore.list();
+            auto fallbackId = pickFallbackAfterDelete(remaining);
+            if (fallbackId.length == 0) {
+                fallbackId = sessionStore.create().id;
+                createdFresh = true;
+            }
+            activateSession(fallbackId); // never commits (W2)
+            // Defensive: if the fallback failed to load, do not keep pointing
+            // at the deleted id — a later commit would resurrect the file (W2).
+            if (activeSession.id == id) {
+                activateSession(sessionStore.create().id);
+                createdFresh = true;
+            }
+        }
+
+        if (wasActive) {
+            this.sendChatMessage("Session deleted: %s. Switched to '%s'%s.", TuiChatMessageType_Assistant,
+                    shortSessionId(id), activeSession.title, createdFresh ? " (new session)" : "");
+        } else {
+            this.sendChatMessage("Session deleted: %s",
+                    TuiChatMessageType_Assistant, shortSessionId(id));
+        }
     }
 
     private AgentStatus runAgent(string query) {
+        // Any command other than /delete clears the pending delete confirmation (Task 10)
+        if (!query.startsWith("/delete"))
+            pendingDeleteId = SessionId.init;
+
         if (query.among("/quit", "/q", "/exit")) {
             return AgentStatus.terminate;
         } else if (query == "/compact") {
             this.doCompress(true);
             return AgentStatus.active;
         } else if (query == "/new") {
-            agent_.clearHistory;
+            doCreateSession();
+            return AgentStatus.active;
+        } else if (query == "/clear") {
+            // Old /new behavior: explicit in-session wipe (F11). Order matters:
+            // clearHistory -> UI clear -> context reset -> pipelineClear -> save.
+            agent_.clearHistory(); // keeps system prompt at history[0]
             uiMsg.clearChat();
-            lastServerStat = agent_.stat;
-            uiMsg.pipelineClear;
+            lastServerStat = ServerStat(startContext: 0); // context resets to 0
+            uiMsg.pipelineClear();
+            commitActiveSession();
+            this.sendChatMessage("Cleared chat history in session '%s'.",
+                    TuiChatMessageType_Assistant, shortSessionId(activeSession.id));
             return AgentStatus.active;
         } else if (query == "/help") {
             auto helpText = this.printHelp(conf_);
@@ -322,9 +634,81 @@ struct AgentApp {
         } else if (query == "/refresh-agent-md") {
             this.handleRefreshAgentMd();
             return AgentStatus.active;
+        } else if (query == "/sessions") {
+            doListSessions();
+            return AgentStatus.active;
+        } else if (query.startsWith("/switch ")) {
+            auto arg = query["/switch ".length .. $].strip();
+            if (arg.empty) {
+                this.sendChatMessage(
+                        "error: /switch requires an argument. Usage: /switch <index|id|title>. Use /sessions to list.",
+                        TuiChatMessageType_Assistant);
+            } else {
+                auto sessions = sessionStore.list();
+                if (sessions.empty) {
+                    this.sendChatMessage("No sessions available. Use /new to create one.",
+                            TuiChatMessageType_Assistant);
+                } else {
+                    auto resolved = resolveSessionRef(sessions, arg);
+                    if (hasValue(resolved)) {
+                        auto id = orElse(resolved, SessionId.init);
+                        switchToSession(id);
+                    } else {
+                        this.sendChatMessage("error: Unknown session '%s'. Use /sessions to list available sessions.",
+                                TuiChatMessageType_Assistant, arg);
+                    }
+                }
+            }
+            return AgentStatus.active;
+        } else if (query.startsWith("/rename ")) {
+            auto arg = query["/rename ".length .. $].strip();
+            if (arg.empty) {
+                this.sendChatMessage("error: /rename requires a title argument. Usage: /rename <title>.",
+                        TuiChatMessageType_Assistant);
+            } else {
+                doRenameSession(arg);
+            }
+            return AgentStatus.active;
+        } else if (query == "/delete" || query.startsWith("/delete ")) {
+            auto arg = query == "/delete" ? "" : query["/delete ".length .. $].strip();
+            if (arg.empty) {
+                this.sendChatMessage("error: /delete requires an index. Usage: /delete <n>.",
+                        TuiChatMessageType_Assistant);
+                pendingDeleteId = SessionId.init;
+                return AgentStatus.active;
+            }
+            auto idx = ifThrown(arg.to!long, -1L);
+            auto sessions = sessionStore.list();
+            if (idx < 1 || idx > cast(long) sessions.length) {
+                this.sendChatMessage("error: Unknown session index '%s'. Use /sessions to list available sessions.",
+                        TuiChatMessageType_Assistant, arg);
+                pendingDeleteId = SessionId.init;
+                return AgentStatus.active;
+            }
+            auto resolvedId = sessions[cast(size_t)(idx - 1)].id;
+            final switch (decideDeleteCommand(pendingDeleteId, resolvedId)) {
+            case PendingDeleteAction.ignore:
+                pendingDeleteId = resolvedId;
+                this.sendChatMessage("Confirm deletion of session '%s' (%s, %s msgs) by repeating /delete %s.",
+                        TuiChatMessageType_Assistant,
+                        shortSessionId(resolvedId), sessions[cast(size_t)(idx - 1)].title,
+                        sessions[cast(size_t)(idx - 1)].messageCount, arg);
+                break;
+            case PendingDeleteAction.confirm:
+                pendingDeleteId = SessionId.init;
+                doDeleteSession(resolvedId);
+                break;
+            case PendingDeleteAction.clear:
+                pendingDeleteId = SessionId.init;
+                this.sendChatMessage("Deletion cancelled (different session). Repeat /delete <n> to start over.",
+                        TuiChatMessageType_Assistant);
+                break;
+            }
+            return AgentStatus.active;
         } else if (query.empty) {
             return AgentStatus.active;
         } else if (query.startsWith("/")) {
+            pendingDeleteId = SessionId.init; // any other command clears pending delete state
             this.sendChatMessage("system: Unknown command: '%s'. Type /help for available commands.",
                     TuiChatMessageType_Assistant, query);
             return AgentStatus.active;
@@ -386,6 +770,47 @@ struct AgentApp {
         }
     }
 
+    // Session startup: wire SessionStore into startup (design 6.3)
+    private void setupSession(AgentMdState agentMdState) {
+        sessionStore = new SessionStore(llmConf.scratchArea ~ "chat");
+        auto sessions = sessionStore.list();
+
+        // Resolve active session: saved id -> most recent -> create fresh
+        if (llmConf.activeChatSessionId.length > 0) {
+            auto found = sessions.filter!(s => s.id.get == llmConf.activeChatSessionId).array;
+            if (found.length > 0) {
+                activeSession = found[0];
+            }
+        }
+        if (activeSession.id.length == 0 && sessions.length > 0) {
+            activeSession = sessions[0]; // most recent (sorted by updatedAt desc)
+        }
+        if (activeSession.id.length == 0) {
+            activeSession = sessionStore.create(); // guarantee at least one session
+        }
+
+        // Load the active session into agent's chat
+        auto sfOpt = sessionStore.load(activeSession.id);
+        if (hasValue(sfOpt)) {
+            auto sf = orElse(sfOpt, SessionFile());
+            agent_.chat.load(sf.doc);
+        } else {
+            logger.warningf("Failed to load active session '%s'. Starting with empty chat.",
+                    activeSession.id);
+        }
+        agent_.chat.resetResponseIndex; // W1: prevent replay of old history
+        agent_.syncContextFromChat(); // W5: set prevStat.context from loaded chat
+
+        agent_.setSystemPrompt(llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf.agentPrompt,
+                addSkills: true, agentMdSummary: agentMdState.summary));
+
+        // Persist active session id (covers "fresh session created" path)
+        llmConf.activeChatSessionId = activeSession.id.get;
+        llmConf.saveState();
+
+        lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
+    }
+
     int run(UserConfig uconf) {
         makeDefaultFileStructure();
         if (conf_.setupDirs)
@@ -405,14 +830,11 @@ struct AgentApp {
         if (agentMdState.isValid())
             logger.tracef("AGENTS.md processed, summary length: %s", agentMdState.summary.length);
 
-        agentHistory = llmConf.scratchArea;
         monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
         agent_ = new Agent("main", llmConf, skillManager_, monitor, rag, llmConf.toolFilter.to());
-        agent_.loadHistory(agentHistory);
-        agent_.setSystemPrompt(llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf.agentPrompt,
-                addSkills: true, agentMdSummary: agentMdState.summary));
 
-        lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
+        setupSession(agentMdState);
+
         scope (exit)
             this.dispose(); // Ensures cleanup on any exception after setup
 
@@ -706,4 +1128,61 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         logger.warning(e.msg);
     }
     return 1;
+}
+
+// =============================================================================
+// Unit tests for the command-layer pure logic (Task 14)
+// =============================================================================
+
+// --- Test: decideDeleteCommand state machine ---
+
+unittest {
+    // No pending confirmation -> ignore
+    assert(AgentApp.decideDeleteCommand(SessionId.init,
+            SessionId("idA")) == PendingDeleteAction.ignore);
+    assert(AgentApp.decideDeleteCommand(SessionId.init,
+            SessionId.init) == PendingDeleteAction.ignore);
+
+    // Same id -> confirm
+    assert(AgentApp.decideDeleteCommand(SessionId("idA"),
+            SessionId("idA")) == PendingDeleteAction.confirm);
+
+    // Different id -> clear
+    assert(AgentApp.decideDeleteCommand(SessionId("idA"),
+            SessionId("idB")) == PendingDeleteAction.clear);
+    assert(AgentApp.decideDeleteCommand(SessionId("idA"),
+            SessionId.init) == PendingDeleteAction.clear);
+}
+
+// --- Test: pickFallbackAfterDelete selects the most recently updated session ---
+
+unittest {
+    SessionMeta a, b, c;
+    a.id = SessionId("20260618-153045-a1b2");
+    a.updatedAt = 100;
+    b.id = SessionId("20260618-153045-b3c4");
+    b.updatedAt = 300;
+    c.id = SessionId("20260618-153045-c5d6");
+    c.updatedAt = 200;
+
+    // Input not sorted: the helper must scan for the maximum updatedAt
+    auto remaining = [a, b, c];
+    assert(AgentApp.pickFallbackAfterDelete(remaining) == b.id,
+            "most recently updated session should be picked");
+
+    // Single remaining session wins
+    auto single = [a];
+    assert(AgentApp.pickFallbackAfterDelete(single) == a.id);
+
+    // Empty list -> caller creates a fresh session
+    SessionMeta[] none;
+    assert(AgentApp.pickFallbackAfterDelete(none) == SessionId.init);
+
+    // Ties keep the first occurrence (deterministic)
+    SessionMeta d;
+    d.id = SessionId("20260618-153045-d7e8");
+    d.updatedAt = 300;
+    auto tie = [b, d];
+    assert(AgentApp.pickFallbackAfterDelete(tie) == b.id,
+            "ties should resolve deterministically to the first occurrence");
 }

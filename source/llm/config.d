@@ -179,6 +179,9 @@ struct LlmConfig {
     CodeModelConfig[] codeModels;
     long activeCodeModelIndex = 0;
 
+    /// Active chat session id (stored in state.json; empty = none).
+    string activeChatSessionId;
+
     /// Tracks total session starts (incremented at the beginning of each session).
     uint sessionCount = 0;
     /// Prevents concurrent or crash-retry consolidation. Cleared on load if stale.
@@ -301,6 +304,9 @@ struct LlmConfig {
                     }
                 }
             }
+            import llm.utility : getValue;
+
+            activeChatSessionId = getValue!(string)(json, v => v["activeChatSessionId"].str, "");
             if ("sessionCount" in json) {
                 sessionCount = cast(uint) json["sessionCount"].integer;
             }
@@ -335,6 +341,7 @@ struct LlmConfig {
             string tempFile = stateFile.toString ~ ".tmp";
             JSONValue stateObj;
             stateObj["activeCodeModelIndex"] = activeCodeModelIndex;
+            stateObj["activeChatSessionId"] = activeChatSessionId;
             stateObj["sessionCount"] = sessionCount;
             stateObj["isConsolidating"] = isConsolidating;
             stateObj["consolidationInterval"] = consolidationInterval;
