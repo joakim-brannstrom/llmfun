@@ -78,9 +78,19 @@ interface IStreamCallback {
 }
 
 struct ServerStat {
-    long context;
+    long startContext;
+    long tokenCount;
     double predictedPerSecond = 0;
     double promptPerSecond = 0;
+
+    ServerStat newTurn() @safe pure nothrow const @nogc {
+        return ServerStat(startContext: context, tokenCount: 0, predictedPerSecond: predictedPerSecond,
+                promptPerSecond: promptPerSecond);
+    }
+
+    long context() @safe pure nothrow const @nogc {
+        return startContext + tokenCount;
+    }
 
     string toString() @safe const {
         import std.format : format;

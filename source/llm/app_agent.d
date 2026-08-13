@@ -177,14 +177,14 @@ struct AgentApp {
     }
 
     private void setStatusText(bool readyState) {
-        uiMsg.statusText(formatStatusText(readyState, agent_.contextSize,
+        uiMsg.statusText(formatStatusText(readyState, agent_.modelContextSize,
                 lastServerStat, llmConf.activeModelName()));
     }
 
     private void doCompress(bool force) {
         if (!agent_.needCompression && !force)
             return;
-        const ctxUsed = agent_.contextUsed;
+        const ctxUsed = agent_.stat.context;
         uiMsg.busy;
         auto res = agent_.compress(force: force, callback: &this.progressCallback);
         uiMsg.chatMessage(compressionResultToString(res.compressed, res.originalLength,
@@ -237,7 +237,7 @@ struct AgentApp {
         } else if (query == "/new") {
             agent_.clearHistory;
             uiMsg.clearChat();
-            lastServerStat.context = 0;
+            lastServerStat = agent_.stat;
             uiMsg.pipelineClear;
             return AgentStatus.active;
         } else if (query == "/help") {
@@ -340,11 +340,11 @@ struct AgentApp {
     }
 
     private IStreamCallback makeStreamCallback() {
-        return new StreamMessageUpdater(uiMsg, agent_.contextSize, llmConf.activeModelName);
+        return new StreamMessageUpdater(uiMsg, agent_.modelContextSize, llmConf.activeModelName);
     }
 
     private IStreamCallback makePipelineStreamCallback() {
-        return new PipelineStreamMessageUpdater(uiMsg, agent_.contextSize,
+        return new PipelineStreamMessageUpdater(uiMsg, agent_.modelContextSize,
                 llmConf.activeModelName);
     }
 
@@ -412,7 +412,7 @@ struct AgentApp {
         agent_.setSystemPrompt(llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf.agentPrompt,
                 addSkills: true, agentMdSummary: agentMdState.summary));
 
-        lastServerStat.context = agent_.chat.approxContextSize;
+        lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
         scope (exit)
             this.dispose(); // Ensures cleanup on any exception after setup
 

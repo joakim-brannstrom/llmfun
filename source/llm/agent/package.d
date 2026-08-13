@@ -44,8 +44,6 @@ class Agent : IBasicAgent {
     string name;
     Chat chat;
     MetricMonitor monitor;
-    long contextSize;
-    long contextUsed;
 
     private {
         LlmRequester rq;
@@ -57,6 +55,7 @@ class Agent : IBasicAgent {
         IStreamCallback streamCallback;
         bool taskDone_;
         string taskDoneMessage_;
+        long contextSize_;
 
         SysTime lastToolCallWarning;
         static immutable ToolCallWarnInterval = 15.dur!"minutes";
@@ -107,7 +106,12 @@ class Agent : IBasicAgent {
     }
 
     long modelContextSize() const {
-        return contextSize;
+        return contextSize_;
+    }
+
+    /// Last known statistic about the conversation
+    ServerStat stat() @safe pure nothrow const @nogc {
+        return prevStat;
     }
 
     /// Reset the agent's model to a new configuration.
@@ -125,12 +129,12 @@ class Agent : IBasicAgent {
         auto tools = filterToolDescriptions(descAllFunctions(), toolFilter);
         this.rq = LlmRequester(modelConfig.toRequestConfig, tools.nullable);
 
-        this.contextSize = modelConfig.getContextSize;
+        this.contextSize_ = modelConfig.getContextSize;
 
         this.modelName_ = modelConfig.name;
 
         logger.tracef("Agent model reset: %s -> %s, context: %s", oldModel,
-                modelConfig.name, this.contextSize);
+                modelConfig.name, this.contextSize_);
     }
 
     Message[] getUserQueries() @safe nothrow {
@@ -227,6 +231,14 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
 
         ProcessResult rval;
 
+        ServerStat useOrApproxStatistic(ServerStat stat) {
+            if (stat.startContext == prevStat.startContext) {
+                // the model never finished with a timing/usage message so total context need to be estimated
+                stat.startContext = chat.approxContextSize;
+            }
+            return stat;
+        }
+
         try {
             auto sp = StreamResponse(prevStat);
             auto stream = (const(char)[] chunk) { /*logger.trace(chunk);*/ sp.parse(chunk);
@@ -245,7 +257,6 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
             };
 
             auto res = rq.request(chat);
-            prevStat = sp.stat;
 
             if (sp.hasError) {
                 if (sp.error.codeNr == 400 && sp.error.type == "exceed_context_size_error") {
@@ -262,10 +273,11 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
                     rval.status = ProcessResult.Status.unknownFailure;
                 }
             } else {
-                rval.stat = sp.stat;
+                rval.stat = useOrApproxStatistic(sp.stat);
                 rval.status = parseResponse(sp);
             }
 
+            prevStat = useOrApproxStatistic(sp.stat).newTurn;
             rval.chat = chat.lastResponses;
             chat.resetResponseIndex;
 
@@ -282,16 +294,16 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
     }
 
     bool needCompression(double threshold = 0.9) {
-        return prevStat.context > contextSize * threshold;
+        return prevStat.context > contextSize_ * threshold;
     }
 
     SummaryAgent.CompressResult compress(double threshold = 0.9, bool force = false,
             SummaryAgent.ProgressCallback callback = null) {
-        if (prevStat.context < contextSize * threshold && !force)
+        if (prevStat.context < contextSize_ * threshold && !force)
             return typeof(return)(compressed: true);
         long oldContextSize = prevStat.context;
         auto result = summary.compress(chat, callback, null);
-        prevStat.context = result.newContextSize;
+        prevStat.startContext = result.newContextSize;
         if (force) {
             logger.infof("Forced compression: context %s -> %s tokens (saved %s)",
                     oldContextSize, prevStat.context, oldContextSize - prevStat.context);
@@ -429,7 +441,7 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
 
     void clearHistory() @safe {
         chat.clear;
-        prevStat.context = chat.approxContextSize;
+        prevStat = ServerStat(startContext: chat.approxContextSize);
     }
 
     /// Save chat history to dir / name_history.json
@@ -460,7 +472,7 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
             auto j = readText(historyPath.toString).parseJSON;
             chat.load(j);
             chat.resetResponseIndex;
-            prevStat.context = chat.approxContextSize;
+            prevStat = ServerStat(startContext: chat.approxContextSize);
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
@@ -634,7 +646,6 @@ struct StreamResponse {
 
     private {
         SysTime start;
-        long tokens;
     }
 
     this(ServerStat prevStat) {
@@ -722,8 +733,7 @@ struct StreamResponse {
     }
 
     void incrToken() @safe nothrow {
-        tokens++;
-        stat.context++;
+        stat.tokenCount++;
     }
 
     void parseStat(ref JSONValue json) @safe nothrow {
@@ -734,10 +744,12 @@ struct StreamResponse {
                         (v) => v["predicted_per_second"].floating, stat.predictedPerSecond);
                 stat.promptPerSecond = getValue(*timings,
                         (v) => v["prompt_per_second"].floating, stat.promptPerSecond);
-                stat.context = getValue(*timings, (v) => v["cache_n"].integer, stat.context);
+                stat.startContext = getValue(*timings, (v) => v["cache_n"].integer, stat.context);
+                stat.tokenCount = 0;
             } else if (auto usage = "usage" in json) {
                 // deepseek and maybe others
-                stat.context = getValue(*usage, (v) => v["total_tokens"].integer, stat.context);
+                stat.startContext = getValue(*usage, (v) => v["total_tokens"].integer, stat.context);
+                stat.tokenCount = 0;
                 const s = (Clock.currTime - start).total!"seconds";
 
                 const cTokens = getValue(*usage, (v) => v["completion_tokens"].integer, 0);
@@ -748,8 +760,8 @@ struct StreamResponse {
                     stat.promptPerSecond = cast(double) pTokens / cast(double)(s);
             } else {
                 const s = (Clock.currTime - start).total!"seconds";
-                if (s > 0 && tokens > 0) {
-                    stat.predictedPerSecond = cast(double) tokens / cast(double)(s);
+                if (s > 0 && stat.tokenCount > 0) {
+                    stat.predictedPerSecond = cast(double) stat.tokenCount / cast(double)(s);
                 }
             }
         } catch (Exception e) {
