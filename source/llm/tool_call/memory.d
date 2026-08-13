@@ -76,7 +76,21 @@ struct WriteMemoryParams {
     string content;
 }
 
-@Function("Store content as markdown paragraph for future retrieval about a topic")
+@Function(`Store content as markdown paragraph for future retrieval about a topic.
+# What to Remember (concrete criteria)
+STORE in memory when:
+- You made a mistake that cost time to debug
+- You discovered non-obvious behavior (API, tool, language)
+- A pattern repeats across 2+ different tasks
+- User reveals a preference, convention, or project-specific detail
+- You found a workaround for a tool limitation
+- You solved a problem in a way you'd want to remember
+
+DO NOT store:
+- Common knowledge that doesn't require lookup
+- Temporary session-specific state
+- Information already in the RAG index
+- Speculative ideas that haven't been verified`)
 ExecuteFuncResult writeMemory(Context baseCtx, WriteMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 

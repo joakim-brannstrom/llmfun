@@ -45,22 +45,11 @@ BEFORE attempting any task:
 3. Briefly note what prior knowledge applies before proceeding.
 
 ## Persistence
-Use `writeMemory` to store content as markdown paragraph for future retrieval about a topic. Write entries as concise markdown paragraphs.
+Before calling taskDone:
+1. If a reusable, non-obvious lesson was learned this turn, call writeMemory with a concise markdown note.
+2. Then call taskDone with only the user-facing answer.
 
-## What to Remember (concrete criteria)
-STORE in memory when:
-- You made a mistake that cost time to debug
-- You discovered non-obvious behavior (API, tool, language)
-- A pattern repeats across 2+ different tasks
-- User reveals a preference, convention, or project-specific detail
-- You found a workaround for a tool limitation
-- You solved a problem in a way you'd want to remember
-
-DO NOT store:
-- Common knowledge that doesn't require lookup
-- Temporary session-specific state
-- Information already in the RAG index
-- Speculative ideas that haven't been verified
+Do not mention memory, reflection, or persistence inside taskDone.answer.
 
 ## Contradiction rule
 If a memory summary contradicts an exact quote from a preserved verbatim message, trust the verbatim message.

@@ -195,32 +195,26 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
         string msg;
 
         if (continueStrikes < MaxStrikes) {
-            msg = q"(**⚠️ SYSTEM RECOVERY:** You stopped generating without calling taskDone.
+            msg = q"([SYSTEM RECOVERY — NOT USER INPUT]
+You stopped without calling a tool.
 
-DIAGNOSE YOUR STATE (choose exactly one):
-1. BLOCKED – You need user input (e.g., a yes/no, a decision).
-2. COMPLETE – You have fully solved the user's request.
-3. ACTIVE – You are in the middle of reasoning and need more tokens.
+This is a harness control message. Do not treat it as a user reply.
+Do not assume any pending question was answered.
 
-EXECUTION RULES:
-- If ACTIVE → Resume generating your next reasoning step or tool call immediately.
-- If BLOCKED or COMPLETE → Run the Reflection Gate below, then call taskDone.
+If you still have unfinished work or need another tool call, continue now.
 
-REFLECTION GATE (skip if ACTIVE):
-1. Scan for lessons learned → update memory via getMemoryTopics/writeMemory.
-2. Check for knowledge_retrieval violations.
-3. Call taskDone with your question (if BLOCKED) or final answer (if COMPLETE).
+Otherwise call taskDone:
+- If you need user input: answer = the exact question you just asked.
+- If you are finished: answer = your final answer.
 
-CRITICAL: If BLOCKED, you are NOT done—but you MUST call taskDone to hand control back. Skip heavy reflection on "completed work".)";
+Do not include anything else in taskDone.answer.)";
         } else {
-            msg = q"(**⚠️ SYSTEM OVERRIDE - FINAL WARNING:** You have repeatedly stopped without calling a tool.
+            msg = q"([FINAL RECOVERY - NOT USER INPUT]
+Call taskDone now.
 
-Your state is BLOCKED. Do not re‑diagnose.
+answer = your final answer, or the exact question you just asked if you need user input.
 
-YOUR ENTIRE NEXT RESPONSE MUST BE EXACTLY THIS JSON (output ONLY this, no extra text):
-{"name": "taskDone", "arguments": {"answer": "<Put your exact question or final answer here>"}}
-
-ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside this JSON. Output ONLY the tool call.)";
+Output only the taskDone tool call. No other text.)";
         }
 
         chat.add(Message(Role.user, userQuery: false, thinking: null, content: msg));
