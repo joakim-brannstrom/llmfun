@@ -261,7 +261,6 @@ struct Database {
     this(Miniorm db, long embedDimensions) {
         this.db = db;
         this.embedDimensions = embedDimensions;
-        this.db.log((string m) => logger.trace(m));
     }
 
     void destroy() {
