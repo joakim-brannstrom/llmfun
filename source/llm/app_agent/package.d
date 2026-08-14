@@ -6,101 +6,61 @@ import std.algorithm;
 import std.array : empty, array, appender;
 import std.concurrency;
 import std.conv : to, text;
-import std.exception : collectException, ifThrown;
+import std.exception : collectException;
 import std.datetime : Clock, SysTime, DateTime, UTC, dur;
 import std.format : format;
 import std.json : JSONType;
-import std.stdio : writeln, writefln, readln, writef, stdout;
 import std.string : strip, startsWith, join;
 import std.sumtype : match;
 
 import llm.agent;
 import llm.agent_md;
+import llm.app_agent.slash;
+import llm.app_agent.ui; // UiMessenger, formatStatusText, stream updaters
 import llm.app_config : UserConfig, userToLlmConfig, createRag;
 import llm.chat;
-import llm.coder;
 import llm.config;
 import llm.memory;
 import llm.metric.monitor : MetricMonitor;
-import llm.pipeline : prettyPrint;
-import llm.plan;
 import llm.query;
 import llm.rag.rag : RAG;
-import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, resolveSessionRef;
+import llm.session : SessionId, SessionMeta, SessionFile, SessionStore;
 import llm.skill;
 import llm.tui;
-import llm.types : ServerStat, StreamMessage, StreamToolCall;
+import llm.types : ServerStat, IStreamCallback;
 import llm.utility;
 import llmfun_tui;
 
 import my.path : Path, AbsolutePath;
 import my.optional : Optional, hasValue, orElse;
 
-/// Unix epoch for timestamp conversion (1970-01-01T00:00:00Z).
 private immutable SysTime UnixEpoch = SysTime(DateTime(1970, 1, 1), UTC());
 
-/// Month abbreviation lookup table (1-indexed: Month.feb == 2, so index 1).
 private immutable(string[]) MonthAbbr = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
     "Dec"
 ];
 
-/// Result of deciding a `/delete` command against the pending confirmation state.
-private enum PendingDeleteAction {
-    ignore, // no pending confirmation
-    confirm, // resolved id matches the pending id
-    clear // pending exists but a different id was given
-}
-
-/** Build the static `/help` text (module-level so unit tests need no AgentApp). */
-private string buildHelpText() {
-    string[] s;
-    s ~= "llmfun agent mode - type a query and press Tab to start.";
-    s ~= " Use /commands for special actions:";
-    s ~= "";
-    s ~= "   (bare query)       Send a message to the agent";
-    s ~= "   /help              Show this help message";
-    s ~= "   /quit, /q, /exit   Exit the agent";
-    s ~= "   /stop              Stop processing the currently active query";
-    s ~= "   /compact           Force compress the chat history";
-    s ~= "   /sessions          List chat sessions (index, id, title, preview)";
-    s ~= "   /switch <n|id|title>  Switch to another session";
-    s ~= "   /new               Start a new chat session";
-    s ~= "   /rename <title>    Rename the current session";
-    s ~= "   /delete <n>        Delete a session (repeat to confirm)";
-    s ~= "   /clear             Clear the current chat history";
-    s ~= "   /model             List available models";
-    s ~= "   /model <index>     Select model by index";
-    s ~= "   /model <name>      Select model by exact name (case-insensitive)";
-    s ~= "   /plan <query>      Run the plan pipeline";
-    s ~= "   /code <query>      Run the coder pipeline";
-    s ~= "   /debug             Toggle verbose debug output";
-    s ~= "   /skills            List available skills";
-    s ~= "   /refresh-agent-md  Force re-summarize AGENTS.md";
-    return s.join("\n");
-}
-
 struct AgentApp {
-    private {
+    package {
         LlmConfig llmConf;
         RAG rag;
         MetricMonitor monitor;
         Agent agent_;
         SessionStore sessionStore;
         SessionMeta activeSession;
-        SessionId pendingDeleteId; // session id awaiting /delete confirmation (Task 10)
-        bool oneShotQuery;
-        Tid uiTid;
+        SessionId pendingDeleteId; // session id awaiting /delete confirmation
         ServerStat lastServerStat;
         bool debugMode;
         UserConfig.AgentChatConfig conf_;
         UiMessenger uiMsg;
         SkillManager skillManager_;
+        SlashCommandRegistry slashCommands_;
+    }
 
-        enum AgentStatus {
-            active,
-            terminate
-        }
+    private {
+        bool oneShotQuery;
+        Tid uiTid;
     }
 
     @disable this(this);
@@ -108,9 +68,27 @@ struct AgentApp {
     this(UserConfig.AgentChatConfig conf) {
         this.conf_ = conf;
         this.uiMsg = new UiMessenger(Tid.init, true);
+        registerBuiltinCommands(slashCommands_);
+        foreach (cmd; startupSlashCommands()) {
+            auto ignore = slashCommands_.register(cmd);
+        }
     }
 
-    void dispose() {
+    /// Public plugin seam: register a slash command on this agent instance.
+    public void registerSlashCommand(SlashCommand cmd) {
+        auto ignore = slashCommands_.register(cmd);
+    }
+
+    /// Public plugin seam: access the live command registry (e.g. to render
+    /// help text or list command names for TUI completion).
+    /// Not thread-safe: register commands before `run()` (or at module load
+    /// via `addStartupSlashCommand`); concurrent `register` from another
+    /// thread while the TUI dispatches is a data race.
+    public ref SlashCommandRegistry slashCommands() {
+        return slashCommands_;
+    }
+
+    private void dispose() {
         if (uiTid != Tid.init) {
             try {
                 uiMsg.terminate();
@@ -137,63 +115,17 @@ struct AgentApp {
 
     // TODO: If help text ever needs externalization (config file, i18n),
     //       the function signature should accept a content parameter.
-    private string printHelp(UserConfig.AgentChatConfig conf) {
+    package string printHelp(UserConfig.AgentChatConfig conf) {
         import std.process : environment;
 
         if (environment.get("LLMFUN_NO_SPLASH") || !conf.prompt.empty)
             return null;
 
-        return buildHelpText();
+        return slashCommands_.helpText();
     }
 
-    private string formatSkillsList() {
-        if (skillManager_ is null) {
-            return "No skill manager initialized.";
-        }
-
-        auto skills = skillManager_.getManifest();
-        if (skills.empty) {
-            return "No skills are currently loaded.";
-        }
-
-        auto alwaysApplyCount = skills.filter!(skill => skill.alwaysApply).array.length;
-        auto lines = appender!(string[])();
-        lines.put("Available skills:");
-        lines.put("");
-
-        foreach (skill; skills) {
-            auto tag = skill.alwaysApply ? " [always-apply]" : "";
-            auto desc = skill.description.length > 80
-                ? skill.description[0 .. 77] ~ "..." : skill.description;
-            lines.put(format("  %-25s %s", skill.name ~ tag, desc));
-        }
-
-        lines.put("");
-        lines.put(i"$(skills.length) skills available, $(alwaysApplyCount) always-apply".text);
-        return lines[].join("\n");
-    }
-
-    private void handleRefreshAgentMd() {
-        this.sendChatMessage("assistant: Refreshing AGENTS.md... (summarizing, please wait)",
-                TuiChatMessageType_Assistant);
-        try {
-            auto newState = refreshAgentMd(llmConf, rag);
-            if (newState.isValid()) {
-                agent_.setSystemPrompt(llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf.agentPrompt,
-                        addSkills: true, agentMdSummary: newState.summary));
-                this.sendChatMessage("assistant: AGENTS.md refreshed successfully.\nSummary (%d chars):\n%s",
-                        TuiChatMessageType_Assistant, newState.summary.length, newState.summary);
-            } else {
-                this.sendChatMessage("assistant: No AGENTS.md found in workarea, or refresh failed.",
-                        TuiChatMessageType_Assistant);
-            }
-        } catch (Exception e) {
-            this.sendChatMessage("assistant: Error refreshing AGENTS.md: %s",
-                    TuiChatMessageType_Assistant, e.msg);
-        }
-    }
-
-    private void sendChatMessage(Args...)(string msg, TuiChatMessageType type, Args args) {
+    /// Public plugin seam: send a chat message to the UI.
+    public void sendChatMessage(Args...)(string msg, TuiChatMessageType type, Args args) {
         static if (args.length > 0) {
             msg = format(msg, args);
         }
@@ -218,7 +150,7 @@ struct AgentApp {
                 lastServerStat, llmConf.activeModelName()));
     }
 
-    private void doCompress(bool force) {
+    package void doCompress(bool force) {
         if (!agent_.needCompression && !force)
             return;
         const ctxUsed = agent_.stat.context;
@@ -267,7 +199,7 @@ struct AgentApp {
 
     /// Save the current agent chat to the active session file.
     /// Strips system messages (D13) before persisting.
-    private void commitActiveSession() @trusted nothrow {
+    package void commitActiveSession() @trusted nothrow {
         try {
             auto doc = agent_.chat.toSaveJson();
 
@@ -281,10 +213,6 @@ struct AgentApp {
             logger.trace(e.msg).collectException;
         }
     }
-
-    // =========================================================================
-    // Session orchestration methods (Task 8) — D5/D6
-    // =========================================================================
 
     /** Activate a session by id: load into memory, clear UI, replay history.
      *
@@ -309,34 +237,26 @@ struct AgentApp {
         // Clear chat history, keeping system prompt at history[0] (I1: use chat.clear
         // directly instead of clearHistory() to avoid redundant syncContextFromChat)
         agent_.chat.clear;
-        // Load the session doc into chat
         agent_.chat.load(sf.doc);
-        // W1: prevent replay of old history on next query
         agent_.chat.resetResponseIndex();
-        // W5: sync context size from loaded chat
         agent_.syncContextFromChat();
         // Status bar must reflect the target session, not the previous one
         lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
 
-        // Clear UI chat and pipeline
         uiMsg.clearChat();
         uiMsg.pipelineClear();
 
-        // Replay messages through the UI
         foreach (m; agent_.chat.getMessages()) {
             this.processChatMessage(m, printUser: true);
         }
 
-        // Resend UiInitHistory (UI mode only)
         if (uiMsg.isActive()) {
             send(uiTid, UiInitHistory(agent_.getUserQueries.map!(a => a.content).array.idup));
         }
 
-        // Update active session and status
         activeSession = sf.meta;
         setStatusText(true);
 
-        // Persist active session id
         llmConf.activeChatSessionId = id.get;
         llmConf.saveState();
     }
@@ -347,7 +267,7 @@ struct AgentApp {
      * A no-op switch to the already-active session still commits so pending
      * changes are persisted.
      */
-    private void switchToSession(SessionId id) {
+    package void switchToSession(SessionId id) {
         if (id == activeSession.id) {
             commitActiveSession(); // persist pending changes on a no-op switch
         } else {
@@ -377,7 +297,7 @@ struct AgentApp {
     }
 
     /** Extract the short id (hex suffix) from a full session id. */
-    private static string shortSessionId(SessionId id) @safe pure nothrow {
+    package static string shortSessionId(SessionId id) @safe pure nothrow {
         // Format: YYYYMMDD-HHMMSS-NNNN — return the last 4 hex chars
         auto idStr = id.get;
         ptrdiff_t pos = -1;
@@ -392,7 +312,7 @@ struct AgentApp {
     }
 
     /** List all sessions with index, active marker, id, title, preview, count, date. */
-    private void doListSessions() {
+    package void doListSessions() {
         auto sessions = sessionStore.list();
 
         if (sessions.length == 0) {
@@ -422,7 +342,7 @@ struct AgentApp {
      * Exactly one save of the current session (W11).
      * The confirmation message appears in the new session's chat view (I2).
      */
-    private void doCreateSession() {
+    package void doCreateSession() {
         auto newMeta = sessionStore.create();
         switchToSession(newMeta.id);
         // Confirmation message sent in the new session's context (I2)
@@ -434,7 +354,7 @@ struct AgentApp {
      *
      * Strips whitespace; rejects empty title (keeps previous).
      */
-    private void doRenameSession(string title) {
+    package void doRenameSession(string title) {
         auto stripped = title.strip;
         if (stripped.length == 0) {
             // runAgent already rejects empty args; this guards direct callers
@@ -454,23 +374,6 @@ struct AgentApp {
                     TuiChatMessageType_Assistant, shortSessionId(activeSession.id));
         }
     }
-    /** Decide how a `/delete` command proceeds given the pending state (pure).
-     *
-     * Params:
-     *   pendingId = session id awaiting confirmation (SessionId.init = none)
-     *   resolvedId = id resolved from this command's argument
-     *
-     * Returns: confirm when the ids match, clear when a different id is
-     *          given, ignore when there is no pending confirmation.
-     */
-    private static PendingDeleteAction decideDeleteCommand(SessionId pendingId, SessionId resolvedId) @safe pure nothrow {
-        if (pendingId.length == 0)
-            return PendingDeleteAction.ignore;
-        if (pendingId == resolvedId)
-            return PendingDeleteAction.confirm;
-        return PendingDeleteAction.clear;
-    }
-
     /** Pick the fallback session after deleting the active one (pure).
      *
      * Params:
@@ -480,7 +383,7 @@ struct AgentApp {
      *          `SessionId.init` when the list is empty (the caller then
      *          creates a fresh one).
      */
-    private static SessionId pickFallbackAfterDelete(const SessionMeta[] remaining) @safe pure nothrow {
+    package static SessionId pickFallbackAfterDelete(const SessionMeta[] remaining) @safe pure nothrow {
         if (remaining.length == 0)
             return SessionId.init;
         size_t best = 0;
@@ -498,7 +401,7 @@ struct AgentApp {
      * by the fallback switch). Fallback = most recently updated remaining
      * session, else a fresh session.
      */
-    private void doDeleteSession(SessionId id) {
+    package void doDeleteSession(SessionId id) {
         auto wasActive = (id == activeSession.id);
         sessionStore.remove(id);
 
@@ -529,189 +432,24 @@ struct AgentApp {
     }
 
     private AgentStatus runAgent(string query) {
-        // Any command other than /delete clears the pending delete confirmation (Task 10)
+        // Any input other than /delete clears the pending delete confirmation.
+        // It applies to bare queries and unknown commands too, so it lives here,
+        // not in the registry.
         if (!query.startsWith("/delete"))
             pendingDeleteId = SessionId.init;
 
-        if (query.among("/quit", "/q", "/exit")) {
-            return AgentStatus.terminate;
-        } else if (query == "/compact") {
-            this.doCompress(true);
+        if (query.empty)
             return AgentStatus.active;
-        } else if (query == "/new") {
-            doCreateSession();
-            return AgentStatus.active;
-        } else if (query == "/clear") {
-            // Old /new behavior: explicit in-session wipe (F11). Order matters:
-            // clearHistory -> UI clear -> context reset -> pipelineClear -> save.
-            agent_.clearHistory(); // keeps system prompt at history[0]
-            uiMsg.clearChat();
-            lastServerStat = ServerStat(startContext: 0); // context resets to 0
-            uiMsg.pipelineClear();
-            commitActiveSession();
-            this.sendChatMessage("Cleared chat history in session '%s'.",
-                    TuiChatMessageType_Assistant, shortSessionId(activeSession.id));
-            return AgentStatus.active;
-        } else if (query == "/help") {
-            auto helpText = this.printHelp(conf_);
-            if (helpText !is null) {
-                this.sendChatMessage(helpText, TuiChatMessageType_User);
-            }
-            return AgentStatus.active;
-        } else if (query == "/debug") {
-            debugMode = !debugMode;
-            uiMsg.logFile(debugMode);
-            logger.globalLogLevel = debugMode ? logger.LogLevel.trace : logger.LogLevel.info;
-            this.sendChatMessage("Debug output: %s",
-                    TuiChatMessageType_Assistant, debugMode ? "ON" : "OFF");
-            return AgentStatus.active;
-        } else if (query == "/model" || query.startsWith("/model ")) {
-            auto arg = query == "/model" ? "" : query["/model ".length .. $].strip();
-            if (arg.empty) {
-                auto m = "Available models:";
-                foreach (i, model; llmConf.codeModels) {
-                    auto activeMarker = (i == cast(size_t) llmConf.activeCodeModelIndex) ? " [active]"
-                        : "";
-                    m ~= format("  %s  %s%s\n", i, model.name, activeMarker);
-                }
-                m ~= "Use /model <index> or /model <name> to switch.";
-                this.sendChatMessage(m, TuiChatMessageType_Assistant);
-            } else {
-                const oldModel = llmConf.activeCodeModel.name;
-                bool switched;
-                size_t idx = ifThrown(arg.to!long, -1);
-                if (idx >= 0) {
-                    switched = llmConf.selectModelByIndex(idx);
-                    if (!switched) {
-                        this.sendChatMessage("error: Invalid model index '%s'. Valid indices: 0-%s.",
-                                TuiChatMessageType_Assistant, arg, llmConf.codeModels.length - 1);
-                    }
-                } else {
-                    auto result = llmConf.selectModelByName(arg);
-                    switched = result.empty;
-                    if (!switched)
-                        this.sendChatMessage("failed to switch model: %s",
-                                TuiChatMessageType_Assistant, result);
-                }
-                if (switched) {
-                    agent_.resetModel(llmConf.activeCodeModel());
-                    agent_.setStreamUpdate(makeStreamCallback);
-                    this.sendChatMessage("switched to model: %s\nAgent model reset: %s -> %s, context: %s",
-                            TuiChatMessageType_Assistant,
-                            llmConf.activeModelName(), oldModel,
-                            agent_.modelName, agent_.modelContextSize);
-                }
-            }
-            return AgentStatus.active;
-        } else if (query.startsWith("/plan ")) {
-            uiMsg.pipelineClear;
-            auto q = query["/plan ".length .. $];
-            sendChatMessage("assistant: Running plan pipeline: %s", TuiChatMessageType_Assistant, q);
-            auto result = runPlanPipeline(q, llmConf, rag, monitor, () {
-                return isStopAgentTriggered;
-            }, llmConf.toolFilter.to(), makePipelineStreamCallback);
-            sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
-            return AgentStatus.active;
-        } else if (query.startsWith("/code ")) {
-            uiMsg.pipelineClear;
-            auto q = query["/code ".length .. $];
-            sendChatMessage("assistant: Running coder pipeline: %s",
-                    TuiChatMessageType_Assistant, q);
-            auto result = runCoderPipeline(q, llmConf, rag, monitor, () {
-                return isStopAgentTriggered;
-            }, llmConf.toolFilter.to(), makePipelineStreamCallback);
-            if (result.wasInterrupted) {
-                this.sendChatMessage("assistant: Pipeline interrupted by user.",
-                        TuiChatMessageType_Assistant);
-                return AgentStatus.active;
-            }
-            this.sendChatMessage(i"assistant: $(prettyPrint(result))".text,
-                    TuiChatMessageType_Assistant);
-            return AgentStatus.active;
-        } else if (query == "/skills") {
-            this.sendChatMessage(this.formatSkillsList(), TuiChatMessageType_Assistant);
-            return AgentStatus.active;
-        } else if (query == "/refresh-agent-md") {
-            this.handleRefreshAgentMd();
-            return AgentStatus.active;
-        } else if (query == "/sessions") {
-            doListSessions();
-            return AgentStatus.active;
-        } else if (query.startsWith("/switch ")) {
-            auto arg = query["/switch ".length .. $].strip();
-            if (arg.empty) {
-                this.sendChatMessage(
-                        "error: /switch requires an argument. Usage: /switch <index|id|title>. Use /sessions to list.",
-                        TuiChatMessageType_Assistant);
-            } else {
-                auto sessions = sessionStore.list();
-                if (sessions.empty) {
-                    this.sendChatMessage("No sessions available. Use /new to create one.",
-                            TuiChatMessageType_Assistant);
-                } else {
-                    auto resolved = resolveSessionRef(sessions, arg);
-                    if (hasValue(resolved)) {
-                        auto id = orElse(resolved, SessionId.init);
-                        switchToSession(id);
-                    } else {
-                        this.sendChatMessage("error: Unknown session '%s'. Use /sessions to list available sessions.",
-                                TuiChatMessageType_Assistant, arg);
-                    }
-                }
-            }
-            return AgentStatus.active;
-        } else if (query.startsWith("/rename ")) {
-            auto arg = query["/rename ".length .. $].strip();
-            if (arg.empty) {
-                this.sendChatMessage("error: /rename requires a title argument. Usage: /rename <title>.",
-                        TuiChatMessageType_Assistant);
-            } else {
-                doRenameSession(arg);
-            }
-            return AgentStatus.active;
-        } else if (query == "/delete" || query.startsWith("/delete ")) {
-            auto arg = query == "/delete" ? "" : query["/delete ".length .. $].strip();
-            if (arg.empty) {
-                this.sendChatMessage("error: /delete requires an index. Usage: /delete <n>.",
-                        TuiChatMessageType_Assistant);
+
+        if (slashCommands_.isSlashCommand(query)) {
+            // /delete-prefixed non-commands like `/deletefoo` skip the top
+            // rule, and the registry's unknown path does not clear pending
+            // state . Clear before dispatch — a stale confirmation would
+            // otherwise make the next `/delete <n>` confirm-delete without
+            // re-prompting.
+            if (query.startsWith("/delete") && !slashCommands_.isRegistered(query))
                 pendingDeleteId = SessionId.init;
-                return AgentStatus.active;
-            }
-            auto idx = ifThrown(arg.to!long, -1L);
-            auto sessions = sessionStore.list();
-            if (idx < 1 || idx > cast(long) sessions.length) {
-                this.sendChatMessage("error: Unknown session index '%s'. Use /sessions to list available sessions.",
-                        TuiChatMessageType_Assistant, arg);
-                pendingDeleteId = SessionId.init;
-                return AgentStatus.active;
-            }
-            auto resolvedId = sessions[cast(size_t)(idx - 1)].id;
-            final switch (decideDeleteCommand(pendingDeleteId, resolvedId)) {
-            case PendingDeleteAction.ignore:
-                pendingDeleteId = resolvedId;
-                this.sendChatMessage("Confirm deletion of session '%s' (%s, %s msgs) by repeating /delete %s.",
-                        TuiChatMessageType_Assistant,
-                        shortSessionId(resolvedId), sessions[cast(size_t)(idx - 1)].title,
-                        sessions[cast(size_t)(idx - 1)].messageCount, arg);
-                break;
-            case PendingDeleteAction.confirm:
-                pendingDeleteId = SessionId.init;
-                doDeleteSession(resolvedId);
-                break;
-            case PendingDeleteAction.clear:
-                pendingDeleteId = SessionId.init;
-                this.sendChatMessage("Deletion cancelled (different session). Repeat /delete <n> to start over.",
-                        TuiChatMessageType_Assistant);
-                break;
-            }
-            return AgentStatus.active;
-        } else if (query.empty) {
-            return AgentStatus.active;
-        } else if (query.startsWith("/")) {
-            pendingDeleteId = SessionId.init; // any other command clears pending delete state
-            this.sendChatMessage("system: Unknown command: '%s'. Type /help for available commands.",
-                    TuiChatMessageType_Assistant, query);
-            return AgentStatus.active;
+            return slashCommands_.execute(this, query);
         }
 
         agent_.addUserQuery(query);
@@ -723,11 +461,11 @@ struct AgentApp {
         return AgentStatus.active;
     }
 
-    private IStreamCallback makeStreamCallback() {
+    package IStreamCallback makeStreamCallback() {
         return new StreamMessageUpdater(uiMsg, agent_.modelContextSize, llmConf.activeModelName);
     }
 
-    private IStreamCallback makePipelineStreamCallback() {
+    package IStreamCallback makePipelineStreamCallback() {
         return new PipelineStreamMessageUpdater(uiMsg, agent_.modelContextSize,
                 llmConf.activeModelName);
     }
@@ -770,7 +508,6 @@ struct AgentApp {
         }
     }
 
-    // Session startup: wire SessionStore into startup (design 6.3)
     private void setupSession(AgentMdState agentMdState) {
         sessionStore = new SessionStore(llmConf.dataDir ~ "chat");
         auto sessions = sessionStore.list();
@@ -789,7 +526,6 @@ struct AgentApp {
             activeSession = sessionStore.create(); // guarantee at least one session
         }
 
-        // Load the active session into agent's chat
         auto sfOpt = sessionStore.load(activeSession.id);
         if (hasValue(sfOpt)) {
             auto sf = orElse(sfOpt, SessionFile());
@@ -811,7 +547,7 @@ struct AgentApp {
         lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
     }
 
-    int run(UserConfig uconf) {
+    private int run(UserConfig uconf) {
         makeDefaultFileStructure();
         if (conf_.setupDirs)
             makeLocalSetupFileStructure(LlmConfig.init);
@@ -899,221 +635,6 @@ struct AgentApp {
     }
 }
 
-class UiMessenger {
-    Tid uiTid;
-    bool blocked;
-
-    this(Tid t, bool b = false) {
-        uiTid = t;
-        blocked = b;
-    }
-
-    bool isActive() {
-        return !blocked;
-    }
-
-    void setActive(bool onOff) {
-        blocked = !onOff;
-    }
-
-    void ready() {
-        if (blocked)
-            return;
-        send(uiTid, UiAgentReady.init);
-    }
-
-    void busy() {
-        if (blocked)
-            return;
-        send(uiTid, UiAgentBusy.init);
-    }
-
-    void terminate() {
-        if (blocked)
-            return;
-        if (uiTid == Tid.init)
-            return; // safety: no UI thread to terminate
-        send(uiTid, UiTerminate.init);
-    }
-
-    void chatMessage(string msg, TuiChatMessageType type) {
-        if (blocked) {
-            writeln(msg);
-        } else {
-            send(uiTid, UiChatMessage(msg, type));
-        }
-    }
-
-    void chatThinkMessage(string msg, string thinking, TuiChatMessageType type) {
-        if (blocked) {
-            if (!thinking.empty) {
-                writeln("Thinking: ", thinking);
-            }
-            writeln(msg);
-        } else {
-            send(uiTid, UiChatThinkMessage(msg, thinking, type));
-        }
-    }
-
-    void statusText(string status) {
-        if (blocked)
-            return;
-        send(uiTid, UiStatusText(status));
-    }
-
-    void finalAnswer(string msg) {
-        if (blocked) {
-            writeln(msg);
-        } else {
-            send(uiTid, UiFinalAnswer(msg));
-        }
-    }
-
-    void clearChat() {
-        if (blocked)
-            return;
-        send(uiTid, UiClearChat.init);
-    }
-
-    void logFile(bool useFile) {
-        if (blocked)
-            return;
-        send(uiTid, UiLogFile(useFile));
-    }
-
-    void setIniFile(string path) {
-        if (blocked)
-            return;
-        send(uiTid, UiSetIniFile(Path(path)));
-    }
-
-    // Streaming methods — silently skipped in blocked (one-shot) mode.
-    // One-shot mode produces final output via writeln in chatMessage/finalAnswer;
-    // incremental streaming feedback is not needed.
-    void streamStatusText(string status) {
-        statusText(status); // delegate to canonical method
-    }
-
-    void streamChatMessage(string msg, string thinking) {
-        if (blocked)
-            return;
-        send(uiTid, UiStreamChatMessage(msg: msg, thinking: thinking));
-    }
-
-    void streamChatDone() {
-        if (blocked)
-            return;
-        send(uiTid, UiStreamChatDone.init);
-    }
-
-    void pipelineStreamChatMessage(string agentId, string content,
-            string thinking, string role, string status) {
-        if (blocked)
-            return;
-        send(uiTid, UiPipelineStreamChatMessage(agentId: agentId, content: content,
-                thinking: thinking, role: role, status: status));
-    }
-
-    void pipelineStreamDone(string agentId) {
-        if (blocked)
-            return;
-        send(uiTid, UiPipelineStreamDone(agentId));
-    }
-
-    void pipelineClear() {
-        if (blocked)
-            return;
-        send(uiTid, UiPipelineClear.init);
-    }
-}
-
-string formatStatusText(bool readyState, long contextSize, ServerStat stat, string model) {
-    return i"Context $(stat.context)/$(contextSize) tokens | $(
-            format!"%.1f"(stat.predictedPerSecond)) tok/s | Model: '$(model)' | $(
-            readyState ? "Ready" : "Busy")".text;
-}
-
-class StreamMessageUpdater : IStreamCallback {
-    UiMessenger uiMsg;
-    long contextSize;
-    string modelName;
-
-    this(UiMessenger messenger, long contextSize, string modelName)
-    in (messenger !is null, "UiMessenger must not be null") {
-        this.uiMsg = messenger;
-        this.contextSize = contextSize;
-        this.modelName = modelName;
-    }
-
-    override void messageUpdate(StreamMessage msg, StreamToolCall[] tools, ServerStat stat) {
-        string content = msg.content;
-        if (!tools.empty) {
-            foreach (tool; tools) {
-                content ~= "\n--- Tool ---\n";
-                content ~= tool.toPrettyString(1000);
-                content ~= "\n\n";
-            }
-        }
-
-        uiMsg.streamStatusText(formatStatusText(false, contextSize, stat, modelName));
-        uiMsg.streamChatMessage(content, msg.reasoning);
-    }
-
-    override void streamMessageDone() {
-        uiMsg.streamChatDone();
-    }
-
-    override void setId(string id) {
-    }
-
-    override IStreamCallback clone() {
-        return new StreamMessageUpdater(uiMsg, contextSize, modelName);
-    }
-}
-
-class PipelineStreamMessageUpdater : IStreamCallback {
-    UiMessenger uiMsg;
-    long contextSize;
-    string modelName;
-    string agentId;
-
-    this(UiMessenger messenger, long contextSize, string modelName)
-    in (messenger !is null, "UiMessenger must not be null") {
-        this.uiMsg = messenger;
-        this.contextSize = contextSize;
-        this.modelName = modelName;
-    }
-
-    override void messageUpdate(StreamMessage msg, StreamToolCall[] tools, ServerStat stat) {
-        string content = msg.content;
-        if (!tools.empty) {
-            foreach (tool; tools) {
-                content ~= "\n--- Tool ---\n";
-                content ~= tool.toPrettyString(1000);
-                content ~= "\n";
-            }
-        }
-
-        string status = i"Context $(stat.context)/$(contextSize) tokens | $(
-                format!"%.1f"(stat.predictedPerSecond)) tok/s".text;
-
-        uiMsg.pipelineStreamChatMessage(agentId: agentId, content: content,
-                thinking: msg.reasoning, role: msg.role, status: status);
-    }
-
-    override void streamMessageDone() {
-        uiMsg.pipelineStreamDone(agentId);
-    }
-
-    override void setId(string id) {
-        agentId = id;
-    }
-
-    override IStreamCallback clone() {
-        return new PipelineStreamMessageUpdater(uiMsg, contextSize, modelName);
-    }
-}
-
 int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     import llm.subsystem : initLlmfunLocalModel, deinitLlmfunLocalModel;
 
@@ -1128,30 +649,6 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
         logger.warning(e.msg);
     }
     return 1;
-}
-
-// =============================================================================
-// Unit tests for the command-layer pure logic (Task 14)
-// =============================================================================
-
-// --- Test: decideDeleteCommand state machine ---
-
-unittest {
-    // No pending confirmation -> ignore
-    assert(AgentApp.decideDeleteCommand(SessionId.init,
-            SessionId("idA")) == PendingDeleteAction.ignore);
-    assert(AgentApp.decideDeleteCommand(SessionId.init,
-            SessionId.init) == PendingDeleteAction.ignore);
-
-    // Same id -> confirm
-    assert(AgentApp.decideDeleteCommand(SessionId("idA"),
-            SessionId("idA")) == PendingDeleteAction.confirm);
-
-    // Different id -> clear
-    assert(AgentApp.decideDeleteCommand(SessionId("idA"),
-            SessionId("idB")) == PendingDeleteAction.clear);
-    assert(AgentApp.decideDeleteCommand(SessionId("idA"),
-            SessionId.init) == PendingDeleteAction.clear);
 }
 
 // --- Test: pickFallbackAfterDelete selects the most recently updated session ---
@@ -1185,4 +682,52 @@ unittest {
     auto tie = [b, d];
     assert(AgentApp.pickFallbackAfterDelete(tie) == b.id,
             "ties should resolve deterministically to the first occurrence");
+}
+
+// --- Test: dispatcher-level pending-delete parity ---
+
+unittest {
+    // The most safety-critical behavior of the dispatcher: a stale
+    // `pendingDeleteId` must never make the next `/delete <n>` confirm-delete
+    // without re-prompting. runAgent's parity guard
+    // (`query.startsWith("/delete") && !slashCommands_.isRegistered(query)`)
+    // clears /delete-prefixed NON-commands; the top rule clears everything
+    // else; registered /delete-prefixed commands are left to their handlers.
+    // The registry's unknown path does NOT clear pending state.
+    import llm.app_config : UserConfig;
+
+    // Blocked UiMessenger (W5) — the unknown path writes via writeln, never
+    // a null uiMsg dereference.
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    auto stale = SessionId("stale-id");
+
+    // Registered /delete-prefixed command: the dispatcher must NOT clear —
+    // the handler owns the delete state machine. deleteprobe's handler does
+    // not touch pendingDeleteId, so any dispatcher clear would be visible.
+    app.registerSlashCommand(SlashCommand("deleteprobe", [], [],
+            SlashArgMode.none, 900, (ref AgentApp a, string arg) => AgentStatus.active));
+    app.pendingDeleteId = stale;
+    assert(app.runAgent("/deleteprobe") == AgentStatus.active);
+    assert(app.pendingDeleteId == stale,
+            "dispatcher must not clear pending for registered /delete-prefixed commands");
+
+    // `/deletefoo` (unregistered /delete-prefixed typo): the registry's
+    // unknown path does not clear pending, so runAgent's guard is the ONLY
+    // clearing path. Without it the next `/delete 3` would confirm-delete
+    // immediately instead of re-prompting.
+    app.pendingDeleteId = stale;
+    assert(app.runAgent("/deletefoo") == AgentStatus.active);
+    assert(app.pendingDeleteId == SessionId.init,
+            "/delete-prefixed non-commands must clear a stale confirmation");
+
+    // Non-/delete unknown: cleared by the top rule, not the registry.
+    app.pendingDeleteId = stale;
+    assert(app.runAgent("/nope") == AgentStatus.active);
+    assert(app.pendingDeleteId == SessionId.init, "non-/delete inputs clear via the top rule");
+
+    // `/delete` (registered, handler-owned): dispatch still reaches the
+    // handler; the empty-arg error path clears pending.
+    app.pendingDeleteId = stale;
+    assert(app.runAgent("/delete") == AgentStatus.active);
+    assert(app.pendingDeleteId == SessionId.init);
 }

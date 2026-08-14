@@ -23,7 +23,16 @@ llmfun/
 │       │   ├── package.d          # Core Agent class (module llm.agent)
 │       │   └── context.d          # Tool-execution context (AgentContext, VisionImage)
 │       ├── agent_pool.d           # Thread pool for agent execution
-│       ├── app_agent.d            # Agent subcommand handler + TUI
+│       ├── app_agent/             # Agent subcommand handler + TUI
+│       │   ├── package.d          # AgentApp + appMain (module llm.app_agent)
+│       │   ├── slash.d            # Slash command registry + plugin API
+│       │   ├── slash_core.d       # Core commands (/help, /quit, /stop, ...)
+│       │   ├── slash_session.d    # Session commands + /delete state machine
+│       │   ├── slash_model.d      # /model command
+│       │   ├── slash_pipeline.d   # /plan, /code commands
+│       │   ├── slash_skills.d     # /skills, /refresh-agent-md commands
+│       │   ├── ui.d               # UiMessenger + stream updaters
+│       │   └── tests.d            # Unit tests (golden help, built-ins)
 │       ├── app_rag.d              # RAG subcommand handler
 │       ├── app_mcp.d              # MCP server subcommand handler
 │       ├── app_tool_metrics.d     # Tool metrics subcommand handler
@@ -213,7 +222,7 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 
 ### Entry Point
 
-`app.d` is an ultra-thin dispatcher. It parses CLI args via `argparse` and routes to `appMain` overloads in `app_agent.d`, `app_rag.d`, `app_mcp.d`, and `app_tool_metrics.d`.
+`app.d` is an ultra-thin dispatcher. It parses CLI args via `argparse` and routes to `appMain` overloads in `app_agent/package.d`, `app_rag.d`, `app_mcp.d`, and `app_tool_metrics.d`.
 
 ### Agent System
 
@@ -225,17 +234,25 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 
 - Multi-history chat storage: one JSON file per session under `data/chat/<id>.json` with header `{title, createdAt, updatedAt, messages}`.
 - Implementation: `source/llm/session/` package (module `llm.session`). `package.d` re-exports `types.d` (`SessionMeta`, `SessionFile`, the `SessionId` strong type, id generation/validation), `store.d` (`SessionStore`: create/load/save/rename/remove/list), `resolve.d` (`resolveSessionRef`: index -> id -> title, pure), `tests.d` (unit tests).
-- Chat-free by design: the module only speaks JSON. `app_agent.d` bridges `SessionFile.doc` to `agent_.chat.load()` / `agent_.chat.toSaveJson()`.
+- Chat-free by design: the module only speaks JSON. `app_agent/package.d` bridges `SessionFile.doc` to `agent_.chat.load()` / `agent_.chat.toSaveJson()`.
 - Naming rule: "session" already means app-launch in `config.d` (`sessionCount` drives memory consolidation). The chat-history concept uses `SessionStore` / `SessionMeta` / `SessionFile` only.
 - `SessionId` is a `NamedType!string` strong type (mylib): a session id is not interchangeable with titles, previews, or other strings. `state.json` still stores the plain string (`activeChatSessionId`); conversion happens at the config boundary.
 - Session id = filename (immutable), format `<YYYYMMDD-HHMMSS>-<4hex>`; D12 regex validation at every store entry point prevents path traversal. Title lives in the header; rename edits the header only.
 - The store resolves its directory to an `AbsolutePath` (independent of the CWD); file paths are built as `AbsolutePath`.
 - Unknown header keys round-trip through `SessionMeta.extra` (D2), so future per-session settings need no format migration.
 - Active session id is persisted in `state.json` as `activeChatSessionId` and reopened on startup. One-shot mode (`-p`) appends to the last active session.
-- Slash commands: `/sessions`, `/switch <n|id|title>`, `/new`, `/rename <title>`, `/delete <n>` (repeat to confirm), `/clear`. Handlers are reusable private `AgentApp` methods (`doListSessions`, `switchToSession`, etc.) so the future TUI sidebar can share the same code path.
+- Slash commands are registered in `app_agent/slash*.d` (registry in `slash.d`, one group module per command family) and dispatch through `AgentApp.slashCommands_`. Session commands (`/sessions`, `/switch <n|id|title>`, `/new`, `/rename <title>`, `/delete <n>` (repeat to confirm), `/clear`) reuse the same `AgentApp` methods (`doListSessions`, `switchToSession`, etc.) as the TUI sidebar.
 - System-prompt entries are stripped from `messages` before save (D13); the prompt is re-set at startup.
 - Single writer (the agent thread); all writes are atomic (tmp file + rename).
 - Full documentation: `doc/sessions.md`.
+
+### Slash Commands
+
+- Delegate-based command registry (`app_agent/slash.d`): commands are registered `SlashCommand` structs with name, aliases, help lines, `SlashArgMode`, help `order`, and a handler `AgentStatus delegate(ref AgentApp, string)`.
+- Five group modules register the built-ins: `slash_core.d` (help/quit/stop/compact/debug), `slash_session.d` (sessions/switch/new/rename/delete/clear + the delete confirm state machine), `slash_model.d`, `slash_pipeline.d` (plan/code), `slash_skills.d`.
+- Help text is generated from the registry (order asc, registration index asc); a golden unit test in `tests.d` locks byte parity with the pre-refactor `buildHelpText()`.
+- Plugin API (public): `addStartupSlashCommand` (module-level hook, registered in `AgentApp`'s constructor), `AgentApp.registerSlashCommand`, `AgentApp.slashCommands()`, `AgentApp.sendChatMessage`, plus `SlashCommand`/`SlashArgMode`/`AgentStatus`. Package-private: the five group registrars and `AgentApp` internals.
+- Full documentation: `doc/slash_commands.md`.
 
 ### Tool Call System
 

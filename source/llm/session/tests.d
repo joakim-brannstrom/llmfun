@@ -13,7 +13,7 @@ version (unittest) {
     import my.optional : hasValue, orElse;
     import my.path : Path;
 
-    import llm.session : SessionStore, SessionMeta, SessionFile, resolveSessionRef;
+    import llm.session : SessionId, SessionStore, SessionMeta, SessionFile, resolveSessionRef;
     import llm.session.types : isValidId, PreviewMaxChars;
 
     private string makeTempDir(string name) {
@@ -56,9 +56,9 @@ unittest {
     import std.range : empty;
 
     auto pat = regex(r"^\d{8}-\d{6}-[0-9a-f]{4}$");
-    assert(!meta.id.match(pat).empty, "id format invalid: " ~ meta.id);
+    assert(!meta.id.get.match(pat).empty, "id format invalid: " ~ meta.id.get);
 
-    auto filePath = buildPath(tmpDir, meta.id ~ ".json");
+    auto filePath = buildPath(tmpDir, meta.id.get ~ ".json");
     assert(exists(filePath), "session file not created");
 
     // Meta fields
@@ -81,8 +81,8 @@ unittest {
     string[] ids;
     foreach (i; 0 .. N) {
         auto meta = store.create();
-        assert(!canFind(ids, meta.id), "duplicate id: " ~ meta.id);
-        ids ~= meta.id;
+        assert(!canFind(ids, meta.id.get), "duplicate id: " ~ meta.id.get);
+        ids ~= meta.id.get;
     }
 }
 
@@ -112,7 +112,7 @@ unittest {
         cleanupDir(tmpDir);
 
     auto store = new SessionStore(tmpDir.Path);
-    auto loadOpt = store.load("nonexistent-id");
+    auto loadOpt = store.load(SessionId("nonexistent-id"));
     assert(!hasValue(loadOpt), "load should return none for missing file");
 }
 
@@ -188,7 +188,7 @@ unittest {
         cleanupDir(tmpDir);
 
     auto store = new SessionStore(tmpDir.Path);
-    auto result = store.rename("nonexistent-id", "New Title");
+    auto result = store.rename(SessionId("nonexistent-id"), "New Title");
     assert(!hasValue(result), "rename should fail for missing session");
 }
 
@@ -201,7 +201,7 @@ unittest {
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
-    auto filePath = buildPath(tmpDir, meta.id ~ ".json");
+    auto filePath = buildPath(tmpDir, meta.id.get ~ ".json");
     assert(exists(filePath), "file should exist before remove");
 
     store.remove(meta.id);
@@ -216,8 +216,8 @@ unittest {
         cleanupDir(tmpDir);
 
     auto store = new SessionStore(tmpDir.Path);
-    store.remove("nonexistent-id"); // D12-invalid: no-op
-    store.remove("20250101-120000-abcd"); // valid format, file absent: silent no-op
+    store.remove(SessionId("nonexistent-id")); // D12-invalid: no-op
+    store.remove(SessionId("20250101-120000-abcd")); // valid format, file absent: silent no-op
 }
 
 // --- Test: list() returns sorted by updatedAt desc ---
@@ -260,17 +260,17 @@ unittest {
 // --- Test: D12 ID validation rejects invalid formats ---
 
 unittest {
-    assert(isValidId("20250101-120000-abcd"), "valid id should pass");
-    assert(isValidId("20250101-120000-0000"), "zero suffix should pass");
-    assert(isValidId("20250101-120000-ffff"), "all f suffix should pass");
+    assert(isValidId(SessionId("20250101-120000-abcd")), "valid id should pass");
+    assert(isValidId(SessionId("20250101-120000-0000")), "zero suffix should pass");
+    assert(isValidId(SessionId("20250101-120000-ffff")), "all f suffix should pass");
 
     // Invalid ids
-    assert(!isValidId(""), "empty string should fail");
-    assert(!isValidId("20250101-120000-abcde"), "5-char suffix should fail");
-    assert(!isValidId("20250101-120000-abc"), "3-char suffix should fail");
-    assert(!isValidId("../etc/passwd"), "path traversal should fail");
-    assert(!isValidId("not-a-valid-id"), "non-matching format should fail");
-    assert(!isValidId("20250101-120000-ABCD"), "uppercase hex should fail");
+    assert(!isValidId(SessionId("")), "empty string should fail");
+    assert(!isValidId(SessionId("20250101-120000-abcde")), "5-char suffix should fail");
+    assert(!isValidId(SessionId("20250101-120000-abc")), "3-char suffix should fail");
+    assert(!isValidId(SessionId("../etc/passwd")), "path traversal should fail");
+    assert(!isValidId(SessionId("not-a-valid-id")), "non-matching format should fail");
+    assert(!isValidId(SessionId("20250101-120000-ABCD")), "uppercase hex should fail");
 }
 
 // --- Test: save() rejects invalid D12 id ---
@@ -287,7 +287,7 @@ unittest {
     doc["messages"] = JSONValue();
     doc["messages"].array = [];
 
-    auto savedMeta = store.save("invalid-id", meta, doc);
+    auto savedMeta = store.save(SessionId("invalid-id"), meta, doc);
     assert(savedMeta.id == meta.id, "meta should be unchanged for invalid id");
 }
 
@@ -382,7 +382,7 @@ unittest {
     auto meta = store.create();
 
     // Manually add extra key to the file
-    auto filePath = buildPath(tmpDir, meta.id ~ ".json");
+    auto filePath = buildPath(tmpDir, meta.id.get ~ ".json");
     auto content = readText(filePath);
     // Insert extra key before closing brace
     content = content.strip;
@@ -442,59 +442,61 @@ unittest {
 
 unittest {
     SessionMeta s1, s2, s3;
-    s1.id = "id1";
+    s1.id = SessionId("id1");
     s1.title = "First";
-    s2.id = "id2";
+    s2.id = SessionId("id2");
     s2.title = "Second";
-    s3.id = "id3";
+    s3.id = SessionId("id3");
     s3.title = "Third";
     auto sessions = [s1, s2, s3];
 
     // Index 1 should return first session
     auto result = resolveSessionRef(sessions, "1");
     assert(hasValue(result), "index 1 should resolve");
-    assert(orElse(result, "") == "id1", "index 1 should return first session");
+    assert(orElse(result, SessionId.init) == SessionId("id1"),
+            "index 1 should return first session");
 
     // Index 3 should return third session
     result = resolveSessionRef(sessions, "3");
     assert(hasValue(result), "index 3 should resolve");
-    assert(orElse(result, "") == "id3", "index 3 should return third session");
+    assert(orElse(result, SessionId.init) == SessionId("id3"),
+            "index 3 should return third session");
 }
 
 // --- Test: resolveSessionRef id precedence over title ---
 
 unittest {
     SessionMeta s1, s2;
-    s1.id = "myid";
+    s1.id = SessionId("myid");
     s1.title = "My Title";
-    s2.id = "otherid";
+    s2.id = SessionId("otherid");
     s2.title = "myid"; // title matches s1's id
     auto sessions = [s1, s2];
 
     // "myid" should match s1 by id, not s2 by title
     auto result = resolveSessionRef(sessions, "myid");
     assert(hasValue(result), "should resolve");
-    assert(orElse(result, "") == "myid", "id match should take precedence");
+    assert(orElse(result, SessionId.init) == SessionId("myid"), "id match should take precedence");
 }
 
 // --- Test: resolveSessionRef case-insensitive title match ---
 
 unittest {
     SessionMeta s1;
-    s1.id = "id1";
+    s1.id = SessionId("id1");
     s1.title = "Hello World";
     auto sessions = [s1];
 
     auto result = resolveSessionRef(sessions, "hello world");
     assert(hasValue(result), "case-insensitive title should match");
-    assert(orElse(result, "") == "id1", "should return correct id");
+    assert(orElse(result, SessionId.init) == SessionId("id1"), "should return correct id");
 }
 
 // --- Test: resolveSessionRef returns none for no match ---
 
 unittest {
     SessionMeta s1;
-    s1.id = "id1";
+    s1.id = SessionId("id1");
     s1.title = "Title";
     auto sessions = [s1];
 
@@ -514,7 +516,7 @@ unittest {
 
 unittest {
     SessionMeta s1;
-    s1.id = "id1";
+    s1.id = SessionId("id1");
     s1.title = "Title";
     auto sessions = [s1];
 

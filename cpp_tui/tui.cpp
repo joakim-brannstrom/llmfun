@@ -651,11 +651,11 @@ void tuiRenderFrame(ImTui::TScreen* screen) {
 }
 
 int InputResizeCallback(ImGuiInputTextCallbackData* data) {
-    auto* udata = reinterpret_cast<std::string*>(data->UserData);
+    auto* udata = reinterpret_cast<UserQueryState*>(data->UserData);
 
     if (data->EventFlag == ImGuiInputTextFlags_CallbackResize) {
-        udata->resize(data->BufSize);
-        data->Buf = udata->data();
+        udata->inputBuf.resize(data->BufSize);
+        data->Buf = udata->inputBuf.data();
     }
 
     return 0;
@@ -889,8 +889,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
     };
 
-    auto inputArea = [&state, &inputBufLines, &DisplaySize, &inputHistory, &log, &focusInput,
-                      &io]() {
+    auto inputArea = [&state, &inputBufLines, &inputHistory, &focusInput]() {
         // Estimate "button" width (text + padding)
         float buttonWidth =
             ImGui::CalcTextSize("Send   ").x + ImGui::GetStyle().FramePadding.x * 2.0f;
@@ -917,7 +916,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         ImGui::InputTextMultiline(
             "##user_input", state.userQuery.inputBuf.data(), state.userQuery.inputBuf.size() + 1,
             ImVec2(inputWidth, inputHeight), ImGuiInputTextFlags_CallbackResize,
-            InputResizeCallback, &state.userQuery.inputBuf);
+            InputResizeCallback, &state.userQuery);
         if (!state.userQuery.newInputBufString.empty()) {
             state.userQuery.newInputBufString.clear();
         }

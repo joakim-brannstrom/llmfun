@@ -399,7 +399,6 @@ void tuiPipelineClear(TuiState* state) {
         return;
     state->inner->left.agents.clear();
 }
-
 #ifdef __cplusplus
 }
 #endif

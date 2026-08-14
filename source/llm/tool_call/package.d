@@ -2,6 +2,7 @@ module llm.tool_call;
 
 import logger = std.logger;
 import std.algorithm : canFind, filter, map;
+import std.array : empty;
 import std.conv : text;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.range : array;
@@ -276,9 +277,10 @@ InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
                             // where it keep on passing a JSON array as a string.
                             // Try to decode the string. If it succeeds use that.
                             try {
-                                __traits(getMember, rval.value, field) = getJsonValue!FT(parseJSON(v.str));
+                                __traits(getMember, rval.value, field) = getJsonValue!FT(
+                                        parseJSON(v.str));
                                 success = true;
-                            } catch(Exception e) {
+                            } catch (Exception e) {
                             }
 
                             if (!success) {
@@ -286,8 +288,8 @@ InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
                                     auto inner = parseJSON(v.str);
                                     if (inner.type == JSONType.array) {
                                         rval.errorMsg = i"error: parameter '$(field)' must be an array of strings, but a string was passed that contains JSON-encoded array text ($(
-                                                v.str)). Pass a real JSON array instead, e.g. \"$(field)\": [\"a\", \"b\"]"
-                                            .text;
+                                                v.str)). Pass a real JSON array instead, e.g. \"$(
+                                                field)\": [\"a\", \"b\"]".text;
                                         return rval;
                                     }
                                 } catch (Exception) {
@@ -298,8 +300,8 @@ InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
                         }
                     }
                     if (!success) {
-                        rval.errorMsg = i"error: wrong parameter type for '$(field)': received $(v.type), expected $(
-                                FT.stringof). $(e.msg)".text;
+                        rval.errorMsg = i"error: wrong parameter type for '$(field)': received $(
+                                v.type), expected $(FT.stringof). $(e.msg)".text;
                         return rval;
                     }
                 }
@@ -323,20 +325,33 @@ private struct TestCmdParams {
 }
 
 unittest {
-    // Double-encoded array: a string containing JSON array text must produce
+    // Double-encoded array: a string containing JSON array integers must produce
     // a hint that names the fix instead of a bare type-mismatch error.
-    auto json = parseJSON(`{"command": "[\"cd\", \"llmfun\"]"}`);
+    auto json = parseJSON(`{"command": "[1, 2]"}`);
     auto params = initParams!TestCmdParams(json, toParams!TestCmdParams);
     assert(params.errorMsg.length > 0);
     assert(params.errorMsg.canFind("array of strings"), params.errorMsg);
     assert(params.errorMsg.canFind("command"), params.errorMsg);
+}
 
+unittest {
+    // Double-encoded array: a string containing JSON array text should decode the json array to a D string array
+    auto json = parseJSON(`{"command": "[\"cd\", \"llmfun\"]"}`);
+    auto params = initParams!TestCmdParams(json, toParams!TestCmdParams);
+    assert(params.errorMsg.empty);
+    assert(params.value.command[0] == "cd");
+    assert(params.value.command[1] == "llmfun");
+}
+
+unittest {
     // A real array converts without error.
     auto okJson = parseJSON(`{"command": ["cd", "llmfun"]}`);
     auto okParams = initParams!TestCmdParams(okJson, toParams!TestCmdParams);
     assert(okParams.errorMsg.length == 0, okParams.errorMsg);
     assert(okParams.value.command == ["cd", "llmfun"]);
+}
 
+unittest {
     // A plain string (not JSON) for an array parameter gets the generic
     // received/expected message.
     auto strJson = parseJSON(`{"command": "cd llmfun"}`);
