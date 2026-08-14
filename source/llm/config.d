@@ -98,8 +98,6 @@ struct LlmConfig {
 
     bool noMemory;
 
-    Path scratchArea;
-
     Path[] promptDir;
 
     Path[] skillPathsUser;
@@ -155,10 +153,6 @@ struct LlmConfig {
         }
         skillPathsUser = skillPathsUser.map!(a => replaceMagicWord(a,
                 workArea.AbsolutePath).Path).array;
-
-        if (scratchArea == Path.init && (AbsolutePath(ProgramName ~ "/data")).exists) {
-            scratchArea = AbsolutePath(ProgramName ~ "/data");
-        }
     }
 
     /// Directory where the LLM can work with assets, create files etc.
@@ -488,11 +482,10 @@ void makeDefaultFileStructure() {
     }
 }
 
-void makeLocalSetupFileStructure(LlmConfig conf, bool rag = false) {
+void makeLocalSetupFileStructure(LlmConfig conf) {
     import std.file : mkdirRecurse;
 
-    foreach (path; ([conf.scratchArea, conf.workArea] ~ (rag ? [conf.dataDir] : null)).filter!(
-            a => !a.exists)) {
+    foreach (path; [conf.dataDir, conf.workArea].filter!(a => !a.exists)) {
         try {
             logger.info("Creating directory ", path);
             mkdirRecurse(path);

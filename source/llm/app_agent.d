@@ -772,7 +772,7 @@ struct AgentApp {
 
     // Session startup: wire SessionStore into startup (design 6.3)
     private void setupSession(AgentMdState agentMdState) {
-        sessionStore = new SessionStore(llmConf.scratchArea ~ "chat");
+        sessionStore = new SessionStore(llmConf.dataDir ~ "chat");
         auto sessions = sessionStore.list();
 
         // Resolve active session: saved id -> most recent -> create fresh
@@ -830,7 +830,7 @@ struct AgentApp {
         if (agentMdState.isValid())
             logger.tracef("AGENTS.md processed, summary length: %s", agentMdState.summary.length);
 
-        monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor.jsonl");
+        monitor = new MetricMonitor(llmConf.dataDir ~ "monitor.jsonl");
         agent_ = new Agent("main", llmConf, skillManager_, monitor, rag, llmConf.toolFilter.to());
 
         setupSession(agentMdState);
@@ -853,9 +853,9 @@ struct AgentApp {
 
         uiTid = spawn(&spawnUserInterface, thisTid);
         uiMsg = new UiMessenger(uiTid, false);
-        uiMsg.setIniFile(llmConf.scratchArea ~ "imgui.ini");
+        uiMsg.setIniFile(llmConf.dataDir ~ "imgui.ini");
         send(uiTid, UiInitHistory(agent_.getUserQueries.map!(a => a.content).array.idup));
-        send(uiTid, UiSetIniFile(llmConf.scratchArea ~ "imgui.ini"));
+        send(uiTid, UiSetIniFile(llmConf.dataDir ~ "imgui.ini"));
         agent_.setStreamUpdate(makeStreamCallback);
 
         foreach (m; agent_.chat.getMessages()) {

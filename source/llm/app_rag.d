@@ -25,7 +25,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         deinitLlmfunLocalModel();
 
     if (conf.setupDirs) {
-        makeLocalSetupFileStructure(LlmConfig.init, rag: true);
+        makeLocalSetupFileStructure(LlmConfig.init);
     }
     auto llmConf = readConfig(uconf.config, false, uconf.noCwdConfig, uconf.trustedConfig)
         .userToLlmConfig(conf);
