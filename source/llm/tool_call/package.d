@@ -264,8 +264,28 @@ InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
                 try {
                     __traits(getMember, rval.value, field) = getJsonValue!FT(*v);
                 } catch (Exception e) {
-                    rval.errorMsg = i"error: wrong parameter type '$(v.type)': Expected parameter '$(
-                            field)' of type $(FT.stringof): $(e.msg)".text;
+                    // The JSON value has the wrong kind for this parameter.
+                    // Detect the common double-encoding mistake: a string
+                    // whose content is a JSON-encoded array. Name the fix
+                    // instead of leaving the caller with a bare type error.
+                    static if (is(FT == string[])) {
+                        if (v.type == JSONType.string) {
+                            try {
+                                auto inner = parseJSON(v.str);
+                                if (inner.type == JSONType.array) {
+                                    rval.errorMsg = i"error: parameter '$(field)' must be an array of strings, but a string was passed that contains JSON-encoded array text ($(
+                                            v.str)). Pass a real JSON array instead, e.g. \"$(field)\": [\"a\", \"b\"]"
+                                        .text;
+                                    return rval;
+                                }
+                            } catch (Exception) {
+                                // inner string is not JSON; report the
+                                // generic mismatch below
+                            }
+                        }
+                    }
+                    rval.errorMsg = i"error: wrong parameter type for '$(field)': received $(v.type), expected $(
+                            FT.stringof). $(e.msg)".text;
                     return rval;
                 }
             }
@@ -279,6 +299,35 @@ InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
     }
 
     return rval;
+}
+
+/// Sample params struct used by the initParams unit tests.
+private struct TestCmdParams {
+    string[] command;
+    @ParamOptional string cwd;
+}
+
+unittest {
+    // Double-encoded array: a string containing JSON array text must produce
+    // a hint that names the fix instead of a bare type-mismatch error.
+    auto json = parseJSON(`{"command": "[\"cd\", \"llmfun\"]"}`);
+    auto params = initParams!TestCmdParams(json, toParams!TestCmdParams);
+    assert(params.errorMsg.length > 0);
+    assert(params.errorMsg.canFind("array of strings"), params.errorMsg);
+    assert(params.errorMsg.canFind("command"), params.errorMsg);
+
+    // A real array converts without error.
+    auto okJson = parseJSON(`{"command": ["cd", "llmfun"]}`);
+    auto okParams = initParams!TestCmdParams(okJson, toParams!TestCmdParams);
+    assert(okParams.errorMsg.length == 0, okParams.errorMsg);
+    assert(okParams.value.command == ["cd", "llmfun"]);
+
+    // A plain string (not JSON) for an array parameter gets the generic
+    // received/expected message.
+    auto strJson = parseJSON(`{"command": "cd llmfun"}`);
+    auto strParams = initParams!TestCmdParams(strJson, toParams!TestCmdParams);
+    assert(strParams.errorMsg.canFind("received string"), strParams.errorMsg);
+    assert(strParams.errorMsg.canFind("string[]"), strParams.errorMsg);
 }
 
 RegParam[] toParams(FunctionParamT)() {
