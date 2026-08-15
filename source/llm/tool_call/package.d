@@ -264,29 +264,44 @@ InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
                 try {
                     __traits(getMember, rval.value, field) = getJsonValue!FT(*v);
                 } catch (Exception e) {
+                    bool success;
+
                     // The JSON value has the wrong kind for this parameter.
                     // Detect the common double-encoding mistake: a string
                     // whose content is a JSON-encoded array. Name the fix
                     // instead of leaving the caller with a bare type error.
                     static if (is(FT == string[])) {
                         if (v.type == JSONType.string) {
+                            // the LLM is retarded and sometimes go into a loop
+                            // where it keep on passing a JSON array as a string.
+                            // Try to decode the string. If it succeeds use that.
                             try {
-                                auto inner = parseJSON(v.str);
-                                if (inner.type == JSONType.array) {
-                                    rval.errorMsg = i"error: parameter '$(field)' must be an array of strings, but a string was passed that contains JSON-encoded array text ($(
-                                            v.str)). Pass a real JSON array instead, e.g. \"$(field)\": [\"a\", \"b\"]"
-                                        .text;
-                                    return rval;
+                                __traits(getMember, rval.value, field) = getJsonValue!FT(parseJSON(v.str));
+                                success = true;
+                            } catch(Exception e) {
+                            }
+
+                            if (!success) {
+                                try {
+                                    auto inner = parseJSON(v.str);
+                                    if (inner.type == JSONType.array) {
+                                        rval.errorMsg = i"error: parameter '$(field)' must be an array of strings, but a string was passed that contains JSON-encoded array text ($(
+                                                v.str)). Pass a real JSON array instead, e.g. \"$(field)\": [\"a\", \"b\"]"
+                                            .text;
+                                        return rval;
+                                    }
+                                } catch (Exception) {
+                                    // inner string is not JSON; report the
+                                    // generic mismatch below
                                 }
-                            } catch (Exception) {
-                                // inner string is not JSON; report the
-                                // generic mismatch below
                             }
                         }
                     }
-                    rval.errorMsg = i"error: wrong parameter type for '$(field)': received $(v.type), expected $(
-                            FT.stringof). $(e.msg)".text;
-                    return rval;
+                    if (!success) {
+                        rval.errorMsg = i"error: wrong parameter type for '$(field)': received $(v.type), expected $(
+                                FT.stringof). $(e.msg)".text;
+                        return rval;
+                    }
                 }
             }
         }
