@@ -60,3 +60,24 @@ target_link_libraries(llmfun_tui PRIVATE
     llmfun_tui_all_lib
     ncursesw
 )
+
+# Headless grid-invariant regression test for the imtui UTF-8 cell-width fix
+# (implementation plan Task 3). Links the REAL imtui + imgui-for-imtui
+# (IMTUI / IMGUI_USE_WCHAR32 come from those targets, exactly like llmfun_tui);
+# runs headless via ImTui_ImplText_* — no ncurses, no PTY. Built by the normal
+# `make` (build_test.py gate) and executed from the build dir.
+add_executable(imtui_utf8_grid_test
+    ../vendor/imtui/test/test_utf8_grid.cpp
+)
+target_link_libraries(imtui_utf8_grid_test PRIVATE imtui)
+
+# ncurses fold-row rewrite regression test (P3 Task 6 follow-up fix).
+# The binary drives the REAL ncurses backend (ImTui_ImplNcurses_DrawScreen)
+# with a folded VS16 pair row across four frames of content changes. It must
+# run on a PTY, so it is spawned and its raw output stream replayed by
+# ../vendor/imtui/test/test_ncurses_fold_redraw.py (wired into build_test.py);
+# the replayer models a VS16-clustering terminal and asserts the final row.
+add_executable(imtui_ncurses_fold_redraw_test
+    ../vendor/imtui/test/test_ncurses_fold_redraw.cpp
+)
+target_link_libraries(imtui_ncurses_fold_redraw_test PRIVATE imtui-ncurses)

@@ -14,6 +14,31 @@ The runtime harness test_inline_code_runtime.cpp additionally compiles
 imgui_markdown.h standalone against a fake ImGui namespace (g++ only, no
 imtui) and asserts the exact rendered byte stream for every inline-code
 edge-case matrix row.
+
+The width-table unit test test_wcwidth.cpp compiles imgui_draw.cpp by TU
+inclusion (IMTUI + IMGUI_USE_WCHAR32, exactly like the llmfun_tui build)
+and asserts the Unicode cell-width vectors for emoji-presentation and
+zero-width codepoints.
+
+The ncurses fold-row rewrite test (binary imtui_ncurses_fold_redraw_test +
+driver test_ncurses_fold_redraw.py) runs the real ncurses backend on a PTY
+with a folded VS16 pair row across frames of content changes, replays the
+raw output stream against a VS16-clustering terminal model and asserts the
+final rows — the only layer where the fold-row rewrite corruption is
+observable (the TScreen grid is internally consistent pre-fix, and tmux
+counts the pair as 1 cell like ncurses' own model).
+
+The grid-invariant regression test test_utf8_grid.cpp renders fixed text
+rows through the real vendored imgui + imtui text backend (CMake target
+imtui_utf8_grid_test, linked like llmfun_tui) into a TScreen grid and
+asserts the grid-vs-terminal-width invariants restored by the UTF-8 width
+fix: per-row grid extent matches an independent width oracle, wide emoji
+land two cells after their base, and no zero-width codepoint leaks a grid
+cell. It fails against the pre-fix width table (✅/❓ rows short by 1,
+⚠️ row long by 1). Both it and test_wcwidth run TWICE: default, and with
+the P3 Task 6 env overrides set (LLMFUN_IMTUI_EMOJI_PRESENTATION=1 for the
+grid test's VS16/combining-mark folding assertions,
+LLMFUN_IMTUI_EMOJI_WIDTH=1 for the width-one emoji class).
 """
 
 import subprocess
@@ -29,8 +54,8 @@ def main():
         return 2
 
     skipped = 0  # runtime harness not verifiable (g++ missing)
-
-    # Install build tools (needed every session)
+    combined = 0  # overall gate status; initialized here so --build mode
+                  # (which never enters the run phase) still returns 0 on success
     print("=== Installing build tools ===")
     result = subprocess.run(
         ["apt-get", "update"],
@@ -50,10 +75,10 @@ def main():
 
     basedir = os.path.abspath(".")
     testdir = os.path.join(basedir, "llmfun", "vendor", "imtui", "test")
+    builddir = os.path.join(basedir, "llmfun", "cpp_tui", "build")
 
     if mode in ("both", "build"):
         print(f"\n=== Building llmfun_tui (compilation check) ===")
-        builddir = os.path.join(basedir, "llmfun", "cpp_tui", "build")
         if os.path.exists(builddir):
             shutil.rmtree(builddir)
         os.makedirs(builddir, exist_ok=True)
@@ -150,10 +175,161 @@ def main():
             except OSError:
                 pass
 
+        # Width-table unit test (C++): verifies imtui_wcwidth /
+        # ImFontIMTuiCellWidth vectors (emoji-presentation codepoints are
+        # width 2, zero-width format/VS/combining codepoints are width 0).
+        # Compiles imgui_draw.cpp by TU inclusion; -ffunction-sections
+        # -Wl,--gc-sections drop the unreferenced imgui functions so no
+        # other translation unit needs to be linked.
+        wc_src = os.path.join(testdir, "test_wcwidth.cpp")
+        wc_bin = os.path.join(testdir, "test_wcwidth")
+        try:
+            result = subprocess.run(
+                ["g++", "-std=c++11", "-O0", "-ffunction-sections",
+                 "-Wl,--gc-sections", "-o", wc_bin, wc_src],
+                capture_output=True, text=True,
+                cwd=testdir, timeout=120
+            )
+        except FileNotFoundError:
+            print("Width-table test NOT verified: g++ not found (install build-essential first).")
+            result = None
+        if result is None:
+            skipped = 1
+        elif result.returncode != 0:
+            print(result.stdout[-500:] if result.stdout else "")
+            print(result.stderr[-500:] if result.stderr else "")
+            print("Width-table test compilation failed.")
+            combined = 1
+        else:
+            result = subprocess.run(
+                [wc_bin],
+                capture_output=True, text=True,
+                cwd=testdir, timeout=60
+            )
+            print(result.stdout)
+            if result.stderr:
+                print(f"STDERR:\n{result.stderr}")
+            if result.returncode == 0:
+                print("Width-table test: all checks passed.")
+            else:
+                print(f"Width-table test: some checks failed (exit code {result.returncode}).")
+                combined = 1
+
+            # P3 (Task 6) second run: LLMFUN_IMTUI_EMOJI_WIDTH=1 forces the
+            # Emoji_Presentation=Yes class to width 1 (narrow-emoji terminal
+            # mitigation). The binary reads the env var and adjusts its
+            # expected emoji-class widths accordingly.
+            result = subprocess.run(
+                [wc_bin],
+                capture_output=True, text=True,
+                cwd=testdir, timeout=60,
+                env={**os.environ, "LLMFUN_IMTUI_EMOJI_WIDTH": "1"}
+            )
+            print(result.stdout)
+            if result.stderr:
+                print(f"STDERR:\n{result.stderr}")
+            if result.returncode == 0:
+                print("Width-table test (LLMFUN_IMTUI_EMOJI_WIDTH=1): all checks passed.")
+            else:
+                print(f"Width-table test (LLMFUN_IMTUI_EMOJI_WIDTH=1): some checks failed (exit code {result.returncode}).")
+                combined = 1
+            try:
+                os.remove(wc_bin)
+            except OSError:
+                pass
+
+        # Headless grid-invariant regression test (C++): renders fixed text
+        # rows through the REAL vendored imgui + imtui text backend into a
+        # TScreen grid and asserts the grid-vs-terminal-width invariants
+        # restored by the UTF-8 width fix (plan Task 3; design §7 Task 3).
+        # Built by the cmake phase (target imtui_utf8_grid_test) into the
+        # llmfun_tui build dir; this block only executes it.
+        grid_bin = os.path.join(builddir, "imtui_utf8_grid_test")
+        if os.path.exists(grid_bin):
+            result = subprocess.run(
+                [grid_bin],
+                capture_output=True, text=True,
+                cwd=testdir, timeout=120
+            )
+            print(result.stdout)
+            if result.stderr:
+                print(f"STDERR:\n{result.stderr}")
+            if result.returncode == 0:
+                print("Grid regression test: all checks passed.")
+            else:
+                print(f"Grid regression test: some checks failed (exit code {result.returncode}).")
+                combined = 1
+
+            # P3 (Task 6) second run: LLMFUN_IMTUI_EMOJI_PRESENTATION=1
+            # switches the production renderer into VS16/combining-mark
+            # folding mode (terminals that cluster VS16). The test asserts
+            # the folding invariants: U+26A0 + U+FE0F folds into one cell
+            # with chwidth == 2 and ch2 == U+FE0F, combining marks merge
+            # into their base cell, and per-row extents follow the
+            # folding-aware oracle.
+            result = subprocess.run(
+                [grid_bin],
+                capture_output=True, text=True,
+                cwd=testdir, timeout=120,
+                env={**os.environ, "LLMFUN_IMTUI_EMOJI_PRESENTATION": "1"}
+            )
+            print(result.stdout)
+            if result.stderr:
+                print(f"STDERR:\n{result.stderr}")
+            if result.returncode == 0:
+                print("Grid regression test (folding mode): all checks passed.")
+            else:
+                print(f"Grid regression test (folding mode): some checks failed (exit code {result.returncode}).")
+                combined = 1
+        else:
+            print("Grid regression test NOT found — run with --build first "
+                  "(binary is produced by the cmake phase).")
+            combined = 1
+
+        # ncurses fold-row rewrite regression test (P3 Task 6 follow-up
+        # fix): the C++ binary imtui_ncurses_fold_redraw_test (built by the
+        # cmake phase, target of the same name) drives the real ncurses
+        # backend with a folded VS16 pair row across frames of content
+        # changes; the Python driver spawns it on a PTY, replays the raw
+        # output stream against a VS16-clustering terminal model and
+        # asserts the final rows. The PTY layer is what makes the bug
+        # observable (grid tests and tmux captures cannot: the TScreen is
+        # internally consistent pre-fix and tmux counts the pair as 1 cell
+        # like ncurses). Skipped (not failed) when the pty modules or the
+        # binary are unavailable.
+        fold_bin = os.path.join(builddir, "imtui_ncurses_fold_redraw_test")
+        fold_driver = os.path.join(testdir, "test_ncurses_fold_redraw.py")
+        if os.path.exists(fold_bin) and os.path.exists(fold_driver):
+            try:
+                result = subprocess.run(
+                    [sys.executable, fold_driver, fold_bin],
+                    capture_output=True, text=True,
+                    cwd=testdir, timeout=120
+                )
+                print(result.stdout)
+                if result.stderr:
+                    print(f"STDERR:\n{result.stderr}")
+                if result.returncode == 0:
+                    print("ncurses fold-row rewrite test: all checks passed.")
+                else:
+                    print(f"ncurses fold-row rewrite test: some checks failed "
+                          f"(exit code {result.returncode}).")
+                    combined = 1
+            except OSError as exc:
+                print(f"ncurses fold-row rewrite test NOT verified: PTY driver "
+                      f"failed to run ({exc}); treated as skipped.")
+                skipped = 1
+        else:
+            print("ncurses fold-row rewrite test NOT found — run with --build "
+                  "first (binary is produced by the cmake phase).")
+            combined = 1
+
         if combined == 0 and skipped == 0:
             print("\nAll tests passed.")
         elif skipped:
-            print("\nRuntime harness NOT verified (g++ missing); overall gate fails.")
+            print("\nOne or more harnesses could not be verified (see the "
+                  "messages above — e.g. missing g++ or no PTY support); "
+                  "overall gate fails.")
         else:
             print("\nSome tests failed.")
 

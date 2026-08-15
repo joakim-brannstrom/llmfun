@@ -344,7 +344,9 @@ void ImTui_ImplNcurses_DrawScreen(bool active) {
     }
 
     int ic = 0;
-    curs.resize(nx + 1);
+    // LLMFUN PATCH: each cell can contribute up to two wide
+    // chars (base ch + folded continuation ch2), so size for 2*nx + NUL.
+    curs.resize(2*nx + 1);
 
     for (int y = 0; y < ny; ++y) {
         bool isSame = compare;
@@ -384,7 +386,32 @@ void ImTui_ImplNcurses_DrawScreen(bool active) {
                 lastp = p;
             }
 
+            // LLMFUN PATCH: one addwstr() run per color pair relies on each
+            // cell's ch advancing the terminal cursor by exactly its
+            // chwidth (the grid was built with the same imtui_wcwidth table,
+            // so grid columns == terminal columns). Wide cells (chwidth > 1,
+            // e.g. CJK/emoji) occupy chwidth-1 extra terminal columns; the
+            // loop compensates by skipping those grid columns so the next
+            // cell lines up. P3 (Task 6): TCell::ch2 (VS16/combining mark
+            // folded into the base) is emitted IMMEDIATELY after ch in the
+            // same run, so the terminal clusters the pair and applies the
+            // final width before the compensation below. FOLD-ROW REWRITE
+            // FIX: ncurses' own wcwidth counts a folded VS16 pair as 1 cell
+            // (wcwidth(U+26A0)=1, wcwidth(U+FE0F)=0) while the grid and
+            // VS16-clustering terminals count 2, so ncurses' virtual screen
+            // is 1 column short per pair and its diff-based patches would
+            // land 1 column off on a rewrite. Rows containing a fold are
+            // therefore forced to a full-line redraw (wredrawln below, after
+            // the final flush) so ncurses never patches them. The
+            // combining-mark merge (no width change: grid = ncurses =
+            // terminal = 1) does not diverge but shares the redraw path
+            // harmlessly. The per-row diff above (TCell::operator!= including
+            // chwidth and ch2) and the memcpy below depend on operator==
+            // staying in sync with the TCell layout.
             curs[ic++] = cell.ch ? (wchar_t)cell.ch : L' ';
+            if (cell.ch2) {
+                curs[ic++] = (wchar_t)cell.ch2;
+            }
             if (cell.chwidth > 1) {
                 x += (cell.chwidth - 1);
             }
@@ -395,6 +422,41 @@ void ImTui_ImplNcurses_DrawScreen(bool active) {
             addwstr(curs.data());
             ic = 0;
             curs[0] = L'\0';
+        }
+
+        // LLMFUN PATCH (P3 Task 6 fix): force a full-line redraw for rows
+        // containing a folded VS16 continuation (ch2 != 0) in either the
+        // new or the previous grid. Because of the model divergence
+        // explained in the row-emission comment above (ncurses counts the
+        // pair as 1 cell, the grid and clustering terminals as 2),
+        // ncurses' diff-based patches would land 1 column left whenever a
+        // fold row is rewritten (the reported " foobar" -> " ffoobar"
+        // bug). wredrawln makes the next wrefresh re-emit the whole line
+        // from column 0 — the line's character stream renders correctly
+        // on every terminal. Both grids are checked: the new grid
+        // protects rows containing a fold now; the previous grid the
+        // fold-REMOVAL transition, where the virtual line is still the
+        // 1-short model and must be re-synced. RESIDUAL LIMITATION: cells
+        // ncurses POSITIONS after the pair (absolute CHA/CUP moves
+        // computed from its 1-short model, e.g. a scrollbar cell patched
+        // toward the right edge) still land 1 column left of the grid
+        // intent — present on the first write too, inherent to ncurses'
+        // width model, and unfixable at the byte-stream level (see
+        // utf8_verification.md). Combining-mark folds never diverge but
+        // share the redraw path harmlessly; unchanged rows are skipped by
+        // the per-row diff above, so the cost is bounded by changed rows.
+        {
+            bool rowHasFold = false;
+            for (int x = 0; x < nx; ++x) {
+                if (g_screen->data[y*nx + x].ch2 != 0 ||
+                    (compare && screenPrev.data[y*nx + x].ch2 != 0)) {
+                    rowHasFold = true;
+                    break;
+                }
+            }
+            if (rowHasFold) {
+                wredrawln(stdscr, y, 1);
+            }
         }
 
         if (compare) {

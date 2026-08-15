@@ -38,7 +38,7 @@ int main() {
     for (int i = 0; i < 300; ++i) {
         std::string summary{"hello"};
         std::string text{
-            u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' \n\n***\n\n"};
+            u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' \n\n'⚠️'\n✅\n\n***\n\n"};
         text.append(std::to_string(i));
 
         TuiChatMessageType type = TuiChatMessageType_Assistant;
@@ -166,7 +166,7 @@ int main() {
 
             std::string content{"hello"};
             std::string reasoning{
-                u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' \n\n***\n\n"};
+                u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' \n'⚠️'\n✅\n \n***\n\n"};
             reasoning.append(std::to_string(i));
 
             std::string role{"assistant"};

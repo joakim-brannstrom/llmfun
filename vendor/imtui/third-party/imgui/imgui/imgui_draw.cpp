@@ -40,11 +40,244 @@ Index of this file:
 
 // LLMFUN PATCH: UTF-8 support via IMTUI vertex color encoding
 #ifdef IMTUI
-// Simplified mk_wcwidth: returns display width of a Unicode codepoint (0, 1, or 2)
+#include <stdlib.h> // getenv (P3 Task 6 env gates below)
+                    //
+// Complete Unicode cell-width function for the imtui terminal grid.
+//
+// Three width classes, matching what conforming terminals actually do:
+//   width 0: control characters, selected combining-mark blocks (subset;
+//            other scripts out of scope), variation selectors
+//            (incl. VS16 U+FE0F), and zero-width format/control codepoints;
+//   width 2: East Asian Wide/Fullwidth ranges plus every codepoint with
+//            Emoji_Presentation=Yes;
+//   width 1: everything else (default).
+//
+// Reference data:
+//  - Emoji_Presentation=Yes ranges below U+1F000 and in U+1F300-U+1FAFF are
+//    taken from Unicode emoji-data.txt, version 15.1 (2023-09).
+//  - Zero-width (non-printing) ranges follow Markus Kuhn's wcwidth()
+//    (https://www.cl.cam.ac.uk/~mgk25/ucs/wcwidth.c).
+//  - U+26A0 (WARNING SIGN) is intentionally width 1: it is NOT
+//    Emoji_Presentation=Yes and terminals render it narrow unless a VS16
+//    (U+FE0F, width 0) selects emoji presentation.
+//  - Regional indicators U+1F1E6-U+1F1FF stay width 1 each: flag pairs are
+//    a grapheme-cluster sequence the per-codepoint grid cannot represent
+//    (documented limitation; emoji presentation via VS16 is deferred).
+// Known limitations:
+//  - Grapheme clusters remain misaligned: the grid model is per-codepoint,
+//    so ZWJ sequences (family emoji), regional-indicator flag pairs, keycaps,
+//    and emoji modifiers (skin tones) still diverge from terminal widths.
+//    This is inherent to the current architecture and out of scope (Won't).
+//  - P0 default (Task 2): combining marks are dropped, e + U+0301 renders
+//    as aligned "e"; U+26A0 + U+FE0F renders as narrow U+26A0 on all
+//    terminals (guaranteed aligned). P3 (Task 6): with
+//    LLMFUN_IMTUI_EMOJI_PRESENTATION=1 (terminals that cluster VS16, e.g.
+//    VTE/kitty/wezterm) RenderText folds the continuation into the base
+//    cell instead of dropping it — VS16 promotes the base to a 2-cell
+//    emoji, combining marks merge into the base (TCell::ch2). TERM cannot
+//    detect this capability (TERM=xterm-256color covers both VTE and real
+//    xterm), so the gate is env-based opt-in and defaults OFF. Folding-mode
+//    caveat: measurement (CalcTextSizeA/CalcWordWrapPositionA) counts the
+//    VS16 pair as 1 cell while rendering advances the pen by 2 — per-row
+//    terminal alignment stays correct (chwidth cursor compensation plus the
+//    extra pen advance in the fold rule), but text-size derived layout of a
+//    folding row is 1 short per promoted pair, and a word-wrapped folding
+//    row can overflow its wrap width by 1 per promoted pair (the wrap
+//    position is computed from the uncounted pair).
+//  - Narrow-emoji terminals (non-conforming width rules) show the OPPOSITE
+//    +1 shift on ✅ rows after this fix (grid 2 vs terminal 1). Mitigation:
+//    LLMFUN_IMTUI_EMOJI_WIDTH=1 forces the whole Emoji_Presentation=Yes
+//    class to width 1 (implemented in imtui_wcwidth below).
+//
+// P3 terminal-capability env gates, read once per process (magic statics;
+// no per-frame cost, no cross-TU state, no new exported symbols):
+static bool imtui_emoji_presentation_enabled()
+{
+    // LLMFUN_IMTUI_EMOJI_PRESENTATION=1 -> fold VS16/combining marks into
+    // the base cell (RenderText). Default OFF = P0 Task 2 behavior.
+    static int cached = -1;
+    if (cached < 0) {
+        const char * v = getenv("LLMFUN_IMTUI_EMOJI_PRESENTATION");
+        cached = (v != NULL && strcmp(v, "1") == 0) ? 1 : 0;
+    }
+    return cached == 1;
+}
+static bool imtui_emoji_width_one()
+{
+    // LLMFUN_IMTUI_EMOJI_WIDTH=1 -> force the Emoji_Presentation=Yes class
+    // to width 1 (narrow-emoji terminal mitigation, design §6).
+    static int cached = -1;
+    if (cached < 0) {
+        const char * v = getenv("LLMFUN_IMTUI_EMOJI_WIDTH");
+        cached = (v != NULL && strcmp(v, "1") == 0) ? 1 : 0;
+    }
+    return cached == 1;
+}
+// Emoji_Presentation=Yes class (emoji-data.txt 15.1, 2023-09) — split out
+// of imtui_wcwidth so the LLMFUN_IMTUI_EMOJI_WIDTH=1 override can force the
+// whole class to width 1 and so RenderText's VS16 folding can reference it.
+// Ranges mirror the original table exactly, including the deliberately
+// coarse 0x1F000-0x1F644 / 0x1FA70-0x1FAFF blocks (Task 1 history).
+static bool imtui_is_emoji_presentation(unsigned int ucs)
+{
+    if (ucs >= 0x231A && ucs <= 0x231B) return true;   // watch, hourglass done
+    if (ucs >= 0x23E9 && ucs <= 0x23F3) return true;   // fast-forward..hourglass with flowing sand
+    if (ucs >= 0x23F8 && ucs <= 0x23FA) return true;   // double vertical bar..record button
+    if (ucs >= 0x25FD && ucs <= 0x25FE) return true;   // white/black medium small square
+    if (ucs >= 0x2614 && ucs <= 0x2615) return true;   // umbrella with rain drops, hot beverage
+    if (ucs >= 0x2648 && ucs <= 0x2653) return true;   // Aries..Pisces
+    if (ucs == 0x267F) return true;                    // wheelchair symbol
+    if (ucs == 0x2693) return true;                    // anchor
+    if (ucs == 0x26A1) return true;                    // high voltage
+    if (ucs >= 0x26AA && ucs <= 0x26AB) return true;   // medium white/black circle
+    if (ucs >= 0x26BD && ucs <= 0x26BE) return true;   // soccer ball, baseball
+    if (ucs >= 0x26C4 && ucs <= 0x26C5) return true;   // snowman without snow, sun behind cloud
+    if (ucs == 0x26CE) return true;                    // ophiuchus
+    if (ucs == 0x26D4) return true;                    // no entry
+    if (ucs == 0x26EA) return true;                    // church
+    if (ucs >= 0x26F2 && ucs <= 0x26F3) return true;   // fountain, flag in hole
+    if (ucs == 0x26F5) return true;                    // sailboat
+    if (ucs == 0x26FA) return true;                    // tent
+    if (ucs == 0x26FD) return true;                    // fuel pump
+    if (ucs == 0x2705) return true;                    // white heavy check mark
+    if (ucs >= 0x270A && ucs <= 0x270B) return true;   // raised fist, raised hand
+    if (ucs == 0x2728) return true;                    // sparkles
+    if (ucs == 0x274C) return true;                    // cross mark
+    if (ucs == 0x274E) return true;                    // negative squared cross mark
+    if (ucs >= 0x2753 && ucs <= 0x2755) return true;   // question/exclamation ornament marks
+    if (ucs == 0x2757) return true;                    // heavy exclamation mark
+    if (ucs >= 0x2795 && ucs <= 0x2797) return true;   // heavy plus/minus/division sign
+    if (ucs == 0x27B0) return true;                    // curly loop
+    if (ucs == 0x27BF) return true;                    // double curly loop
+    if (ucs >= 0x2B1B && ucs <= 0x2B1C) return true;   // black/white large square
+    if (ucs == 0x2B50) return true;                    // star
+    if (ucs == 0x2B55) return true;                    // heavy large circle
+    if (ucs >= 0x1F000 && ucs <= 0x1F644) return true; // mahjong tiles..face with rolling eyes (existing range)
+    if (ucs >= 0x1F300 && ucs <= 0x1F6FF) return true; // cyclone..transport symbols
+    if (ucs >= 0x1F7E0 && ucs <= 0x1F7EB) return true; // large colored circles
+    if (ucs == 0x1F7F0) return true;                   // heavy equals sign
+    if (ucs >= 0x1F900 && ucs <= 0x1F9FF) return true; // supplemental symbols and pictographs
+    if (ucs >= 0x1FA70 && ucs <= 0x1FAFF) return true; // symbols and pictographs extended-A (whole block; covers the 15.1 emoji subranges)
+    return false;
+}
+// VS16-eligible bases: Emoji=Yes but Emoji_Presentation=No ("text-default
+// emoji", emoji-data.txt 15.1) — the codepoints U+FE0F promotes from narrow
+// to a 2-cell emoji on terminals that cluster VS16. Restricted to the
+// sub-0x1F000 list: keycap digit bases (0023/002A/0030-0039) and regional
+// indicators (0x1F1E6-0x1F1FF) are grapheme-cluster bases (out of scope),
+// and the enclosed-alphanumeric block 0x1F000-0x1F644 is already width 2 in
+// the table (the RenderText promotion guard `base width <= 1` makes such
+// entries no-ops, so they are omitted here). A false positive in this list
+// would promote a base the terminal renders narrow (the original bug class
+// in the opposite direction) — when unsure, leave a codepoint out: a false
+// negative only means VS16 is dropped and the base stays narrow (the safe
+// P0 fallback).
+static bool imtui_is_vs16_eligible(unsigned int ucs)
+{
+    if (ucs == 0x00A9 || ucs == 0x00AE) return true;   // copyright, registered
+    if (ucs == 0x203C || ucs == 0x2049) return true;   // double exclamation, exclamation question
+    if (ucs == 0x2122 || ucs == 0x2139) return true;   // trade mark, information
+    if (ucs >= 0x2194 && ucs <= 0x2199) return true;   // left-right..south-west arrows
+    if (ucs >= 0x21A9 && ucs <= 0x21AA) return true;   // leftwards/rightwards arrow with hook
+    if (ucs == 0x2328) return true;                    // keyboard
+    if (ucs == 0x23CF) return true;                    // eject symbol
+    if (ucs == 0x24C2) return true;                    // circled M
+    if (ucs >= 0x25AA && ucs <= 0x25AB) return true;   // black/white small square
+    if (ucs == 0x25B6 || ucs == 0x25C0) return true;   // black right/left-pointing triangle
+    if (ucs >= 0x25FB && ucs <= 0x25FC) return true;   // white/black medium square
+    if (ucs >= 0x2600 && ucs <= 0x2604) return true;   // sun..comet
+    if (ucs == 0x260E) return true;                    // telephone
+    if (ucs == 0x2611) return true;                    // ballot box with check
+    if (ucs == 0x2618) return true;                    // shamrock
+    if (ucs == 0x261D) return true;                    // index pointing up
+    if (ucs == 0x2620) return true;                    // skull and crossbones
+    if (ucs >= 0x2622 && ucs <= 0x2623) return true;   // radioactive, biohazard
+    if (ucs == 0x2626) return true;                    // orthodox cross
+    if (ucs == 0x262A) return true;                    // star and crescent
+    if (ucs >= 0x262E && ucs <= 0x262F) return true;   // peace, yin yang
+    if (ucs >= 0x2638 && ucs <= 0x263A) return true;   // wheel of dharma..smiling face
+    if (ucs == 0x2640 || ucs == 0x2642) return true;   // female/male sign
+    if (ucs >= 0x265F && ucs <= 0x2660) return true;   // chess pawn, black spade suit
+    if (ucs == 0x2663) return true;                    // black club suit
+    if (ucs >= 0x2665 && ucs <= 0x2666) return true;   // black heart/diamond suit
+    if (ucs == 0x2668) return true;                    // hot springs
+    if (ucs == 0x267B) return true;                    // recycling symbol
+    if (ucs == 0x267E) return true;                    // infinity
+    if (ucs == 0x2692) return true;                    // hammer and pick
+    if (ucs >= 0x2694 && ucs <= 0x2697) return true;   // crossed swords..alembic
+    if (ucs == 0x2699) return true;                    // gear
+    if (ucs >= 0x269B && ucs <= 0x269C) return true;   // atom symbol, fleur-de-lis
+    if (ucs == 0x26A0) return true;                    // warning sign (the bug-report char)
+    if (ucs == 0x26A7) return true;                    // transgender symbol
+    if (ucs >= 0x26B0 && ucs <= 0x26B1) return true;   // coffin, funeral urn
+    if (ucs == 0x26C8) return true;                    // thunder cloud and rain
+    if (ucs == 0x26CF) return true;                    // pick
+    if (ucs == 0x26D1) return true;                    // helmet with white cross
+    if (ucs == 0x26D3) return true;                    // chains
+    if (ucs == 0x26E9) return true;                    // shinto shrine
+    if (ucs >= 0x26F0 && ucs <= 0x26F1) return true;   // mountain, umbrella on ground, flag
+    if (ucs == 0x26F4) return true;                    // ferry
+    if (ucs >= 0x26F7 && ucs <= 0x26F9) return true;   // skier, ice skate, person bouncing ball
+    if (ucs == 0x2702) return true;                    // scissors
+    if (ucs >= 0x2708 && ucs <= 0x2709) return true;   // airplane, envelope
+    if (ucs >= 0x270C && ucs <= 0x270D) return true;   // victory hand, writing hand
+    if (ucs == 0x270F) return true;                    // pencil
+    if (ucs == 0x2712) return true;                    // black nib
+    if (ucs == 0x2714) return true;                    // heavy check mark
+    if (ucs == 0x2716) return true;                    // heavy multiplication x
+    if (ucs == 0x271D) return true;                    // latin cross
+    if (ucs == 0x2721) return true;                    // star of david
+    if (ucs >= 0x2733 && ucs <= 0x2734) return true;   // eight-spoked asterisk, eight-pointed star
+    if (ucs == 0x2744) return true;                    // snowflake
+    if (ucs == 0x2747) return true;                    // sparkle
+    if (ucs >= 0x2763 && ucs <= 0x2764) return true;   // heavy heart exclamation, red heart
+    if (ucs == 0x27A1) return true;                    // right arrow
+    if (ucs >= 0x2934 && ucs <= 0x2935) return true;   // arrow heading up then right, down then right
+    if (ucs >= 0x2B05 && ucs <= 0x2B07) return true;   // left/up/down arrows
+    if (ucs == 0x3030) return true;                    // wavy dash
+    if (ucs == 0x303D) return true;                    // part alternation mark
+    if (ucs == 0x3297 || ucs == 0x3299) return true;   // circled ideograph congratulation/secret
+    return false;
+}
+// Combining-mark blocks that RenderText folds into the base cell (P3) —
+// same ranges as the width-0 class in imtui_wcwidth below.
+static bool imtui_is_combining_mark(unsigned int ucs)
+{
+    if (ucs >= 0x0300 && ucs <= 0x036F) return true;
+    if (ucs >= 0x1AB0 && ucs <= 0x1AFF) return true;
+    if (ucs >= 0x1DC0 && ucs <= 0x1DFF) return true;
+    if (ucs >= 0x20D0 && ucs <= 0x20FF) return true;
+    if (ucs >= 0xFE20 && ucs <= 0xFE2F) return true;
+    return false;
+}
 static int imtui_wcwidth(unsigned int ucs)
 {
+    // Width 0: control characters (DEL..0x9F; NBSP U+00A0 is width 1)
     if (ucs == 0) return 0;
     if (ucs < 32 || (ucs >= 0x7F && ucs < 0xA0)) return 0;
+
+    // Width 0: combining marks (dropped in P0, see RenderText skip rule)
+    if (ucs >= 0x0300 && ucs <= 0x036F) return 0;
+    if (ucs >= 0x1AB0 && ucs <= 0x1AFF) return 0;
+    if (ucs >= 0x1DC0 && ucs <= 0x1DFF) return 0;
+    if (ucs >= 0x20D0 && ucs <= 0x20FF) return 0;
+    if (ucs >= 0xFE20 && ucs <= 0xFE2F) return 0;
+
+    // Width 0: variation selectors (incl. VS16 U+FE0F)
+    if (ucs >= 0xFE00 && ucs <= 0xFE0F) return 0;
+
+    // Width 0: zero-width format/control block
+    if (ucs >= 0x200B && ucs <= 0x200F) return 0;   // ZWSP, ZWNJ, ZWJ (U+200D), LRM, RLM
+    if (ucs >= 0x2028 && ucs <= 0x202E) return 0;   // 2028-2029 line/paragraph separators (extension beyond Kuhn); 202A-202E bidi controls
+    if (ucs >= 0x2060 && ucs <= 0x206F) return 0;   // word joiner, invisible operators
+    if (ucs == 0xFEFF) return 0;                    // BOM / ZWNBSP
+    if (ucs >= 0xFFF9 && ucs <= 0xFFFB) return 0;   // interlinear annotation anchors
+
+    // Regional indicators stay width 1 each (flag pairs are grapheme
+    // clusters; this must win over the coarse 0x1F000-0x1F644 range below).
+    if (ucs >= 0x1F1E6 && ucs <= 0x1F1FF) return 1;
+
+    // Width 2: East Asian Wide/Fullwidth (existing ranges)
     if (ucs >= 0x1100 && ucs <= 0x115F) return 2;
     if (ucs >= 0x2329 && ucs <= 0x232A) return 2;
     if (ucs >= 0x2E80 && ucs <= 0xA4CF) return 2;
@@ -55,15 +288,21 @@ static int imtui_wcwidth(unsigned int ucs)
     if (ucs >= 0xFE30 && ucs <= 0xFE6F) return 2;
     if (ucs >= 0xFF01 && ucs <= 0xFF60) return 2;
     if (ucs >= 0xFFE0 && ucs <= 0xFFE6) return 2;
-    if (ucs >= 0x1F000 && ucs <= 0x1F644) return 2;
     if (ucs >= 0x20000 && ucs <= 0x2FFFD) return 2;
     if (ucs >= 0x30000 && ucs <= 0x3FFFD) return 2;
+
+    // Width 2: Emoji_Presentation=Yes (emoji-data.txt 15.1, 2023-09). The
+    // class lives in imtui_is_emoji_presentation() above so the narrow-emoji
+    // terminal override (LLMFUN_IMTUI_EMOJI_WIDTH=1) can force it to width 1
+    // and RenderText's VS16 folding can reference the same ranges.
+    if (imtui_is_emoji_presentation(ucs))
+        return imtui_emoji_width_one() ? 1 : 2;
     return 1;
 }
 static float ImFontIMTuiCellWidth(unsigned int cp)
 {
     int w = imtui_wcwidth(cp);
-    if (w < 0) w = 1;
+    // The table only ever returns 0/1/2; clamp defensively for future ranges.
     if (w > 2) w = 2;
     return (float)w;
 }
@@ -3421,6 +3660,14 @@ void ImFont::RenderText(ImDrawList* draw_list, float size, ImVec2 pos, ImU32 col
     ImDrawVert* vtx_write = draw_list->_VtxWritePtr;
     ImDrawIdx* idx_write = draw_list->_IdxWritePtr;
     unsigned int vtx_current_idx = draw_list->_VtxCurrentIdx;
+#ifdef IMTUI
+    // LLMFUN PATCH (P3, Task 6): most recently emitted glyph quad — the fold
+    // target for width-0 continuations (VS16 / combining marks). See the
+    // fold block below. Cleared on dropped chars, invisible glyphs (spaces),
+    // clipped quads and line breaks so only immediately adjacent
+    // continuations fold.
+    ImDrawVert* lastQuad = NULL;
+#endif
 
     const ImU32 col_untinted = col | ~IM_COL32_A_MASK;
 
@@ -3441,6 +3688,9 @@ void ImFont::RenderText(ImDrawList* draw_list, float size, ImVec2 pos, ImU32 col
                 x = pos.x;
                 y += line_height;
                 word_wrap_eol = NULL;
+#ifdef IMTUI
+                lastQuad = NULL; // new line: no base to fold into
+#endif
 
                 // Wrapping skips upcoming blanks
                 while (s < text_end)
@@ -3471,12 +3721,20 @@ void ImFont::RenderText(ImDrawList* draw_list, float size, ImVec2 pos, ImU32 col
             {
                 x = pos.x;
                 y += line_height;
+#ifdef IMTUI
+                lastQuad = NULL; // new line: no base to fold into
+#endif
                 if (y > clip_rect.w)
                     break; // break out of main loop
                 continue;
             }
             if (c == '\r')
+            {
+#ifdef IMTUI
+                lastQuad = NULL; // carriage return: no fold across it
+#endif
                 continue;
+            }
         }
 
         const ImFontGlyph* glyph = FindGlyph((ImWchar)c);
@@ -3495,9 +3753,109 @@ void ImFont::RenderText(ImDrawList* draw_list, float size, ImVec2 pos, ImU32 col
 #endif
 
 #ifdef IMTUI
-        float char_width = ImFontIMTuiCellWidth(c) * scale;
+        const float cw = ImFontIMTuiCellWidth(c);
+        float char_width = cw * scale;
 #else
         float char_width = glyph->AdvanceX * scale;
+#endif
+#ifdef IMTUI
+        // LLMFUN PATCH: width-0 codepoints (VS16 U+FE0F, ZWJ U+200D,
+        // format/control chars incl. literal tabs, combining marks) must
+        // never produce their own grid cell: the quad-width-1 invariant
+        // (x2 = x + 1.0) and the "avg + 1" cell mapping assume each emitted
+        // quad advances the pen by exactly its cell width, so a width-0 cell
+        // would shift the terminal cursor and leave a dangling blank cell.
+        // The pen never advances for width-0 chars (continue skips the
+        // trailing x += char_width), so the next glyph maps to the same pen
+        // position. Test the unscaled result (cw), not char_width, to stay
+        // robust against scale changes.
+        //
+        // P0 default (Task 2): drop the codepoint. Consequence: ⚠️
+        // (U+26A0 + U+FE0F) renders as narrow ⚠ on all terminals —
+        // guaranteed aligned (design §6); combining marks are dropped
+        // (e + U+0301 renders as aligned "e").
+        //
+        // P3 (Task 6), LLMFUN_IMTUI_EMOJI_PRESENTATION=1 (terminals that
+        // cluster VS16): instead of dropping, fold the continuation into the
+        // PREVIOUSLY emitted quad at the vertex level — no second quad is
+        // emitted, so the text backend's lastCharX dedup (which would push a
+        // duplicate quad to lastCharX + 1) never fires:
+        //  - VS16 (U+FE0F) after a text-default emoji base (the
+        //    imtui_is_vs16_eligible list) promotes the base cell to width 2;
+        //  - a combining mark attaches to the base cell, width unchanged.
+        // The continuation codepoint travels in vtx 3's color (becomes
+        // TCell::ch2; see the encoding contract below) and the ncurses
+        // backend emits ch + ch2 as one addwstr run so the terminal clusters
+        // the pair before the chwidth cursor compensation.
+        //
+        // Conservative folding rules — a wrong fold shifts the row (the
+        // original bug class in the opposite direction):
+        //  - only into the IMMEDIATELY preceding emitted text quad
+        //    (lastQuad is cleared on dropped chars, invisible glyphs
+        //    (spaces), clipped quads and line breaks);
+        //  - never into a space cell (base ch == ' ') and never twice
+        //    (a cell holds one ch2);
+        //  - VS16 only promotes width-1 bases and never when
+        //    LLMFUN_IMTUI_EMOJI_WIDTH=1 forces the emoji class narrow;
+        //    VS16 after any other base is dropped — which is what the
+        //    terminal does anyway (VS16 is a no-op on non-emoji bases);
+        //  - a promoted pair advances the pen by 2 cells total (the base's
+        //    own char_width of 1 plus one extra cell below), matching what
+        //    the terminal will render; without this extra advance the next
+        //    glyph would land inside the 2-cell span and be skipped by the
+        //    ncurses chwidth cursor compensation;
+        //  - ZWJ U+200D, ZWSP, bidi controls and other zero-width format
+        //    characters are ALWAYS dropped (grapheme clusters are out of
+        //    scope — design §6 Won't). VS15 (U+FE0E) is also always dropped
+        //    in this revision: demoting a width-2 emoji to width 1 would
+        //    misalign on terminals that ignore VS15, and folding it with no
+        //    width change is indistinguishable from dropping it.
+        //  - ncurses' internal wcwidth counts the folded VS16 pair as 1
+        //    cell (wcwidth(U+26A0)=1, wcwidth(U+FE0F)=0) while the grid and
+        //    VS16-clustering terminals count 2. The initial write is still
+        //    correct (the terminal applies its own width model to the byte
+        //    stream), but ncurses' virtual screen ends up 1 column short
+        //    per pair, so ncurses' diff-based row updates would land 1
+        //    column off on a rewrite. Fixed in the ncurses backend: rows
+        //    whose new or previous grid contains a fold are forced to a
+        //    full-line redraw (wredrawln) instead of diff patching (see
+        //    imtui-impl-ncurses.cpp). The combining-mark fold has no width
+        //    change and does not diverge. The gate still defaults OFF
+        //    because non-clustering terminals (real xterm, tmux) render
+        //    the pair narrow (1 cell vs the grid's 2) — an unfixable
+        //    terminal-capability mismatch that no redraw strategy can
+        //    compensate.
+        if (cw <= 0.0f)
+        {
+            bool folded = false;
+            if (lastQuad != NULL && lastQuad[3].col == 0 &&
+                lastQuad[1].col != (ImU32)' ' &&
+                imtui_emoji_presentation_enabled())
+            {
+                const ImU32 base = lastQuad[1].col;
+                if (c == 0xFE0F && lastQuad[2].col <= 1 &&
+                    !imtui_emoji_width_one() && imtui_is_vs16_eligible(base))
+                {
+                    lastQuad[2].col = 2;   // emoji presentation: 2 cells
+                    lastQuad[3].col = (ImU32)c;
+                    // The base already advanced 1 cell (its char_width);
+                    // the promoted pair occupies 2 terminal cells, so add
+                    // the missing cell here — otherwise the next glyph maps
+                    // inside the 2-cell span and the ncurses chwidth skip
+                    // would swallow it (see the folding rules above).
+                    x += scale;
+                    folded = true;
+                }
+                else if (imtui_is_combining_mark(c))
+                {
+                    lastQuad[3].col = (ImU32)c; // mark merges; width unchanged
+                    folded = true;
+                }
+            }
+            if (!folded)
+                lastQuad = NULL; // dropped: do not fold across it
+            continue;            // never advance the pen for width-0 chars
+        }
 #endif
         if (glyph->Visible)
         {
@@ -3508,6 +3866,9 @@ void ImFont::RenderText(ImDrawList* draw_list, float size, ImVec2 pos, ImU32 col
             float y2 = y - 0.5f;
             if (x1 <= clip_rect.z && x2 >= clip_rect.x)
             {
+#ifdef IMTUI
+                ImDrawVert* quad_start = vtx_write; // fold target update below
+#endif
                 // Render a character
                 float u1 = glyph->U0;
                 float v1 = glyph->V0;
@@ -3557,17 +3918,48 @@ void ImFont::RenderText(ImDrawList* draw_list, float size, ImVec2 pos, ImU32 col
                     vtx_write[1].pos.x = x2; vtx_write[1].pos.y = y1; vtx_write[1].col = glyph_col; vtx_write[1].uv.x = u2; vtx_write[1].uv.y = v1;
                     vtx_write[2].pos.x = x2; vtx_write[2].pos.y = y2; vtx_write[2].col = glyph_col; vtx_write[2].uv.x = u2; vtx_write[2].uv.y = v2;
                     vtx_write[3].pos.x = x1; vtx_write[3].pos.y = y2; vtx_write[3].col = glyph_col; vtx_write[3].uv.x = u1; vtx_write[3].uv.y = v2;
-                    // LLMFUN PATCH: encode character code and width into vertex colors
+                    // LLMFUN PATCH: vertex-color encoding contract. The imtui
+                    // text backend decodes each emitted quad back into a
+                    // terminal cell (ImTui_ImplText_RenderDrawData,
+                    // imtui-impl-text.cpp "cell.ch = col1; ...", around line
+                    // 245):
+                    //   vtx_write[0].col = glyph color       -> cell fg
+                    //   vtx_write[1].col = Unicode codepoint -> TCell::ch
+                    //   vtx_write[2].col = cell width 1 or 2 -> TCell::chwidth
+                    //   vtx_write[3].col = continuation codepoint (VS16 or a
+                    //       combining mark folded into the base by the P3
+                    //       rule above) -> TCell::ch2; 0 = none
+                    // These assignments MUST stay in sync with the backend
+                    // decode; the width written here is the unscaled table
+                    // result (see the fold/skip rule above).
+                    // Note: ImFont::RenderChar (ellipsis path, ~line 3453)
+                    // does NOT apply this encoding; if an ellipsis renders
+                    // into the TScreen its quad decodes a color as the cell
+                    // character (U+2026 is width 1, so the skip rule does not
+                    // catch it). Known limitation; the ellipsis path is not
+                    // exercised by llmfun_tui's llm_output child.
 #ifdef IMTUI
                     vtx_write[1].col = (ImU32)c;
                     vtx_write[2].col = (ImU32)ImFontIMTuiCellWidth(c);
+                    vtx_write[3].col = 0; // ch2: no continuation (the P3 fold may set it afterwards)
 #endif
                     vtx_write += 4;
                     vtx_current_idx += 4;
                     idx_write += 6;
+#ifdef IMTUI
+                    lastQuad = quad_start; // base for a following width-0 continuation
+#endif
                 }
             }
+#ifdef IMTUI
+            else
+                lastQuad = NULL; // quad clipped: nothing visible to fold into
+#endif
         }
+#ifdef IMTUI
+        else
+            lastQuad = NULL; // invisible glyph (space): no base for a following mark
+#endif
         x += char_width;
     }
 

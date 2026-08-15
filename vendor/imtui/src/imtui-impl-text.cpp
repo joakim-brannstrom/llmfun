@@ -172,6 +172,27 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
 
                 if (clip_rect.x < fb_width && clip_rect.y < fb_height && clip_rect.z >= 0.0f && clip_rect.w >= 0.0f)
                 {
+                    // LLMFUN PATCH: quad-to-cell mapping. Every glyph quad
+                    // emitted by RenderText is exactly 1 cell wide
+                    // (quad-width-1 invariant) and carries the codepoint in
+                    // vertex 1's color and the cell width in vertex 2's color
+                    // (encoding contract, imgui_draw.cpp RenderText). The
+                    // cell position is the average of the six quad vertices;
+                    // the "+1" offset (xx = x + 1) is the "avg + 1" mapping
+                    // that puts the first text cell in grid column 1 (column
+                    // 0 is the window frame/margin; the scrollbar occupies
+                    // the last column, clip_rect.z - 1, per the clip guard
+                    // below). The dedup heuristic below pushes a second quad
+                    // landing on the same cell to lastCharX + 1 so two glyphs never
+                    // overwrite one cell. Vertices are clipped to
+                    // clip_rect.z - 1 so content can never overwrite the
+                    // scrollbar column. ch/chwidth/ch2 are taken from the
+                    // encoded vertex colors (vertex 1 = codepoint, vertex 2
+                    // = cell width, vertex 3 = continuation codepoint folded
+                    // into the base, P3 Task 6 — decoded below, guarded by
+                    // col2 being a cell width); rect cells painted by
+                    // drawTriangle() (scrollbar track/grab, window bg) set
+                    // ch = ' ' and leave chwidth/ch2 = 0.
                     float lastCharX = -10000.0f;
                     float lastCharY = -10000.0f;
 
@@ -204,6 +225,19 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                             int vvidx0 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 3];
                             int vvidx1 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 4];
                             int vvidx2 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 5];
+                            // LLMFUN PATCH (P3, Task 6): vertex 3's color
+                            // carries the continuation codepoint
+                            // (VS16/combining mark folded into the base by
+                            // RenderText; 0 = none). vvidx2 IS the quad's
+                            // vertex 3 (index 5 of the quad's 6 indices), so
+                            // this read is always in bounds here: the loop
+                            // only reaches this branch for text quads, where
+                            // i is the quad's first triangle (the trailing
+                            // i += 3 below skips the second). Reading it
+                            // inside the branch keeps the rect-triangle path
+                            // (which has no vertex 3) free of any
+                            // out-of-range index access.
+                            auto col3 = cmd_list->VtxBuffer[vvidx2].col;
 
                             auto ppos0 = cmd_list->VtxBuffer[vvidx0].pos;
                             auto ppos1 = cmd_list->VtxBuffer[vvidx1].pos;
@@ -227,6 +261,19 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                                 auto & cell = screen->data[yy*screen->nx + xx];
                                 cell.ch = col1;
                                 cell.chwidth = (uint8_t)col2;
+                                // LLMFUN PATCH (P3, Task 6): decode the
+                                // continuation codepoint (VS16/combining mark
+                                // folded into the base by RenderText) into
+                                // TCell::ch2. col3 is only meaningful for
+                                // RenderText-encoded quads, i.e. quads whose
+                                // col2 is a cell width (1 or 2); any other
+                                // textured quad (e.g. the ImFont::RenderChar
+                                // ellipsis path, which lacks the encoding)
+                                // carries colors in these channels and must
+                                // not leak a garbage continuation. Width-0
+                                // codepoints never emit a quad, so text
+                                // cells always decode chwidth >= 1.
+                                cell.ch2 = (col2 >= 1 && col2 <= 2) ? (uint32_t)col3 : 0;
                                 cell.fg = rgbToAnsi256(col0, false);
                             }
                             i += 3;
