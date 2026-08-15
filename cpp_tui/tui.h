@@ -185,6 +185,7 @@ struct MarkdownStyle {
 
     ImVec4 strong = ImVec4(1.0f, 1.0f, 0.8f, 1.0f);
     ImVec4 italic = ImVec4(0.3f, 0.9f, 0.9f, 1.0f);
+    ImVec4 inlineCode = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
 };
 
 struct TuiState {

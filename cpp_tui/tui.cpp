@@ -544,6 +544,19 @@ void markdownFormatCallback(const ImGui::MarkdownFormatInfo& markdownFormatInfo_
             ImGui::PopStyleColor();
         }
     } break;
+    // Terminal has no monospace face: wrap the span in literal backticks,
+    // same trick as the EMPHASIS markers above.
+    case ImGui::MarkdownFormatType::INLINE_CODE:
+        if (start_) {
+            ImGui::PushStyleColor(ImGuiCol_Text, style.inlineCode);
+            ImGui::TextUnformatted("`");
+            ImGui::SameLine(0.0f, 0.0f);
+        } else {
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::TextUnformatted("`");
+            ImGui::PopStyleColor();
+        }
+        break;
     case ImGui::MarkdownFormatType::LINK:
         if (start_) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);

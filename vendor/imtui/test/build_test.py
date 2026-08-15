@@ -9,6 +9,11 @@ Usage:
 Tests are Python-based since imtui's stripped-down ImGui lacks the full
 API needed by imgui_markdown. The compilation test verifies that
 imgui_markdown.h compiles correctly as part of the llmfun_tui build.
+
+The runtime harness test_inline_code_runtime.cpp additionally compiles
+imgui_markdown.h standalone against a fake ImGui namespace (g++ only, no
+imtui) and asserts the exact rendered byte stream for every inline-code
+edge-case matrix row.
 """
 
 import subprocess
@@ -18,6 +23,12 @@ import shutil
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "both"
+    mode = mode.lstrip("-")  # accept --build/--run as documented in the README
+    if mode not in ("both", "build", "run"):
+        print(f"Unknown mode: {sys.argv[1]!r}. Usage: build_test.py [--build|--run]")
+        return 2
+
+    skipped = 0  # runtime harness not verifiable (g++ missing)
 
     # Install build tools (needed every session)
     print("=== Installing build tools ===")
@@ -75,27 +86,80 @@ def main():
 
     if mode in ("both", "run"):
         print(f"\n=== Running tests ===")
-        test_script = os.path.join(testdir, "test_code_block.py")
-        if not os.path.exists(test_script):
-            print(f"Test script not found: {test_script}")
-            return 1
+        combined = 0
 
-        result = subprocess.run(
-            [sys.executable, test_script],
-            capture_output=True, text=True,
-            cwd=testdir, timeout=60
-        )
-        print(result.stdout)
-        if result.stderr:
-            print(f"STDERR:\n{result.stderr}")
+        # Static-analysis test scripts (Python)
+        for script_name in ("test_code_block.py", "test_inline_code.py"):
+            test_script = os.path.join(testdir, script_name)
+            if not os.path.exists(test_script):
+                print(f"Test script not found: {test_script}")
+                combined = 1
+                continue
 
-        if result.returncode == 0:
-            print("\nAll tests passed.")
+            result = subprocess.run(
+                [sys.executable, test_script],
+                capture_output=True, text=True,
+                cwd=testdir, timeout=60
+            )
+            print(result.stdout)
+            if result.stderr:
+                print(f"STDERR:\n{result.stderr}")
+
+            if result.returncode == 0:
+                print(f"{script_name}: all tests passed.")
+            else:
+                print(f"{script_name}: some tests failed (exit code {result.returncode}).")
+                combined = 1
+
+        # Runtime harness (C++): exact rendered byte stream for every
+        # inline-code edge-case matrix row, against a fake ImGui namespace.
+        harness_src = os.path.join(testdir, "test_inline_code_runtime.cpp")
+        harness_bin = os.path.join(testdir, "test_inline_code_runtime")
+        try:
+            result = subprocess.run(
+                ["g++", "-std=c++11", "-O0", "-o", harness_bin, harness_src],
+                capture_output=True, text=True,
+                cwd=testdir, timeout=120
+            )
+        except FileNotFoundError:
+            print("Harness NOT verified: g++ not found (install build-essential first).")
+            result = None
+        if result is None:
+            skipped = 1
+        elif result.returncode != 0:
+            print(result.stdout[-500:] if result.stdout else "")
+            print(result.stderr[-500:] if result.stderr else "")
+            print("Harness compilation failed.")
+            combined = 1
         else:
-            print(f"\nSome tests failed (exit code {result.returncode}).")
-            return result.returncode
+            result = subprocess.run(
+                [harness_bin],
+                capture_output=True, text=True,
+                cwd=testdir, timeout=60
+            )
+            print(result.stdout)
+            if result.stderr:
+                print(f"STDERR:\n{result.stderr}")
+            if result.returncode == 0:
+                print("Runtime harness: all checks passed.")
+            else:
+                print(f"Runtime harness: some checks failed (exit code {result.returncode}).")
+                combined = 1
+            try:
+                os.remove(harness_bin)
+            except OSError:
+                pass
 
-    return 0
+        if combined == 0 and skipped == 0:
+            print("\nAll tests passed.")
+        elif skipped:
+            print("\nRuntime harness NOT verified (g++ missing); overall gate fails.")
+        else:
+            print("\nSome tests failed.")
+
+    if skipped and combined == 0:
+        return 1
+    return combined
 
 if __name__ == "__main__":
     sys.exit(main())

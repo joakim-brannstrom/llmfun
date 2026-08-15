@@ -124,8 +124,12 @@ def test_block_without_id():
 def test_empty_block():
     tc = test_start("Empty block")
     src = load_header()
-    tc.check("codeBlock_.textStart < codeBlock_.textEnd" in src,
-             "RenderCodeBlock should check for empty content")
+    # Content length is computed from textStart/textEnd; the default callback
+    # guards empty content with "lineBegin < textLen" before rendering.
+    tc.check("formatInfo.textLength = codeBlock_.textEnd - codeBlock_.textStart" in src,
+             "RenderCodeBlock should compute content length from textStart/textEnd")
+    tc.check("if (lineBegin < textLen)" in src,
+             "Default callback should guard empty content via lineBegin < textLen")
     tc.finish()
 
 
@@ -172,9 +176,9 @@ def test_link_literal():
 def test_multiline_block():
     tc = test_start("Multi-line block")
     src = load_header()
-    tc.check("markdown_[ci] == '\\n'" in src,
-             "RenderCodeBlock should split content on newlines")
-    tc.check('ImGui::TextUnformatted(markdown_ + lineBegin, markdown_ + lineBreak)' in src,
+    tc.check("case MarkdownFormatType::CODE_BLOCK" in src,
+             "Default callback should handle the CODE_BLOCK format type")
+    tc.check('ImGui::TextUnformatted(text + lineBegin, text + lineBreak)' in src,
              "Each line should be rendered with TextUnformatted")
     tc.finish()
 

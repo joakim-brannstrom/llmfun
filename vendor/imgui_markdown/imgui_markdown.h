@@ -289,6 +289,7 @@ enum class MarkdownFormatType {
     LINK,
     EMPHASIS,
     CODE_BLOCK,
+    INLINE_CODE,
 };
 
 struct MarkdownFormatInfo {
@@ -404,6 +405,7 @@ private:
 struct Line {
     bool isHeading = false;
     bool isEmphasis = false;
+    bool isInlineCode = false;
     bool isUnorderedListStart = false;
     bool isLeadingSpace = true; // spaces at start of line
     int leadSpaceCount = 0;
@@ -456,6 +458,11 @@ struct CodeBlock {
         0; // Number of backticks in opening fence (for CommonMark close validation)
 };
 
+struct CodeSpan {
+    bool active = false;
+    int textStart = 0; // Start index of span content in markdown_ (after opening backtick)
+};
+
 inline void UnderLine(ImColor col_) {
     ImVec2 min = ImGui::GetItemRectMin();
     ImVec2 max = ImGui::GetItemRectMax();
@@ -502,6 +509,14 @@ inline void RenderLine(const char* markdown_, Line& line_, TextRegion& textRegio
         formatInfo.type = MarkdownFormatType::EMPHASIS;
         mdConfig_.formatCallback(formatInfo, true);
         const char* text = markdown_ + textStart;
+        textRegion_.RenderTextWrapped(text, text + textSize);
+    } else if (line_.isInlineCode) // render inline code
+    {
+        formatInfo.type = MarkdownFormatType::INLINE_CODE;
+        const char* text = markdown_ + textStart;
+        formatInfo.text = text;
+        formatInfo.textLength = textSize;
+        mdConfig_.formatCallback(formatInfo, true);
         textRegion_.RenderTextWrapped(text, text + textSize);
     } else // render a normal paragraph chunk
     {
@@ -558,6 +573,7 @@ inline void Markdown(const char* markdown_, size_t markdownLength_,
     Link link;
     Emphasis em;
     CodeBlock codeBlock;
+    CodeSpan codeSpan;
     TextRegion textRegion;
     int concurrentEmptyNewlines = 0;
     bool appliedExtraNewline = false;
@@ -665,6 +681,7 @@ inline void Markdown(const char* markdown_, size_t markdownLength_,
                         i = nlEnd - 1;
                         em = Emphasis();
                         link = Link();
+                        codeSpan = CodeSpan();
                         continue;
                     }
                     // Not a valid opening fence; fall through to normal processing
@@ -735,6 +752,7 @@ inline void Markdown(const char* markdown_, size_t markdownLength_,
                             line.lastRenderPosition = i;
                             em = Emphasis(); // Reset emphasis state when exiting code block
                             link = Link();   // Reset link state when exiting code block
+                            codeSpan = CodeSpan(); // Reset inline code span state
                             line.isLeadingSpace =
                                 true; // Reset line state for next line after closing fence
                             line.lineStart =
@@ -799,6 +817,53 @@ inline void Markdown(const char* markdown_, size_t markdownLength_,
             if (!appliedExtraNewline && !prevLine.isHeading && concurrentEmptyNewlines >= 1) {
                 ImGui::NewLine();
                 appliedExtraNewline = true;
+            }
+        }
+
+        // Inline code spans — text between single backticks is rendered literally
+        // (skip when inside code block)
+        if (!codeBlock.active) {
+            if (codeSpan.active) {
+                if (c == '`') {
+                    // render text before the span (the opening backtick is excluded
+                    // from both the pre-text and the span content)
+                    int lineEnd = codeSpan.textStart - 1;
+                    if (lineEnd > line.lineStart) {
+                        line.lineEnd = lineEnd;
+                        RenderLine(markdown_, line, textRegion, mdConfig_);
+                        ImGui::SameLine(0.0f, 0.0f);
+                        line.isUnorderedListStart = false;
+                        line.leadSpaceCount = 0;
+                    }
+                    line.isInlineCode = true;
+                    line.lastRenderPosition = codeSpan.textStart - 1;
+                    line.lineStart = codeSpan.textStart;
+                    line.lineEnd = i;
+                    RenderLine(markdown_, line, textRegion, mdConfig_);
+                    ImGui::SameLine(0.0f, 0.0f);
+                    line.isInlineCode = false;
+                    line.lastRenderPosition = i;
+                    codeSpan = CodeSpan();
+                    continue;
+                }
+                if (c == '\n' || c == '\r') {
+                    // unclosed span at end of line: abort it and fall through so the
+                    // normal line-end handler renders the opening backtick literally
+                    codeSpan = CodeSpan();
+                } else {
+                    // span content is literal: skip link and emphasis parsing
+                    continue;
+                }
+            } else if (c == '`' && (i == 0 || markdown_[i - 1] != '`') &&
+                       link.state == Link::NO_LINK && em.state == Emphasis::NONE &&
+                       !line.isHeading && (int)markdownLength_ > i + 1 && markdown_[i + 1] != '`' &&
+                       markdown_[i + 1] != '\n' && markdown_[i + 1] != '\r') {
+                // a lone backtick starts an inline code span; hold the backtick back
+                // (line.lastRenderPosition is left untouched) so it renders literally
+                // if the span never closes
+                codeSpan.active = true;
+                codeSpan.textStart = i + 1;
+                continue;
             }
         }
 
@@ -1008,6 +1073,7 @@ inline void Markdown(const char* markdown_, size_t markdownLength_,
                 link = Link();
                 em = Emphasis(); // Reset emphasis state to prevent stale state carrying through
                                  // code block
+                codeSpan = CodeSpan(); // Reset inline code span state
                 concurrentEmptyNewlines = 0;
                 appliedExtraNewline = false;
                 continue;
@@ -1060,6 +1126,7 @@ inline void Markdown(const char* markdown_, size_t markdownLength_,
         codeBlock = CodeBlock();
         em = Emphasis();
         link = Link(); // Reset link state after rendering unclosed code block
+        codeSpan = CodeSpan(); // Reset inline code span state
         // Prevent RenderLine from re-rendering code block content
         line.lineStart = (int)markdownLength_;
     }
@@ -1373,6 +1440,13 @@ inline void defaultMarkdownFormatCallback(const MarkdownFormatInfo& markdownForm
         }
         break;
     }
+    case MarkdownFormatType::INLINE_CODE:
+        if (start_) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+        } else {
+            ImGui::PopStyleColor();
+        }
+        break;
     default:
         break;
     }
