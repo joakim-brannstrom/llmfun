@@ -48,6 +48,10 @@ llmfun/
 └── doc/                           # Documentation (database, sessions, skills, TUI design)
 ```
 
+If your identity is **llmfun** then:
+- when accessing the source code through tools such as listDirectories, read/write/edit the source code is located at "./llmfun".
+- when using the tool executeCommand the working directory is /workarea. The absolute path to the source code is /workarea/llmfun.
+
 ## Commands
 
 **Important**: The container image to use when running the tool `executeCommand` is `llmfun/app:latest`.
