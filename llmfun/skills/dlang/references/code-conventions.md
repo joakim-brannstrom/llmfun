@@ -128,6 +128,22 @@
   to signal error-return patterns (returning `SumType`, error codes, etc.) and
   let the compiler enforce the contract.
 
+## Global State & Threading
+
+- **Module-level globals are thread-local (TLS) by default.** Each thread gets
+  its own copy. A global registry filled on one thread appears empty on other
+  threads. Mark cross-thread globals `__gshared` (raw shared storage, no
+  safeguards) or `shared` (compiler-checked access):
+
+  ```d
+  int counter;           // TLS: per-thread copy
+  __gshared int gcount;  // shared across threads
+  shared int scount;     // shared, compiler-checked
+  ```
+
+- **`static this()` runs once per thread.** Use `shared static this()` for
+  program-wide initialization.
+
 ## General
 
 - **ASCII only.** Avoid emdash, unicode arrows, or any non-ASCII characters. Use `-`, `->`, `x`, `...`.

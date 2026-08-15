@@ -5,7 +5,7 @@ description: >-
   D programs, compiling D code, running D tests, or managing D project dependencies.
   Triggers on: dlang, d language, d programming, dub, dub.sdl, dub.json,
   D project, D build, D test, compile D, run D.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # D Language Skill
@@ -14,25 +14,18 @@ Work with D programming language projects using dub as the build system.
 
 ## When to Use
 
-Use this skill when:
-- Building or testing D projects with dub
-- Working with D source code files
-- Configuring dub project files (dub.sdl or dub.json)
-- Compiling or running D programs
-- Diagnosing build environment issues
-- Checking D source syntax or brace balance
+Use when building or testing D projects with dub, working with D source files,
+configuring dub projects (dub.sdl or dub.json), or diagnosing build issues.
 
 ## Key Concepts
 
 - A **dub project** is a directory containing a `dub.sdl` or `dub.json` file.
-- Build by executing `dub build` in the project directory.
-- Use `executeCommand` tool with a D language container environment to compile and execute tests.
-  Example: `executeCommand(environmentTag="dlang", command=["cd", "<project-dir>", "&&", "dub", "build"])`
 
 ## Rules
 
 - **Always use dub**: Build and test through dub, not manual compilation.
-- **Use executeCommand**: Use `executeCommand` with a D language container environment to run dub commands.
+- **Use executeImage**: Use `executeCommand` with a D language environment to run dub commands.
+  Example: `executeCommand(environmentTag="dlang2:latest", command=["cd", "<project-dir>", "&&", "dub", "build"])`
 - **Check dub config first**: Read `dub.sdl` or `dub.json` before building to understand project structure.
 - **Verify build output**: Check the `targetPath` directory (default: `./`) for compiled artifacts.
 
@@ -45,16 +38,12 @@ Full details in `references/code-conventions.md`. Key rules:
 - **Use ddoc**, not doxygen. Forms: `/** ... */`, `///`, `/+ ... +/`.
 - **Module header:** Brief ddoc (1-3 lines) before `module` declaration.
 - **Explain why, not what.** Concise: 1-2 lines. No hard-wrapping.
-- **Write code first, comment later.** Never comment copied code.
 
 ### String Handling
 
 - **Prefer interpolated strings** over `std.format.format`.
 - **Runtime interpolated strings need `.text`:** `i"value: $(var)".text` — without `.text` you get `AliasSeq`, not `string`. Requires `import std.conv : text;`.
-- **No format specifiers in interpolated strings:** Cannot do `%.1f`, `%.80s`, `%(...)`. Keep `format!"..."` for float formatting or use alternatives:
-  - Float: `format!"%.1f"(value)` or embed: `i"$(format!"%.1f"(v)) units".text`
-  - Truncation: `str[0 .. min(str.length, 80)]` instead of `%.80s`
-  - Arrays: `.join(" ")` instead of `%(%-s %)`
+- **No format specifiers in interpolated strings:** Cannot do `%.1f`, `%.80s`, `%(...)`. Use `format!"..."` for floats, `.join(" ")` for arrays, slicing for truncation (examples in references).
 - **Prefer backtick-strings** when embedding `"` or `\`.
 
 ### Variable Initialization
@@ -81,6 +70,10 @@ Full details in `references/code-conventions.md`. Key rules:
 - **pure:** Add when no global/mutable state access.
 - **nothrow:** Mark when no exceptions. Signals error-return patterns.
 
+### Global State & Threading
+
+- **Globals are thread-local (TLS) by default**: each thread gets its own copy; a registry filled on one thread is empty on others. Use `__gshared` or `shared` for cross-thread state. Details: `references/code-conventions.md`.
+
 ### General
 
 - **ASCII only.** No emdash, unicode arrows, or non-ASCII.
@@ -92,34 +85,12 @@ Full details in `references/code-conventions.md`. Key rules:
 1. **Identify the project**: Locate the `dub.sdl` or `dub.json` file.
 2. **Read the configuration**: Understand project name, type, dependencies, and target path.
 3. **Choose the command**: Use `build` to compile, `test` to run tests.
-4. **Execute with dub**: Use `executeCommand` with a D language container environment and dub command.
-  Example: `executeCommand(environmentTag="dlang", command=["cd", "<project-dir>", "&&", "dub", "build"])`
+4. **Execute with dub**: Use `executeCommand` with a D language container environment and dub command (see Rules).
 5. **Verify results**: Check output for errors or test results.
 
 ## Utility Scripts
 
-See `scripts/README.md` for full documentation. Quick reference:
-
-| Script | Purpose |
-|--------|---------|
-| `find_d_toolchain.py` | Find ldc2, dmd, gdc, dub |
-| `check_d_syntax.py` | Syntax-check .d files via ldc2 |
-| `dub_build.py` | Build/test dub projects |
-| `count_d_loc.py` | Count LOC in D source |
-| `check_braces.py` / `.d` | Verify brace balance |
-| `check_build_tools.py` | Verify build environment |
-| `find_c_libs.py` | Find C/C++ library dependencies |
-| `gen_dub_deps.py` | Generate dub.sdl dependency entries |
-
-## Minimal dub.sdl Configuration
-
-```sdl
-name "program"
-targetPath "build"
-targetType "executable"
-```
-
-This minimal config reads and compiles all files in the source directory.
+See `scripts/README.md` for the script reference (syntax checks, dub builds, toolchain discovery).
 
 ## References
 

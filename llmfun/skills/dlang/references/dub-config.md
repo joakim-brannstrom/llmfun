@@ -20,8 +20,8 @@ The `executeCommand` tool runs commands in a configured execution environment. U
 
 **Example usage:**
 ```
-executeCommand(environmentTag="dlang", command=["cd", "<project-dir>", "&&", "dub", "build"])
-executeCommand(environmentTag="dlang", command=["cd", "<project-dir>", "&&", "dub", "test"])
+executeCommand(environmentTag="dlang2:latest", command=["cd", "<project-dir>", "&&", "dub", "build"])
+executeCommand(environmentTag="dlang2:latest", command=["cd", "<project-dir>", "&&", "dub", "test"])
 ```
 
 The build target "syntax" is excellent for checking the syntax of the code
@@ -29,7 +29,7 @@ without generating any object code. Prefer using it if you do not need to
 execute the tests.
 
 ```
-executeCommand(environmentTag="dlang", command=["cd", "<project-dir>", "&&", "dub", "build", "-b", "syntax"])
+executeCommand(environmentTag="dlang2:latest", command=["cd", "<project-dir>", "&&", "dub", "build", "-b", "syntax"])
 ```
 
 ## Minimal dub.sdl
