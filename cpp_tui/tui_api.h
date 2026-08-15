@@ -38,7 +38,16 @@ extern "C" {
  *     tuiLastError
  */
 
-#define TUI_API_VERSION 1
+/* TUI_API_VERSION - API generation marker. Documentation only: nothing
+ * consumes this macro at compile time or runtime. Bump it (with a comment
+ * listing the additions) whenever the C API surface grows.
+ *
+ * Version history:
+ *   1 - original API
+ *   2 - session sidebar: SessionItem, TuiSessionActionType, SessionAction,
+ *       tuiSetSessionList, tuiIsSessionActionReady, tuiGetSessionAction
+ */
+#define TUI_API_VERSION 2
 
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
@@ -126,6 +135,65 @@ typedef struct PipelineChatMessage {
     String finishReason;
     String status;
 } PipelineChatMessage;
+
+/* SessionItem - One row of the session sidebar snapshot.
+ *
+ * Ownership: all Strings are inbound (non-owning). The panel copies their
+ * data during tuiSetSessionList, so the caller's buffers may be reused or
+ * freed immediately after the call returns.
+ *
+ * Layout (64-bit): 3x String{ptr(8) + size_t(8)} + size_t(8) + int(4)
+ *   = 60 bytes (+ 4-byte tail padding), total struct size 64 bytes.
+ * All fields are naturally aligned.
+ *
+ * Example initialization:
+ *   SessionItem item = {
+ *       .id           = String{"abc123", 6},
+ *       .title        = String{"My Chat", 7},
+ *       .preview      = String{"Hello", 5},
+ *       .messageCount = 3,
+ *       .isActive     = 1,
+ *   };
+ */
+typedef struct SessionItem {
+    String id;           /* offset 0,  size 16 - immutable session id */
+    String title;        /* offset 16, size 16 */
+    String preview;      /* offset 32, size 16 - first user message, truncated by D */
+    size_t messageCount; /* offset 48, size 8 */
+    int isActive;        /* offset 56, size 4 - 1 = active, 0 = not */
+} SessionItem;           /* total size: 64 bytes */
+
+/* TuiSessionActionType - Kind of a session sidebar action.
+ * Append-only ordering: existing values must never be renumbered or
+ * reused, so future actions (Fork, Export, Archive, Search, ...) can be
+ * added without breaking the D-side mapping.
+ */
+typedef enum TuiSessionActionType {
+    TuiSessionAction_None = 0,   /* sentinel - no action (empty queue) */
+    TuiSessionAction_Select = 1, /* switch to the session */
+    TuiSessionAction_New = 2,    /* create a new session */
+    TuiSessionAction_Rename = 3, /* rename the session (title payload) */
+    TuiSessionAction_Delete = 4  /* delete the session (already confirmed) */
+} TuiSessionActionType;
+
+/* SessionAction - One queued sidebar action, consumed by tuiGetSessionAction.
+ *
+ * Ownership: the Strings returned by tuiGetSessionAction are owned
+ * (malloc'd) and MUST be freed with String_Free() when no longer needed.
+ * An empty field is returned as {NULL, 0}.
+ *
+ * Layout (64-bit): enum(4) + 4-byte padding + 2x String{ptr(8) + size_t(8)}
+ *   = 40 bytes. All fields are naturally aligned.
+ *
+ * Fields:
+ *   sessionId - target session id; empty ({NULL, 0}) for New.
+ *   title     - new title for Rename; empty for all other types.
+ */
+typedef struct SessionAction {
+    TuiSessionActionType type; /* offset 0,  size 4 */
+    String sessionId;          /* offset 8,  size 16 */
+    String title;              /* offset 24, size 16 */
+} SessionAction;               /* total size: 40 bytes */
 
 /* TuiState — Opaque handle to the internal TUI state.
  * Created via tuiCreateState(), destroyed via tuiDestroyState().
@@ -409,6 +477,46 @@ void tuiSetAutoScroll(TuiState* state, int enabled);
  * Pass 1 to signal ready and 0 for busy.
  */
 void tuiReadyStatus(TuiState* state, int ready);
+
+/* ---- Session sidebar ---- */
+
+/* Replace the session snapshot shown in the sidebar panel.
+ *
+ * `items` is an array of `count` SessionItem structs. The panel copies all
+ * inbound strings during the call, so the caller's buffers may be freed or
+ * reused immediately after this call returns (same contract as
+ * tuiInitQueryHistory / tuiAddChatMessage).
+ *
+ * The active id is recomputed from the snapshot (the entry with
+ * isActive != 0; at most one such entry is expected - the last one wins
+ * defensively). The panel's pending two-step delete confirmation is
+ * cleared when its id is absent from the new snapshot.
+ *
+ * Null-safe: no-op if state is NULL. `items` may be NULL when count == 0
+ * (empty list); a NULL items pointer with count > 0 is treated as empty.
+ */
+void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count);
+
+/* Check whether the sidebar has a pending session action.
+ *
+ * Pure check - does not consume anything. Returns 1 iff at least one
+ * action is queued, 0 otherwise.
+ *
+ * Null-safe: returns 0 if state is NULL.
+ */
+int tuiIsSessionActionReady(TuiState* state);
+
+/* Pop one pending session action from the front of the sidebar queue.
+ *
+ * Consume-on-read: each call returns exactly one action, or the None
+ * sentinel when the queue is empty. The returned strings are owned
+ * (malloc'd) and MUST be freed with String_Free() when no longer needed.
+ * An empty sessionId/title field is returned as {NULL, 0}.
+ *
+ * Null-safe: returns {TuiSessionAction_None, {NULL, 0}, {NULL, 0}} if
+ * state is NULL.
+ */
+SessionAction tuiGetSessionAction(TuiState* state);
 
 #ifdef __cplusplus
 }

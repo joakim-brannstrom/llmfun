@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -10,7 +11,27 @@
 String makeStr(const char* s) { return String{s, std::strlen(s)}; }
 String makeStr(std::string s) { return String{s.data(), s.size()}; };
 
-int main() {
+int main(int argc, char** argv) {
+    // Headless smoke mode: --frames N (or --smoke = --frames 30) renders
+    // exactly N frames then exits 0, so CI can exercise the session panel
+    // and the action queue without a human. Without the argument the loop
+    // below runs until the user quits (L5: interactive loop unchanged).
+    int maxFrames = -1;
+    if (argc >= 3 && std::strcmp(argv[1], "--frames") == 0) {
+        char* end = nullptr;
+        long n = std::strtol(argv[2], &end, 10);
+        if (end == argv[2] || *end != '\0' || n < 0) {
+            std::fprintf(stderr, "error: --frames requires a non-negative integer\n");
+            return 2;
+        }
+        maxFrames = static_cast<int>(n);
+    } else if (argc == 2 && std::strcmp(argv[1], "--smoke") == 0) {
+        maxFrames = 30;
+    } else if (argc > 1) {
+        std::fprintf(stderr, "usage: %s [--frames N | --smoke]\n", argv[0]);
+        return 2;
+    }
+
     TuiScreen* screen = nullptr;
 
     screen = tuiInit();
@@ -34,6 +55,20 @@ int main() {
     tuiSetLogging(state, true);
     tuiSetStatusText(state, makeStr("Context: 0/0 tokens | Model: none | Ready"));
     tuiSetIniFilename(state, makeStr("imgui2.ini"));
+
+    // Headless smoke seed: session sidebar snapshot so the panel renders
+    // rows and the action poll can be exercised (Task 6). Inbound strings
+    // are copied by tuiSetSessionList, so the literals may go out of scope.
+    if (maxFrames >= 0) {
+        SessionItem sessions[] = {
+            {makeStr("20260815-100000-aaaa"), makeStr("Alpha session"),
+             makeStr("first user preview"), 3, 1},
+            {makeStr("20260815-100000-bbbb"), makeStr("Beta session"),
+             makeStr("second user preview"), 5, 0},
+            {makeStr("20260815-100000-cccc"), makeStr("Gamma session"), makeStr(""), 0, 0},
+        };
+        tuiSetSessionList(state, sessions, sizeof(sessions) / sizeof(sessions[0]));
+    }
 
     for (int i = 0; i < 300; ++i) {
         std::string summary{"hello"};
@@ -187,7 +222,13 @@ int main() {
     auto pipelineShow = true;
     auto pipelineShowAt = std::chrono::system_clock::now() + std::chrono::seconds{1};
 
+    // Frame-count exit for --frames N; the body is identical to the
+    // interactive loop (L5).
+    int frame = 0;
     while (true) {
+        if (maxFrames >= 0 && frame >= maxFrames)
+            break;
+
         tuiBackendNewFrame();
 
         if (tuiRender(state) == 0)
@@ -227,6 +268,32 @@ int main() {
         }
 
         tuiBackendRender(screen);
+        ++frame;
+    }
+
+    if (maxFrames >= 0) {
+        // Headless smoke: exercise the session action poll. Nothing was
+        // clicked in the dry-run, so the queue must be empty and the pop
+        // must return the None sentinel with NULL strings (String_Free is
+        // a no-op on them). This proves tuiIsSessionActionReady /
+        // tuiGetSessionAction work end-to-end in the executable.
+        if (tuiIsSessionActionReady(state) != 0) {
+            std::fprintf(stderr, "error: expected empty session action queue\n");
+            tuiDestroyState(state);
+            tuiShutdown(screen);
+            return 1;
+        }
+        SessionAction action = tuiGetSessionAction(state);
+        String_Free(action.sessionId);
+        String_Free(action.title);
+        if (action.type != TuiSessionAction_None) {
+            std::fprintf(stderr, "error: expected TuiSessionAction_None sentinel\n");
+            tuiDestroyState(state);
+            tuiShutdown(screen);
+            return 1;
+        }
+        std::printf("smoke ok: rendered %d frames, session action queue empty (None sentinel)\n",
+                    frame);
     }
 
     tuiDestroyState(state);

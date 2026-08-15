@@ -8,6 +8,8 @@ import std.concurrency;
 
 import my.path : Path;
 
+import llm.session : SessionId;
+
 import llmfun_tui;
 
 // Convert a D string to an inbound API `String` (no allocation)
@@ -241,6 +243,37 @@ struct TextUserInterface {
         tuiInitQueryHistory(tuiState, app[].ptr, app[].length);
     }
 
+    // Replaces the sidebar session snapshot. The C++ panel copies all
+    // inbound strings during the call, so the D buffers may be reused
+    // or freed immediately afterwards.
+    void setSessionList(const(UiSessionItem)[] items) {
+        if (items.length == 0) {
+            tuiSetSessionList(tuiState, null, 0);
+            return;
+        }
+        auto app = appender!(SessionItem[])();
+        foreach (ref const item; items) {
+            app.put(SessionItem(toTuiString(item.id.get), toTuiString(item.title),
+                    toTuiString(item.preview), item.messageCount, item.isActive ? 1 : 0));
+        }
+        tuiSetSessionList(tuiState, app[].ptr, app[].length);
+    }
+
+    // Pops at most one sidebar action from the C++ queue. Returned strings
+    // are owned by the C API and freed here exactly once (String_Free is a
+    // no-op for the {NULL, 0} fields of the empty-queue None sentinel).
+    void pollSessionAction(out TuiSessionActionType type, out string id, out string title) {
+        // `out` parameters default to .init on entry (None / null).
+        if (tuiIsSessionActionReady(tuiState) == 0)
+            return;
+        auto action = tuiGetSessionAction(tuiState);
+        type = action.type;
+        id = toString(action.sessionId);
+        title = toString(action.title);
+        String_Free(action.sessionId);
+        String_Free(action.title);
+    }
+
     bool hasUserTerminated() @safe {
         return userTerminated_;
     }
@@ -350,6 +383,38 @@ struct UiPipelineStreamDone {
 struct UiPipelineClear {
 }
 
+// Session sidebar snapshot (D -> UI): full ordered list of sessions.
+struct UiSessionItem {
+    SessionId id;
+    string title;
+    string preview;
+    size_t messageCount;
+    bool isActive;
+}
+
+struct UiSessionList {
+    // Immutable array so the message passes std.concurrency's send()
+    // no-mutable-aliasing check (same pattern as UiInitHistory.queries).
+    UiSessionItem[] items;
+}
+
+// Session sidebar actions (UI -> D), consumed by the agent receive loop.
+struct UiSessionSelect {
+    SessionId id;
+}
+
+struct UiSessionNew {
+}
+
+struct UiSessionRename {
+    SessionId id;
+    string title;
+}
+
+struct UiSessionDelete {
+    SessionId id;
+}
+
 void spawnUserInterface(Tid ownerTid) {
     import std.string : strip;
     import std.datetime : dur, Clock, Duration;
@@ -361,6 +426,15 @@ void spawnUserInterface(Tid ownerTid) {
     auto ui = makeTui();
     ui.setUiAsStdLogger;
     bool running = true;
+    // Stash for one session action per frame (L7 deferral): polled after
+    // render, forwarded at the top of the next iteration AFTER the drained
+    // user query, so the agent always sees the query before the click.
+    // If the owner dies mid-forward the send throws, the loop catch logs it,
+    // and the stash is retried next iteration; the UI thread terminates with
+    // the process, so this accepted teardown behavior is intentional.
+    TuiSessionActionType pendingAction = TuiSessionAction_None;
+    string pendingActionId;
+    string pendingActionTitle;
 
     immutable UpdateInterval = 10.dur!"msecs";
     auto nextUpdate = Clock.currTime;
@@ -384,7 +458,8 @@ void spawnUserInterface(Tid ownerTid) {
                 (UiInitHistory a) { ui.setHistory(a.queries); },
                 (UiPipelineStreamChatMessage a) { ui.pipelineMessage(a); },
                 (UiPipelineStreamDone a) { ui.pipelineMessage(a); },
-                (UiPipelineClear _) { ui.pipelineClear; }
+                (UiPipelineClear _) { ui.pipelineClear; },
+                (immutable UiSessionList a) { ui.setSessionList(a.items); }
             );
             // dfmt on
 
@@ -399,9 +474,41 @@ void spawnUserInterface(Tid ownerTid) {
                 }
             }
 
+            // Forward the stashed sidebar action (if any) AFTER the drained
+            // user query: both share one sender mailbox, so the agent always
+            // sees the query before the click (L7).
+            if (pendingAction != TuiSessionAction_None) {
+                switch (pendingAction) {
+                case TuiSessionAction_Select:
+                    send(ownerTid, UiSessionSelect(SessionId(pendingActionId)));
+                    break;
+                case TuiSessionAction_New:
+                    send(ownerTid, UiSessionNew.init);
+                    break;
+                case TuiSessionAction_Rename:
+                    send(ownerTid, UiSessionRename(SessionId(pendingActionId),
+                            pendingActionTitle));
+                    break;
+                case TuiSessionAction_Delete:
+                    send(ownerTid, UiSessionDelete(SessionId(pendingActionId)));
+                    break;
+                default:
+                    logger.warningf("Unknown session action type %d", pendingAction);
+                    break;
+                }
+                pendingAction = TuiSessionAction_None;
+                pendingActionId = null;
+                pendingActionTitle = null;
+            }
+
             if (Clock.currTime > nextUpdate) {
                 ui.render();
                 nextUpdate = Clock.currTime + UpdateInterval;
+                // Poll one session action per frame into the stash; never
+                // overwrite an action that is still awaiting forward.
+                if (pendingAction == TuiSessionAction_None) {
+                    ui.pollSessionAction(pendingAction, pendingActionId, pendingActionTitle);
+                }
             }
         } catch (Exception e) {
             logger.trace(e);

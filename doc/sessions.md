@@ -22,6 +22,14 @@ The session layer is deliberately chat-free: it stores and parses JSON only and 
   - [Commit Points](#commit-points)
   - [Slash Commands](#slash-commands)
   - [Delete Confirmation](#delete-confirmation)
+- [TUI Sidebar (Phase 2)](#tui-sidebar-phase-2)
+  - [Panel UI](#panel-ui)
+  - [Message Flow](#message-flow)
+  - [Mutual Exclusion with the Pipeline Panel](#mutual-exclusion-with-the-pipeline-panel)
+  - [Busy Gating and the Late-Click Effect](#busy-gating-and-the-late-click-effect)
+  - [Rename and Delete Semantics](#rename-and-delete-semantics)
+  - [Refresh Rule](#refresh-rule)
+  - [C API](#c-api)
 - [Error Handling](#error-handling)
 - [Concurrency and Atomicity](#concurrency-and-atomicity)
 - [Tests](#tests)
@@ -34,7 +42,7 @@ The core idea is simple: **one JSON file per session, no in-memory cache**.
 
 | Aspect | Decision |
 |--------|----------|
-| Storage | One JSON file per session in the chat directory (`<scratchArea>/chat/`, i.e. `data/chat/` with the default scratch area) |
+| Storage | One JSON file per session in the chat directory (`<dataDir>/chat/`) |
 | Identity | Session id = filename (immutable). Renaming changes the header title only |
 | State | The store is stateless; `AgentApp` holds the active session's `SessionMeta` |
 | Format | JSON contract only — the session module knows nothing about `Chat` |
@@ -225,6 +233,110 @@ Deleting the **active** session skips the pre-switch commit (the deleted file mu
 - Any other command clears the pending state.
 
 The decision logic is the pure helper `decideDeleteCommand(pendingId, resolvedId)`, returning `ignore` / `confirm` / `clear`.
+
+---
+
+## TUI Sidebar (Phase 2)
+
+Phase 2 adds a session sidebar to the TUI: a left panel listing all sessions (id, title, preview, message count, active marker) with switch / new / rename / delete operated from the panel. Every sidebar action funnels into the Phase 1 `AgentApp` methods (`switchToSession`, `doCreateSession`, `doDeleteSession`) or the store directly (`sessionStore.rename`), preserving the three-layer architecture (D actor thread -> C API -> C++ imtui renderer) and its message-passing style.
+
+### Panel UI
+
+The panel is a `ChatTabSessionPanel` (`cpp_tui/tui.h`), auto-opened at startup:
+
+- Open width is 30 columns (`PanelWActivated`); collapsing leaves an 8-column "Open" button strip so the output area never covers it.
+- One row per session: title truncated to the row width with an ellipsis (UTF-8 safe) plus the always-kept ` [N]` message-count suffix; the active row is highlighted; hovering shows a tooltip with the full title and preview.
+- "New" at the top queues a create action; "Rename" is a toggle on the active row that reveals an `InputText`; each row has a two-step delete button (`del` -> `del?` -> confirm).
+- The panel has no vertical scrolling yet; rows below the terminal height are unreachable until Phase 3.
+
+### Message Flow
+
+```
+startup / mutation / query completion:
+  AgentApp (agent thread)
+    sendSessionList() -> UiSessionList(items) -> UI thread
+      ui.setSessionList(items) -> tuiSetSessionList(state, items, n)
+        -> C++ replaces the panel snapshot (full replace, A1)
+
+sidebar interaction:
+  C++ renderTabChatSessionPanel: button / rename input / two-step delete
+    -> SessionAction pushed onto panel.actions
+  UI thread (after ui.render()): ui.pollSessionAction() polls at most one
+    action (tuiIsSessionActionReady + tuiGetSessionAction), stashes it
+  Next loop iteration (after draining ui.userQuery):
+    send(ownerTid, UiUserQuery(query))                 -- non-empty query first (L7)
+    send(ownerTid, UiSessionSelect|New|Rename|Delete)  -- click after
+  AgentApp run() receive loop:
+    UiSessionSelect -> doSidebarSelect  -> switchToSession(id)
+    UiSessionNew    -> doSidebarNew     -> doCreateSession()
+    UiSessionRename -> doSidebarRename  -> sessionStore.rename(id, title)
+    UiSessionDelete -> doSidebarDelete  -> doDeleteSession(id)
+    each mutating callee ends with a sendSessionList() refresh
+```
+
+The diagram omits two UI-thread gates: the drained query is sent only when
+its stripped form is non-empty, and the exact raw string `/stop` is
+intercepted by the UI thread itself (`stopAgent()`) and never sent to the
+agent. Both gates predate Phase 2 and are unchanged.
+
+The new D messages live in `source/llm/tui/package.d` (module `llm.tui`):
+
+| Direction | Message | Payload |
+|-----------|---------|---------|
+| D -> UI | `UiSessionList` | `UiSessionItem[]` (id, title, preview, messageCount, isActive); immutable for `std.concurrency` send |
+| UI -> D | `UiSessionSelect` | `SessionId id` |
+| UI -> D | `UiSessionNew` | none |
+| UI -> D | `UiSessionRename` | `SessionId id`, `string title` |
+| UI -> D | `UiSessionDelete` | `SessionId id` |
+
+The action poll mirrors the existing submit-query poll (`tuiIsSubmitReady` / `tuiGetSubmitQuery` / `tuiResetSubmit`): the C++ side owns UI state, the D side polls and forwards, the agent thread owns semantics. `pollSessionAction` frees every returned string exactly once with `String_Free` (a no-op on the empty-queue `None` sentinel's `{NULL, 0}` fields).
+
+The per-frame stash is deferred to the top of the next loop iteration so that a same-frame query + click reaches the agent in a deterministic order: the drained user query is sent first, then the click (L7). A query typed in frame N runs in the session it was typed in; the switch applies after. The agent's `sendSessionList()` is guarded by `uiMsg.isActive()`, so one-shot mode (`-p`) never sends.
+
+### Mutual Exclusion with the Pipeline Panel
+
+The chat tab has one left-panel slot shared with the pipeline panel. The
+pipeline panel renders whenever it has agents — open or collapsed — so it
+always wins the slot while agents are present; the session panel renders only
+when the pipeline is empty. The rule is keyed on **agents-present**
+(`!state.left.agents.empty()`), not on the pipeline's open/closed state, and
+panel state is preserved, so the session panel reappears exactly as it was
+when the pipeline clears. The output area offsets by `leftPanelWidth(state)`:
+session panel open = 30 columns, collapsed = 8-column "Open" strip, pipeline
+present = the pipeline panel's width. See `doc/tui_design.md` for the panel
+internals.
+
+### Busy Gating and the Late-Click Effect
+
+While the agent is busy (`readyStatus == false`), every interactive sidebar widget is guarded: no action is queued (guard-and-skip only; the vendored ImGui 1.81 has no `BeginDisabled`). Because the C++ queue and the agent mailbox are separate, a click that is already in flight when the busy state flips is still delivered and processed between queries — the observable effect is a click that appears to fire after the current query completes. Phase 3 upgrades this to an explicit pending-switch queue; the C++ `actions` deque and its consume-on-read semantics already support it.
+
+### Rename and Delete Semantics
+
+- The rename input is bound to the **active row** and the action carries the session id; D renames that id regardless of the current active session (A8), so a rename can never hit the wrong session if a switch raced in between. Empty/whitespace-only titles are rejected in the panel and again in D; there is no length cap anywhere (matching `/rename` and `SessionStore.rename`). The panel buffer holds 128 bytes; a title that does not fit initializes the buffer empty, so a blind Enter is rejected as empty until a new title is typed — no silent truncation. The buffer is (re)initialized only on row change or toggle-open, never per frame.
+- Two-step delete is owned by the C++ panel (`pendingDeleteId` in the panel): the first press arms the row, a second press on the same row queues the confirmed delete, pressing another row's delete moves the pending target, and any non-delete control clears it. The slash `/delete` keeps its own confirmation state machine, and every sidebar handler clears the agent-side `pendingDeleteId` on entry, so a stale slash confirmation can never fire against a session that was switched away from, renamed, or deleted via the sidebar (A5).
+- Deleting the active session goes through the same Phase 1 fallback (most recently updated remaining session, else a fresh one); deleting a non-active session removes it and refreshes without switching.
+
+### Refresh Rule
+
+The sidebar snapshot is a full replace: D sends the complete ordered list (`SessionStore.list()` order, i.e. `updatedAt` descending) with `isActive` marking the active session, and C++ replaces its copy wholesale. Refresh points:
+
+1. At startup, after the message replay in `run()`.
+2. After every completed query, next to `uiMsg.ready()` (covers `/clear`, since `commitActiveSession` bumps `updatedAt` and recomputes counts/preview on every save).
+3. At the end of every mutation chain: `activateSession` (success path) / `switchToSession` / `doRenameSession` / `doDeleteSession` (non-active path); `doCreateSession` sends via the `switchToSession` -> `activateSession` chain. `activateSession` deliberately sends nothing on its load-failure path, and `doDeleteSession` relies on `activateSession` for the active-delete path.
+
+The mutating callees send the list themselves; a `UiSession*` handler sends only when its path does not end in a sending callee — no double sends per sidebar action. `UiSessionRename` goes straight to the store (there is no active-only rename callee for an arbitrary id), so `doSidebarRename` sends the refreshed list on both the success and the error path. Slash-triggered mutations are exempt from the single-send rule: they arrive as `UiUserQuery`, so the callee send and the receive-loop refresh may both fire in one pass. Idempotent (C++ full replace), accepted.
+
+### C API
+
+The sidebar boundary lives in the pure C API (`cpp_tui/tui_api.h`, `TUI_API_VERSION` bumped 1 -> 2 — a documentation marker only, nothing consumes it at compile or runtime):
+
+| Function | Behavior |
+|----------|----------|
+| `tuiSetSessionList(TuiState*, const SessionItem*, size_t)` | Full replace of the panel snapshot; copies all inbound strings during the call; recomputes the active id; clears the panel's pending two-step delete when its id is absent; null-safe |
+| `tuiIsSessionActionReady(TuiState*)` | 1 iff at least one action is queued; pure check, consumes nothing; null-safe |
+| `tuiGetSessionAction(TuiState*)` | Pops exactly one action from the front (consume-on-read); returned strings are malloc'd and must be freed with `String_Free`; `{TuiSessionAction_None, {NULL, 0}, {NULL, 0}}` when empty; null-safe |
+
+See `doc/tui_design.md` for the panel internals and layout comments.
 
 ---
 

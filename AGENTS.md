@@ -77,7 +77,7 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 ./build/llmfun agent                        # Run interactive agent
 ./build/llmfun rag add <path>               # Add file to RAG index
 ./build/llmfun rag query "question"         # Query RAG knowledge base
-./build/llmfun tool_metrics --data llmfun/data/scratch/monitor.jsonl   # View tool metrics
+./build/llmfun tool_metrics --data llmfun/data/monitor.jsonl   # View tool metrics
 ./build/llmfun mcp --stdio                                              # Run MCP server over stdio
 ./build/llmfun mcp --list-tools                                         # List available MCP tools
 ```
@@ -232,7 +232,7 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 
 ### Chat Sessions
 
-- Multi-history chat storage: one JSON file per session under `data/chat/<id>.json` with header `{title, createdAt, updatedAt, messages}`.
+- Multi-history chat storage: one JSON file per session under `<dataDir>/chat/<id>.json` with header `{title, createdAt, updatedAt, messages}`.
 - Implementation: `source/llm/session/` package (module `llm.session`). `package.d` re-exports `types.d` (`SessionMeta`, `SessionFile`, the `SessionId` strong type, id generation/validation), `store.d` (`SessionStore`: create/load/save/rename/remove/list), `resolve.d` (`resolveSessionRef`: index -> id -> title, pure), `tests.d` (unit tests).
 - Chat-free by design: the module only speaks JSON. `app_agent/package.d` bridges `SessionFile.doc` to `agent_.chat.load()` / `agent_.chat.toSaveJson()`.
 - Naming rule: "session" already means app-launch in `config.d` (`sessionCount` drives memory consolidation). The chat-history concept uses `SessionStore` / `SessionMeta` / `SessionFile` only.
@@ -245,6 +245,8 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 - System-prompt entries are stripped from `messages` before save (D13); the prompt is re-set at startup.
 - Single writer (the agent thread); all writes are atomic (tmp file + rename).
 - Full documentation: `doc/sessions.md`.
+- Phase 2 TUI sidebar: a left session panel (`ChatTabSessionPanel` in `cpp_tui/tui.h`) with switch / new / rename / delete. Messages: `UiSessionList` (D -> UI snapshot) and `UiSessionSelect` / `UiSessionNew` / `UiSessionRename` / `UiSessionDelete` (UI -> D actions) in `tui/package.d`; the agent handlers `doSidebarSelect` / `doSidebarNew` / `doSidebarRename` / `doSidebarDelete` reuse the Phase 1 methods. `isValidId` is public (`session/types.d`) for UI-boundary validation.
+- Sidebar C API additions (`TUI_API_VERSION` 2, documentation marker): `SessionItem`, `SessionAction`, `tuiSetSessionList`, `tuiIsSessionActionReady`, `tuiGetSessionAction`. The session panel and the pipeline panel share one left slot: `leftPanelWidth(state)` resolves the output offset; the pipeline wins whenever it has agents.
 
 ### Slash Commands
 
@@ -290,6 +292,7 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 - C++ TUI library (`cpp_tui/`) provides Dear ImGui-based terminal UI with markdown rendering.
 - D bindings in `tui/package.d` handle streaming and inter-thread message passing.
 - Exposed via pure C API (`tui_api.h` / `tui_api.cpp`) for D interop.
+- Session sidebar (`ChatTabSessionPanel`): session rows with active marker and ` [N]` count, rename toggle + input on the active row, two-step delete, busy gating (guard-and-skip; the vendored ImGui 1.81 has no `BeginDisabled`). Mutually exclusive with the pipeline panel (the pipeline wins the left slot whenever it has agents); `leftPanelWidth(state)` resolves the output offset. See `doc/tui_design.md`.
 
 ### MCP Server
 

@@ -157,6 +157,54 @@ struct ChatTabLeftPanel {
     bool autoScroll = true;
 };
 
+// Internal C++ mirror of the C TuiSessionActionType (tui_api.h).
+// Append-only ordering: existing values must never be renumbered or
+// reused, so future actions can be added without breaking the D mapping.
+enum class SessionActionType : int {
+    None = 0,
+    Select = 1,
+    New = 2,
+    Rename = 3,
+    Delete = 4,
+};
+
+// One queued sidebar action (UI -> D). Mirrors the C SessionAction
+// (tui_api.h); the C API layer converts between the two.
+struct SessionAction {
+    SessionActionType type = SessionActionType::None;
+    std::string sessionId; // empty for New
+    std::string title;     // new title for Rename, empty otherwise
+};
+
+// One row of the session sidebar snapshot (full replace, A1).
+struct SessionEntry {
+    std::string id;
+    std::string title;
+    std::string preview;
+    size_t messageCount{0};
+    bool isActive{false};
+};
+
+struct ChatTabSessionPanel {
+    ImVec4 activeButton = ImVec4(0.4f, 0.4f, 0.45f, 1.0f);
+    int panelW = 0; // 0 = unset; init to PanelWActivated on first render
+    static constexpr int PanelWActivated = 30;
+    bool panelOpen{true}; // auto-open at startup
+
+    std::vector<SessionEntry> sessions; // full snapshot (A1)
+    std::string activeId;               // active session id from the snapshot
+    std::deque<SessionAction> actions;  // UI -> D queue (A2/A7)
+
+    char renameBuf[128] = {};    // rename input; init on row change or
+                                 // toggle-open, never per frame
+    bool renameActive{false};    // rename input visible (L8)
+    std::string renameRowId;     // row renameBuf was initialized for (L3)
+    bool renameFocus{false};     // focus the rename input on the next frame
+    int renameSeq{0};            // bumped on each toggle-open; keeps the
+                                 // InputText state fresh per open
+    std::string pendingDeleteId; // two-step delete state (A5)
+};
+
 struct ChatTab {
     ImVec4 nestedAssistNodeBg = ImVec4(0.25f, 0.25f, 0.25f, 1.0f);
     ImVec4 thinkingNodeBg = ImVec4(0.2f, 0.2f, 0.2f, 1.0f);
@@ -197,6 +245,7 @@ struct TuiState {
 
     ChatTab chat;
     ChatTabLeftPanel left;
+    ChatTabSessionPanel sessionPanel;
 
     std::deque<LogMessage> logMessages;
     static constexpr size_t MaxLogMessages = 1000;
@@ -214,6 +263,12 @@ struct TuiState {
 
     TuiState() { startProcesssingTime = std::chrono::system_clock::now(); }
 };
+
+/// Resolved width of the left panel slot (A6/H1): the pipeline panel wins
+/// whenever it has agents (open or collapsed); otherwise the session panel
+/// renders when open and keeps its 8-wide "Open" strip when closed (the
+/// output area never covers the panel).
+int leftPanelWidth(const TuiState& s);
 
 void initMarkdownConfig(TuiState& state);
 

@@ -10,7 +10,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 struct TuiScreen {
@@ -398,6 +400,96 @@ void tuiPipelineClear(TuiState* state) {
     if (!state || !state->inner)
         return;
     state->inner->left.agents.clear();
+}
+
+/* Compile-time linkage between the C enum (tui_api.h) and the internal C++
+ * mirror (tui.h): both lists are append-only and must stay in sync, or the
+ * static_cast in tuiGetSessionAction would silently mis-map future values.
+ */
+static_assert(static_cast<int>(::llmfun::tui::SessionActionType::None) == TuiSessionAction_None,
+              "C/C++ session action enum mismatch (None)");
+static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Select) == TuiSessionAction_Select,
+              "C/C++ session action enum mismatch (Select)");
+static_assert(static_cast<int>(::llmfun::tui::SessionActionType::New) == TuiSessionAction_New,
+              "C/C++ session action enum mismatch (New)");
+static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Rename) == TuiSessionAction_Rename,
+              "C/C++ session action enum mismatch (Rename)");
+static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Delete) == TuiSessionAction_Delete,
+              "C/C++ session action enum mismatch (Delete)");
+
+/* ---- Session sidebar ---- */
+
+void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count) {
+    if (!state || !state->inner)
+        return;
+    auto& panel = state->inner->sessionPanel;
+    panel.sessions.clear();
+    panel.activeId.clear();
+    if (items && count > 0) {
+        panel.sessions.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            const SessionItem& it = items[i];
+            ::llmfun::tui::SessionEntry e;
+            e.id = it.id.data ? std::string(it.id.data, it.id.len) : std::string();
+            e.title = it.title.data ? std::string(it.title.data, it.title.len) : std::string();
+            e.preview =
+                it.preview.data ? std::string(it.preview.data, it.preview.len) : std::string();
+            e.messageCount = it.messageCount;
+            e.isActive = it.isActive != 0;
+            if (e.isActive)
+                panel.activeId = e.id; // at most one active entry expected; last wins
+            panel.sessions.push_back(std::move(e));
+        }
+    }
+    // Two-step delete confirmation: drop the pending id when the target
+    // session is no longer in the snapshot.
+    if (!panel.pendingDeleteId.empty()) {
+        const std::string& pending = panel.pendingDeleteId;
+        auto found = std::find_if(
+            panel.sessions.begin(), panel.sessions.end(),
+            [&pending](const ::llmfun::tui::SessionEntry& s) { return s.id == pending; });
+        if (found == panel.sessions.end())
+            panel.pendingDeleteId.clear();
+    }
+    // The rename box binds to the active row; when the active row is no
+    // longer in the snapshot (deleted between refreshes, or the snapshot
+    // has no active entry at all), close the box - an open box bound to a
+    // missing row is dead-but-harmless state (Task 8 tracked fix).
+    if (panel.renameActive) {
+        auto found = std::find_if(
+            panel.sessions.begin(), panel.sessions.end(),
+            [&panel](const ::llmfun::tui::SessionEntry& s) { return s.id == panel.activeId; });
+        if (found == panel.sessions.end()) {
+            panel.renameActive = false;
+            panel.renameFocus = false;
+        }
+    }
+}
+
+int tuiIsSessionActionReady(TuiState* state) {
+    if (!state || !state->inner)
+        return 0;
+    return state->inner->sessionPanel.actions.empty() ? 0 : 1;
+}
+
+SessionAction tuiGetSessionAction(TuiState* state) {
+    if (!state || !state->inner)
+        return {TuiSessionAction_None, {nullptr, 0}, {nullptr, 0}};
+    auto& actions = state->inner->sessionPanel.actions;
+    if (actions.empty())
+        return {TuiSessionAction_None, {nullptr, 0}, {nullptr, 0}};
+    ::llmfun::tui::SessionAction a = std::move(actions.front());
+    actions.pop_front();
+    SessionAction out{};
+    out.type = static_cast<TuiSessionActionType>(a.type);
+    // On OOM, String_NewBuf returns {NULL, 0}, indistinguishable from an
+    // empty field; mirrors the API's existing failure model (only
+    // tuiCreateState reports allocation failure).
+    if (!a.sessionId.empty())
+        out.sessionId = String_NewBuf(a.sessionId.data(), a.sessionId.size());
+    if (!a.title.empty())
+        out.title = String_NewBuf(a.title.data(), a.title.size());
+    return out;
 }
 #ifdef __cplusplus
 }

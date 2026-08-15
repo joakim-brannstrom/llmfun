@@ -191,6 +191,57 @@ Returns an owned `String` with the last error message. Thread-local: each thread
 
 See `tui_api.h` for the complete C API. The header is self-documented with detailed comments for each function.
 
+### Session API (Phase 2)
+
+The session sidebar added a second API family to `tui_api.h`, and bumped
+`TUI_API_VERSION` from 1 to 2. The version macro is a **documentation marker
+only** — nothing consumes it at compile time or runtime; the header comment
+lists the additions.
+
+New types:
+
+```c
+typedef struct SessionItem {
+    String id;           /* immutable session id */
+    String title;        /* human-readable title */
+    String preview;      /* first user message, truncated by D */
+    size_t messageCount; /* total entries in the session file */
+    int isActive;        /* 1 = active session, 0 = not */
+} SessionItem;
+
+typedef enum TuiSessionActionType {
+    TuiSessionAction_None = 0,   /* sentinel - no action (empty queue) */
+    TuiSessionAction_Select = 1, /* switch to the session */
+    TuiSessionAction_New = 2,    /* create a new session */
+    TuiSessionAction_Rename = 3, /* rename the session (title payload) */
+    TuiSessionAction_Delete = 4  /* delete the session (already confirmed) */
+} TuiSessionActionType;
+
+typedef struct SessionAction {
+    TuiSessionActionType type; /* offset 0,  size 4 */
+    String sessionId;          /* offset 8,  size 16 - target session id; empty for New */
+    String title;              /* offset 24, size 16 - new title for Rename; empty otherwise */
+} SessionAction;               /* total size: 40 bytes */
+```
+
+`TuiSessionActionType` is append-only: existing values are never renumbered
+or reused, so future actions (Fork, Export, Archive, Search) extend it without
+breaking the D mapping. `tui_api.cpp` has compile-time `static_assert`s tying
+the C enum to the internal C++ mirror (`SessionActionType` in `tui.h`).
+
+New functions:
+
+| Function | Semantics |
+|----------|-----------|
+| `tuiSetSessionList(TuiState*, const SessionItem*, size_t)` | Full replace of the panel snapshot. All inbound strings are copied into `std::string` during the call (caller buffers may be reused/freed immediately). Recomputes the active id (the entry with `isActive != 0`; at most one expected, last wins defensively). Clears the panel's two-step delete confirmation when its id is absent from the new snapshot. Null-safe; `items == NULL` with `count == 0` is an empty list |
+| `tuiIsSessionActionReady(TuiState*)` | Pure check: 1 iff at least one action is queued, 0 otherwise. Consumes nothing. Null-safe (0) |
+| `tuiGetSessionAction(TuiState*)` | Pops exactly one action from the front of the queue (consume-on-read). Returned strings are malloc'd (via `String_NewBuf`) and MUST be freed with `String_Free`; empty fields are `{NULL, 0}`. Empty queue returns `{TuiSessionAction_None, {NULL, 0}, {NULL, 0}}`. Null-safe |
+
+The ownership contract mirrors `String` exactly: `SessionItem` strings are
+inbound (non-owning, copied during the call), `SessionAction` strings are
+outbound (owned, `String_Free`). See the header for byte-level layout
+comments.
+
 ---
 
 ## Internal C++ API
@@ -198,6 +249,108 @@ See `tui_api.h` for the complete C API. The header is self-documented with detai
 The internal C++ API (`tui.h` / `tui.cpp`) is used by `tui_api.cpp` and `main.cpp` (via the C API). All functions are in the `llmfun::tui` namespace.
 
 See `tui.h` for the complete function declarations.
+
+## Session Sidebar (Phase 2)
+
+The session sidebar is a left panel in the chat tab that lists all chat
+sessions (title, message count, preview) and offers switch / new / rename /
+delete. It follows the same three-layer pattern as the query input: the C++
+panel owns all UI state and queues actions; the D UI thread polls the queue
+once per frame and forwards one action to the agent thread; the agent thread
+runs the Phase 1 session methods.
+
+### ChatTabSessionPanel
+
+`ChatTabSessionPanel` (`tui.h`) holds the panel state:
+
+```cpp
+struct ChatTabSessionPanel {
+    ImVec4 activeButton = ImVec4(0.4f, 0.4f, 0.45f, 1.0f); // highlight color
+    int panelW = 0;                    // 0 = unset; init to PanelWActivated
+                                       // on first render (F5)
+    static constexpr int PanelWActivated = 30;
+    bool panelOpen{true};              // auto-open at startup
+
+    std::vector<SessionEntry> sessions; // full snapshot (A1)
+    std::string activeId;               // active session id from the snapshot
+    std::deque<SessionAction> actions;  // UI -> D queue (A2/A7)
+
+    char renameBuf[128] = {};   // rename input; init on row change or
+                                // toggle-open, never per frame
+    bool renameActive{false};   // rename input visible (L8)
+    std::string renameRowId;    // row renameBuf was initialized for
+    bool renameFocus{false};    // focus the rename input next frame
+    int renameSeq{0};           // bumped per open; fresh InputText id
+    std::string pendingDeleteId; // two-step delete state (A5)
+};
+```
+
+`SessionEntry` is one snapshot row (`id`, `title`, `preview`,
+`messageCount`, `isActive`); the internal `SessionAction` mirrors the C
+`SessionAction` (type + sessionId + title).
+
+### Mutual Exclusion with the Pipeline Panel
+
+The chat tab has exactly **one left-panel slot**. The pipeline panel
+(`ChatTabLeftPanel`) renders whenever it has agents — open or collapsed —
+so it always wins the slot while agents are present. The session panel
+renders only when the pipeline is empty; its state is preserved, so it
+reappears unchanged when the pipeline clears. `renderTabChatSessionPanel`
+starts with the early return `if (!state.left.agents.empty()) return;`
+(no overlap, R6/A6/H1).
+
+The output area offsets by the resolved width, kept in one place:
+
+```cpp
+int leftPanelWidth(const TuiState& s) {
+    return !s.left.agents.empty() ? s.left.panelW
+                                  : (s.sessionPanel.panelOpen ? s.sessionPanel.panelW : 8);
+}
+```
+
+Session panel open = 30 columns, collapsed = an 8-column "Open" strip (so the
+output area never covers the Open button), pipeline present = the pipeline
+panel's own width. `renderTabChat` calls `renderTabChatSessionPanel` before
+`renderTabChatLeftPanel`, and the `outputArea` lambda offsets by
+`leftPanelWidth(state)`.
+
+### Panel Behavior
+
+- **First open**: `panelW == 0` is initialized to `PanelWActivated` (mirrors
+  `renderTabChatLeftPanel`), so the first frame never offsets the output area
+  by 0 (F5).
+- **Collapse**: the "Close" button clears the pending delete and rename state
+  and sets `panelW = 8`; the collapsed strip shows an "Open" button that
+  restores `PanelWActivated`.
+- **Rows**: one row per snapshot entry via the shared `renderButton` helper;
+  label = title truncated to the row width with a UTF-8-safe ellipsis plus the
+  always-kept ` [N]` message count (`sessionRowLabel`); the active row is
+  highlighted; a tooltip shows the full title and preview. Clicking a row
+  queues `{Select, id}` unless it is already active (a click on the active
+  row queues nothing).
+- **New**: queues `{New}`.
+- **Rename**: a "Rename" toggle on the active row reveals the `InputText`
+  (the toggle avoids an always-present tab-focus stop — imtui tab navigation
+  does not reach plain buttons). The buffer is initialized from the current
+  title only on row change or toggle-open, never per frame (L3); a title
+  longer than the 128-byte buffer initializes the buffer empty, so a blind
+  Enter is rejected as empty — no silent truncation (L4). Enter queues
+  `{Rename, activeId, typedTitle}` (empty/whitespace-only titles rejected
+  in-panel), Escape cancels.
+- **Delete**: each row has a `del` button; the first press arms the row
+  (`del?`), a second press on the same row queues `{Delete, id}` and clears
+  the arm. Pressing another row's delete moves the pending target (L1); any
+  non-delete control clears it.
+- **Busy gating**: when `!state.readyStatus`, every interactive widget is
+  guarded so no action is queued (guard-and-skip only — the vendored ImGui
+  1.81 has no `BeginDisabled`). A click already in flight when the busy state
+  flips is processed between queries (the mailbox race); see
+  `doc/sessions.md` for the observable late-click effect.
+- **Scrolling**: the panel child window has no vertical scrollbar yet; rows
+  below the terminal height are unreachable until Phase 3.
+
+Sidebar interactions are logged through the shared `Log& log` parameter
+(`session panel: ...` lines in the Log tab).
 
 ---
 
@@ -212,6 +365,16 @@ The `main.cpp` file provides a lightweight test/dry-run for the TUI (not the mai
    - **Submission check**: If `tuiIsSubmitReady(state)`, extract the query via `tuiGetSubmitQuery()`, echo it to output, and reset submit flag.
    - `tuiBackendRender(screen)` — renders the ImGui frame to the terminal screen
 3. **Shutdown**: Call `tuiDestroyState(state)` and `tuiShutdown(screen)` on exit.
+
+### Headless Smoke Mode
+
+`main.cpp` accepts `--frames N` (or `--smoke`, an alias for 30 frames) for
+headless CI runs: it seeds the session panel with a sample
+`tuiSetSessionList` snapshot, runs the normal frame loop for exactly N
+frames, verifies the session action queue is empty (`tuiIsSessionActionReady`
+== 0 and `tuiGetSessionAction` returns the None sentinel), prints
+`smoke ok: ...`, and exits 0. Without the argument the interactive loop is
+unchanged. `--frames` requires a non-negative integer; usage errors exit 2.
 
 ### Keyboard Shortcuts
 

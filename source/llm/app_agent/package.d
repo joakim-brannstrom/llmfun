@@ -24,7 +24,7 @@ import llm.memory;
 import llm.metric.monitor : MetricMonitor;
 import llm.query;
 import llm.rag.rag : RAG;
-import llm.session : SessionId, SessionMeta, SessionFile, SessionStore;
+import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
 import llm.skill;
 import llm.tui;
 import llm.types : ServerStat, IStreamCallback;
@@ -230,6 +230,11 @@ struct AgentApp {
             this.sendChatMessage("error: Cannot load session '%s' (not found or corrupt). Staying in current session.",
                     TuiChatMessageType_Assistant, id);
             return; // W4: keep current session unchanged
+            // Note: no sendSessionList() here - the list refresh happens
+            // only on the success path to keep exactly one send per
+            // sidebar action (L10). Adding a send here would double-send
+            // in doDeleteSession's defensive branch (failed first
+            // activation, then a successful create() activation).
         }
 
         auto sf = orElse(sfOpt, SessionFile());
@@ -259,6 +264,11 @@ struct AgentApp {
 
         llmConf.activeChatSessionId = id.get;
         llmConf.saveState();
+
+        // R8/L10: the switch path terminates here - send the refreshed
+        // snapshot (covers switch, delete-active fallback, and any
+        // startup-triggered switches). Guarded for one-shot mode inside.
+        sendSessionList();
     }
 
     /** Switch to a different session: commit current + activate target.
@@ -270,9 +280,12 @@ struct AgentApp {
     package void switchToSession(SessionId id) {
         if (id == activeSession.id) {
             commitActiveSession(); // persist pending changes on a no-op switch
+            // R8/L10: activateSession is not called on the no-op path, so
+            // refresh here - the commit may have changed counts/preview.
+            sendSessionList();
         } else {
             commitActiveSession();
-            activateSession(id);
+            activateSession(id); // sends the refreshed list itself (L10)
         }
     }
 
@@ -373,6 +386,10 @@ struct AgentApp {
             this.sendChatMessage("error: Failed to rename session '%s'.",
                     TuiChatMessageType_Assistant, shortSessionId(activeSession.id));
         }
+        // R8/L10: mutating callee - the active session's title changed, so
+        // the sidebar snapshot is refreshed here (slash /rename is exempt
+        // from the single-send rule: the receive-loop refresh may repeat it).
+        sendSessionList();
     }
     /** Pick the fallback session after deleting the active one (pure).
      *
@@ -416,6 +433,11 @@ struct AgentApp {
             activateSession(fallbackId); // never commits (W2)
             // Defensive: if the fallback failed to load, do not keep pointing
             // at the deleted id — a later commit would resurrect the file (W2).
+            // L10 single-send note: a FAILED activation returns before
+            // sendSessionList() (see activateSession's load-failure path), so
+            // this defensive second activation is the only successful one on
+            // this path and sends the list exactly once. The branch never
+            // double-sends; it relies on the failure path sending nothing.
             if (activeSession.id == id) {
                 activateSession(sessionStore.create().id);
                 createdFresh = true;
@@ -428,6 +450,135 @@ struct AgentApp {
         } else {
             this.sendChatMessage("Session deleted: %s",
                     TuiChatMessageType_Assistant, shortSessionId(id));
+            // R8/L10: no activateSession on this path, so the removed session
+            // must leave the sidebar here (the active-delete path refreshes
+            // inside activateSession).
+            sendSessionList();
+        }
+    }
+
+    /** Map a session list to the sidebar snapshot items (pure).
+     *
+     * `isActive` marks the session whose id equals `activeId`; all other
+     * fields pass through unchanged, preserving the caller's sort order
+     * (the store already sorts by updatedAt descending).
+     */
+    package static UiSessionItem[] mapSessionItems(const SessionMeta[] sessions, SessionId activeId) @safe pure nothrow {
+        auto items = new UiSessionItem[sessions.length];
+        foreach (i, ref const s; sessions) {
+            items[i] = UiSessionItem(s.id, s.title, s.preview, s.messageCount,
+                    s.id.get == activeId.get);
+        }
+        return items;
+    }
+
+    /** Send the current ordered session snapshot to the UI thread (Phase 2).
+     *
+     * Maps `sessionStore.list()` (already sorted by updatedAt descending) to
+     * UiSessionItem[] with the active marker, then sends UiSessionList to
+     * uiTid. Guarded by `uiMsg.isActive()` so one-shot mode (-p) never sends.
+     */
+    private void sendSessionList() {
+        if (!uiMsg.isActive())
+            return; // one-shot mode: no UI thread to send to
+        auto items = mapSessionItems(sessionStore.list(), activeSession.id);
+        send(uiTid, cast(immutable) UiSessionList(items));
+    }
+
+    /** Sidebar select handler (UiSessionSelect): clear pending delete (A5),
+     * D12-validate the untrusted UI id, then switch. Store failures degrade
+     * to a chat message (N2/L9) - the receive loop keeps running.
+     */
+    package void doSidebarSelect(SessionId id) {
+        pendingDeleteId = SessionId.init; // A5
+        try {
+            if (!isValidId(id)) {
+                this.sendChatMessage("error: Invalid session id '%s'. Switch rejected.",
+                        TuiChatMessageType_Assistant, id);
+                return;
+            }
+            switchToSession(id); // sends the refreshed list (L10)
+        } catch (Exception e) {
+            this.sendChatMessage("error: Failed to switch session: %s.",
+                    TuiChatMessageType_Assistant, e.msg);
+        }
+    }
+
+    /** Sidebar new handler (UiSessionNew): clear pending delete (A5), then
+     * create + switch. Store failures degrade to a chat message (N2/L9).
+     */
+    package void doSidebarNew() {
+        pendingDeleteId = SessionId.init; // A5
+        try {
+            doCreateSession(); // sends the refreshed list (L10)
+        } catch (Exception e) {
+            this.sendChatMessage("error: Failed to create session: %s.",
+                    TuiChatMessageType_Assistant, e.msg);
+        }
+    }
+
+    /** Sidebar rename handler (UiSessionRename): clear pending delete (A5),
+     * D12-validate the id, reject empty titles only (no length cap, mirrors
+     * /rename), rename the CARRIED id (A8), refresh the active meta on
+     * success, and always send the refreshed list (L10 - the rename goes
+     * straight to the store, so this handler owns the send on both paths).
+     */
+    package void doSidebarRename(SessionId id, string title) {
+        pendingDeleteId = SessionId.init; // A5
+        try {
+            if (!isValidId(id)) {
+                this.sendChatMessage("error: Invalid session id '%s'. Rename rejected.",
+                        TuiChatMessageType_Assistant, id);
+                return;
+            }
+            // Exact mirror of doRenameSession: reject empty/stripped
+            // titles only; no length cap anywhere (SessionStore.rename
+            // accepts any non-empty title).
+            auto stripped = title.strip;
+            if (stripped.length == 0) {
+                this.sendChatMessage("error: Rename rejected — empty title.",
+                        TuiChatMessageType_Assistant);
+                return;
+            }
+            auto result = sessionStore.rename(id, stripped);
+            if (hasValue(result)) {
+                auto newMeta = orElse(result, SessionMeta());
+                if (id == activeSession.id)
+                    activeSession = newMeta; // keep the active meta fresh
+                this.sendChatMessage("Session renamed to '%s'.",
+                        TuiChatMessageType_Assistant, newMeta.title);
+            } else {
+                // M3: unknown/corrupt id - error message, active meta
+                // unchanged, list still refreshed below.
+                this.sendChatMessage("error: Failed to rename session '%s'.",
+                        TuiChatMessageType_Assistant, shortSessionId(id));
+            }
+            // L10: rename goes straight to the store (no sending callee),
+            // so this handler sends the refreshed list on both paths.
+            sendSessionList();
+        } catch (Exception e) {
+            this.sendChatMessage("error: Failed to rename session: %s.",
+                    TuiChatMessageType_Assistant, e.msg);
+        }
+    }
+
+    /** Sidebar delete handler (UiSessionDelete): clear pending delete (A5),
+     * D12-validate the id, then delete. The C++ panel already ran the
+     * two-step confirmation, so D delegates to the Phase 1 method (active
+     * fallback incl.).
+     */
+    package void doSidebarDelete(SessionId id) {
+        pendingDeleteId = SessionId.init; // A5
+        try {
+            if (!isValidId(id)) {
+                this.sendChatMessage("error: Invalid session id '%s'. Delete rejected.",
+                        TuiChatMessageType_Assistant, id);
+                return;
+            }
+            doDeleteSession(id); // sends the refreshed list (L10)
+        } catch (Exception e) {
+            this.sendChatMessage("error: Failed to delete session: %s.",
+                    TuiChatMessageType_Assistant, e.msg);
         }
     }
 
@@ -597,6 +748,11 @@ struct AgentApp {
         foreach (m; agent_.chat.getMessages()) {
             this.processChatMessage(m, printUser: true);
         }
+
+        // R8: initial sidebar snapshot right after the message replay;
+        // guarded by uiMsg.isActive() so one-shot mode never sends.
+        sendSessionList();
+
         auto helpText = this.printHelp(conf_);
         if (helpText !is null) {
             this.sendChatMessage(helpText, TuiChatMessageType_User);
@@ -626,7 +782,15 @@ struct AgentApp {
                         break;
                     }
                     uiMsg.ready();
+                    // R8/M2: every completed query can change counts/preview
+                    // and the updatedAt sort order (commitActiveSession on
+                    // save), so refresh the sidebar snapshot.
+                    sendSessionList();
                 }
+            }, (UiSessionSelect a) { this.doSidebarSelect(a.id); }, (UiSessionNew _) {
+                this.doSidebarNew();
+            }, (UiSessionRename a) { this.doSidebarRename(a.id, a.title); }, (UiSessionDelete a) {
+                this.doSidebarDelete(a.id);
             }, (UiTerminated _) { running = false; });
         }
         while (running);
@@ -730,4 +894,186 @@ unittest {
     app.pendingDeleteId = stale;
     assert(app.runAgent("/delete") == AgentStatus.active);
     assert(app.pendingDeleteId == SessionId.init);
+}
+
+// --- Test: sidebar snapshot mapping (SessionMeta[] -> UiSessionItem[]) ---
+
+unittest {
+    SessionMeta a, b;
+    a.id = SessionId("20260618-153045-a1b2");
+    a.title = "Alpha";
+    a.preview = "prev a";
+    a.messageCount = 3;
+    a.userMessageCount = 2;
+    b.id = SessionId("20260618-153045-b3c4");
+    b.title = "Beta";
+    b.preview = "prev b";
+    b.messageCount = 5;
+    b.userMessageCount = 1;
+
+    // Active marker follows the activeId argument; order is preserved.
+    auto items = AgentApp.mapSessionItems([a, b], b.id);
+    assert(items.length == 2);
+    assert(items[0].id == a.id);
+    assert(items[0].title == "Alpha");
+    assert(items[0].preview == "prev a");
+    assert(items[0].messageCount == 3);
+    assert(!items[0].isActive);
+    assert(items[1].id == b.id);
+    assert(items[1].title == "Beta");
+    assert(items[1].messageCount == 5);
+    assert(items[1].isActive);
+
+    // Empty input -> empty snapshot; no active session -> no active row.
+    assert(AgentApp.mapSessionItems([], SessionId.init).length == 0);
+    auto noActive = AgentApp.mapSessionItems([a], SessionId.init);
+    assert(noActive.length == 1 && !noActive[0].isActive);
+}
+
+// --- Test: sidebar invalid-id rejection for each action type (D12) ---
+
+unittest {
+    import llm.app_config : UserConfig;
+
+    // No store is configured: reaching the store would crash the test, so
+    // a green run proves rejection happens BEFORE any store access.
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    auto bad = SessionId("bad-id");
+
+    app.doSidebarSelect(bad);
+    assert(app.pendingDeleteId == SessionId.init, "Select clears pending delete (A5)");
+
+    app.doSidebarRename(bad, "x");
+    assert(app.pendingDeleteId == SessionId.init, "Rename clears pending delete (A5)");
+
+    app.doSidebarDelete(bad);
+    assert(app.pendingDeleteId == SessionId.init, "Delete clears pending delete (A5)");
+}
+
+// --- Test: sidebar rename input validation (empty title rejected, long
+// non-empty title accepted - no length cap, matches /rename) ---
+
+unittest {
+    import std.file : exists, rmdirRecurse, mkdirRecurse;
+    import std.path : buildPath;
+    import std.array : replicate;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_rename_validate");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.sessionStore = store;
+    app.activeSession = meta;
+
+    // Whitespace-only title: rejected, store unchanged.
+    app.doSidebarRename(meta.id, "   ");
+    assert(orElse(store.load(meta.id), SessionFile()).meta.title == meta.title,
+            "empty title must not change the stored title");
+
+    // Long non-empty title: accepted (no length cap anywhere).
+    auto longTitle = "T".replicate(300);
+    app.doSidebarRename(meta.id, longTitle);
+    assert(orElse(store.load(meta.id), SessionFile()).meta.title == longTitle,
+            "long non-empty title must be accepted");
+    assert(app.activeSession.title == longTitle,
+            "active meta must refresh when the renamed id is active");
+}
+
+// --- Test: sidebar rename-none error handling (unknown id, corrupt file:
+// error emitted, active meta unchanged, list still refreshed) ---
+
+unittest {
+    import std.file : exists, rmdirRecurse, mkdirRecurse, write;
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_rename_none");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.sessionStore = store;
+    app.activeSession = meta;
+    // Active UiMessenger pointed at this thread: the handler's error chat
+    // message and the sendSessionList() refresh both land in this thread's
+    // own mailbox, so the test can observe "error emitted" and "list still
+    // refreshed" without spawning a thread.
+    app.uiMsg = new UiMessenger(thisTid, false);
+    app.uiTid = thisTid;
+
+    // Unknown id (valid format, no file): rename -> none -> error message,
+    // active meta unchanged, list still refreshed.
+    auto unknown = SessionId("20260618-153045-ffff");
+    app.doSidebarRename(unknown, "New title");
+    bool gotError = false;
+    receiveTimeout(dur!"seconds"(1), (UiChatMessage m) {
+        gotError = m.msg == "error: Failed to rename session 'ffff'.";
+    });
+    assert(gotError, "rename-none must emit the error chat message");
+    assert(app.activeSession.id == meta.id, "rename-none must keep the active meta");
+    assert(app.activeSession.title == meta.title);
+    bool gotList = false;
+    receiveTimeout(dur!"seconds"(1), (immutable UiSessionList l) {
+        gotList = true;
+        assert(l.items.length == 1, "list still refreshed on rename-none");
+    });
+    assert(gotList, "rename-none must still refresh the sidebar list");
+
+    // Corrupt file (valid id, garbage JSON): same none path.
+    write(buildPath(tmpDir, "20260618-153046-0bad.json"), "{ not json !!!");
+    auto corrupt = SessionId("20260618-153046-0bad");
+    app.doSidebarRename(corrupt, "New title");
+    gotError = false;
+    receiveTimeout(dur!"seconds"(1), (UiChatMessage m) {
+        gotError = m.msg == "error: Failed to rename session '0bad'.";
+    });
+    assert(gotError, "corrupt-file rename must emit the error chat message");
+    assert(app.activeSession.id == meta.id, "corrupt-file rename must keep the active meta");
+    gotList = false;
+    receiveTimeout(dur!"seconds"(1), (immutable UiSessionList l) {
+        gotList = true;
+    });
+    assert(gotList, "corrupt-file rename must still refresh the sidebar list");
+}
+
+// --- Test: stale pending-delete clearing by the sidebar New handler (A5)
+// and store-exception degradation in a sidebar handler (L9) ---
+
+unittest {
+    import std.file : exists, rmdirRecurse, mkdirRecurse;
+    import std.path : buildPath;
+
+    // A store whose create() throws simulates a disk-full failure (L9).
+    static class ThrowingStore : SessionStore {
+        this(string dir) {
+            super(dir.Path);
+        }
+
+        override SessionMeta create() @trusted {
+            throw new Exception("simulated disk full");
+        }
+    }
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_new_throw");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.sessionStore = new ThrowingStore(tmpDir);
+    auto stale = SessionId("stale-pending");
+    app.pendingDeleteId = stale;
+
+    // The handler clears pendingDeleteId on entry (A5) even though the
+    // create() below throws; the exception is caught and logged as a chat
+    // message (N2/L9) - the receive loop keeps running.
+    app.doSidebarNew();
+    assert(app.pendingDeleteId == SessionId.init,
+            "New handler must clear stale pending delete on entry (A5)");
 }

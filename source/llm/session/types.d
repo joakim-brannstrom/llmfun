@@ -90,7 +90,12 @@ package string generateDateTitle() @safe {
     return format("%04d-%02d-%02d", now.year, now.month, now.day);
 }
 
-package bool isValidId(SessionId id) @safe {
+/** Validate a session id against the D12 format (YYYYMMDD-HHMMSS-4hex).
+ *
+ * Public so the UI boundary (`llm.app_agent` receive loop) can validate
+ * sidebar-supplied ids before any store access (A3). Pure format check.
+ */
+public bool isValidId(SessionId id) @safe {
     import std.regex : match;
     import std.range : empty;
 
