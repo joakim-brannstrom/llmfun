@@ -6,7 +6,7 @@ description: >-
   writing code. Triggers on: implementation plan, plan implementation, break
   down, task breakdown, task plan, feature plan, design tasks, what to build,
   plan the work, task order.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Implementation Plan Skill

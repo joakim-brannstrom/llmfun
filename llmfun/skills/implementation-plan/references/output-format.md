@@ -20,7 +20,7 @@ tasks before it. Tasks can be executed by the `code-task` skill.
 Each task in the plan follows this structure:
 
 ```markdown
-## Task: [Task Name]
+## Task [Number]: [Task Name]
 
 ### Description
 [What this task accomplishes — concise, focused description]
