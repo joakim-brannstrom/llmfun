@@ -29,10 +29,16 @@ struct ServerConfig {
     long maxRetries = 3; // maximum number of retries for transient failures
     long backoffMs = 500; // initial backoff in milliseconds (exponential)
 
-    /// API key for Bearer token authentication (e.g. OpenAI API key).
-    /// If empty, the OPENAI_API_KEY environment variable is checked as fallback.
-    /// Leave empty for servers that do not require authentication (e.g. local llama.cpp).
-    string apiKey;
+    /** Environment variable to read the API key from.
+     * API key for Bearer token authentication (e.g. OpenAI API key).
+     * If empty or the environment variable is not set a warning is raised.
+     * Leave empty for servers that do not require authentication (e.g. local
+     * llama.cpp), but remember to also set warnIfNoApiKey to false.
+     */
+    string apiKeyEnv;
+
+    /// If true, emit a warning when no API key is configured for a model server. Defaults to true.
+    bool warnIfNoApiKey = true;
 
     // Type of end point
     string type;

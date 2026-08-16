@@ -32,7 +32,7 @@ class RemoteEmbedder : Embedder {
 
         this.cfg = cfg;
 
-        auto apiKey = cfg.server.apiKey.empty ? getEnvApiKey() : cfg.server.apiKey;
+        auto apiKey = cfg.server.apiKeyEnv.empty ? "" : getEnvApiKey(cfg.server.apiKeyEnv);
         // No "Content-Type" here: setPostData adds it for POST requests.
         auto headers = string[string].init;
         if (!apiKey.empty)

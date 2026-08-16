@@ -192,9 +192,6 @@ struct LlmConfig {
     /// delegates to a separate model specialized for vision tasks.
     Nullable!VisionModelConfig visionModel;
 
-    /// If true, emit a warning when no API key is configured for a model server. Defaults to true.
-    bool warnIfNoApiKey = true;
-
     invariant {
         assert(maxManifestSkills > 0, i"maxManifestSkills must be positive, got $(maxManifestSkills)"
                 .text);
@@ -614,7 +611,7 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
          timeoutS: cast(int) conf.server.timeoutSeconds,
          verifySslCert: conf.server.verifySslCert,
          verbosity: cast(int) conf.server.httpVerbosity,
-         apiKey: conf.server.apiKey.empty ? getEnvApiKey() : conf.server.apiKey,
+         apiKey: conf.server.apiKeyEnv.empty ? "" : getEnvApiKey(conf.server.apiKeyEnv),
          header: makeHeader(conf.name, conf.temp, conf.maxTokens, conf.server));
     // dfmt on
 }
@@ -954,38 +951,36 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
 /// Called from validateConfig() after all hard validation checks.
 /// No-op when warnIfNoApiKey is false or OPENAI_API_KEY env var is set.
 private void checkApiKeyWarnings(LlmConfig conf) {
-    if (!conf.warnIfNoApiKey || !getEnvApiKey.empty)
-        return;
-
     bool warned;
 
-    foreach (model; conf.codeModels.filter!(a => a.server.apiKey.empty)) {
-        logger.warningf("No API key configured for code model '%s'", model.name);
-        warned = true;
+    void warnOrNot(ref ServerConfig conf, string name, string helpText) {
+        if (conf.warnIfNoApiKey && getEnvApiKey(conf.apiKeyEnv).empty) {
+            logger.warningf("No API key found in environment variable '%s' for %s: %s",
+                    conf.apiKeyEnv, helpText, name);
+            warned = true;
+        }
     }
 
-    if (!conf.summaryModel.server.url.empty && conf.summaryModel.server.apiKey.empty) {
-        logger.warningf("No API key configured for summary model '%s'", conf.summaryModel.name);
-        warned = true;
+    foreach (model; conf.codeModels) {
+        warnOrNot(model.server, model.name, "code model");
     }
 
-    if (!conf.visionModel.isNull && !conf.visionModel.get.server.url.empty
-            && conf.visionModel.get.server.apiKey.empty) {
-        logger.warningf("No API key configured for vision model '%s'", conf.visionModel.get.name);
-        warned = true;
+    if (!conf.summaryModel.server.url.empty) {
+        warnOrNot(conf.summaryModel.server, conf.summaryModel.name, "summary model");
+    }
+
+    if (!conf.visionModel.isNull && !conf.visionModel.get.server.url.empty) {
+        warnOrNot(conf.visionModel.get.server, conf.visionModel.get.name, "vision model");
     }
 
     conf.embedConfig.match!((RemoteEmbedConfig r) {
-        if (r.server.apiKey.empty) {
-            logger.warningf("No API key configured for remote embed model '%s'", r.name);
-            warned = true;
-        }
+        warnOrNot(r.server, r.name, "embed model");
     }, (LocalEmbedConfig) {} // No API key needed for local embed
     );
 
-    if (warned)
-        logger.warningf(
-                "To suppress these warnings, set 'warnIfNoApiKey' to false or provide OPENAI_API_KEY.");
+    if (warned) {
+        logger.warningf("To suppress these warnings, set 'warnIfNoApiKey' to false or provide the an environment variable with the API key.");
+    }
 }
 
 /// Validate LlmConfig after JSON parsing. Throws on validation failure.
@@ -1036,11 +1031,11 @@ void validateConfig(LlmConfig conf) {
 
 alias applyLlmConfig = applyConfig!LlmConfig;
 
-/// Returns the OpenAI API key from the OPENAI_API_KEY environment variable, or "" if not set.
-string getEnvApiKey() {
+/// Returns the key from the enviroment variable, or "" if not set.
+string getEnvApiKey(string envVariable) {
     import std.process : environment;
 
-    return environment.get("OPENAI_API_KEY", null);
+    return environment.get(envVariable, null);
 }
 
 /// Replace magic words in text with actual paths.
