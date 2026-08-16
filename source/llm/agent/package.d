@@ -153,8 +153,20 @@ class Agent : IBasicAgent {
         toolCtx.setPipelineContext(ctx);
     }
 
+    /// Adds a user query. Chat owns the turn policy (A3): a user query always
+    /// opens a new turn inside Chat.add — call sites cannot violate it.
     void addUserQuery(string query) nothrow {
-        chat.add(Message(role: Role.user, userQuery: true, content: query, thinking: null));
+        chat.addUserQuery(query);
+    }
+
+    /// Adds a harness control message that continues the current turn
+    /// (A3/H1): a user-role nudge with userQuery:false — never opens a turn
+    /// and appears in neither the dialogue nor the trace projection. Used by
+    /// the pipeline retry loop instead of addUserQuery, which would fragment
+    /// one logical turn into N turns and leak harness text into the Facts
+    /// projection.
+    void addContinueMessage(string msg) @safe nothrow {
+        chat.add(Message(Role.user, userQuery: false, content: msg, thinking: null));
     }
 
     void addKeepReasoning() @safe nothrow {
@@ -235,6 +247,8 @@ Output only the taskDone tool call. No other text.)";
         }
 
         try {
+            logger.tracef("agent %s: processing turn %s (%s messages)", name,
+                    chat.currentTurnId(), chat.length);
             auto sp = StreamResponse(prevStat);
             auto stream = (const(char)[] chunk) { /*logger.trace(chunk);*/ sp.parse(chunk);
                 if (streamCallback !is null) {
@@ -320,6 +334,22 @@ Output only the taskDone tool call. No other text.)";
                     oldContextSize, prevStat.context, oldContextSize - prevStat.context);
         }
         return result;
+    }
+
+    /// Register a listener for compression checkpoints (A6/G2). The seam is
+    /// multicast: Phase 1 and Phase 2 subscribe independently. A listener
+    /// fires exactly once per compression that actually evicts verbatim
+    /// content, and a throwing listener never breaks compression.
+    void addCompressionCheckpointListener(SummaryAgent.CheckpointListener listener) {
+        summary.addCheckpointListener(listener);
+    }
+
+    /// Set the session id stamped into each checkpoint event (A6/G1). Call
+    /// sites that know the owning session (doCompress: activeSession.id) set
+    /// it before compressing; pool callbacks set their own or leave "".
+    /// Phase 1 refuses to index events with an empty sessionId.
+    void setCompressionCheckpointSessionId(string sessionId) {
+        summary.setCheckpointSessionId(sessionId);
     }
 
     /// Run the agent until completion (no more tool calls, no more thinking needed)
@@ -861,4 +891,89 @@ struct StreamResponse {
             logger.tracef("invalid error structure '%s': %s", json, e.msg);
         }
     }
+}
+
+// --- Task 6 tests: call-site integration (real Agent, no LLM calls) ---
+
+version (unittest) {
+    /// Builds a minimal LlmConfig for a real Agent with no network, no skills
+    /// and no RAG. promptDir points at the temp dir holding the one prompt
+    /// file getPrompt reads (SUMMARY.md); the empty server type resolves to
+    /// EndpointType.unknown, so the requesters never dial out.
+    private LlmConfig makeAgentTestConfig(string promptDir) {
+        LlmConfig llmConf;
+        llmConf.disableSkills = true;
+        llmConf.promptDir = [promptDir.Path];
+        llmConf.workArea = promptDir.Path;
+        CodeModelConfig codeCfg;
+        codeCfg.modelName = "test-code-model";
+        codeCfg.contextSize = 8192;
+        llmConf.codeModels ~= codeCfg;
+        SummaryModelConfig summaryCfg;
+        summaryCfg.modelName = "test-summary-model";
+        summaryCfg.contextSize = 8192;
+        summaryCfg.contextChunkSize = 8192;
+        llmConf.summaryModel = summaryCfg;
+        return llmConf;
+    }
+
+    /// Test hygiene: remove the temp prompt dir; failures only log.
+    private void cleanupAgentTestDir(string dir) {
+        import std.exception : collectException;
+        import std.file : rmdirRecurse;
+
+        try {
+            if (dir.exists)
+                rmdirRecurse(dir);
+        } catch (Exception e) {
+            logger.tracef("agent turn-id test cleanup failed: %s", e.msg).collectException;
+        }
+    }
+}
+
+/// Integration: a real Agent (no LLM calls) delegates addUserQuery to the
+/// Chat, which owns the turn policy — §4.5 matrix agent:157: the system
+/// prompt stamps 0, the first query opens turn 1, harness nudges (incl.
+/// addContinueMessage, the pipeline retry path) continue the current turn,
+/// and the next query opens turn 2 (A3, H1, Task 6).
+unittest {
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+
+    // stdTime (100ns resolution) keeps two runs in the same second from
+    // colliding on the temp dir.
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_turnid_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    auto agent = new Agent("integration", llmConf, null, null);
+
+    agent.setSystemPrompt("sys");
+    agent.addUserQuery("first question"); // opens turn 1
+    agent.addContinue(); // nudge continues turn 1
+    agent.addUserQuery("second question"); // opens turn 2
+    agent.addKeepReasoning(); // nudge continues turn 2
+    agent.addContinueMessage("You stopped without calling 'pipelineOutput'."); // retry nudge continues turn 2
+
+    assert(agent.chat.nextTurnId() == 2);
+    auto msgs = agent.chat.getMessages;
+    assert(msgs.length == 6);
+    assert(turnIdOf(msgs[0]) == 0, "system prompt belongs to no turn");
+    assert(turnIdOf(msgs[1]) == 1);
+    assert(turnIdOf(msgs[2]) == 1);
+    assert(turnIdOf(msgs[3]) == 2);
+    assert(turnIdOf(msgs[4]) == 2);
+    assert(turnIdOf(msgs[5]) == 2, "retry nudge continues turn 2, never opens one");
+
+    // H1: the retry nudge is harness traffic — it appears in neither
+    // projection and did not fragment the turn sequence.
+    auto dialogue = agent.chat.getDialogueHistory();
+    assert(dialogue.length == 2, "only the two real user queries are dialogue");
+    assert(turnIdOf(dialogue[0]) == 1 && turnIdOf(dialogue[1]) == 2);
+    assert(agent.chat.getReasoningTrace().length == 0, "harness nudges are not trace");
 }

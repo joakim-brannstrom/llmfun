@@ -136,6 +136,7 @@ version (unittest) {
         // (cast() logger.sharedLog).logLevel = logger.LogLevel.trace;
     }
 
+    import llm.chat;
     import llm.summary_agent;
     import std.json : JSONValue;
     import std.datetime : Duration;
@@ -181,6 +182,40 @@ version (unittest) {
                 SummaryAgent.ProgressCallback compressCallback = null,
                 bool delegate() interrupt = null) {
             throw new Exception(message);
+        }
+    }
+
+    /// Mock agent that appends `turns` user-query/answer pairs to its own
+    /// Chat during runToCompletion. Each agent owns a SEPARATE chat, so the
+    /// pool's worker threads can run them concurrently without sharing
+    /// history (the same-chat cross-thread case is documented, not fixed).
+    class TurnChatAgent : IAgent {
+        Chat chat;
+        int turns;
+
+        private string name_;
+
+        this(string name, int turns) {
+            this.name_ = name;
+            this.turns = turns;
+        }
+
+        override string id() {
+            return name_;
+        }
+
+        override ProcessResult runToCompletion(void delegate(ProcessResult) step = null,
+                SummaryAgent.ProgressCallback compressCallback = null,
+                bool delegate() interrupt = null) {
+            chat.setSystemPrompt("sys");
+            foreach (i; 0 .. turns) {
+                chat.addUserQuery("q" ~ i.to!string);
+                chat.add(Message(Role.assistant, userQuery: false,
+                        content: "a" ~ i.to!string, thinking: null));
+            }
+            ProcessResult result;
+            result.status = ProcessResult.Status.ok;
+            return result;
         }
     }
 
@@ -495,6 +530,68 @@ unittest {
     assert(agentFound(agentA, successfulAgents), "Agent A should have completed");
     assert(agentFound(agentC, successfulAgents), "Agent C should have completed");
     assert(agentFound(agentE, successfulAgents), "Agent E should have completed");
+}
+
+/// Test: two pooled agents' chats each run an independent, monotonic TurnID
+/// sequence. The chats are separate, so overlap across chats is allowed and
+/// asserted harmless - cross-session identity is (session_id, turn_id), and
+/// only per-chat monotonicity is a guarantee. Deterministic on purpose: no
+/// cross-chat disjointness or wall-clock ordering is asserted.
+unittest {
+    auto pool = new AgentExecutionPool(2);
+    scope (exit)
+        pool.stop();
+
+    auto counter = countHandle();
+    IAgent[] executedAgents;
+    Mutex agentMutex = new Mutex();
+
+    void callback(IAgent agent, ProcessResult result) {
+        agentMutex.lock();
+        scope (exit)
+            agentMutex.unlock();
+        executedAgents ~= agent;
+        counter.increment();
+    }
+
+    immutable Turns = 5;
+    pool.submit(new TurnChatAgent("turn-a", Turns), &callback);
+    pool.submit(new TurnChatAgent("turn-b", Turns), &callback);
+
+    counter.wait(2, 30.dur!"seconds");
+    assert(counter.get() == 2, "both agents must complete");
+    assert(executedAgents.length == 2);
+
+    // Cast on the main thread: a failed cast fails fast here instead of
+    // being swallowed by the pool's worker-thread exception handler and
+    // stalling the test for the full wait timeout.
+    Chat[] capturedChats;
+    foreach (agent; executedAgents) {
+        auto turnAgent = cast(TurnChatAgent) agent;
+        assert(turnAgent !is null, "only TurnChatAgents are submitted to this test");
+        capturedChats ~= turnAgent.chat;
+    }
+
+    // Both chats ran the same local sequence: system (0), then one q/a pair
+    // per turn, stamped 1..Turns. Overlap across chats is by design.
+    foreach (chat; capturedChats) {
+        assert(chat.length == 1 + Turns * 2, "system prompt + one q/a pair per turn");
+        long[] expected = [0L];
+        foreach (i; 0 .. Turns) {
+            expected ~= i + 1L;
+            expected ~= i + 1L;
+        }
+        assert(chat.getMessages.length == expected.length);
+        long prev = 0;
+        foreach (i, m; chat.getMessages) {
+            const id = turnIdOf(m);
+            assert(id == expected[i], "stamps must follow the per-chat sequence");
+            assert(id >= prev, "per-chat TurnIDs must be monotonic (I1)");
+            prev = id;
+        }
+        assert(chat.currentTurnId() == Turns);
+        assert(chat.nextTurnId() == Turns);
+    }
 }
 
 /// Test: start() is idempotent

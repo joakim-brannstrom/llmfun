@@ -17,6 +17,11 @@ interface IBasicAgent : IAgent {
     // Feed a user query/input to the agent.
     void addUserQuery(string query);
 
+    // Feed a harness control message that continues the current turn
+    // (A3/H1): not a user query, never opens a turn, and excluded from the
+    // dialogue/trace projections. Pipeline retry prompts use this.
+    void addContinueMessage(string msg);
+
     // Set the pipeline control context for tool call coordination.
     void setPipelineContext(PipelineControlContext ctx);
 

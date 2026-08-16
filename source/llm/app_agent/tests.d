@@ -50,3 +50,74 @@ unittest {
     assert(reg.execute(app, "/plan") == AgentStatus.active);
     assert(reg.execute(app, "/code") == AgentStatus.active);
 }
+
+/// TurnID header round-trip: the high-water mark written by
+/// `commitActiveSession` survives a `SessionStore.save` and seeds the counter
+/// on reload (A5). Exercises the same chain commitActiveSession uses
+/// (`extra["next_turn_id"]` -> save -> load -> `Chat.load`) without a live
+/// Agent: `Chat` and `SessionStore` cover the whole seam.
+unittest {
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse;
+    import std.format : format;
+    import std.json : JSONValue, JSONType;
+
+    import my.optional : hasValue, orElse;
+    import my.path;
+    import llm.chat : Chat, turnIdOf;
+    import llm.session : SessionStore, SessionFile;
+
+    // stdTime (100ns resolution) keeps two runs in the same second from
+    // colliding on the temp dir.
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/turnid_commit_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupTurnIdTmp(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    auto chat = Chat();
+    chat.setSystemPrompt("sys");
+    chat.addUserQuery("first question");
+    chat.addUserQuery("second question");
+    assert(chat.nextTurnId() == 2);
+
+    // commitActiveSession's persistence seam: header high-water mark -> save,
+    // with the same null_ guard as the production path (app_agent/package.d).
+    if (meta.extra.type == JSONType.null_) {
+        meta.extra = JSONValue.emptyObject;
+    }
+    meta.extra["next_turn_id"] = chat.nextTurnId();
+    meta = store.save(meta.id, meta, chat.toSaveJson());
+
+    auto sfOpt = store.load(meta.id);
+    assert(hasValue(sfOpt));
+    auto sf = orElse(sfOpt, SessionFile());
+    assert(sf.doc["next_turn_id"].integer == 2, "header must persist the counter");
+
+    // Reload continues the session's own sequence (I-1: no +1 seeding).
+    Chat reloaded;
+    reloaded.load(sf.doc);
+    assert(reloaded.nextTurnId() == 2);
+    reloaded.addUserQuery("third question");
+    assert(reloaded.currentTurnId() == 3);
+    foreach (i; 1 .. reloaded.getMessages.length) {
+        assert(turnIdOf(reloaded.getMessages[i]) > 0, "loaded messages must be stamped");
+    }
+}
+
+/// Removes a turn-id test session dir; failures only log (test hygiene).
+private void cleanupTurnIdTmp(string dir) {
+    import std.exception : collectException;
+    import std.file : rmdirRecurse;
+
+    import logger = std.logger;
+
+    try {
+        rmdirRecurse(dir);
+    } catch (Exception e) {
+        logger.trace(e.msg).collectException;
+    }
+}

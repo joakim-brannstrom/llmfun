@@ -110,6 +110,10 @@ class PipelineAgent : IBasicAgent {
         wrappedAgent.addUserQuery(query);
     }
 
+    override void addContinueMessage(string msg) {
+        wrappedAgent.addContinueMessage(msg);
+    }
+
     override void setPipelineContext(PipelineControlContext ctx) {
         wrappedAgent.setPipelineContext(ctx);
     }
@@ -135,7 +139,10 @@ class PipelineAgent : IBasicAgent {
                 return result;
             }
 
-            wrappedAgent.addUserQuery("You stopped without calling 'pipelineOutput'. Please continue your work, "
+            // Retry nudge is harness traffic (H1): continue the current turn
+            // instead of opening a new one, and keep it out of the Facts
+            // projection. addUserQuery would fragment the node's logical turn.
+            wrappedAgent.addContinueMessage("You stopped without calling 'pipelineOutput'. Please continue your work, "
                     ~ "or call 'pipelineOutput' followed by 'taskDone' if you're finished.");
         }
     }
@@ -528,7 +535,9 @@ struct Pipeline {
         while (true) {
             auto res = node.agent.runToCompletion();
             if (node.output.empty) {
-                node.agent.addUserQuery("You stopped without calling 'pipelineOutput'. Please continue your work, or call 'pipelineOutput' followed by 'taskDone' if you're finished");
+                // Harness retry nudge (H1): continue the current turn, never
+                // open a new one (addUserQuery would fragment the turn).
+                node.agent.addContinueMessage("You stopped without calling 'pipelineOutput'. Please continue your work, or call 'pipelineOutput' followed by 'taskDone' if you're finished");
             } else {
                 return res;
             }
@@ -845,6 +854,10 @@ version (unittest) {
             _hasQuery = true;
         }
 
+        override void addContinueMessage(string msg) {
+            _hasQuery = true;
+        }
+
         override void setPipelineContext(PipelineControlContext ctx) {
         }
 
@@ -880,6 +893,10 @@ version (unittest) {
             _receivedQueries ~= query;
         }
 
+        override void addContinueMessage(string msg) {
+            _receivedQueries ~= msg;
+        }
+
         override void setPipelineContext(PipelineControlContext ctx) {
             _ctx = ctx;
         }
@@ -901,6 +918,7 @@ version (unittest) {
         string _id;
         uint _runCount;
         uint _addUserQueryCount;
+        uint _addContinueMessageCount;
         uint _produceOutputOnCall; // 0 = never, 1 = on first call, 2 = on second call, etc.
         PipelineControlContext _ctx;
 
@@ -918,6 +936,10 @@ version (unittest) {
 
         override void addUserQuery(string query) {
             _addUserQueryCount++;
+        }
+
+        override void addContinueMessage(string msg) {
+            _addContinueMessageCount++;
         }
 
         override void setPipelineContext(PipelineControlContext ctx) {
@@ -1083,6 +1105,8 @@ unittest {
     assert(result.status == ProcessResult.Status.ok, "Result should be ok");
     assert(mockAgent._runCount == 1, "Wrapped agent should have been called exactly once");
     assert(mockAgent._addUserQueryCount == 0, "No retry prompt should have been sent");
+    assert(mockAgent._addContinueMessageCount == 0,
+            "No retry nudge should have been sent when output is produced");
     assert(!node.output.empty, "Node output should be set");
 }
 
@@ -1098,8 +1122,8 @@ unittest {
     assert(result.status == ProcessResult.Status.ok, "Result should still be ok (safety valve)");
     assert(mockAgent._runCount == maxRetries,
             "Wrapped agent should have been called exactly maxRetries times");
-    assert(mockAgent._addUserQueryCount == maxRetries - 1,
-            "Retry prompt should have been sent maxRetries-1 times");
+    assert(mockAgent._addContinueMessageCount == maxRetries - 1,
+            "Retry nudge should have been sent maxRetries-1 times (continuing the turn, H1)");
     assert(node.output.empty, "Node output should still be empty");
 }
 
@@ -1113,6 +1137,7 @@ unittest {
 
     assert(result.status == ProcessResult.Status.ok, "Result should be ok");
     assert(mockAgent._runCount == 2, "Wrapped agent should have been called exactly twice");
-    assert(mockAgent._addUserQueryCount == 1, "Retry prompt should have been sent exactly once");
+    assert(mockAgent._addContinueMessageCount == 1,
+            "Retry nudge should have been sent exactly once (continuing the turn, H1)");
     assert(!node.output.empty, "Node output should be set after second attempt");
 }

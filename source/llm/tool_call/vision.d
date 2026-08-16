@@ -172,6 +172,12 @@ class DedicatedVisionAgent : IAgent {
         // The agent is created per-request by AgentContext.getVisionAgent(), so no shared state persists.
         chat.clear();
 
+        // A vision turn opens explicitly (Task 6): VisionMessages never start
+        // a turn themselves (they are not Messages), so beginNewTurn() is the
+        // only allocation path (A3). clear() reset only currentTurnId_; the
+        // counter keeps climbing, so consecutive images get distinct IDs.
+        chat.beginNewTurn();
+
         // Add user message with image and query
         chat.add(VisionMessage(content: query, imageDataUrl: imageDataUrl));
 
@@ -273,4 +279,45 @@ ExecuteFuncResult loadImageApi(Context baseCtx, LoadImageApiParams params) nothr
     } catch (Exception e) {
         return ExecuteFuncResult("error: " ~ e.msg, success: false);
     }
+}
+
+// --- Task 6 test: single-turn vision opens a real turn (beginNewTurn) ---
+
+// processImage() must fail against a closed localhost port, but the turn
+// opens BEFORE the request: system prompt stamps 0, the VisionMessage stamps
+// 1, and a second image (after clear()) gets turn 2 — the counter never
+// re-uses IDs (I4).
+unittest {
+    import llm.chat : turnIdOf;
+
+    VisionModelConfig cfg;
+    cfg.server.url = "http://127.0.0.1:1"; // closed port: request fails fast
+    cfg.server.maxRetries = 0; // one attempt, no exponential backoff
+    cfg.modelName = "test-vision";
+    cfg.contextSize = 8192;
+    cfg.timeoutSecs = 1;
+
+    auto agent = new DedicatedVisionAgent(cfg, "");
+
+    auto res = agent.processImage("data:image/png;base64,AAAA", "what is in this image?");
+    res.match!((string s) {
+        assert(false, "no live server: expected an Error, got: " ~ s);
+    }, (DedicatedVisionAgent.Error e) {});
+    assert(agent.chat.currentTurnId() == 1);
+    assert(agent.chat.nextTurnId() == 1);
+    auto msgs = agent.chat.getMessages;
+    assert(msgs.length == 2);
+    assert(turnIdOf(msgs[0]) == 0, "system prompt belongs to no turn");
+    assert(turnIdOf(msgs[1]) == 1, "vision message carries the opened turn");
+
+    auto res2 = agent.processImage("data:image/png;base64,BBBB", "and this one?");
+    res2.match!((string s) {
+        assert(false, "no live server: expected an Error, got: " ~ s);
+    }, (DedicatedVisionAgent.Error e) {});
+    assert(agent.chat.currentTurnId() == 2);
+    assert(agent.chat.nextTurnId() == 2);
+    msgs = agent.chat.getMessages;
+    assert(msgs.length == 2,
+            "clear() resets to the system prompt; the new VisionMessage makes length 2");
+    assert(turnIdOf(msgs[1]) == 2);
 }

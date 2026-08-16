@@ -9,7 +9,7 @@ import std.conv : to, text;
 import std.exception : collectException;
 import std.datetime : Clock, SysTime, DateTime, UTC, dur;
 import std.format : format;
-import std.json : JSONType;
+import std.json : JSONType, JSONValue;
 import std.string : strip, startsWith, join;
 import std.sumtype : match;
 
@@ -184,6 +184,11 @@ struct AgentApp {
     package void doCompress(bool force) {
         if (!agent_.needCompression && !force)
             return;
+        // G1: stamp the owning session into any checkpoint event this
+        // compression fires. Pool callbacks set their own or leave "" —
+        // Phase 1 refuses to index events with an empty sessionId.
+        agent_.setCompressionCheckpointSessionId(activeSession.id.get);
+        logger.tracef("compression checkpoint session id: %s", activeSession.id.get);
         const ctxUsed = agent_.stat.context;
         uiMsg.busy;
         auto res = agent_.compress(force: force, callback: &this.progressCallback);
@@ -252,6 +257,14 @@ struct AgentApp {
             auto msgs = doc["messages"].array.filter!(entry => entry.type != JSONType.object
                     || !("role" in entry.object) || entry["role"].str != "system").array;
             doc["messages"] = msgs;
+
+            // Persist the TurnID counter high-water mark as a session-header
+            // key (A5); the session store preserves unknown header keys via
+            // meta.extra (D2) and rebuilds the header on save.
+            if (activeSession.extra.type == JSONType.null_) {
+                activeSession.extra = JSONValue.emptyObject;
+            }
+            activeSession.extra["next_turn_id"] = agent_.chat.nextTurnId();
 
             activeSession = sessionStore.save(activeSession.id, activeSession, doc);
             chatDirty = false;
