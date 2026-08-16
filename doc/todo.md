@@ -9,23 +9,22 @@
 - support AGENT.md
 - move choosing a model to the menu
 - look at what claude code is doing with .claude/rules and CLAUDE.md
-- change the behavior of loading a .llmfun.json from the current directory if it exist to only doing it if the project is trusted
+- change the behavior of loading a .llmfun.yaml from the current directory if it exist to only doing it if the project is trusted
 - before writing a file check that the file isn't inside a tree of symlinks from the workarea and up
 - a memory file that is written should have a date when it was updated. Even better if each section in it that is changed have a date. This is to enhance the LLM's capability to reason about the "age" of the data if it gets conflicting data from different sources.
 - add more @safe tags
 - workarea is not allowed to be a symlink. Security reasons
 - the 'answer' parameter in taskDone is almost a summary of everything between it and the previous user query. Maybe the summary algorithm should be updated to only keep final answers?
 - the self improvement of how to use tools should always be injected directly after the system prompt on startup if the chat is empty
-- if llmfun/data/scratch do not exist history file is loaded relative to the llmfun binary
+- if llmfun/data/chat do not exist history file is loaded relative to the llmfun binary
 - replace "format!" with interpolated strings when possible
 - in tool calls and the response there is an excessive amount of escaping of slash
 - replace the grep tool with an internal implementation, to reduce the dependency on the OS
-- make sound notification configurable in json via config.d
+- make sound notification configurable in yaml via config.d
 - merge the tools listDirectory, removeFile, checksumFile etc to one tool which take a command and then a key/value json string, which is the arguments. This approach should reduce the number of tools that is needed and thus the system prompt. Do a similar thing for sandbox.
 - when summarizing the agent context add all messages, excluding the system prompt, to the RAG in one large document under the topic "agent_context". Protect this topic. This should then also be added to the summarized context that all details are saved in the RAG under this topic. Each time an agent is summarized or /new is called the topic is either replaced or deleted.
 - modify imgui_markdown to render code blocks with Text so we get line break in them. That fix the side scrolling issue and ugly rendering on long lines.
-- editFile when matching should ignore empty lines. Because it doesn't it lead to a lot of tool call errors.
-- editFile when matching should ignore empty lines. Because it doesn't it lead to a lot of tool call errors.
+- rename LLMFUN_DEFAULT_CONFIG to LLMFUN_SYSTEM_CONFIG
 
 # ui
 - change the background color for the input field to dark grey
@@ -72,7 +71,7 @@
 
 # skills
 - Consider adding a `skill.load` metric event (tracked by `MetricMonitor`) to identify most-used skills. Deferred to P2 — requires designing the metric schema.
-- If a skill-related bug prevents agent startup, users can set `"disableSkills": true` in their JSON config to bypass all skill logic. This is the primary rollback mechanism.
+- If a skill-related bug prevents agent startup, users can set `disableSkills: true` in their YAML config to bypass all skill logic. This is the primary rollback mechanism.
 - Glob-Triggered Skill Activation (P2)
 - `allowed-tools` Permission Bypass (P2)
 - skills should be part of the metrics that are collected. How often they are loaded etc

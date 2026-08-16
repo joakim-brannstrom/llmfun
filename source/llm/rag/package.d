@@ -1,3 +1,5 @@
+module llm.rag;
+
 public import llm.rag.database;
 public import llm.common.embedder;
 public import llm.rag.rag;

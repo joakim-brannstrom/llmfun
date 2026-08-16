@@ -27,11 +27,11 @@ struct UserConfig {
     Path config;
 
     @(NamedArgument("no-cwd-config")
-            .Description("Do not read .llmfun.json from current directory (security)"))
+            .Description("Do not read .llmfun.yaml from current directory (security)"))
     bool noCwdConfig;
 
     @(NamedArgument("trusted-config")
-            .Description("Allow loading .llmfun.json from CWD when workarea equals CWD"))
+            .Description("Allow loading .llmfun.yaml from CWD when workarea equals CWD"))
     bool trustedConfig;
 
     @(Command("agent"))

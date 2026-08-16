@@ -237,51 +237,45 @@ Skills are discovered in path order. If duplicate skill names exist across paths
 
 ### Adding Claude Code Skills
 
-To import skills from Claude Code, add `~/.claude/skills` to your `skillPaths` configuration:
+To import skills from Claude Code, add `~/.claude/skills` to your `skillPathsUser` configuration:
 
-```json
-{
-  "skillPaths": [
-    "llmfun/skills",
-    "~/.local/share/llmfun/skills",
-    "~/.claude/skills"
-  ]
-}
+```yaml
+skillPathsUser:
+  - llmfun/skills
+  - ~/.local/share/llmfun/skills
+  - ~/.claude/skills
 ```
 
 ---
 
 ## Configuration
 
-Skill behavior is controlled through the llmfun JSON configuration file. All skill-related options are optional with sensible defaults.
+Skill behavior is controlled through the llmfun YAML configuration file. All skill-related options are optional with sensible defaults.
 
 ### Configuration Fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `skillPaths` | string[] | `[llmfun/skills, ~/.local/share/llmfun/skills]` | Directories to scan for skills. |
-| `maxManifestSkills` | integer | `200` | Maximum skills listed in system prompt manifest. |
+| `skillPathsUser` | string[] | `[]` | User-level skill directories (searched first). |
+| `skillPathsSystem` | string[] | `[llmfun/skills, ~/.local/share/llmfun/skills]` | System skill directories (searched after user paths). |
 | `maxAlwaysApplyTokens` | integer | `4000` | Maximum estimated tokens for always-apply skill bodies. Set to 0 for unlimited (not recommended). |
 | `disableSkills` | boolean | `false` | Disable all skill functionality when `true`. |
 
 ### Example Configuration
 
-```json
-{
-  "skillPaths": [
-    "llmfun/skills",
-    "~/.local/share/llmfun/skills",
-    "~/.claude/skills"
-  ],
-  "maxManifestSkills": 150,
-  "maxAlwaysApplyTokens": 3000,
-  "disableSkills": false
-}
+```yaml
+skillPathsUser:
+  - llmfun/skills
+  - ~/.local/share/llmfun/skills
+  - ~/.claude/skills
+maxManifestSkills: 150
+maxAlwaysApplyTokens: 3000
+disableSkills: false
 ```
 
 ### Configuration File Location
 
-The JSON config is loaded from `.llmfun.json` (project-local), `$LLMFUN_DEFAULT_CONFIG` or `~/.config/llmfun/config.json` (user-level). Project-local configuration is merged with the user-level configuration such that first is user-level loaded then project-local overwrite some or all configuration options.
+The YAML config is loaded from `.llmfun.yaml` (project-local), `$LLMFUN_DEFAULT_CONFIG` or `~/.config/llmfun/config.yaml` (user-level). Project-local configuration is merged with the user-level configuration such that first is user-level loaded then project-local overwrite some or all configuration options.
 
 ---
 

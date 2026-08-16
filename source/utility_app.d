@@ -45,7 +45,7 @@ struct UserConfig {
             config = Path(v);
         }
 
-        Path config = "config/remote.json";
+        Path config = "config/remote.yaml";
     }
 
     @(Command("summary_test"))
@@ -55,7 +55,7 @@ struct UserConfig {
             config = Path(v);
         }
 
-        Path config = "config/remote.json";
+        Path config = "config/remote.yaml";
 
         @(NamedArgument("history").Required().Description("History file to summarize"))
         string history;
@@ -187,7 +187,7 @@ int appMain(UserConfig uconf, UserConfig.TestSlotApiConfig conf) {
     import llm.chat;
     import llm.query;
 
-    auto llmConf = readConfig(Path("config/remote.json"), false, true, false).userToLlmConfig(conf);
+    auto llmConf = readConfig(Path("config/remote.yaml"), false, true, false).userToLlmConfig(conf);
     auto slot = LlmSlotRequester(llmConf.codeModels[0].toRequestConfig);
     auto res = slot.request();
     res.match!((JSONValue j) { writeln(j.toPrettyString); }, (LlamaRequestError e) {
@@ -200,7 +200,6 @@ int appMain(UserConfig uconf, UserConfig.TestSlotApiConfig conf) {
 int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
     import llm.tool_call;
     import llm.tool_call.io;
-    import llm.tool_call.sandbox;
     import llm.tool_call.memory;
     import llm.tool_call.completion : CompletionContext;
     import llm.config;
@@ -212,17 +211,13 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
     class DummyCtx : Context {
     }
 
-    static class DummyContext : SandboxContext, FileContext, MemoryContext, CompletionContext {
+    static class DummyContext : FileContext, MemoryContext, CompletionContext {
         override bool isPathInsideWorkArea(AbsolutePath p) {
             return true;
         }
 
         override AbsolutePath workArea() {
             return AbsolutePath(".");
-        }
-
-        override SandboxConfig getSandboxConfig() {
-            return SandboxConfig();
         }
 
         override string[] getMemoryFileTopics() {
@@ -298,7 +293,7 @@ int appMain(UserConfig uconf, UserConfig.TestPipelineConfig conf) {
     string query = "count from 1 to 5. Only output 1,2,3,4,5 and nothing else";
 
     auto llmConf = readConfig(conf.config.Path, false, true, false).userToLlmConfig(conf);
-    auto monitor = new MetricMonitor(llmConf.scratchArea ~ "monitor_pipeline_test.jsonl");
+    auto monitor = new MetricMonitor(llmConf.dataDir ~ "monitor_pipeline_test.jsonl");
 
     auto writer = new Agent("writer", llmConf, monitor);
     writer.setSystemPrompt("You are a technical writer. Write a short, clear summary on the given topic. " ~ "Focus on accuracy and readability." ~ "You **MUST** call the tool pipelineOutput with the result and **THEN** call taskDone. Never call taskDone before pipelineOutput.");

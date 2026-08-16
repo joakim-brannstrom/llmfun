@@ -16,7 +16,7 @@ This document describes the threat model for the sandbox container configuration
 
 ### Attack Surface
 
-- Configuration files (`example.json`, `.llmfun.json`, image catalog files)
+- Configuration files (`example.yaml`, `.llmfun.yaml`, execution environment files)
 - Container runtime CLI arguments
 - Mount points and volume mappings
 - Magic word substitution (`@{llmfun_workarea}`, `@{llmfun}`)
@@ -28,12 +28,9 @@ This document describes the threat model for the sandbox container configuration
 **Description**: Attacker injects `--privileged` flag to gain full host access.
 
 **Example**:
-```json
-{
-  "defaultOptions": {
-    "security": ["--privileged"]
-  }
-}
+```yaml
+defaultOptions:
+  security: ["--privileged"]
 ```
 
 **Impact**: Container gains full access to host devices, kernel modules, and can escape sandbox entirely.
@@ -46,21 +43,12 @@ This document describes the threat model for the sandbox container configuration
 
 ### 2. Host Filesystem Access
 
-**Mitigation**: 
-- **User responsibility**: Users must review their configuration files.
-- System does not validate option safety.
-
-### 2. Host Filesystem Access
-
 **Description**: Attacker mounts sensitive host directories into the container.
 
 **Example**:
-```json
-{
-  "defaultOptions": {
-    "mounts": ["-v", "/etc:/host-etc:rw", "-v", "/:/host-root:rw"]
-  }
-}
+```yaml
+defaultOptions:
+  mounts: ["-v", "/etc:/host-etc:rw", "-v", "/:/host-root:rw"]
 ```
 
 **Impact**: Container can read/write arbitrary host files, including credentials and system configuration.
@@ -74,12 +62,9 @@ This document describes the threat model for the sandbox container configuration
 **Description**: Attacker configures network access to allow the container to communicate with external services.
 
 **Example**:
-```json
-{
-  "defaultOptions": {
-    "network": ["--network", "host"]
-  }
-}
+```yaml
+defaultOptions:
+  network: ["--network", "host"]
 ```
 
 **Impact**: Container can access host network, potentially exfiltrate data or attack internal services.
@@ -90,16 +75,16 @@ This document describes the threat model for the sandbox container configuration
 
 ### 4. Configuration Poisoning
 
-**Description**: Agent writes a `.llmfun.json` file in the workarea/CWD that overrides the user's intended configuration.
+**Description**: Agent writes a `.llmfun.yaml` file in the workarea/CWD that overrides the user's intended configuration.
 
 **Attack Flow**:
 1. Agent is prompted to modify configuration
-2. Agent writes `.llmfun.json` in CWD with unsafe options
+2. Agent writes `.llmfun.yaml` in CWD with unsafe options
 3. On next run, the malicious config is loaded, granting the agent more privileges
 
 **Mitigations**:
-- **`--no-cwd-config`**: Completely skip loading `.llmfun.json` from CWD.
-- **`--trusted-config`**: Only load `.llmfun.json` from CWD when explicitly allowed. Without this flag, config loading is skipped when `workArea == CWD`.
+- **`--no-cwd-config`**: Completely skip loading `.llmfun.yaml` from CWD.
+- **`--trusted-config`**: Only load `.llmfun.yaml` from CWD when explicitly allowed. Without this flag, config loading is skipped when `workArea == CWD`.
 - Warning is logged when CWD config is skipped.
 
 ### 5. Option Injection via Magic Words
@@ -119,12 +104,9 @@ This document describes the threat model for the sandbox container configuration
 **Description**: Malicious configuration causes container runtime to fail or hang.
 
 **Example**:
-```json
-{
-  "defaultOptions": {
-    "resources": ["--memory", "1b", "--cpus", "0.0001"]
-  }
-}
+```yaml
+defaultOptions:
+  resources: ["--memory", "1b", "--cpus", "0.0001"]
 ```
 
 **Impact**: Container fails to start or executes extremely slowly.
@@ -137,7 +119,7 @@ This document describes the threat model for the sandbox container configuration
 |------------|-------------|------------------|
 | `--no-cwd-config` | Skip CWD config entirely | Configuration poisoning |
 | `--trusted-config` | Require explicit opt-in for CWD config | Configuration poisoning |
-| Image catalog | Curated list of allowed images | Unauthorized image execution |
+| Execution environments | Curated list of allowed container images | Unauthorized image execution |
 | `timeoutSeconds` | Subprocess execution timeout | Denial of service |
 | `maxOutputBytes` | Output stream byte limit | Resource exhaustion |
 | Magic word scoping | Only two magic words, values only | Option injection |
@@ -149,7 +131,7 @@ The user is responsible for:
 1. **Reviewing configuration files** before use, especially when cloning from external sources.
 2. **Validating container options** for safety (no `--privileged`, no sensitive mounts).
 3. **Using `--trusted-config`** when running in directories where the agent can write files.
-4. **Maintaining the image catalog** with only trusted images.
+4. **Maintaining the execution environment files** with only trusted images.
 5. **Setting appropriate resource limits** (memory, CPU, timeout).
 6. **Using `--no-cwd-config`** in untrusted environments.
 
@@ -174,6 +156,6 @@ Options map keys are **tag names** (logical groups like `"security"`, `"network"
 
 ## References
 
-- Configuration format: `config/example.json`
-- Execution environments format: `execution_environments.json`
+- Configuration format: `config/example.yaml`
+- Execution environments format: `execution_environments.yaml`
 - Implementation: `source/llm/config.d`, `source/llm/environment/`

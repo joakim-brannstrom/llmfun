@@ -18,6 +18,7 @@ import my.path;
 import llm.query : RequestConfig;
 import llm.skill : SkillManager;
 import llm.environment.config : EnvironmentBackend, ExecutionConfigState, loadExecutionBackends;
+import llm.yaml : loadYamlValue;
 public import llm.common.embedder;
 public import llm.common.config;
 
@@ -67,15 +68,15 @@ struct SandboxConfig {
     /// Maximum output bytes per stream (stdout/stderr)
     long maxOutputBytes = 1_048_576;
 
-    /// Path to system execution environments JSON file (relative to config directory).
+    /// Path to system execution environments config file (relative to config directory).
     /// Loaded as layer 1; user file entries override system entries with the same tag.
     string systemExecutionEnvironmentsFile;
 
-    /// Path to user execution environments JSON file (relative to config directory).
+    /// Path to user execution environments config file (relative to config directory).
     /// Loaded as layer 2; entries with the same tag override system entries.
     string userExecutionEnvironmentsFile;
 
-    /// Execution environments (loaded from configured JSON files at startup).
+    /// Execution environments (loaded from the configured environments file at startup).
     EnvironmentBackend[] executionEnvironments;
 
     /// Loading state of the execution environments config.
@@ -703,6 +704,11 @@ private void loadExecutionEnvironments(ref LlmConfig conf,
     }
 }
 
+// Configuration format decision (2026-08): llmfun reads ONLY YAML config
+// files (config.yaml / .llmfun.yaml / any -c path). Legacy JSON names
+// (.llmfun.json, config.json) are never read — no fallback, no deprecation
+// window, no migration. Machine-managed JSON (state.json, chat sessions,
+// monitor.jsonl, protocol payloads) is unaffected.
 LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig,
         bool trustedConfig, Path userCliWorkArea = Path.init) {
     import std.file : getcwd;
@@ -710,7 +716,7 @@ LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig,
     import my.xdg : xdgConfigHome;
 
     auto systemConfigPath = environment.get("LLMFUN_DEFAULT_CONFIG",
-            (xdgConfigHome ~ Path(ProgramName) ~ Path("config.json")).toString).Path;
+            (xdgConfigHome ~ Path(ProgramName) ~ Path("config.yaml")).toString).Path;
     return readConfigInternal(path: path, silent: silent, noCwdConfig: noCwdConfig, trustedConfig: trustedConfig,
             userCliWorkArea: userCliWorkArea, cwd: Path(getcwd()),
             systemConfigPath: systemConfigPath);
@@ -730,11 +736,11 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
         if (systemConfigPath.exists) {
             logger.infof(!silent, "Reading base configuration from %s", systemConfigPath);
             try {
-                conf = jsonToLlmConfig(conf, readText(systemConfigPath).parseJSON);
+                conf = applyLlmConfig(conf, loadYamlValue(systemConfigPath));
                 loadedAnyFile = true;
                 configDir = systemConfigPath.dirName;
             } catch (Exception e) {
-                logger.errorf(!silent, "Failed to parse base config %s: %s",
+                logger.errorf(!silent, "Failed to load base config %s: %s",
                         systemConfigPath, e.msg);
             }
         } else {
@@ -756,23 +762,23 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
             bool workAreaIsCwd = effectiveWorkArea.toString.among(".", "./")
                 || AbsolutePath(effectiveWorkArea) == AbsolutePath(cwd);
             if (workAreaIsCwd && !trustedConfig) {
-                logger.warningf(!silent, "Skipping CWD config: workarea equals CWD (%s). Use --trusted-config to allow loading .llmfun.json from CWD, or --no-cwd-config to suppress this warning.",
+                logger.warningf(!silent, "Skipping CWD config: workarea equals CWD (%s). Use --trusted-config to allow loading .llmfun.yaml from CWD, or --no-cwd-config to suppress this warning.",
                         cwd);
                 overlayPath = Path.init;
             } else {
-                overlayPath = buildPath(cwd, ".llmfun.json").Path;
+                overlayPath = buildPath(cwd, ".llmfun.yaml").Path;
             }
         }
 
         if (!overlayPath.empty && overlayPath.exists) {
             logger.infof(!silent, "Reading project configuration from %s", overlayPath);
             try {
-                conf = jsonToLlmConfig(conf, readText(overlayPath.toString).parseJSON);
+                conf = applyLlmConfig(conf, loadYamlValue(overlayPath));
                 loadedAnyFile = true;
                 configDir = overlayPath.dirName;
             } catch (Exception e) {
                 logger.errorf(!silent,
-                        "Failed to parse project config %s: %s", overlayPath, e.msg);
+                        "Failed to load project config %s: %s", overlayPath, e.msg);
             }
         } else if (!overlayPath.empty) {
             logger.infof(!silent, "No project configuration found at %s", overlayPath);
@@ -794,25 +800,25 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
     return conf;
 }
 
-private EmbedConfig jsonToEmbedConfig(JSONValue json) {
+private EmbedConfig embedConfigFromValue(JSONValue json) {
     import std.exception : enforce;
 
     if ("type" !in json) {
-        throw new Exception("embedConfig JSON missing required field 'type'");
+        throw new Exception("embedConfig missing required field 'type'");
     }
 
     string type = json["type"].str;
     json.object.remove("type");
     if (type == "remote") {
-        return EmbedConfig(jsonToConfig!(RemoteEmbedConfig)(RemoteEmbedConfig.init, json));
+        return EmbedConfig(applyConfig!(RemoteEmbedConfig)(RemoteEmbedConfig.init, json));
     }
     if (type == "local") {
-        return EmbedConfig(jsonToConfig!(LocalEmbedConfig)(LocalEmbedConfig.init, json));
+        return EmbedConfig(applyConfig!(LocalEmbedConfig)(LocalEmbedConfig.init, json));
     }
     throw new Exception("embedConfig: unknown type '" ~ type ~ "', expected 'remote' or 'local'");
 }
 
-auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
+auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
     import std.traits;
 
     template NullableInner(T) {
@@ -843,7 +849,7 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
         }
     }
 
-    logger.trace("read json config start: " ~ ConfigT.stringof);
+    logger.trace("apply config start: " ~ ConfigT.stringof);
     bool[string] used;
 
     static foreach (llmMemberName; __traits(allMembers, ConfigT)) {
@@ -889,7 +895,7 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                             }
                         } else static if (is(Type == CodeModelConfig[])) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(
-                                    a => jsonToConfig(CodeModelConfig.init, a)).array;
+                                    a => applyConfig(CodeModelConfig.init, a)).array;
                         } else static if (is(Type : string)) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].str;
                         } else static if (is(Type : bool)) {
@@ -911,7 +917,7 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(a => a.str)
                                 .array;
                         } else static if (is(Type : EmbedConfig)) {
-                            __traits(getMember, conf, llmMemberName) = jsonToEmbedConfig(
+                            __traits(getMember, conf, llmMemberName) = embedConfigFromValue(
                                     json[llmMemberName]);
                         } else static if (isNullableType!Type
                                 && isAggregateType!(NullableInner!Type)) {
@@ -920,11 +926,11 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
                             auto val = json[llmMemberName];
                             if (val.type != JSONType.NULL) {
                                 auto innerConf = InnerT.init;
-                                __traits(getMember, conf, llmMemberName) = Nullable!InnerT(jsonToConfig(innerConf,
+                                __traits(getMember, conf, llmMemberName) = Nullable!InnerT(applyConfig(innerConf,
                                         val));
                             }
                         } else static if (isAggregateType!Type) {
-                            __traits(getMember, conf, llmMemberName) = jsonToConfig(__traits(getMember,
+                            __traits(getMember, conf, llmMemberName) = applyConfig(__traits(getMember,
                                     conf, llmMemberName), *(llmMemberName in json));
                         }
                     } catch (Exception e) {
@@ -938,10 +944,10 @@ auto jsonToConfig(ConfigT)(ConfigT conf, JSONValue json) {
     }
 
     foreach (k; json.object.byKey.filter!(a => a !in used)) {
-        logger.warningf("Unknown json configuration %s:%s", ConfigT.stringof, k);
+        logger.warningf("Unknown configuration key %s.%s", ConfigT.stringof, k);
     }
 
-    logger.trace("read json config done: " ~ ConfigT.stringof);
+    logger.trace("apply config done: " ~ ConfigT.stringof);
     return conf;
 }
 
@@ -1029,7 +1035,7 @@ void validateConfig(LlmConfig conf) {
     checkApiKeyWarnings(conf);
 }
 
-alias jsonToLlmConfig = jsonToConfig!LlmConfig;
+alias applyLlmConfig = applyConfig!LlmConfig;
 
 /// Returns the OpenAI API key from the OPENAI_API_KEY environment variable, or "" if not set.
 string getEnvApiKey() {
@@ -1142,7 +1148,7 @@ unittest {
     assert(result["mounts"][2] == i"$(thisExePath.dirName)/data:/d".text);
 }
 
-/// Test: jsonToConfig parses string[][string] correctly.
+/// Test: applyConfig parses string[][string] correctly.
 unittest {
     import std.path : buildPath;
     import std.stdio : File;
@@ -1155,10 +1161,13 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "test.json");
-    string json = `{"options":{"security":["--read-only"],"network":["--network","none"]}}`;
-    File(tmpFile, "w").write(json);
-    auto conf = jsonToConfig!(TestConfig)(TestConfig.init, parseJSON(readText(tmpFile)));
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `options:
+  security: ["--read-only"]
+  network: ["--network", "none"]
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyConfig!(TestConfig)(TestConfig.init, loadYamlValue(Path(tmpFile)));
     assert(conf.options.length == 2);
     assert(conf.options["security"] == ["--read-only"]);
     assert(conf.options["network"] == ["--network", "none"]);
@@ -1175,9 +1184,15 @@ unittest {
         rmdirRecurse(tmpDir);
 
     // Create a config file with a custom value we can check
-    auto configFile = buildPath(tmpDir, "test_config.json");
-    string configJson = `{"sandboxConfig":{"maxOutputBytes":42},"codeModels":[{"name":"test","server":{"url":"http://localhost:8080"}}]}`;
-    File(configFile, "w").write(configJson);
+    auto configFile = buildPath(tmpDir, "test_config.yaml");
+    string configYaml = `sandboxConfig:
+  maxOutputBytes: 42
+codeModels:
+  - name: test
+    server:
+      url: http://localhost:8080
+`;
+    File(configFile, "w").write(configYaml);
 
     // Explicit config path should always load
     auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: false,
@@ -1195,22 +1210,115 @@ unittest {
     scope (exit)
         rmdirRecurse(tmpDir);
 
-    auto configFile = buildPath(tmpDir, ".llmfun.json");
-    string configJson = `{
-        "codeModels": [{
-            "name": "test",
-            "server": { "url": "http://localhost:8080" }
-        }],
-    }`;
-    File(configFile, "w").write(configJson);
+    auto configFile = buildPath(tmpDir, ".llmfun.yaml");
+    string configYaml = `codeModels:
+  - name: test
+    server:
+      url: http://localhost:8080
+`;
+    File(configFile, "w").write(configYaml);
 
     // With --no-cwd-config, no CWD config should be loaded
     auto conf = readConfigInternal(Path.init, silent: true, noCwdConfig: true, trustedConfig: false,
             userCliWorkArea: tmpDir.Path, cwd: tmpDir.Path, systemConfigPath: Path.init);
     assert(conf.codeModels.empty, "No config should have been loaded: " ~ conf.to!string);
 
+    // With workArea == CWD and no --trusted-config, the CWD config is skipped.
+    conf = readConfigInternal(Path.init, silent: true, noCwdConfig: false, trustedConfig: false,
+            userCliWorkArea: tmpDir.Path, cwd: tmpDir.Path, systemConfigPath: Path.init);
+    assert(conf.codeModels.empty, "CWD config must be skipped when workArea == CWD without --trusted-config: "
+            ~ conf.to!string);
+
     // with trusted it should load
     conf = readConfigInternal(Path.init, silent: true, noCwdConfig: false, trustedConfig: true,
             userCliWorkArea: tmpDir.Path, cwd: tmpDir.Path, systemConfigPath: Path.init);
     assert(!conf.codeModels.empty, "Config should have been loaded: " ~ conf.to!string);
+}
+
+/// Test: a legacy `.llmfun.json` alone is ignored — no fallback read.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "legacy_ignored_" ~ __LINE__.to!string);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    // Only the old JSON name exists in this directory.
+    auto legacyFile = buildPath(tmpDir, ".llmfun.json");
+    string legacyJson = `{"codeModels":[{"name":"legacy","server":{"url":"http://localhost:8080"}}]}`;
+    File(legacyFile, "w").write(legacyJson);
+
+    // Even with --trusted-config, the legacy JSON file must not be loaded.
+    auto conf = readConfigInternal(Path.init, silent: true, noCwdConfig: false, trustedConfig: true,
+            userCliWorkArea: tmpDir.Path, cwd: tmpDir.Path, systemConfigPath: Path.init);
+    assert(conf.codeModels.empty, "Legacy .llmfun.json must be ignored: " ~ conf.to!string);
+}
+
+/// Test: layer 1 loads `config.yaml` (or any YAML name) from LLMFUN_DEFAULT_CONFIG.
+unittest {
+    import std.path : buildPath;
+    import std.process : environment;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "default_config_" ~ __LINE__.to!string);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto configFile = buildPath(tmpDir, "my_base.yaml");
+    string configYaml = `warnIfNoApiKey: false
+codeModels:
+  - name: base
+    server:
+      url: http://localhost:8080
+`;
+    File(configFile, "w").write(configYaml);
+
+    // Point LLMFUN_DEFAULT_CONFIG at the YAML file; restore the old value after.
+    string oldValue;
+    if ("LLMFUN_DEFAULT_CONFIG" in environment)
+        oldValue = environment["LLMFUN_DEFAULT_CONFIG"];
+    scope (exit) {
+        if (oldValue is null)
+            environment.remove("LLMFUN_DEFAULT_CONFIG");
+        else
+            environment["LLMFUN_DEFAULT_CONFIG"] = oldValue;
+    }
+
+    environment["LLMFUN_DEFAULT_CONFIG"] = configFile;
+    auto conf = readConfig(Path.init, silent: true, noCwdConfig: true, trustedConfig: false);
+    assert(conf.codeModels.length == 1, "Layer 1 YAML config must be loaded: " ~ conf.to!string);
+    assert(conf.codeModels[0].name == "base");
+}
+
+/// Test: the shipped config/example.yaml loads with a complete defaultOptions
+/// map (guards the YAML quoting: unquoted "0.5"/"60" would become non-strings
+/// and the merger would silently drop the whole map, incl. 06_network).
+unittest {
+    // Parse guard: the shipped file must load, and every defaultOptions item
+    // must be a string (the merger's .str access would throw otherwise).
+    auto json = loadYamlValue(Path("config/example.yaml"));
+    foreach (key, val; json["sandboxConfig"]["defaultOptions"].object) {
+        foreach (item; val.array) {
+            assert(item.type == JSONType.STRING,
+                    "defaultOptions['" ~ key ~ "'] item must be a string: " ~ item.to!string);
+        }
+    }
+
+    // Full pipeline: the merged config must keep every defaultOptions entry.
+    auto conf = readConfigInternal(Path("config/example.yaml"), silent: true,
+            noCwdConfig: true, trustedConfig: false, userCliWorkArea: Path.init,
+            cwd: Path.init, systemConfigPath: Path.init);
+    auto opts = conf.sandboxConfig.defaultOptions;
+    assert(opts.length == 8, "defaultOptions must have 8 keys, got " ~ opts.length.to!string);
+    assert(opts["00_subcommand"] == ["run"]);
+    assert(opts["01_cleanup"] == ["--rm"]);
+    assert(opts["02_user"] == ["--user", "1000:1000"]);
+    assert(opts["03_resources"] == ["--memory", "256m", "--cpus", "0.5"]);
+    assert(opts["04_tmpfs"] == ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]);
+    assert(opts["05_timeout"] == ["--stop-timeout", "60"]);
+    assert(opts["06_network"] == ["--network", "none"]);
+    assert(opts["entrypoint_shell"] == ["sh", "-c"]);
 }

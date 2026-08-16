@@ -6,16 +6,17 @@ module llm.environment.config;
 import logger = std.logger;
 import std.algorithm : filter, map;
 import std.array : empty, array;
-import std.conv : to, text;
+import std.conv : to;
 import std.datetime : Duration, dur;
-import std.file : readText, exists;
-import std.json : JSONValue, JSONType, parseJSON;
+import std.file : exists;
+import std.json : JSONValue, JSONType;
 import std.string : indexOf;
 import std.sumtype : SumType;
 
 import my.path : Path;
 
 import llm.utility : getValue;
+import llm.yaml : loadYamlValue;
 
 /// Execution environment type distinguishing container vs host backends.
 /// Used by consumers to determine which RunnerBackend to instantiate.
@@ -182,10 +183,10 @@ private string[][string] merge(string[][string] base, string[][string] add) {
     return merged;
 }
 
-/// Load execution backends from a JSON configuration file.
+/// Load execution backends from a YAML configuration file.
 ///
 /// Supports the format:
-/// `{ "version": 1, "defaultEnvironment": "tag", "environments": [...] }`
+/// `version: 1 / defaultEnvironment: tag / environments: [...]`
 ///
 /// Accepts `envVars` in both map (`{ "KEY": "VALUE" }`) and list
 /// (`["KEY=VALUE"]`) formats, normalizing to `string[string]`.
@@ -194,7 +195,7 @@ private string[][string] merge(string[][string] base, string[][string] add) {
 /// Returns an empty array if no config file is found (execution disabled).
 ///
 /// Params:
-///    filePath = Path to the JSON config file.
+///    filePath = Path to the YAML config file.
 ///    state = Output parameter tracking the load outcome.
 ///    defaultTag = Output parameter for the default environment tag (optional).
 ///
@@ -213,19 +214,11 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
         return null;
     }
 
-    string content;
-    try {
-        content = readText(filePath);
-    } catch (Exception e) {
-        logger.warningf("Failed to read execution environments config %s: %s", filePath, e.msg);
-        return null;
-    }
-
     JSONValue json;
     try {
-        json = parseJSON(content);
+        json = loadYamlValue(filePath);
     } catch (Exception e) {
-        logger.warningf("Failed to parse execution environments config %s: %s", filePath, e.msg);
+        logger.warningf("Failed to load execution environments config %s: %s", filePath, e.msg);
         return null;
     }
 
@@ -243,7 +236,10 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
     }
 
     if ("version" in json) {
-        auto ver = json["version"].integer;
+        // getValue swallows a wrong-typed 'version' (YAML makes this easy:
+        // 1.0 → decimal, "1" → string); a non-integer version then degrades
+        // to the unknown-version warning instead of failing the whole load.
+        auto ver = getValue(json, (v) => v["version"].integer, 0);
         if (ver != 1) {
             logger.warningf("Execution environments config version %s is unknown - " ~ "attempting to parse anyway",
                     ver);
@@ -428,7 +424,7 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
 // Unit tests for loadExecutionBackends()
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test: valid JSON with container and host environments parses correctly.
+/// Test: valid YAML with container and host environments parses correctly.
 unittest {
     import std.file : mkdirRecurse, rmdirRecurse;
     import std.path : buildPath;
@@ -439,9 +435,42 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = "{\"version\":1,\"defaultEnvironment\":\"sandbox\",\"environments\":[{\"tag\":\"sandbox\",\"description\":\"Container sandbox\",\"capabilities\":[\"isolated\"],\"isIsolated\":true,\"commandJoinMode\":\"whitespace\",\"timeout\":60,\"config\":{\"type\":\"container\",\"runtimeCli\":\"docker\",\"image\":\"alpine:latest\",\"options\":{\"00_subcommand\":[\"run\"],\"01_security\":[\"--read-only\"], \"05_workarea\":[\"-v\",\"/workarea:/workarea\"]}}},{\"tag\":\"native\",\"description\":\"Host execution\",\"capabilities\":[\"fast\"],\"isIsolated\":false,\"commandJoinMode\":\"append\",\"timeout\":30,\"config\":{\"type\":\"host\",\"options\":{\"00_shell\":[\"sh\",\"-c\"]},\"workingDir\":\"/tmp\",\"envVars\":{\"HOME\":\"/tmp\",\"PATH\":\"/usr/bin\"}}}]}";
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `version: 1
+defaultEnvironment: sandbox
+environments:
+  - tag: sandbox
+    description: Container sandbox
+    capabilities:
+      - isolated
+    isIsolated: true
+    commandJoinMode: whitespace
+    timeout: 60
+    config:
+      type: container
+      runtimeCli: docker
+      image: alpine:latest
+      options:
+        00_subcommand: ["run"]
+        01_security: ["--read-only"]
+        05_workarea: ["-v", "/workarea:/workarea"]
+  - tag: native
+    description: Host execution
+    capabilities:
+      - fast
+    isIsolated: false
+    commandJoinMode: append
+    timeout: 30
+    config:
+      type: host
+      options:
+        00_shell: ["sh", "-c"]
+      workingDir: /tmp
+      envVars:
+        HOME: /tmp
+        PATH: /usr/bin
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -476,7 +505,7 @@ unittest {
 unittest {
     ExecutionConfigState state;
     string defaultTag;
-    auto result = loadExecutionBackends("/nonexistent/exec_env.json".Path, null, state, defaultTag);
+    auto result = loadExecutionBackends("/nonexistent/exec_env.yaml".Path, null, state, defaultTag);
     assert(result is null);
     assert(state == ExecutionConfigState.notConfigured);
     assert(defaultTag is null);
@@ -492,9 +521,18 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = "{\"version\":1,\"defaultEnvironment\":\"sandbos\",\"environments\":[{\"tag\":\"sandbox\",\"timeout\":60,\"config\":{\"type\":\"container\",\"runtimeCli\":\"docker\",\"image\":\"alpine:latest\"}}]}";
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `version: 1
+defaultEnvironment: sandbos
+environments:
+  - tag: sandbox
+    timeout: 60
+    config:
+      type: container
+      runtimeCli: docker
+      image: alpine:latest
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -514,9 +552,20 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = "{\"environments\":[{\"tag\":\"sandbox\",\"timeout\":60,\"config\":{\"type\":\"container\",\"runtimeCli\":\"docker\",\"image\":\"alpine:latest\"}},{\"tag\":\"sandbox\",\"timeout\":30,\"config\":{\"type\":\"host\"}}]}";
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: sandbox
+    timeout: 60
+    config:
+      type: container
+      runtimeCli: docker
+      image: alpine:latest
+  - tag: sandbox
+    timeout: 30
+    config:
+      type: host
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -526,7 +575,7 @@ unittest {
     assert(result[0].tag == "sandbox");
 }
 
-/// Test: invalid JSON returns null with loadFailed state.
+/// Test: invalid YAML returns null with loadFailed state.
 unittest {
     import std.file : mkdirRecurse, rmdirRecurse;
     import std.path : buildPath;
@@ -536,8 +585,12 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "bad.json");
-    File(tmpFile, "w").write("{ invalid json }");
+    auto tmpFile = buildPath(tmpDir, "bad.yaml");
+    // Leading '@' is a genuine dyaml parse error ("cannot start any token").
+    // '{ invalid json }' would NOT work here: it is valid YAML (a mapping
+    // {invalid json: null}), which would move this test off the parse-failure
+    // path onto the invalid-format path (same state, wrong branch exercised).
+    File(tmpFile, "w").write("@invalid");
 
     ExecutionConfigState state;
     string defaultTag;
@@ -557,9 +610,15 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"environments":[{"tag":"testhost","timeout":30,"config":{"type":"host","envVars":["FOO=bar","BAZ=qux"]}}]}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: testhost
+    timeout: 30
+    config:
+      type: host
+      envVars: ["FOO=bar", "BAZ=qux"]
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -581,9 +640,17 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"environments":[{"tag":"testhost","timeout":30,"config":{"type":"host","envVars":{"KEY1":"val1","KEY2":"val2"}}}]}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: testhost
+    timeout: 30
+    config:
+      type: host
+      envVars:
+        KEY1: val1
+        KEY2: val2
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -604,9 +671,11 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"version": 1, "environments": []}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `version: 1
+environments: []
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -625,9 +694,11 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"version": 1, "items": []}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `version: 1
+items: []
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -647,9 +718,18 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"environments":[{"tag":"podman-env","timeout":60,"config":{"type":"container","runtimeCli":"podman","image":"alpine:latest","options":{"00_run":["run"]}}}]}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: podman-env
+    timeout: 60
+    config:
+      type: container
+      runtimeCli: podman
+      image: alpine:latest
+      options:
+        00_run: ["run"]
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -670,9 +750,19 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"defaultEnvironment":"mydefault","environments":[{"tag":"mydefault","timeout":30,"config":{"type":"host"}},{"tag":"other","timeout":30,"config":{"type":"host"}}]}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `defaultEnvironment: mydefault
+environments:
+  - tag: mydefault
+    timeout: 30
+    config:
+      type: host
+  - tag: other
+    timeout: 30
+    config:
+      type: host
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -692,9 +782,20 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"environments":[{"tag":"test","timeout":60,"config":{"type":"container","runtimeCli":"docker","image":"alpine:latest","options":{"00_valid":["arg1"],"invalid":["arg2"],"01_also_valid":["arg3"]}}}]}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: test
+    timeout: 60
+    config:
+      type: container
+      runtimeCli: docker
+      image: alpine:latest
+      options:
+        00_valid: ["arg1"]
+        invalid: ["arg2"]
+        01_also_valid: ["arg3"]
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -716,9 +817,15 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"environments":[{"tag":"testhost","timeout":30,"config":{"type":"host","envVars":["FOO=","BAR=baz"]}}]}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: testhost
+    timeout: 30
+    config:
+      type: host
+      envVars: ["FOO=", "BAR=baz"]
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -740,9 +847,15 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"environments":[{"tag":"testhost","timeout":30,"config":{"type":"host","envVars":["=bad","GOOD=ok"]}}]}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: testhost
+    timeout: 30
+    config:
+      type: host
+      envVars: ["=bad", "GOOD=ok"]
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -765,11 +878,20 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
     // Environment has only "01_security" option, defaultOptions has "00_subcommand" and "01_security"
     // Result should have both, with environment's "01_security" overriding the default
-    string json = `{"environments":[{"tag":"test","timeout":60,"config":{"type":"container","runtimeCli":"docker","image":"alpine:latest","options":{"01_security":["--read-only"]}}}]}`;
-    File(tmpFile, "w").write(json);
+    string yaml = `environments:
+  - tag: test
+    timeout: 60
+    config:
+      type: container
+      runtimeCli: docker
+      image: alpine:latest
+      options:
+        01_security: ["--read-only"]
+`;
+    File(tmpFile, "w").write(yaml);
 
     // Default options with "00_subcommand" and "01_security"
     string[][string] defaultOptions;
@@ -805,9 +927,18 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
-    string json = `{"environments":[{"tag":"test","timeout":60,"config":{"type":"container","runtimeCli":"docker","image":"alpine:latest","options":{"00_run":["run"]}}}]}`;
-    File(tmpFile, "w").write(json);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: test
+    timeout: 60
+    config:
+      type: container
+      runtimeCli: docker
+      image: alpine:latest
+      options:
+        00_run: ["run"]
+`;
+    File(tmpFile, "w").write(yaml);
 
     ExecutionConfigState state;
     string defaultTag;
@@ -834,11 +965,18 @@ unittest {
     mkdirRecurse(tmpDir);
     scope (exit)
         rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "config.json");
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: testhost
+    timeout: 30
+    config:
+      type: host
+      options:
+        01_env: ["--env", "VAR=val"]
+`;
     // Environment has only "01_env" option, defaultOptions has "00_shell" and "01_env"
     // Result should have both, with environment's "01_env" overriding the default
-    string json = `{"environments":[{"tag":"testhost","timeout":30,"config":{"type":"host","options":{"01_env":["--env","VAR=val"]}}}]}`;
-    File(tmpFile, "w").write(json);
+    File(tmpFile, "w").write(yaml);
 
     // Default options with "00_shell" and "01_env"
     string[][string] defaultOptions;
@@ -856,6 +994,96 @@ unittest {
             assert("01_env" in h.options, "env option should override default");
             assert(h.options["01_env"][0] == "--env", "env option should override default");
             assert(h.options["01_env"][1] == "VAR=val");
+            return true;
+        }));
+}
+
+/// Test: a wrong-typed 'version' (YAML decimal `1.0`) degrades to the
+/// unknown-version warning instead of throwing and failing the whole load.
+unittest {
+    import std.file : mkdirRecurse, rmdirRecurse;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "execenv_" ~ __LINE__.to!string);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `version: 1.0
+environments:
+  - tag: sandbox
+    timeout: 60
+    config:
+      type: container
+      runtimeCli: docker
+      image: alpine:latest
+`;
+    File(tmpFile, "w").write(yaml);
+
+    ExecutionConfigState state;
+    string defaultTag;
+    auto result = loadExecutionBackends(tmpFile.Path, null, state, defaultTag);
+    assert(state == ExecutionConfigState.loaded);
+    assert(result.length == 1);
+    assert(result[0].tag == "sandbox");
+}
+
+/// Test: the shipped config/execution_environments.yaml loads all six
+/// environments; container environments keep the workarea mount and network
+/// isolation, and the native environment keeps its magic-word workingDir.
+unittest {
+    import std.sumtype : match;
+
+    // Parse guard: the shipped file must load via the bridge directly.
+    auto envJson = loadYamlValue(Path("config/execution_environments.yaml"));
+    assert(envJson["version"].integer == 1);
+    assert(envJson["environments"].array.length == 6);
+
+    // Use the shipped example.yaml's defaultOptions so the merge path is
+    // exercised exactly like the real pipeline (config.d loadExecutionEnvironments).
+    string[][string] defaultOptions;
+    auto exampleJson = loadYamlValue(Path("config/example.yaml"));
+    foreach (key, val; exampleJson["sandboxConfig"]["defaultOptions"].object) {
+        string[] vals;
+        foreach (v; val.array)
+            vals ~= v.str;
+        defaultOptions[key] = vals;
+    }
+
+    ExecutionConfigState state;
+    string defaultTag;
+    auto envs = loadExecutionBackends(Path("config/execution_environments.yaml"),
+            defaultOptions, state, defaultTag);
+    assert(state == ExecutionConfigState.loaded, "shipped environments file must load");
+    assert(envs.length == 6, "expected 6 environments, got " ~ envs.length.to!string);
+
+    // Tags in file order.
+    assert(envs[0].tag == "llmfun");
+    assert(envs[1].tag == "alpine");
+    assert(envs[2].tag == "python");
+    assert(envs[3].tag == "node");
+    assert(envs[4].tag == "ubuntu");
+    assert(envs[5].tag == "native");
+
+    // Every container environment: the quoted @{llmfun_workarea} mount and the
+    // merged network-isolation default must survive the load.
+    foreach (env; envs[0 .. 5]) {
+        assert(env.config.match!((ContainerConfig c) {
+                assert(c.options["05_mounts"] == ["-v", "@{llmfun_workarea}:/workarea"],
+                        "container " ~ env.tag ~ " lost its workarea mount");
+                assert(c.options["06_network"] == ["--network", "none"],
+                        "container " ~ env.tag ~ " lost network isolation");
+                return true;
+            }, (HostConfig h) => false), "environment " ~ env.tag ~ " must be a container");
+    }
+
+    // Native (host) environment: magic-word workingDir, env vars, shell options.
+    assert(envs[5].config.match!((ContainerConfig c) => false, (HostConfig h) {
+            assert(h.workingDir == "@{llmfun_workarea}");
+            assert(h.envVars["PATH"] == "/usr/local/bin:/usr/bin:/bin");
+            assert(h.options["00_shell"] == ["sh", "-c"]);
+            assert(h.allowedCommandPrefixes == ["ls", "cat", "echo", "pwd"]);
             return true;
         }));
 }

@@ -164,13 +164,13 @@ llmfun rag --rm --include ".*deprecated.*"
 ### Print tool metrics
 
 ```bash
-llmfun tool_metrics --data llmfun/data/scratch/monitor.jsonl --number 10
+llmfun tool_metrics --data llmfun/data/monitor.jsonl --number 10
 ```
 
 ### Live monitor tool calls
 
 ```bash
-llmfun tool_metrics --data llmfun/data/scratch/monitor.jsonl --follow
+llmfun tool_metrics --data llmfun/data/monitor.jsonl --follow
 ```
 
 ### Start MCP server over stdio
@@ -199,8 +199,8 @@ These parameters apply to all commands:
 |-----------|-------|-------------|
 | `--config <path>` | `-c` | Path to a configuration file to read |
 | `--verbose` | `-v` | Set log verbosity level (repeat for more verbosity) |
-| `--no-cwd-config` | *none* | Do not read `.llmfun.json` from current directory |
-| `--trusted-config` | *none* | Allow loading `.llmfun.json` from CWD when workarea equals CWD |
+| `--no-cwd-config` | *none* | Do not read `.llmfun.yaml` from current directory |
+| `--trusted-config` | *none* | Allow loading `.llmfun.yaml` from CWD when workarea equals CWD |
 
 ## Slash Commands
 
@@ -229,9 +229,9 @@ When in interactive agent mode (`agent` command), the following slash commands a
 
 ## Chat Sessions
 
-The agent persists chat history as sessions — one JSON file per session under the chat directory `<scratchArea>/chat/` (with the example configuration that is `llmfun/data/scratch/chat/`; without a configured `scratchArea` it falls back to `llmfun/data/chat/`). Sessions can be listed, switched, renamed, and deleted with the slash commands above.
+The agent persists chat history as sessions — one JSON file per session under the chat directory `<dataDir>/chat/` (with the example configuration that is `llmfun/data/chat/`). Sessions can be listed, switched, renamed, and deleted with the slash commands above.
 
-- Each session is `<scratchArea>/chat/<id>.json` with header fields `title`, `createdAt`, `updatedAt`, and `messages`.
+- Each session is `<dataDir>/chat/<id>.json` with header fields `title`, `createdAt`, `updatedAt`, and `messages`.
 - The session id is the filename (immutable), format `<YYYYMMDD-HHMMSS>-<4hex>` (e.g. `20260618-153045-a1b2`); renaming a session changes the header title only.
 - The active session id is persisted in `llmfun/data/state.json` (`activeChatSessionId`) and reopened on startup. One-shot mode (`-p`) appends to the last active session.
 - `/delete <n>` asks twice before deleting. Deleting the active session switches to the most recently updated remaining session.
@@ -241,50 +241,189 @@ See `doc/sessions.md` for the full design and the `SessionStore` API.
 
 ## Configuration
 
-llmfun is configured via a JSON configuration file specified with `--config <path>` or the `LLMFUN_DEFAULT_CONFIG` environment variable. See `config/example.json` for a complete reference of all available options.
+llmfun is configured via a YAML configuration file specified with `--config <path>` or the `LLMFUN_DEFAULT_CONFIG` environment variable. See `config/example.yaml` for a complete reference of all available options.
+
+**YAML notes**: llmfun reads configuration as YAML (YAML 1.1). A few quoting rules differ from JSON and can silently change values:
+
+- Numeric-looking strings must be quoted: `"0.5"` and `"60"` stay strings; unquoted they parse as a float/integer and the config merger drops the whole containing option group (in `defaultOptions` this silently removes all CLI arguments, including network isolation).
+- YAML 1.1 booleans: unquoted `yes`/`no`/`on`/`off`/`true`/`false` (any case) parse as booleans, not strings. Quote them in string fields (e.g. `apiKey: "yes"`).
+- Date-like strings: unquoted `2024-01-01` parses as a timestamp and becomes `"2024-01-01T00:00:00Z"`. Quote date-like strings in string fields.
+- Empty strings must be written explicitly as `""`; an empty value is `null`, not `""`.
+- Regexes must be single-quoted (e.g. `'.*\.txt'`); double-quoted YAML rejects lone backslashes.
+- Values starting with `@` (magic words) or containing `: ` must be quoted.
+- Duplicate mapping keys now fail the load (dyaml throws; `std.json` used last-wins). Key order otherwise does not matter.
+
+Old JSON configuration files (`.llmfun.json`, `config.json`, `execution_environments.json`) are never read; convert them to the corresponding YAML names. Users must update their configuration files manually — llmfun performs no migration.
 
 ### Multi-Layer Configuration
 
 llmfun uses a two-layer configuration system:
 
-1. **Layer 1 (Base)**: Loaded from `LLMFUN_DEFAULT_CONFIG` environment variable or `$XDG_CONFIG_HOME/llmfun/config.json`.
-2. **Layer 2 (Overlay)**: Loaded from `--config` CLI argument or `.llmfun.json` in the current working directory.
+1. **Layer 1 (Base)**: Loaded from `LLMFUN_DEFAULT_CONFIG` environment variable or `$XDG_CONFIG_HOME/llmfun/config.yaml`.
+2. **Layer 2 (Overlay)**: Loaded from `--config` CLI argument or `.llmfun.yaml` in the current working directory.
 
 Layer 2 values override Layer 1 values. This allows global defaults with project-specific overrides.
 
-**Security**: By default, if the workarea equals the current working directory, `.llmfun.json` in the CWD is NOT loaded (to prevent malicious projects from injecting config). Use `--trusted-config` to allow this, or `--no-cwd-config` to suppress the warning.
+**Security**: By default, if the workarea equals the current working directory, `.llmfun.yaml` in the CWD is NOT loaded (to prevent malicious projects from injecting config). Use `--trusted-config` to allow this, or `--no-cwd-config` to suppress the warning.
 
 ### Configuration Structure
 
-```json
-{
-  "dataDir": "llmfun/data",
-  "memoryArea": "llmfun/data/memory",
-  "scratchArea": "llmfun/data/scratch",
-  "promptDir": "llmfun/config/prompt",
-  "workArea": "llmfun/workarea",
-  "sandboxConfig": {"systemExecutionEnvironmentsFile": "execution_environments.json", ...},
-  "agentPrompt": "AGENT.md",
-  "activeCodeModelIndex": 0,
-  "noMemory": false,
-  "warnIfNoApiKey": true,
-  "skillPathsUser": [],
-  "skillPathsSystem": [],
-  "maxManifestSkills": 200,
-  "maxAlwaysApplyTokens": 4000,
-  "disableSkills": false,
-  "consolidationInterval": 10,
-  "toolLimits": {...},
-  "ragPrimary": {...},
-  "ragSecondary": {...},
-  "ragConfig": {...},
-  "toolFilter": {...},
-  "ragFilter": {...},
-  "codeModels": [...],
-  "summaryModel": {...},
-  "visionModel": {...},
-  "embedConfig": {...}
-}
+```yaml
+# Complete configuration reference (a ready-to-use copy lives in config/example.yaml).
+# YAML quoting rules (see "YAML notes" above): quote numeric-looking strings,
+# write empty strings as "", single-quote regexes, quote @-leading values.
+
+dataDir: llmfun/data
+memoryArea: llmfun/data/memory
+promptDir: llmfun/config/prompt
+workArea: llmfun/workarea
+agentPrompt: AGENT.md
+activeCodeModelIndex: 0
+noMemory: false
+warnIfNoApiKey: true
+skillPathsUser: []
+skillPathsSystem: []
+maxManifestSkills: 200
+maxAlwaysApplyTokens: 4000
+disableSkills: false
+consolidationInterval: 10
+
+toolLimits:
+  readFileMaxLines: 20
+  editFileMaxLines: 80
+  maxDirEntries: 50
+  grepMaxResults: 1000
+  maxSummaryLength: 200
+  maxTopicLength: 100
+  maxTopK: 20
+  maxArgLength: 200
+
+sandboxConfig:
+  maxOutputBytes: 1048576
+  # Every value is a CLI argument string. "0.5" and "60" must stay quoted:
+  # unquoted they would parse as decimal/integer and the config merger would
+  # silently drop the whole defaultOptions map (incl. 06_network isolation).
+  defaultOptions:
+    00_subcommand: ["run"]
+    01_cleanup: ["--rm"]
+    02_user: ["--user", "1000:1000"]
+    03_resources: ["--memory", "256m", "--cpus", "0.5"]
+    04_tmpfs: ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+    05_timeout: ["--stop-timeout", "60"]
+    06_network: ["--network", "none"]
+    entrypoint_shell: ["sh", "-c"]
+  systemExecutionEnvironmentsFile: "execution_environments.yaml"
+  userExecutionEnvironmentsFile: ""
+
+ragPrimary:
+  path: llmfun/data/rag.sqlite3
+  description: Primary RAG database (read/write)
+
+ragSecondary:
+  user_knowledge:
+    - path: /path/to/knowledge.sqlite3
+      description: Read-only user collected knowledge base
+
+toolFilter:
+  include:
+    - '.*'
+  exclude: []
+
+ragFilter:
+  include:
+    - '.*\.txt'
+    - '.*\.md'
+    - '.*\.d'
+    - '.*\.json'
+    - '.*\.yaml'
+  exclude:
+    - '.*deprecated.*'
+    - '.*\.git.*'
+
+ragConfig:
+  windowOverlapPercent: 50
+
+codeModels:
+  - server:
+      url: http://127.0.0.1:1234
+      type: llamaCpp
+      promptUrl: v1/completion
+      chatUrl: v1/chat/completions
+      slotUrl: slots
+      embedUrl: v1/embeddings
+      timeoutSeconds: 3600
+      httpVerbosity: 0
+      verifySslCert: true
+      maxRetries: 3
+      backoffMs: 500
+      apiKey: ""
+    name: local-model
+    temp: 0.6
+    contextSize: 128000
+    maxTokens: -1
+    reasoningBudget: 4096
+    preserveThinking: true
+
+summaryModel:
+  server:
+    url: http://127.0.0.1:1234
+    type: llamaCpp
+    promptUrl: v1/completion
+    chatUrl: v1/chat/completions
+    slotUrl: slots
+    embedUrl: v1/embeddings
+    timeoutSeconds: 60
+    httpVerbosity: 0
+    verifySslCert: true
+    maxRetries: 3
+    backoffMs: 500
+    apiKey: ""
+  name: summary-model
+  prompt: SUMMARY.md
+  temp: 0.3
+  contextSize: 32768
+  contextChunkSize: 32768
+  maxTokens: 4096
+  reasoningBudget: 0
+  preserveThinking: false
+
+visionModel:
+  server:
+    url: http://127.0.0.1:1234
+    type: llamaCpp
+    promptUrl: v1/completion
+    chatUrl: v1/chat/completions
+    slotUrl: slots
+    embedUrl: v1/embeddings
+    timeoutSeconds: 60
+    httpVerbosity: 0
+    verifySslCert: true
+    maxRetries: 3
+    backoffMs: 500
+    apiKey: ""
+  name: vision-model
+  systemPrompt: ""
+  temp: 0.3
+  contextSize: 32768
+  maxTokens: 4096
+  reasoningBudget: 0
+  preserveThinking: false
+  timeoutSecs: 60
+
+embedConfig:
+  type: remote
+  server:
+    url: http://127.0.0.1:1234
+    type: llamaCpp
+    timeoutSeconds: 60
+    httpVerbosity: 0
+    verifySslCert: true
+    maxRetries: 3
+    backoffMs: 500
+    apiKey: ""
+  name: nomic-embed-text
+  nBatch: 512
+  dimensions: 768
 ```
 
 ### Top-Level Options
@@ -293,7 +432,6 @@ Layer 2 values override Layer 1 values. This allows global defaults with project
 |-------|------|---------|-------------|
 | `dataDir` | string | `llmfun/data` | Base directory for data files |
 | `memoryArea` | string[] | `llmfun/data/memory` | Path(s) to persistent memory area(s) |
-| `scratchArea` | string | `llmfun/data/scratch` | Temporary workspace and runtime data |
 | `promptDir` | string/[] | `llmfun/config/prompt` | Directory with prompt templates |
 | `workArea` | string | `llmfun/workarea` | Agent working directory for file operations |
 | `sandboxConfig` | object | defaults | Container runtime config (see below) |
@@ -315,30 +453,31 @@ Layer 2 values override Layer 1 values. This allows global defaults with project
 
 Configures the execution environments for command execution. Supports both container-based (Docker, Podman) and host-based execution.
 
-```json
-"sandboxConfig": {
-  "maxOutputBytes": 1048576,
-  "defaultOptions": {
-    "00_subcommand": ["run"],
-    "01_cleanup": ["--rm"],
-    "02_user": ["--user", "1000:1000"],
-    "03_resources": ["--memory", "256m", "--cpus", "0.5"],
-    "04_tmpfs": ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"],
-    "05_timeout": ["--stop-timeout", "60"],
-    "06_network": ["--network", "none"],
-    "entrypoint_cmd": ["sh", "-c"]
-  },
-  "systemExecutionEnvironmentsFile": "execution_environments.json",
-  "userExecutionEnvironmentsFile": ""
-}
+```yaml
+sandboxConfig:
+  maxOutputBytes: 1048576
+  # Every value is a CLI argument string. "0.5" and "60" must stay quoted:
+  # unquoted they would parse as decimal/integer and the config merger would
+  # silently drop the whole defaultOptions map (incl. 06_network isolation).
+  defaultOptions:
+    00_subcommand: ["run"]
+    01_cleanup: ["--rm"]
+    02_user: ["--user", "1000:1000"]
+    03_resources: ["--memory", "256m", "--cpus", "0.5"]
+    04_tmpfs: ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+    05_timeout: ["--stop-timeout", "60"]
+    06_network: ["--network", "none"]
+    entrypoint_shell: ["sh", "-c"]
+  systemExecutionEnvironmentsFile: "execution_environments.yaml"
+  userExecutionEnvironmentsFile: ""
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `maxOutputBytes` | long | `1048576` | Maximum output bytes per stream (stdout/stderr) |
 | `defaultOptions` | object | defaults | Default container options merged into container environments |
-| `systemExecutionEnvironmentsFile` | string | *(empty)* | Path to system execution environments JSON file |
-| `userExecutionEnvironmentsFile` | string | *(empty)* | Path to user execution environments JSON file |
+| `systemExecutionEnvironmentsFile` | string | *(empty)* | Path to system execution environments YAML file |
+| `userExecutionEnvironmentsFile` | string | *(empty)* | Path to user execution environments YAML file |
 
 #### Default Options
 
@@ -346,36 +485,29 @@ The `defaultOptions` object uses numbered keys to control the order of CLI argum
 
 #### Execution Environments
 
-Execution environments define how commands are executed. They are loaded from JSON files configured via `systemExecutionEnvironmentsFile` and `userExecutionEnvironmentsFile`. User entries override system entries with the same tag.
+Execution environments define how commands are executed. They are loaded from YAML files configured via `systemExecutionEnvironmentsFile` and `userExecutionEnvironmentsFile`. User entries override system entries with the same tag.
 
-The environment config format is a JSON file with `version`, `defaultEnvironment`, and `environments` array:
+The environment config format is a YAML file with `version`, `defaultEnvironment`, and `environments` array:
 
-```json
-{
-  "version": 1,
-  "defaultEnvironment": "alpine",
-  "environments": [
-    {
-      "tag": "alpine",
-      "description": "Minimal Linux environment. **shell: sh**",
-      "capabilities": ["linux", "minimal"],
-      "isIsolated": true,
-      "timeout": 120,
-      "commandJoinMode": "whitespace",
-      "config": {
-        "type": "container",
-        "runtimeCli": "docker",
-        "image": "alpine:latest",
-        "options": {
-          "02_security": ["--read-only"],
-          "04_tmpfs": ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"],
-          "05_mounts": ["-v", "@{llmfun_workarea}:/workarea"],
-          "06_network": ["--network", "none"]
-        }
-      }
-    }
-  ]
-}
+```yaml
+version: 1
+defaultEnvironment: alpine
+environments:
+  - tag: alpine
+    description: "Minimal Linux environment. **shell: sh**"
+    capabilities: ["linux", "minimal"]
+    isIsolated: true
+    timeout: 120
+    commandJoinMode: whitespace
+    config:
+      type: container
+      runtimeCli: docker
+      image: alpine:latest
+      options:
+        02_security: ["--read-only"]
+        04_tmpfs: ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+        05_mounts: ["-v", "@{llmfun_workarea}:/workarea"]
+        06_network: ["--network", "none"]
 ```
 
 **Environment entry fields:**
@@ -413,23 +545,22 @@ The environment config format is a JSON file with `version`, `defaultEnvironment
 - `@{llmfun_workarea}`: Replaced with the configured workarea path
 - `@{llmfun}`: Replaced with the directory of the llmfun executable
 
-See `config/execution_environments.json` for a complete example with multiple environments.
+See `config/execution_environments.yaml` for a complete example with multiple environments.
 
 ### Tool Limits (`toolLimits`)
 
 Configures per-tool limits.
 
-```json
-"toolLimits": {
-  "readFileMaxLines": 20
-  "editFileMaxLines": 80,
-  "maxDirEntries": 50,
-  "grepMaxResults": 1000,
-  "maxSummaryLength": 200,
-  "maxTopicLength": 100,
-  "maxTopK": 20,
-  "maxArgLength": 200
-}
+```yaml
+toolLimits:
+  readFileMaxLines: 20
+  editFileMaxLines: 80
+  maxDirEntries: 50
+  grepMaxResults: 1000
+  maxSummaryLength: 200
+  maxTopicLength: 100
+  maxTopK: 20
+  maxArgLength: 200
 ```
 
 | Field                 | Type | Default | Description |
@@ -450,25 +581,20 @@ Configures the primary (read/write) and secondary (read-only) RAG databases.
 #### Primary Database (`ragPrimary`)
 The primary database is used for indexing and retrieval.
 
-```json
-"ragPrimary": {
-  "path": "llmfun/data/rag.sqlite3",
-  "description": "Recent project source code, documentation and files added with tools loadFileToRAG, loadContentToRAG"
-}
+```yaml
+ragPrimary:
+  path: llmfun/data/rag.sqlite3
+  description: Recent project source code, documentation and files added with tools loadFileToRAG, loadContentToRAG
 ```
 
 #### Secondary Databases (`ragSecondary`)
 A collection of read-only databases organized by category.
 
-```json
-"ragSecondary": {
-  "user_knowledge": [
-    {
-      "path": "/path/to/knowledge.sqlite3",
-      "description": "Read-only user collected knowledge base"
-    }
-  ]
-}
+```yaml
+ragSecondary:
+  user_knowledge:
+    - path: /path/to/knowledge.sqlite3
+      description: Read-only user collected knowledge base
 ```
 
 Each database entry supports:
@@ -479,10 +605,9 @@ Each database entry supports:
 
 Controls RAG indexing behavior.
 
-```json
-"ragConfig": {
-  "windowOverlapPercent": 50
-}
+```yaml
+ragConfig:
+  windowOverlapPercent: 50
 ```
 
 | Field | Type | Default | Description |
@@ -493,11 +618,12 @@ Controls RAG indexing behavior.
 
 Controls which tools the agent can access via regex include/exclude patterns.
 
-```json
-"toolFilter": {
-  "include": [".*"],
-  "exclude": ["executeCommand"]
-}
+```yaml
+toolFilter:
+  include:
+    - '.*'
+  exclude:
+    - 'executeCommand'
 ```
 
 - `include` (string[]): Regex patterns for tools to allow (default: all tools)
@@ -507,11 +633,12 @@ Controls which tools the agent can access via regex include/exclude patterns.
 
 Controls which files are indexed into the RAG database.
 
-```json
-"ragFilter": {
-  "include": [".*\\.txt", ".*\\.md"],
-  "exclude": []
-}
+```yaml
+ragFilter:
+  include:
+    - '.*\.txt'
+    - '.*\.md'
+  exclude: []
 ```
 
 - `include` (string[]): Regex patterns for files to include (default: `.*\\.txt`, `.*\\.md`)
@@ -521,18 +648,27 @@ Controls which files are indexed into the RAG database.
 
 Array of LLM model configurations for the agent. At least one model is required.
 
-```json
-"codeModels": [
-  {
-    "server": { ... },
-    "name": "local-model",
-    "temp": 0.6,
-    "contextSize": 128000,
-    "maxTokens": -1,
-    "reasoningBudget": 4096,
-    "preserveThinking": true
-  }
-]
+```yaml
+codeModels:
+  - server:
+      url: http://127.0.0.1:1234
+      type: llamaCpp
+      promptUrl: v1/completion
+      chatUrl: v1/chat/completions
+      slotUrl: slots
+      embedUrl: v1/embeddings
+      timeoutSeconds: 3600
+      httpVerbosity: 0
+      verifySslCert: true
+      maxRetries: 3
+      backoffMs: 500
+      apiKey: ""
+    name: local-model
+    temp: 0.6
+    contextSize: 128000
+    maxTokens: -1
+    reasoningBudget: 4096
+    preserveThinking: true
 ```
 
 | Field | Type | Default | Description |
@@ -549,21 +685,20 @@ Array of LLM model configurations for the agent. At least one model is required.
 
 Used by `codeModels`, `summaryModel`, and `embedConfig`.
 
-```json
-"server": {
-  "url": "http://127.0.0.1:1234",
-  "promptUrl": "v1/completion",
-  "chatUrl": "v1/chat/completions",
-  "slotUrl": "slots",
-  "embedUrl": "v1/embeddings",
-  "timeoutSeconds": 3600,
-  "httpVerbosity": 0,
-  "verifySslCert": true,
-  "maxRetries": 3,
-  "backoffMs": 500,
-  "apiKey": "",
-  "type": "llamaCpp"
-}
+```yaml
+server:
+  url: http://127.0.0.1:1234
+  type: llamaCpp
+  promptUrl: v1/completion
+  chatUrl: v1/chat/completions
+  slotUrl: slots
+  embedUrl: v1/embeddings
+  timeoutSeconds: 3600
+  httpVerbosity: 0
+  verifySslCert: true
+  maxRetries: 3
+  backoffMs: 500
+  apiKey: ""
 ```
 
 | Field | Type | Default | Description |
@@ -589,18 +724,29 @@ Used by `codeModels`, `summaryModel`, and `embedConfig`.
 
 Configuration for the model used to compress chat history.
 
-```json
-"summaryModel": {
-  "server": { ... },
-  "name": "summary-model",
-  "prompt": "SUMMARY.md",
-  "temp": 0.3,
-  "contextSize": 32768,
-  "contextChunkSize": 32768,
-  "maxTokens": 4096,
-  "reasoningBudget": 0,
-  "preserveThinking": false
-}
+```yaml
+summaryModel:
+  server:
+    url: http://127.0.0.1:1234
+    type: llamaCpp
+    promptUrl: v1/completion
+    chatUrl: v1/chat/completions
+    slotUrl: slots
+    embedUrl: v1/embeddings
+    timeoutSeconds: 60
+    httpVerbosity: 0
+    verifySslCert: true
+    maxRetries: 3
+    backoffMs: 500
+    apiKey: ""
+  name: summary-model
+  prompt: SUMMARY.md
+  temp: 0.3
+  contextSize: 32768
+  contextChunkSize: 32768
+  maxTokens: 4096
+  reasoningBudget: 0
+  preserveThinking: false
 ```
 
 | Field | Type | Default | Description |
@@ -619,18 +765,29 @@ Configuration for the model used to compress chat history.
 
 Optional dedicated vision model for image processing. When configured, `loadImageApi` delegates image analysis to a separate vision-specialized model instead of sending images to the main agent model. This enables hardware separation (e.g., vision model on CPU, main model on GPU) and uses a model optimized for image understanding.
 
-```json
-"visionModel": {
-  "server": { ... },
-  "name": "vision-model",
-  "systemPrompt": "",
-  "temp": 0.3,
-  "contextSize": 32768,
-  "maxTokens": 4096,
-  "reasoningBudget": 0,
-  "preserveThinking": false,
-  "timeoutSecs": 60
-}
+```yaml
+visionModel:
+  server:
+    url: http://127.0.0.1:1234
+    type: llamaCpp
+    promptUrl: v1/completion
+    chatUrl: v1/chat/completions
+    slotUrl: slots
+    embedUrl: v1/embeddings
+    timeoutSeconds: 60
+    httpVerbosity: 0
+    verifySslCert: true
+    maxRetries: 3
+    backoffMs: 500
+    apiKey: ""
+  name: vision-model
+  systemPrompt: ""
+  temp: 0.3
+  contextSize: 32768
+  maxTokens: 4096
+  reasoningBudget: 0
+  preserveThinking: false
+  timeoutSecs: 60
 ```
 
 | Field | Type | Default | Description |
@@ -656,35 +813,42 @@ Configuration for the embedding backend. Supports both local (llama.cpp) and rem
 
 #### Remote Embedding (HTTP API)
 
-```json
-"embedConfig": {
-  "type": "remote",
-  "server": { ... },
-  "name": "nomic-embed-text",
-  "nBatch": 512,
-  "dimensions": 768
-}
+```yaml
+embedConfig:
+  type: remote
+  server:
+    url: http://127.0.0.1:1234
+    type: llamaCpp
+    timeoutSeconds: 60
+    httpVerbosity: 0
+    verifySslCert: true
+    maxRetries: 3
+    backoffMs: 500
+    apiKey: ""
+  name: nomic-embed-text
+  nBatch: 512
+  dimensions: 768
 ```
 
 #### Local Embedding (llama.cpp)
 
-```json
-"embedConfig": {
-  "type": "local",
-  "modelPath": "/path/to/embedding-model.gguf",
-  "context": 8192,
-  "nBatch": 512,
-  "dimensions": 768
-}
+```yaml
+embedConfig:
+  type: local
+  name: nomic-embed-text
+  modelPath: /path/to/embedding-model.gguf
+  onlyCpu: true
+  nBatch: 512
+  dimensions: 768
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `type` | string | (required) | Either `"remote"` or `"local"` |
 | `server` | object | - | Server config (remote only) |
-| `name` | string | - | Model name (remote only) |
+| `name` | string | - | Model name (remote: embedding model name; local: label) |
 | `modelPath` | string | - | Path to GGUF model file (local only) |
-| `context` | long | - | Context size for local embedding |
+| `onlyCpu` | bool | `true` | Run local embedding on CPU only |
 | `nBatch` | long | 512 | Batch size for embedding |
 | `dimensions` | long | 768 | Embedding vector dimensions |
 
@@ -695,19 +859,18 @@ llmfun uses a local directory structure for data and configuration. The structur
 ```
 llmfun/
 ├── config/
-│   ├── example.json         # Complete configuration reference
-│   ├── execution_environments.json   # Curated execution environments
+│   ├── example.yaml         # Complete configuration reference
+│   ├── execution_environments.yaml   # Curated execution environments
 │   ├── prompt/              # Prompt templates and system prompts
 │   │   └── *.md             # Markdown prompt files
 │   └── thinking/            # Thinking templates for structured reasoning
 │       └── *.md             # Structured reasoning strategy templates
 ├── data/
-│   ├── memory               # LLM-persisted memory file (shared across sessions)
+│   ├── chat/                # Chat sessions (one JSON file per session)
+│   ├── memory/              # LLM-persisted memory area: one Markdown file per topic
+│   ├── monitor.jsonl        # Tool call metrics log (JSONL format)
 │   ├── rag.sqlite3          # RAG database (SQLite with FTS5 and vector search)
-│   ├── state.json           # Active model selection and chat session state (auto-saved)
-│   └── scratch/             # Temporary workspace and runtime data
-│       ├── chat/            # Chat sessions (one JSON file per session)
-│       └── monitor.jsonl    # Tool call metrics log (JSONL format)
+│   └── state.json           # Active model selection and chat session state (auto-saved)
 └── workarea/                # Agent working directory for file operations
 ```
 
@@ -718,11 +881,11 @@ llmfun/
 | `llmfun/config/` | Configuration files and templates |
 | `llmfun/config/prompt/` | System prompt templates loaded at startup |
 | `llmfun/config/thinking/` | Thinking templates accessible via `getThinkingTemplate()` tool |
-| `<scratchArea>/chat/` | Chat sessions: one JSON file per session (see `doc/sessions.md`) |
-| `llmfun/data/memory` | Persistent memory file where the LLM stores cross-session information |
+| `llmfun/data/chat/` | Chat sessions: one JSON file per session (see `doc/sessions.md`) |
+| `llmfun/data/memory/` | Persistent memory area: one Markdown file per memory topic (shared across sessions) |
 | `llmfun/data/rag.sqlite3` | SQLite database for RAG with full-text search (FTS5) and vector embeddings |
 | `llmfun/data/state.json` | Auto-saved state (active model index, active chat session id, session count, consolidation lock) |
-| `llmfun/data/scratch/` | Temporary runtime data, including tool call monitoring logs |
+| `llmfun/data/monitor.jsonl` | Tool call metrics log (JSONL format) |
 | `llmfun/workarea/` | Sandbox directory where the agent can create and modify files |
 
 ### Path Resolution Priority
@@ -758,14 +921,14 @@ llmfun requires API keys for LLM providers. These should be configured via:
   ```
   llmfun/config/
   llmfun/data/
-  .llmfun.json
+  .llmfun.yaml
   ```
 - Use environment variables for sensitive credentials when possible
 - The `OPENAI_API_KEY` environment variable is automatically checked as a fallback if no API key is specified in the configuration
 
 ### CWD Config Security
 
-When the workarea is set to the current working directory (or `.`), llmfun will NOT load `.llmfun.json` from the CWD by default. This prevents malicious projects from injecting configuration. To allow CWD config loading:
+When the workarea is set to the current working directory (or `.`), llmfun will NOT load `.llmfun.yaml` from the CWD by default. This prevents malicious projects from injecting configuration. To allow CWD config loading:
 
 - Use `--trusted-config` flag
 - Set workarea to a different directory than CWD

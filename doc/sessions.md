@@ -56,7 +56,7 @@ The core idea is simple: **one JSON file per session, no in-memory cache**.
 ### File Layout
 
 ```
-<scratchArea>/chat/
+<dataDir>/chat/
     20260618-153045-a1b2.json
     20260618-153512-3c4d.json
     ...
@@ -189,7 +189,7 @@ Practical notes:
 
 `setupSession()`:
 
-1. Constructs `SessionStore(<scratchArea>/chat)`.
+1. Constructs `SessionStore(<dataDir>/chat)`.
 2. Lists sessions.
 3. Resolves the active session: saved `activeChatSessionId` if it still exists → else the most recently updated session → else `create()` a fresh one (at least one session always exists).
 4. Loads the active session into `agent_.chat`, resets the response index (preventing replay of old history), and syncs the context size.

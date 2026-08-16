@@ -1,0 +1,92 @@
+# Execution environments for llmfun command execution.
+#
+# YAML 1.1 quoting rules that apply in this file:
+# - descriptions containing ': ' (e.g. "**shell: sh**") must be quoted;
+# - @-leading values (magic words) must be quoted.
+
+version: 1
+defaultEnvironment: llmfun
+environments:
+  - tag: llmfun
+    description: "llmfun development image with D toolchain (git, dub, ldc2, bash). Use for building and testing the llmfun project. **shell: sh**"
+    capabilities: ["dev", "d", "llmfun"]
+    isIsolated: true
+    timeout: 120
+    config:
+      type: container
+      runtimeCli: docker
+      image: llmfun/app:latest
+      options:
+        02_security: ["--read-only"]
+        04_tmpfs: ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+        05_mounts: ["-v", "@{llmfun_workarea}:/workarea"]
+        06_network: ["--network", "none"]
+  - tag: alpine
+    description: "Minimal Linux distribution based on Alpine Linux. Lightweight and fast, ideal for simple commands and scripts. **shell: sh**"
+    capabilities: ["linux", "minimal", "base"]
+    isIsolated: true
+    timeout: 120
+    config:
+      type: container
+      runtimeCli: docker
+      image: alpine:latest
+      options:
+        02_security: ["--read-only"]
+        04_tmpfs: ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+        05_mounts: ["-v", "@{llmfun_workarea}:/workarea"]
+        06_network: ["--network", "none"]
+  - tag: python
+    description: "Python 3.11 runtime in a slim Debian-based image. Use for running Python scripts and applications. **shell: sh**"
+    capabilities: ["python", "dev", "debian"]
+    isIsolated: true
+    timeout: 120
+    config:
+      type: container
+      runtimeCli: docker
+      image: python:3.11-slim
+      options:
+        02_security: ["--read-only"]
+        04_tmpfs: ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+        05_mounts: ["-v", "@{llmfun_workarea}:/workarea"]
+        06_network: ["--network", "none"]
+  - tag: node
+    description: "Node.js 20 LTS runtime on Alpine Linux. Use for running Node.js applications and JavaScript/TypeScript code. **shell: sh**"
+    capabilities: ["nodejs", "javascript", "typescript", "dev"]
+    isIsolated: true
+    timeout: 120
+    config:
+      type: container
+      runtimeCli: docker
+      image: node:20-alpine
+      options:
+        02_security: ["--read-only"]
+        04_tmpfs: ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+        05_mounts: ["-v", "@{llmfun_workarea}:/workarea"]
+        06_network: ["--network", "none"]
+  - tag: ubuntu
+    description: "Ubuntu 22.04 LTS full image. General-purpose Linux environment with apt package manager and common utilities. **shell: sh**"
+    capabilities: ["linux", "ubuntu", "general"]
+    isIsolated: true
+    timeout: 120
+    config:
+      type: container
+      runtimeCli: docker
+      image: ubuntu:22.04
+      options:
+        04_tmpfs: ["--tmpfs", "/tmp:rw,noexec,nosuid,size=64m"]
+        05_mounts: ["-v", "@{llmfun_workarea}:/workarea"]
+        06_network: ["--network", "none"]
+  - tag: native
+    description: "Host execution directly via subprocess. No isolation - use with caution. **shell: sh**"
+    capabilities: ["host", "native"]
+    isIsolated: false
+    timeout: 60
+    commandJoinMode: whitespace
+    config:
+      type: host
+      workingDir: "@{llmfun_workarea}"
+      envVars:
+        PATH: "/usr/local/bin:/usr/bin:/bin"
+      options:
+        00_shell: ["sh", "-c"]
+      allowedCommandPrefixes: ["ls", "cat", "echo", "pwd"]
