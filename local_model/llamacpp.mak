@@ -13,6 +13,7 @@ build/llama_cpp: build/llama_cpp.stamp
 build/llama_cpp_install.stamp: build/llama_cpp
 	find build/llama_cpp -iname '*.so' -exec cp '{}' build/ \; 
 	cd build && ln -sfT libllama.so libllama.so.0
+	mkdir -p ../build
 	cp -P build/*.so* ../build/
 	touch build/llama_cpp_install.stamp
 
