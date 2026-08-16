@@ -275,7 +275,7 @@ disableSkills: false
 
 ### Configuration File Location
 
-The YAML config is loaded from `.llmfun.yaml` (project-local), `$LLMFUN_DEFAULT_CONFIG` or `~/.config/llmfun/config.yaml` (user-level). Project-local configuration is merged with the user-level configuration such that first is user-level loaded then project-local overwrite some or all configuration options.
+The YAML config is loaded from `.llmfun.yaml` (project-local), `$LLMFUN_SYSTEM_CONFIG` or `~/.config/llmfun/config.yaml` (user-level). Project-local configuration is merged with the user-level configuration such that first is user-level loaded then project-local overwrite some or all configuration options.
 
 ---
 

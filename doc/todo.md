@@ -20,7 +20,6 @@
 - merge the tools listDirectory, removeFile, checksumFile etc to one tool which take a command and then a key/value json string, which is the arguments. This approach should reduce the number of tools that is needed and thus the system prompt. Do a similar thing for sandbox.
 - when summarizing the agent context add all messages, excluding the system prompt, to the RAG in one large document under the topic "agent_context". Protect this topic. This should then also be added to the summarized context that all details are saved in the RAG under this topic. Each time an agent is summarized or /new is called the topic is either replaced or deleted.
 - modify imgui_markdown to render code blocks with Text so we get line break in them. That fix the side scrolling issue and ugly rendering on long lines.
-- rename LLMFUN_DEFAULT_CONFIG to LLMFUN_SYSTEM_CONFIG
 - Each message that is processed should have their processing time recorded and other useful statistics such as tokens/s, total tokens etc.
 
 # ui

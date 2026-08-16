@@ -282,7 +282,7 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 ### Configuration
 
 - Multi-layer config in `config.d`: CLI args override file config, file config overrides defaults.
-- Two-layer loading: base config from `LLMFUN_DEFAULT_CONFIG` / system path, overlay from `--config` / `.llmfun.yaml` in CWD.
+- Two-layer loading: base config from `LLMFUN_SYSTEM_CONFIG` / system path, overlay from `--config` / `.llmfun.yaml` in CWD.
 - Security: CWD config skipped when workarea == CWD unless `--trusted-config` is used.
 - Supports `ToolLimits`, `RagConfig`, `SandboxConfig` with execution environments, skill paths, consolidation settings, and endpoint types (`llamaCpp`, `deepseek`).
 - Magic word substitution: `@{llmfun_workarea}` and `@{llmfun}` in container options.

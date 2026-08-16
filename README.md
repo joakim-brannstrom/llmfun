@@ -241,7 +241,7 @@ See `doc/sessions.md` for the full design and the `SessionStore` API.
 
 ## Configuration
 
-llmfun is configured via a YAML configuration file specified with `--config <path>` or the `LLMFUN_DEFAULT_CONFIG` environment variable. See `config/example.yaml` for a complete reference of all available options.
+llmfun is configured via a YAML configuration file specified with `--config <path>` or the `LLMFUN_SYSTEM_CONFIG` environment variable. See `config/example.yaml` for a complete reference of all available options.
 
 **YAML notes**: llmfun reads configuration as YAML (YAML 1.1). A few quoting rules differ from JSON and can silently change values:
 
@@ -259,7 +259,7 @@ Old JSON configuration files (`.llmfun.json`, `config.json`, `execution_environm
 
 llmfun uses a two-layer configuration system:
 
-1. **Layer 1 (Base)**: Loaded from `LLMFUN_DEFAULT_CONFIG` environment variable or `$XDG_CONFIG_HOME/llmfun/config.yaml`.
+1. **Layer 1 (Base)**: Loaded from `LLMFUN_SYSTEM_CONFIG` environment variable or `$XDG_CONFIG_HOME/llmfun/config.yaml`.
 2. **Layer 2 (Overlay)**: Loaded from `--config` CLI argument or `.llmfun.yaml` in the current working directory.
 
 Layer 2 values override Layer 1 values. This allows global defaults with project-specific overrides.

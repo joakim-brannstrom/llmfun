@@ -715,7 +715,7 @@ LlmConfig readConfig(Path path, bool silent = false, bool noCwdConfig,
     import std.process : environment;
     import my.xdg : xdgConfigHome;
 
-    auto systemConfigPath = environment.get("LLMFUN_DEFAULT_CONFIG",
+    auto systemConfigPath = environment.get("LLMFUN_SYSTEM_CONFIG",
             (xdgConfigHome ~ Path(ProgramName) ~ Path("config.yaml")).toString).Path;
     return readConfigInternal(path: path, silent: silent, noCwdConfig: noCwdConfig, trustedConfig: trustedConfig,
             userCliWorkArea: userCliWorkArea, cwd: Path(getcwd()),
@@ -732,7 +732,7 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
     string configDir = "."; // Directory of the last successfully loaded config file
 
     void layerOneLoad() {
-        // Layer 1: Base config from LLMFUN_DEFAULT_CONFIG
+        // Layer 1: Base config from LLMFUN_SYSTEM_CONFIG
         if (systemConfigPath.exists) {
             logger.infof(!silent, "Reading base configuration from %s", systemConfigPath);
             try {
@@ -745,7 +745,7 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
             }
         } else {
             logger.infof(!silent,
-                    "No base configuration found (LLMFUN_DEFAULT_CONFIG not set or file missing)");
+                    "No base configuration found (LLMFUN_SYSTEM_CONFIG not set or file missing)");
         }
     }
 
@@ -771,17 +771,16 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
         }
 
         if (!overlayPath.empty && overlayPath.exists) {
-            logger.infof(!silent, "Reading project configuration from %s", overlayPath);
+            logger.infof(!silent, "Reading project configuration from '%s'", overlayPath);
             try {
                 conf = applyLlmConfig(conf, loadYamlValue(overlayPath));
                 loadedAnyFile = true;
                 configDir = overlayPath.dirName;
             } catch (Exception e) {
-                logger.errorf(!silent,
-                        "Failed to load project config %s: %s", overlayPath, e.msg);
+                logger.errorf(!silent, "Failed to load project config %s: %s", overlayPath, e.msg);
             }
         } else if (!overlayPath.empty) {
-            logger.infof(!silent, "No project configuration found at %s", overlayPath);
+            logger.tracef(!silent, "No project configuration found at %s", overlayPath);
         }
     }
 
@@ -1226,7 +1225,8 @@ unittest {
     // With workArea == CWD and no --trusted-config, the CWD config is skipped.
     conf = readConfigInternal(Path.init, silent: true, noCwdConfig: false, trustedConfig: false,
             userCliWorkArea: tmpDir.Path, cwd: tmpDir.Path, systemConfigPath: Path.init);
-    assert(conf.codeModels.empty, "CWD config must be skipped when workArea == CWD without --trusted-config: "
+    assert(conf.codeModels.empty,
+            "CWD config must be skipped when workArea == CWD without --trusted-config: "
             ~ conf.to!string);
 
     // with trusted it should load
@@ -1256,7 +1256,7 @@ unittest {
     assert(conf.codeModels.empty, "Legacy .llmfun.json must be ignored: " ~ conf.to!string);
 }
 
-/// Test: layer 1 loads `config.yaml` (or any YAML name) from LLMFUN_DEFAULT_CONFIG.
+/// Test: layer 1 loads `config.yaml` (or any YAML name) from LLMFUN_SYSTEM_CONFIG.
 unittest {
     import std.path : buildPath;
     import std.process : environment;
@@ -1276,18 +1276,18 @@ codeModels:
 `;
     File(configFile, "w").write(configYaml);
 
-    // Point LLMFUN_DEFAULT_CONFIG at the YAML file; restore the old value after.
+    // Point LLMFUN_SYSTEM_CONFIG at the YAML file; restore the old value after.
     string oldValue;
-    if ("LLMFUN_DEFAULT_CONFIG" in environment)
-        oldValue = environment["LLMFUN_DEFAULT_CONFIG"];
+    if ("LLMFUN_SYSTEM_CONFIG" in environment)
+        oldValue = environment["LLMFUN_SYSTEM_CONFIG"];
     scope (exit) {
         if (oldValue is null)
-            environment.remove("LLMFUN_DEFAULT_CONFIG");
+            environment.remove("LLMFUN_SYSTEM_CONFIG");
         else
-            environment["LLMFUN_DEFAULT_CONFIG"] = oldValue;
+            environment["LLMFUN_SYSTEM_CONFIG"] = oldValue;
     }
 
-    environment["LLMFUN_DEFAULT_CONFIG"] = configFile;
+    environment["LLMFUN_SYSTEM_CONFIG"] = configFile;
     auto conf = readConfig(Path.init, silent: true, noCwdConfig: true, trustedConfig: false);
     assert(conf.codeModels.length == 1, "Layer 1 YAML config must be loaded: " ~ conf.to!string);
     assert(conf.codeModels[0].name == "base");
@@ -1308,9 +1308,9 @@ unittest {
     }
 
     // Full pipeline: the merged config must keep every defaultOptions entry.
-    auto conf = readConfigInternal(Path("config/example.yaml"), silent: true,
-            noCwdConfig: true, trustedConfig: false, userCliWorkArea: Path.init,
-            cwd: Path.init, systemConfigPath: Path.init);
+    auto conf = readConfigInternal(Path("config/example.yaml"), silent: true, noCwdConfig: true,
+            trustedConfig: false, userCliWorkArea: Path.init, cwd: Path.init,
+            systemConfigPath: Path.init);
     auto opts = conf.sandboxConfig.defaultOptions;
     assert(opts.length == 8, "defaultOptions must have 8 keys, got " ~ opts.length.to!string);
     assert(opts["00_subcommand"] == ["run"]);
