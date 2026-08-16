@@ -6,7 +6,6 @@
 - Max timeout when using -p
 - deep research
 - add a specific /code analyze mode to update a plan/code_analysis.md
-- support AGENT.md
 - move choosing a model to the menu
 - look at what claude code is doing with .claude/rules and CLAUDE.md
 - change the behavior of loading a .llmfun.yaml from the current directory if it exist to only doing it if the project is trusted
@@ -14,17 +13,15 @@
 - a memory file that is written should have a date when it was updated. Even better if each section in it that is changed have a date. This is to enhance the LLM's capability to reason about the "age" of the data if it gets conflicting data from different sources.
 - add more @safe tags
 - workarea is not allowed to be a symlink. Security reasons
-- the 'answer' parameter in taskDone is almost a summary of everything between it and the previous user query. Maybe the summary algorithm should be updated to only keep final answers?
 - the self improvement of how to use tools should always be injected directly after the system prompt on startup if the chat is empty
-- if llmfun/data/chat do not exist history file is loaded relative to the llmfun binary
 - replace "format!" with interpolated strings when possible
-- in tool calls and the response there is an excessive amount of escaping of slash
 - replace the grep tool with an internal implementation, to reduce the dependency on the OS
 - make sound notification configurable in yaml via config.d
 - merge the tools listDirectory, removeFile, checksumFile etc to one tool which take a command and then a key/value json string, which is the arguments. This approach should reduce the number of tools that is needed and thus the system prompt. Do a similar thing for sandbox.
 - when summarizing the agent context add all messages, excluding the system prompt, to the RAG in one large document under the topic "agent_context". Protect this topic. This should then also be added to the summarized context that all details are saved in the RAG under this topic. Each time an agent is summarized or /new is called the topic is either replaced or deleted.
 - modify imgui_markdown to render code blocks with Text so we get line break in them. That fix the side scrolling issue and ugly rendering on long lines.
 - rename LLMFUN_DEFAULT_CONFIG to LLMFUN_SYSTEM_CONFIG
+- Each message that is processed should have their processing time recorded and other useful statistics such as tokens/s, total tokens etc.
 
 # ui
 - change the background color for the input field to dark grey
@@ -54,7 +51,6 @@
 - need to be restructured. First it should analyze the source code to understand the project. This should be written to a file in plan/. Then that is used by the system design step.
 - there should be a plan execute
 - each implementation task should be written to its own file with enough information for the task to be finished. The current design force the LLM to read the whole `implementation_plan.md` before it can start on a task.
-- live agent status update in a new imgui window while it is working
 - there should be a mode where the pipeline execute all tasks and then optionally ask the user for input
 - there should be something like /plan update, which goes through the pipeline but with other steering prompt such that the LLM understand that it should fix things in the system design and implementation plan.
 - use the memory system for transporting "code/implementation.md" between agents. It should be a checksum of the implementation_plan.md
@@ -78,29 +74,3 @@
 - it should be possible to mark a skill, in the frontmatter, that it should not be shown in the system prompt (xml manifest). Only available for load on demand. But there need to be a way for the model to know there are "hidden tools" that it somehow can request the "frontmatter" for. If possible avoid creating a new tool for this but maybe that is required. Consider different design alternatives.
 - all skills should be added to the primary rag upon startup. Removed skills should be removed. But only if the RAG is not in-memory because otherwise it slows down startup. This is because the LLM do not always find the relevant information when it uses knowledge-retrieval because it is inside e.g. a skill's reference.
 - when copying scripts also set the executable bit
-
-# memory
-## Workflow Improvements
-- D. Automatic Template Loading
-**Current state:** `update_memory` template must be explicitly fetched
-**Proposed change:** When memory operations are triggered, automatically load the template:
-
-When the reflection gate activates (pre-taskDone):
-1. Auto-fetch `getThinkingTemplate('update_memory')` as reference
-2. Follow the structured workflow in the template
-
-## Phase 4: Feedback Loop
-
-- H. Memory Usage Tracking
-**Proposed change:** Add a mechanism to track whether memories are actually being used:
-
-After reading a memory at session start, note in the conversation:
-"Relevant prior knowledge from [topic]: [brief summary]"
-This creates visible evidence that memories are being consulted.
-
-
-- I. Self-Correction Mechanism
-**Proposed change:** When I catch myself about to make a mistake that's documented in memory, explicitly acknowledge it:
-
-"Memory notes that [pitfall] — avoiding that approach."
-This reinforces the value of the memory system.
