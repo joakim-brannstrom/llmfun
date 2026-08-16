@@ -50,6 +50,12 @@ struct AgentApp {
         SessionStore sessionStore;
         SessionMeta activeSession;
         SessionId pendingDeleteId; // session id awaiting /delete confirmation
+        // True while the in-memory chat differs from the last persisted
+        // state. commitActiveSession() only writes (and bumps updatedAt)
+        // when this is set, so mere navigation - switching or re-clicking a
+        // row - never rewrites a file and never changes the sidebar sort
+        // order. Sorting is by the latest message in a session.
+        bool chatDirty;
         ServerStat lastServerStat;
         bool debugMode;
         UserConfig.AgentChatConfig conf_;
@@ -103,10 +109,29 @@ struct AgentApp {
         }
         if (agent_) {
             if (activeSession.id.length > 0) {
-                // processResult already commits after every query; this second
-                // save is a safety net for error/early-exit paths (harmless
-                // rewrite that bumps updatedAt once more).
+                // processResult already commits after every query; this is a
+                // safety net for error/early-exit paths. Dirty-gated: a chat
+                // that was already persisted is not rewritten and its
+                // updatedAt stays untouched.
                 commitActiveSession();
+            }
+            // A13: empty-session cleanup on clean exit, after the final
+            // commit. The guard is REQUIRED (M9): dispose() runs on the
+            // scope(exit) path and a failed setupSession leaves the store
+            // null while agent_ is already set. The active session is
+            // exempted (W15) even when empty. Single-writer (C8): the
+            // sweep runs on the agent thread only; state.json is not
+            // touched by it (saved below, unchanged order).
+            if (sessionStore) {
+                try {
+                    auto swept = sessionStore.sweepEmptySessions(activeSession.id);
+                    if (swept.length > 0) {
+                        logger.tracef("Swept %s empty session(s) on exit: %s",
+                                swept.length, swept.map!(s => s.get).join(", "));
+                    }
+                } catch (Exception e) {
+                    logger.trace(e.msg).collectException;
+                }
             }
             llmConf.saveState();
             agent_ = null;
@@ -156,6 +181,11 @@ struct AgentApp {
         const ctxUsed = agent_.stat.context;
         uiMsg.busy;
         auto res = agent_.compress(force: force, callback: &this.progressCallback);
+        // A compression that actually rewrote history (summarized or purged
+        // entries change the message list) makes the chat dirty; a no-op
+        // compression leaves the persisted state untouched.
+        if (res.originalLength != res.newLength || res.purgedCount > 0)
+            chatDirty = true;
         uiMsg.chatMessage(compressionResultToString(res.compressed, res.originalLength,
                 res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize),
                 TuiChatMessageType_Assistant);
@@ -198,17 +228,27 @@ struct AgentApp {
     }
 
     /// Save the current agent chat to the active session file.
-    /// Strips system messages (D13) before persisting.
+    /// Strips system messages before persisting.
+    ///
+    /// Gated on `chatDirty`: a clean chat (nothing changed since the last
+    /// save) skips the write entirely, so switching sessions, re-clicking
+    /// the active row, or a clean shutdown can never bump `updatedAt` and
+    /// reorder the sidebar. The flag is set by real content changes (a user
+    /// query, `/clear`, a compression that rewrote history) and cleared
+    /// here on success; a failed save keeps it so the next commit retries.
     package void commitActiveSession() @trusted nothrow {
+        if (!chatDirty)
+            return;
         try {
             auto doc = agent_.chat.toSaveJson();
 
-            // D13: strip role: "system" entries from messages
+            // Strip role: "system" entries from messages
             auto msgs = doc["messages"].array.filter!(entry => entry.type != JSONType.object
                     || !("role" in entry.object) || entry["role"].str != "system").array;
             doc["messages"] = msgs;
 
             activeSession = sessionStore.save(activeSession.id, activeSession, doc);
+            chatDirty = false;
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
         }
@@ -243,6 +283,8 @@ struct AgentApp {
         // directly instead of clearHistory() to avoid redundant syncContextFromChat)
         agent_.chat.clear;
         agent_.chat.load(sf.doc);
+        // The loaded chat matches the persisted file: nothing to save yet.
+        chatDirty = false;
         agent_.chat.resetResponseIndex();
         agent_.syncContextFromChat();
         // Status bar must reflect the target session, not the previous one
@@ -274,8 +316,10 @@ struct AgentApp {
     /** Switch to a different session: commit current + activate target.
      *
      * Single commit of the current session (W11), then activate the target.
-     * A no-op switch to the already-active session still commits so pending
-     * changes are persisted.
+     * A no-op switch to the already-active session still commits, so pending
+     * changes are persisted. The commit is dirty-gated: when the chat is
+     * already persisted it is a no-op and `updatedAt` stays untouched, so
+     * navigation never changes the sidebar sort order.
      */
     package void switchToSession(SessionId id) {
         if (id == activeSession.id) {
@@ -472,11 +516,14 @@ struct AgentApp {
         return items;
     }
 
-    /** Send the current ordered session snapshot to the UI thread (Phase 2).
+    /** Send the current session snapshot to the UI thread.
      *
-     * Maps `sessionStore.list()` (already sorted by updatedAt descending) to
-     * UiSessionItem[] with the active marker, then sends UiSessionList to
-     * uiTid. Guarded by `uiMsg.isActive()` so one-shot mode (-p) never sends.
+     * Maps `sessionStore.list()` (already sorted by updatedAt descending,
+     * i.e. by the latest message in each session) to UiSessionItem[] with
+     * the active marker. The sidebar shows this order verbatim - clicking a
+     * row never reorders the list; only a new message in a session moves
+     * that session to the top. Guarded by `uiMsg.isActive()` so one-shot
+     * mode (-p) never sends.
      */
     private void sendSessionList() {
         if (!uiMsg.isActive())
@@ -604,6 +651,8 @@ struct AgentApp {
         }
 
         agent_.addUserQuery(query);
+        // The chat now carries a message that is not persisted yet.
+        chatDirty = true;
         this.doCompress(false);
         auto result = agent_.runToCompletion(&this.processResult,
                 compressCallback: &this.progressCallback, interrupt: () {
@@ -681,6 +730,8 @@ struct AgentApp {
         if (hasValue(sfOpt)) {
             auto sf = orElse(sfOpt, SessionFile());
             agent_.chat.load(sf.doc);
+            // Startup loads persisted state: nothing to save yet.
+            chatDirty = false;
         } else {
             logger.warningf("Failed to load active session '%s'. Starting with empty chat.",
                     activeSession.id);
@@ -720,10 +771,14 @@ struct AgentApp {
         monitor = new MetricMonitor(llmConf.dataDir ~ "monitor.jsonl");
         agent_ = new Agent("main", llmConf, skillManager_, monitor, rag, llmConf.toolFilter.to());
 
-        setupSession(agentMdState);
-
+        // Register BEFORE setupSession(): a throw in setupSession (e.g. an
+        // unusable session dir) must still run dispose(), which then finds
+        // sessionStore null while agent_ is set - the M9 guard inside
+        // dispose() covers exactly this production-reachable shape.
         scope (exit)
             this.dispose(); // Ensures cleanup on any exception after setup
+
+        setupSession(agentMdState);
 
         // oneShotQuery: true  = CLI prompt mode (no UI thread, UiMessenger blocked)
         //                 false = full UI mode (UI thread spawned, UiMessenger active)
@@ -1076,4 +1131,593 @@ unittest {
     app.doSidebarNew();
     assert(app.pendingDeleteId == SessionId.init,
             "New handler must clear stale pending delete on entry (A5)");
+}
+
+// --- Test: sidebar snapshot keeps store order (updatedAt descending) with
+// the active marker; clicking must not reorder ---
+
+unittest {
+    import std.file : exists, mkdirRecurse, rmdirRecurse, write;
+    import std.format : format;
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_snapshot_order");
+    // Clear any stale dir from a crashed earlier run so the deterministic
+    // store-order precondition cannot be disturbed by leftover files.
+    if (exists(tmpDir))
+        rmdirRecurse(tmpDir);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    // Three sessions with distinct updatedAt so the store order is
+    // deterministic: a (100) < c (200) < b (300) -> store order [b, c, a].
+    auto a = SessionId("20260618-153045-a1b2");
+    auto b = SessionId("20260618-153045-b3c4");
+    auto c = SessionId("20260618-153045-c5d6");
+    void writeSession(SessionId id, long updatedAt) {
+        write(buildPath(tmpDir, id.get ~ ".json"),
+                format(`{"title": "T", "createdAt": 100, "updatedAt": %d, "messages": []}`,
+                    updatedAt));
+    }
+
+    writeSession(a, 100);
+    writeSession(b, 300);
+    writeSession(c, 200);
+
+    auto store = new SessionStore(tmpDir.Path);
+    assert(store.list().map!(s => s.id).array == [b, c, a],
+            "store order must be updatedAt descending");
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.sessionStore = store;
+    app.activeSession.id = c; // the middle one is active
+    // Active UiMessenger pointed at this thread: sendSessionList() lands in
+    // this thread's own mailbox (same pattern as the rename-none test).
+    app.uiMsg = new UiMessenger(thisTid, false);
+    app.uiTid = thisTid;
+
+    // Active session stays in store order, only marked active.
+    app.sendSessionList();
+    bool gotList = false;
+    receiveTimeout(dur!"seconds"(1), (immutable UiSessionList l) {
+        gotList = true;
+        assert(l.items.length == 3);
+        assert(l.items[0].id == b && !l.items[0].isActive,
+            "most recent session leads regardless of the active marker");
+        assert(l.items[1].id == c && l.items[1].isActive,
+            "the active session must stay at its store position");
+        assert(l.items[2].id == a && !l.items[2].isActive);
+    });
+    assert(gotList, "sendSessionList must emit the store-ordered snapshot");
+
+    // Active at index 0 (store order): order unchanged, marked active.
+    app.activeSession.id = b;
+    app.sendSessionList();
+    gotList = false;
+    receiveTimeout(dur!"seconds"(1), (immutable UiSessionList l) {
+        gotList = true;
+        assert(l.items.length == 3);
+        assert(l.items[0].id == b && l.items[0].isActive);
+        assert(l.items[1].id == c && l.items[2].id == a, "snapshot must keep the store order");
+    });
+    assert(gotList, "sendSessionList must emit the store-ordered snapshot");
+
+    // Active absent from the list: snapshot keeps the store order.
+    app.activeSession.id = SessionId("20260618-153045-9999");
+    app.sendSessionList();
+    gotList = false;
+    receiveTimeout(dur!"seconds"(1), (immutable UiSessionList l) {
+        gotList = true;
+        assert(l.items.length == 3);
+        assert(l.items[0].id == b && l.items[1].id == c && l.items[2].id == a,
+            "absent active id must leave the snapshot in store order");
+        assert(!l.items[0].isActive && !l.items[1].isActive && !l.items[2].isActive);
+    });
+    assert(gotList, "sendSessionList must emit the store-ordered snapshot");
+
+    // Empty store: empty snapshot, no throw.
+    app.sessionStore = new SessionStore(buildPath(tmpDir, "empty_sub").Path);
+    app.sendSessionList();
+    gotList = false;
+    receiveTimeout(dur!"seconds"(1), (immutable UiSessionList l) {
+        gotList = true;
+        assert(l.items.length == 0, "empty store must produce an empty snapshot");
+    });
+    assert(gotList, "sendSessionList must emit the empty snapshot");
+}
+
+// --- Test: navigation never rewrites a session (updatedAt unchanged) and a
+// dirty chat commits with an updatedAt bump ---
+
+unittest {
+    import my.filter : ReFilter;
+    import std.file : exists, mkdirRecurse, rmdirRecurse, write;
+    import std.format : format;
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_switch_no_bump");
+    if (exists(tmpDir))
+        rmdirRecurse(tmpDir);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    // Two sessions with distinct updatedAt: newer (300) and older (100).
+    auto newer = SessionId("20260618-153045-b3c4");
+    auto older = SessionId("20260618-153045-a1b2");
+    void writeSession(SessionId id, long updatedAt) {
+        write(buildPath(tmpDir, "chat", id.get ~ ".json"), format(
+                `{"title": "T", "createdAt": 100, "updatedAt": %d,` ~ `"messages": [{"role": "user", "content": "hi"}]}`,
+                updatedAt));
+    }
+
+    writeSession(newer, 300);
+    writeSession(older, 100);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+    auto newerFile = store.load(newer);
+    assert(hasValue(newerFile), "setup: active session file must load");
+    app.activeSession = orElse(newerFile, SessionFile()).meta;
+
+    const long newerUpdatedBefore = app.activeSession.updatedAt;
+
+    // Switching away from the clean active session must not rewrite it.
+    app.switchToSession(older);
+    auto afterSwitch = orElse(store.load(newer), SessionFile());
+    assert(afterSwitch.meta.updatedAt == newerUpdatedBefore,
+            "switching must not bump updatedAt of the session you leave");
+
+    // Switching back: same guarantee for the other direction.
+    const long olderUpdatedBefore = app.activeSession.updatedAt;
+    app.switchToSession(newer);
+    assert(orElse(store.load(older), SessionFile()).meta.updatedAt == olderUpdatedBefore,
+            "switching back must not bump updatedAt either");
+    assert(app.activeSession.id == newer, "setup: active is the newer session again");
+
+    // A real content change (a user query) marks the chat dirty and the
+    // commit bumps updatedAt.
+    const long beforeQuery = app.activeSession.updatedAt;
+    app.agent_.addUserQuery("hello newer");
+    app.chatDirty = true;
+    app.commitActiveSession();
+    assert(app.chatDirty == false, "a successful commit must clear the dirty flag");
+    assert(app.activeSession.updatedAt >= beforeQuery, "a query commit must bump updatedAt");
+
+    // A clean commit is a no-op: no further bump, no rewrite.
+    const long afterQuery = app.activeSession.updatedAt;
+    app.commitActiveSession();
+    assert(app.activeSession.updatedAt == afterQuery, "a clean commit must not rewrite the file");
+}
+
+version (unittest) {
+    /// Minimal headless LlmConfig for constructing a real Agent in tests:
+    /// one code model (never contacted) plus a temp summary prompt file.
+    /// dataDir is intentionally NOT created so dispose()'s saveState() is
+    /// a no-op - the tests never write a state.json.
+    ///
+    /// Coupling invariants: the Agent is built with null SkillManager/
+    /// MetricMonitor/RAG (tolerated by the constructor) and a model name
+    /// that is never contacted; any future Agent constructor change must
+    /// keep this helper compiling and passing.
+    private LlmConfig testLlmConfig(string tmpDir) {
+        import std.file : mkdirRecurse, write;
+        import std.path : buildPath;
+        import llm.common.config : ServerConfig;
+
+        auto promptDir = buildPath(tmpDir, "prompt");
+        mkdirRecurse(promptDir);
+        write(buildPath(promptDir, "SUMMARY.md"), "test summary prompt");
+
+        LlmConfig cfg;
+        cfg.codeModels = [
+            CodeModelConfig(server: ServerConfig.init, name: "test-model")
+        ];
+        cfg.activeCodeModelIndex = 0;
+        cfg.promptDir = [promptDir.Path];
+        cfg.dataDir = buildPath(tmpDir, "no-state").Path;
+        return cfg;
+    }
+}
+
+// --- Test: dispose() sweeps empty non-active sessions on exit (A13) ---
+
+unittest {
+    import my.filter : ReFilter;
+    import std.file : exists, mkdirRecurse, rmdirRecurse;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_dispose_sweep");
+    if (exists(tmpDir))
+        rmdirRecurse(tmpDir);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto cfg = testLlmConfig(tmpDir);
+
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+    auto active = store.create();
+    auto emptyNonActive = store.create();
+    auto nonEmpty = store.create();
+
+    // nonEmpty gets one user message via save().
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+    JSONValue userMsg;
+    userMsg["role"] = "user";
+    userMsg["content"] = "hello";
+    doc["messages"].array ~= userMsg;
+    assert(store.save(nonEmpty.id, nonEmpty, doc).userMessageCount == 1,
+            "setup: non-empty session needs 1 user message");
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    app.activeSession = active;
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+    // The in-memory chat carries the active session's user message, as in
+    // production after a query: the dirty flag is set so
+    // commitActiveSession() persists it BEFORE the sweep.
+    app.agent_.addUserQuery("active hello");
+    app.chatDirty = true;
+
+    app.dispose(); // must not throw
+
+    assert(!exists(buildPath(tmpDir, "chat", emptyNonActive.id.get ~ ".json")),
+            "empty non-active session file must be swept on exit");
+    assert(exists(buildPath(tmpDir, "chat", active.id.get ~ ".json")),
+            "active session must survive dispose()");
+    assert(exists(buildPath(tmpDir, "chat", nonEmpty.id.get ~ ".json")),
+            "non-empty non-active session must survive");
+    assert(orElse(store.load(active.id), SessionFile()).meta.userMessageCount == 1,
+            "commit runs before the sweep: active session keeps its user message");
+    assert(app.agent_ is null, "dispose() must clear the agent");
+}
+
+// --- Test: dispose() with a null session store (M9 guard) ---
+
+unittest {
+    import my.filter : ReFilter;
+    import std.file : exists, mkdirRecurse, rmdirRecurse;
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_dispose_null_store");
+    if (exists(tmpDir))
+        rmdirRecurse(tmpDir);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto cfg = testLlmConfig(tmpDir);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    // M9: a failed setupSession leaves the store null while agent_ is set
+    // and the active id empty; dispose() must not dereference the store.
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+    app.dispose(); // must not throw
+    assert(app.agent_ is null, "dispose() must clear the agent");
+}
+
+// --- Test: dispose() keeps the active session even when empty (W15) ---
+
+unittest {
+    import my.filter : ReFilter;
+    import std.file : exists, mkdirRecurse, rmdirRecurse;
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_dispose_all_empty");
+    if (exists(tmpDir))
+        rmdirRecurse(tmpDir);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto cfg = testLlmConfig(tmpDir);
+
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+    auto active = store.create(); // stays empty on purpose (W15)
+    auto emptyOther = store.create();
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    app.activeSession = active;
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+
+    app.dispose(); // must not throw
+
+    assert(exists(buildPath(tmpDir, "chat", active.id.get ~ ".json")),
+            "active session must survive dispose() even when empty (W15)");
+    assert(!exists(buildPath(tmpDir, "chat", emptyOther.id.get ~ ".json")),
+            "empty non-active session must be swept on exit");
+}
+
+// --- Test: switch-after-compression resets stat().startContext to the
+// target chat's approxContextSize (R16) ---
+//
+// Regression lock for the activate pipeline: activateSession must call
+// syncContextFromChat() AFTER chat.load so prevStat no longer carries the
+// previous session's context. The "compressed" state is modeled headlessly
+// (no server call): loading the small session and syncing leaves exactly
+// the invariant a real compression leaves behind (prevStat.startContext ==
+// current chat context). A stale value would fail the asserts below.
+
+unittest {
+    import my.filter : ReFilter;
+    import std.array : replicate;
+    import std.file : exists, mkdirRecurse, rmdirRecurse;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_switch_after_compression");
+    if (exists(tmpDir))
+        rmdirRecurse(tmpDir);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto cfg = testLlmConfig(tmpDir);
+
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+    auto small = store.create(); // active session: small context
+    auto large = store.create(); // switch target: clearly larger context
+
+    // Small doc: one short user message (~2 tokens).
+    JSONValue smallDoc;
+    smallDoc["messages"] = JSONValue();
+    smallDoc["messages"].array = [];
+    JSONValue smallUser;
+    smallUser["role"] = "user";
+    smallUser["content"] = "short";
+    smallDoc["messages"].array ~= smallUser;
+    small = store.save(small.id, small, smallDoc);
+
+    // Large doc: one long user message (400 chars -> ~200 tokens).
+    JSONValue largeDoc;
+    largeDoc["messages"] = JSONValue();
+    largeDoc["messages"].array = [];
+    JSONValue largeUser;
+    largeUser["role"] = "user";
+    largeUser["content"] = "x".replicate(400);
+    largeDoc["messages"].array ~= largeUser;
+    large = store.save(large.id, large, largeDoc);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    app.activeSession = small;
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+
+    // Model the post-compression state of the small session: the agent
+    // chat holds the (small) session history and prevStat is synced from
+    // it. staleStart is the value that would survive the switch if
+    // activateSession ever stopped calling syncContextFromChat.
+    app.agent_.chat.load(smallDoc);
+    app.agent_.syncContextFromChat();
+    const long staleStart = app.agent_.stat().startContext;
+    // Modeling precondition only: syncContextFromChat() sets prevStat from
+    // the chat by construction, so this cannot fail for a production bug -
+    // it just confirms the model matches what a real compression leaves.
+    assert(staleStart == app.agent_.chat.approxContextSize,
+            "setup: prevStat must hold the small session's context");
+
+    app.switchToSession(large.id);
+
+    assert(app.activeSession.id == large.id, "switch must land on the target session");
+    // The regression lock: startContext is reset to the TARGET chat's size.
+    // A stale compressed value (staleStart) fails this assert.
+    assert(app.agent_.stat().startContext == app.agent_.chat.approxContextSize,
+            "stat().startContext must be reset to the target chat's context after switching");
+    // Exact expectation derived from the payload defined above, immune to
+    // payload-size edits and to any plausible ApproxTokenSize change (both
+    // sides scale together), and still fails on a stale prevStat. The
+    // large payload is 400 'x' chars, the small one "short" (5 chars).
+    import llm.common.config : ApproxTokenSize; // public, stable
+    const long expectedLarge = largeUser["content"].str.length / ApproxTokenSize; // ~200
+    assert(app.agent_.stat().startContext == expectedLarge,
+            "stat().startContext must equal the target chat's exact approx context");
+    assert(app.agent_.stat().startContext > staleStart,
+            "target context must be clearly larger than the stale compressed value");
+}
+
+// --- Test: delete-active falls back to the most recently updated
+// remaining session and the snapshot drops the deleted id (R16) ---
+
+unittest {
+    import my.filter : ReFilter;
+    import std.file : exists, mkdirRecurse, rmdirRecurse, write;
+    import std.format : format;
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_delete_active_fallback");
+    if (exists(tmpDir))
+        rmdirRecurse(tmpDir);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    // Three sessions with distinct updatedAt: a (400, the active one to
+    // delete) > b (300, the expected fallback) > c (200).
+    auto a = SessionId("20260618-153045-a1b2");
+    auto b = SessionId("20260618-153045-b3c4");
+    auto c = SessionId("20260618-153045-c5d6");
+    // Test-only helper: userContent must be JSON-safe ASCII (no escaping).
+    // createdAt is arbitrary (100): only updatedAt matters for ordering.
+    void writeSession(SessionId id, long updatedAt, string userContent) {
+        write(buildPath(tmpDir, "chat", id.get ~ ".json"), format(
+                `{"title": "T", "createdAt": 100, "updatedAt": %d,` ~ `"messages": [{"role": "user", "content": "%s"}]}`,
+                updatedAt, userContent));
+    }
+
+    writeSession(a, 400, "hello-a");
+    writeSession(b, 300, "hello-b");
+    writeSession(c, 200, "hello-c");
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+    auto aFile = store.load(a);
+    assert(hasValue(aFile), "setup: active session file must load");
+    app.activeSession = orElse(aFile, SessionFile()).meta;
+    // Active UiMessenger pointed at this thread: the fallback activation's
+    // sendSessionList() and the confirmation chat message land in this
+    // thread's own mailbox (same pattern as the rename-none test).
+    app.uiMsg = new UiMessenger(thisTid, false);
+    app.uiTid = thisTid;
+
+    app.doDeleteSession(a);
+
+    assert(app.activeSession.id == b,
+            "delete-active must switch to the most recently updated remaining session");
+    assert(!exists(buildPath(tmpDir, "chat", a.get ~ ".json")),
+            "the deleted session file must be gone");
+    assert(exists(buildPath(tmpDir, "chat", b.get ~ ".json")),
+            "the fallback session file must survive");
+    assert(exists(buildPath(tmpDir, "chat", c.get ~ ".json")),
+            "the other remaining session file must survive");
+
+    // Snapshot: deleted id absent; the fallback is the most recently
+    // updated remaining session, so it leads the store order and is
+    // marked active.
+    bool gotList = false;
+    receiveTimeout(dur!"seconds"(1), (immutable UiSessionList l) {
+        gotList = true;
+        assert(l.items.length == 2, "snapshot must exclude the deleted id");
+        assert(l.items[0].id == b && l.items[0].isActive,
+            "fallback session must lead the snapshot and be active");
+        assert(l.items[1].id == c && !l.items[1].isActive);
+    });
+    assert(gotList, "delete-active must refresh the sidebar snapshot");
+
+    // Confirmation chat message on the fallback path (exact string locks
+    // the user-facing wording per R16).
+    bool gotDeleted = false;
+    string lastChatMsg;
+    receiveTimeout(dur!"seconds"(1), (UiChatMessage m) {
+        gotDeleted = m.msg == "Session deleted: a1b2. Switched to 'T'.";
+        lastChatMsg = m.msg; // keep for the diagnostic below
+    });
+    assert(gotDeleted, "delete-active must emit the switch confirmation, got: " ~ lastChatMsg);
+
+    // Drain the remaining UI messages so this thread's mailbox stays
+    // clean for subsequent unittests (receiveTimeout scans past unmatched
+    // types, but other tests in this binary may match on them). The
+    // snapshot handler uses the immutable variant: UiSessionList is sent
+    // as cast(immutable), so a mutable handler would never match.
+    // INVARIANT: keep this handler list in sync with everything
+    // activateSession/sendSessionList/setStatusText can emit (a new UI
+    // message type added there would silently stay in the mailbox here).
+    foreach (_; 0 .. 20) {
+        bool drained = receiveTimeout(dur!"msecs"(50), (UiClearChat _) {}, (UiPipelineClear _) {
+        }, (UiChatThinkMessage _) {}, (UiInitHistory _) {}, (UiStatusText _) {}, (UiChatMessage _) {
+        }, (immutable UiSessionList _) {});
+        if (!drained)
+            break;
+    }
+}
+
+// --- Test: corrupt session files are skipped by listing and the sweep,
+// and switchToSession keeps the current session on load failure (R16) ---
+
+unittest {
+    import my.filter : ReFilter;
+    import std.file : exists, mkdirRecurse, rmdirRecurse, write;
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "app_agent_corrupt_files");
+    if (exists(tmpDir))
+        rmdirRecurse(tmpDir);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+    auto good = store.create();
+    auto emptyOther = store.create();
+
+    // Corrupt file with a D12-valid id: present on disk, must never be
+    // listed, loaded, or swept (C7/W16).
+    auto corrupt = SessionId("20260618-153046-0bad");
+    auto corruptPath = buildPath(tmpDir, "chat", corrupt.get ~ ".json");
+    write(corruptPath, "{ not json !!!");
+
+    // Listing skips the corrupt file.
+    auto listed = store.list();
+    assert(listed.map!(s => s.id).canFind(good.id), "setup: good session listed");
+    assert(!listed.map!(s => s.id).canFind(corrupt),
+            "corrupt file must be absent from the store listing");
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+    auto goodFile = store.load(good.id);
+    assert(hasValue(goodFile), "setup: good session file must load");
+    app.activeSession = orElse(goodFile, SessionFile()).meta;
+    app.uiMsg = new UiMessenger(thisTid, false);
+    app.uiTid = thisTid;
+
+    // Snapshot excludes the corrupt file. Both remaining sessions were
+    // created in the same second (updatedAt tie, id-desc tiebreak), so the
+    // exact order is not asserted here - only membership and the active
+    // marker (order semantics are covered by the snapshot-order test).
+    app.sendSessionList();
+    bool gotList = false;
+    receiveTimeout(dur!"seconds"(1), (immutable UiSessionList l) {
+        gotList = true;
+        assert(l.items.length == 2, "snapshot must exclude the corrupt file");
+        auto ids = l.items.map!(i => i.id).array;
+        assert(ids.canFind(good.id) && ids.canFind(emptyOther.id),
+            "snapshot must list both remaining sessions");
+        foreach (item; l.items) {
+            if (item.id == good.id) {
+                assert(item.isActive, "the active session must be marked active");
+            } else {
+                assert(!item.isActive, "only the active session is marked");
+            }
+        }
+    });
+    assert(gotList, "sendSessionList must emit the snapshot");
+
+    // switchToSession on the corrupt id: error message, current session kept
+    // (exact string locks the user-facing wording per R16).
+    app.switchToSession(corrupt);
+    bool gotError = false;
+    receiveTimeout(dur!"seconds"(1), (UiChatMessage m) {
+        gotError = m.msg
+            == "error: Cannot load session '20260618-153046-0bad' (not found or corrupt). Staying in current session.";
+    });
+    assert(gotError, "switchToSession must emit the cannot-load error");
+    assert(app.activeSession.id == good.id, "a failed load must keep the current session unchanged");
+
+    // The sweep removes only list() candidates: the corrupt file is never
+    // a candidate and survives untouched (W16), the empty non-active
+    // session is removed, and the kept (active) id is exempted (W15).
+    // Note: good is empty from creation (store.create() writes messages:
+    // []); the failed switch commits nothing (the chat is clean), so the
+    // keep-exemption is what protects it here; non-empty survival is
+    // covered by the Task 1 store-level tests.
+    auto swept = store.sweepEmptySessions(good.id);
+    assert(swept.length == 1 && swept[0] == emptyOther.id,
+            "sweep must remove only the empty non-active session");
+    assert(!exists(buildPath(tmpDir, "chat", emptyOther.id.get ~ ".json")),
+            "the empty non-active session file must be swept");
+    assert(exists(corruptPath), "the sweep must leave the corrupt file untouched");
+    assert(exists(buildPath(tmpDir, "chat", good.id.get ~ ".json")),
+            "the kept session file must survive the sweep");
 }

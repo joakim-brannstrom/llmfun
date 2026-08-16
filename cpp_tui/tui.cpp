@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cfloat>
 #include <clocale>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <iterator>
@@ -754,6 +755,42 @@ static std::string sessionRowLabel(const SessionEntry& entry, int rowWidth) {
     return title + count;
 }
 
+// One dimmed preview line for a session row: the first user message
+// truncated to the row width with an ellipsis (A14). Returns the empty
+// string when the preview is empty so the row stays single-line. Residual
+// control bytes are collapsed to spaces - belt-and-braces on top of the
+// D-side A17 normalization, so a preview can never break the two-line row
+// layout (M1). Truncation is byte-based but backed off to a UTF-8 boundary
+// like sessionRowLabel; a multi-byte character at the row edge is never
+// split.
+static std::string previewRowLabel(const SessionEntry& entry, int rowWidth) {
+    if (entry.preview.empty() || rowWidth <= 0) {
+        return std::string();
+    }
+    std::string preview = entry.preview;
+    for (char& c : preview) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 0x20 || uc == 0x7f) {
+            c = ' ';
+        }
+    }
+    if (static_cast<int>(preview.size()) <= rowWidth) {
+        return preview;
+    }
+    // Reserve 3 cells for the ellipsis when there is room for it.
+    // rowWidth == 3 fits the ellipsis alone; smaller budgets drop it.
+    int n = rowWidth >= 3 ? rowWidth - 3 : 0;
+    while (n > 0 && isUtf8Continuation(preview[n - 1])) {
+        --n;
+    }
+    std::string out;
+    out.assign(preview, 0, n);
+    if (n > 0 || rowWidth >= 3) {
+        out += "...";
+    }
+    return out;
+}
+
 // Queue one sidebar action for the D side to poll (A2/A7).
 static void queueSessionAction(ChatTabSessionPanel& panel, SessionActionType type,
                                const std::string& id, const std::string& title) {
@@ -787,6 +824,27 @@ static void initRenameBuf(ChatTabSessionPanel& panel, const std::string& title) 
 static void renderTabChatSessionPanel(TuiState& state, Log& log) {
     auto& panel = state.sessionPanel;
 
+    // Pending-switch flush (A12/R14): a session row clicked while the
+    // agent was busy becomes an ordinary Select on the first ready frame.
+    // This runs at the VERY TOP, before every early return (mutual
+    // exclusion below and the collapsed-state branch further down, M8),
+    // so the queued switch applies even when the pipeline panel currently
+    // owns the left slot or the panel was collapsed after the click; if
+    // the panel is not rendered at all, the slot simply survives until it
+    // is. The slot is cleared here, so the flush fires exactly once.
+    if (!panel.pendingSelectId.empty() && state.readyStatus) {
+        if (panel.pendingSelectId != panel.activeId) {
+            queueSessionAction(panel, SessionActionType::Select, panel.pendingSelectId, "");
+            log("session panel: flushed pending select %s\n", panel.pendingSelectId.c_str());
+        } else {
+            // The queued target became the active session in the meantime
+            // (e.g. a slash /switch); the flush must not re-select it.
+            log("session panel: pending select %s already active; dropped\n",
+                panel.pendingSelectId.c_str());
+        }
+        panel.pendingSelectId.clear();
+    }
+
     // Mutual exclusion (R6/A6/H1): the pipeline panel renders whenever it
     // has agents - open or collapsed - so the session panel must not. Panel
     // state is preserved so the session panel reappears when the pipeline
@@ -818,9 +876,9 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
     const auto panelWClosed = 8;
     const bool canQueue = state.readyStatus;
 
-    // Note: no vertical scrolling for long session lists yet - the child
-    // auto-sizes and rows below the terminal height are unreachable until
-    // Phase 3 adds a scrollable list / search-filters.
+    // Outer child: panel border/background, id unchanged (A15). The header
+    // (Close/Open, New, separator) stays fixed; the rows live in their own
+    // scrollable child sized to the remaining panel height (R15).
     ImGui::BeginChild("Session child window", ImVec2(panel.panelW - 1, 0), true);
     if (!panel.panelOpen) {
         panel.panelW = panelWClosed;
@@ -855,29 +913,61 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
 
     renderSeparator("Sessions ", "-", ImGui::GetContentRegionMax().x, true);
 
+    // The rows live in a child of their own, sized to the remaining panel
+    // height, so ImGui 1.81 enables the scrollbar when the list overflows
+    // (R15). The id is stable, so the scroll position survives snapshot
+    // refreshes (the full-replace list does not reset it).
+    ImGui::BeginChild("session_rows", ImVec2(panel.panelW - 1, ImGui::GetContentRegionAvail().y),
+                      true);
+
     const int delWidth = 4;
-    // One extra cell of margin: the vendored imtui clips draw commands at
-    // InnerClipRect.Max - 1, so the panel's last column is not rendered;
-    // a del label flush against the content edge would lose its last
-    // character. Shrink the row width so the del button ends one cell early.
-    const int rowWidth = static_cast<int>(ImGui::GetContentRegionMax().x) - delWidth -
-                         static_cast<int>(ImGui::GetStyle().ItemSpacing.x) - 1;
+    // Row width budget from the actual clip rect, not the content size. The
+    // rows child is bordered and nested inside the bordered panel child, and
+    // each border level costs one clipped column, so the draw clip rect is
+    // two cells narrower than GetContentRegionAvail().x (29 vs 27 at the
+    // default panel width). The vendored imtui backend also drops the last
+    // clip column (text vertices clamp at ClipRect.Max - 1 and cells at
+    // >= Max are discarded), so a del label sized against the content width
+    // loses its last character. ClipRect.Max stays put when a scrollbar
+    // appears (the WorkRect shrinks instead), so rows narrow with the
+    // scrollbar instead of clipping. The trailing -1 keeps the del button
+    // one cell short of the clip edge, like before.
+    const int usableWidth = static_cast<int>(std::floor(ImGui::GetContentRegionMax().x)) -
+                            static_cast<int>(std::floor(ImGui::GetCursorScreenPos().x)) - 1;
+    const int rowWidth =
+        usableWidth - delWidth - static_cast<int>(ImGui::GetStyle().ItemSpacing.x) - 1;
     for (const auto& entry : panel.sessions) {
         const bool isActive = (entry.id == panel.activeId);
         const bool delPending = (panel.pendingDeleteId == entry.id);
         const std::string label = sessionRowLabel(entry, rowWidth);
         const float labelWidth = ImGui::CalcTextSize(label.c_str()).x;
+        // A queued switch target renders with the pending color so the
+        // click that will apply on the next ready frame stays visible
+        // (R18); while the slot is empty every row renders with the
+        // active color as before.
+        const ImVec4& rowColor =
+            (entry.id == panel.pendingSelectId) ? panel.pendingButton : panel.activeButton;
 
         // The session id keeps row widgets unique even when titles collide.
         ImGui::PushID(entry.id.c_str());
-        if (renderButton(label, rowWidth, isActive, panel.activeButton)) {
+        if (renderButton(label, rowWidth, isActive, rowColor)) {
             panel.pendingDeleteId.clear(); // non-delete control (L1)
             if (canQueue && !isActive) {
                 queueSessionAction(panel, SessionActionType::Select, entry.id, "");
                 log("session panel: queued select %s\n", entry.id.c_str());
+            } else if (!canQueue && !isActive) {
+                // Busy (A12): defer the switch in the single pending slot
+                // (last click wins); it flushes as an ordinary Select on
+                // the first ready frame (top of this function). Selecting
+                // is safe to defer - the in-flight query completes in the
+                // session it was typed in; New/Rename/Delete stay
+                // guard-and-skip.
+                panel.pendingSelectId = entry.id;
+                log("session panel: pending select %s (busy)\n", entry.id.c_str());
             } else {
-                log("session panel: select %s skipped (busy or already active)\n",
-                    entry.id.c_str());
+                // Active-row click: no-op, and any pending target stays
+                // armed (A12).
+                log("session panel: select %s skipped (already active)\n", entry.id.c_str());
             }
         }
         if (ImGui::IsItemHovered()) {
@@ -889,7 +979,7 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
             ImGui::EndTooltip();
         }
         sameLineAfterButton(rowWidth, labelWidth);
-        if (renderButton(delPending ? "del?" : "del", delWidth, false, panel.activeButton)) {
+        if (renderButton(delPending ? "del?" : "del", delWidth, false, rowColor)) {
             if (canQueue) {
                 if (delPending) {
                     // Second press: confirmed (A5).
@@ -905,75 +995,78 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
                 log("session panel: delete %s skipped (busy)\n", entry.id.c_str());
             }
         }
-        if (!isActive) {
-            ImGui::PopID();
-            continue;
-        }
-
-        // Rename toggle + input on the active row only (R4/L8).
-        if (renderButton("Rename", 6, panel.renameActive, panel.activeButton)) {
-            panel.pendingDeleteId.clear(); // non-delete control (L1)
-            panel.renameActive = !panel.renameActive;
-            if (panel.renameActive) {
-                panel.renameRowId = entry.id;
-                initRenameBuf(panel, entry.title);
-                panel.renameFocus = true;
-                ++panel.renameSeq; // fresh InputText state per open
-                log("session panel: rename opened %s\n", entry.id.c_str());
+        if (isActive) {
+            // Rename toggle + input on the active row only (R4/L8).
+            if (renderButton("Rename", 6, panel.renameActive, panel.activeButton)) {
+                panel.pendingDeleteId.clear(); // non-delete control (L1)
+                panel.renameActive = !panel.renameActive;
+                if (panel.renameActive) {
+                    panel.renameRowId = entry.id;
+                    initRenameBuf(panel, entry.title);
+                    panel.renameFocus = true;
+                    ++panel.renameSeq; // fresh InputText state per open
+                    log("session panel: rename opened %s\n", entry.id.c_str());
+                }
             }
-        }
-        if (!panel.renameActive) {
-            // Keep the ID stack balanced: the row's PushID (above) must be
-            // popped before continuing, or assert-enabled builds abort with
-            // "PushID/PopID Mismatch" at EndChild.
-            ImGui::PopID();
-            continue;
-        }
-        ImGui::SameLine();
-        if (panel.renameFocus) {
-            ImGui::SetKeyboardFocusHere();
-            panel.renameFocus = false;
-        }
-        // Fill the rest of the row (the default 0.65 * content width would
-        // clip the input's right edge in the narrow panel).
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-        const std::string inputId = "##session_rename_" + std::to_string(panel.renameSeq);
-        const bool enter =
-            ImGui::InputText(inputId.c_str(), panel.renameBuf, sizeof(panel.renameBuf),
-                             ImGuiInputTextFlags_EnterReturnsTrue);
-        // The vendored InputText clears its own ActiveId on Escape (1.81
-        // behavior, no EscapeClearsAll flag needed), so IsItemActive() is
-        // false by the time we check - gate on the key alone. Trade-off:
-        // Escape closes the rename box even when another widget holds the
-        // keyboard focus (e.g. the query input); acceptable, because Escape
-        // has no other TUI binding and canceling the rename is the safe
-        // action.
-        const bool esc = ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape));
-        if (esc) {
-            panel.renameActive = false;
-            panel.renameFocus = false;
-            log("session panel: rename cancelled\n");
-        } else if (enter) {
-            const std::string newTitle(panel.renameBuf);
-            if (isWhitespaceOnly(newTitle)) {
-                // Empty titles are rejected here and again in D (L4).
-                log("session panel: empty rename rejected\n");
-            } else if (canQueue) {
-                queueSessionAction(panel, SessionActionType::Rename, entry.id, newTitle);
-                panel.renameActive = false;
-                panel.renameFocus = false;
-                log("session panel: queued rename %s\n", entry.id.c_str());
-            } else {
-                log("session panel: rename skipped (busy)\n");
+            if (panel.renameActive) {
+                ImGui::SameLine();
+                if (panel.renameFocus) {
+                    ImGui::SetKeyboardFocusHere();
+                    panel.renameFocus = false;
+                }
+                // Fill the rest of the row (the default 0.65 * content width
+                // would clip the input's right edge in the narrow panel).
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                const std::string inputId = "##session_rename_" + std::to_string(panel.renameSeq);
+                const bool enter =
+                    ImGui::InputText(inputId.c_str(), panel.renameBuf, sizeof(panel.renameBuf),
+                                     ImGuiInputTextFlags_EnterReturnsTrue);
+                // The vendored InputText clears its own ActiveId on Escape
+                // (1.81 behavior, no EscapeClearsAll flag needed), so
+                // IsItemActive() is false by the time we check - gate on
+                // the key alone. Trade-off: Escape closes the rename box
+                // even when another widget holds the keyboard focus (e.g.
+                // the query input); acceptable, because Escape has no other
+                // TUI binding and canceling the rename is the safe action.
+                const bool esc = ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape));
+                if (esc) {
+                    panel.renameActive = false;
+                    panel.renameFocus = false;
+                    log("session panel: rename cancelled\n");
+                } else if (enter) {
+                    const std::string newTitle(panel.renameBuf);
+                    if (isWhitespaceOnly(newTitle)) {
+                        // Empty titles are rejected here and again in D (L4).
+                        log("session panel: empty rename rejected\n");
+                    } else if (canQueue) {
+                        queueSessionAction(panel, SessionActionType::Rename, entry.id, newTitle);
+                        panel.renameActive = false;
+                        panel.renameFocus = false;
+                        log("session panel: queued rename %s\n", entry.id.c_str());
+                    } else {
+                        log("session panel: rename skipped (busy)\n");
+                    }
+                }
             }
         }
         // The rename input stays inside the row's PushID scope so its widget
         // id changes with the row: when the active row changes, the InputText
         // re-reads the (re-initialized) user buffer instead of its stale
         // internal edit state (L3).
+        // Line 2: dimmed non-interactive preview of the first user message
+        // (A14). Skipped entirely when the preview is empty so rows without
+        // one stay single-line; non-interactive (no button, no hover
+        // action, no tooltip of its own).
+        const std::string preview = previewRowLabel(entry, rowWidth);
+        if (!preview.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, panel.previewColor);
+            ImGui::TextUnformatted(preview.c_str());
+            ImGui::PopStyleColor();
+        }
         ImGui::PopID();
     }
-    ImGui::EndChild();
+    ImGui::EndChild(); // session_rows
+    ImGui::EndChild(); // Session child window
 }
 
 int leftPanelWidth(const TuiState& s) {

@@ -423,6 +423,10 @@ void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count) 
     if (!state || !state->inner)
         return;
     auto& panel = state->inner->sessionPanel;
+    // The previous active id, for the stale-pending rule (M3): a slash
+    // /switch typed while busy changes the active session, and the queued
+    // click must not override the user's explicit switch.
+    const std::string prevActiveId = panel.activeId;
     panel.sessions.clear();
     panel.activeId.clear();
     if (items && count > 0) {
@@ -450,6 +454,18 @@ void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count) 
             [&pending](const ::llmfun::tui::SessionEntry& s) { return s.id == pending; });
         if (found == panel.sessions.end())
             panel.pendingDeleteId.clear();
+    }
+    // Pending-switch slot (A12): drop the queued id when its target left
+    // the snapshot (mirror of the pendingDeleteId rule above) or when the
+    // active session changed since the previous snapshot (M3) - a slash
+    // /switch typed while busy wins over the queued click.
+    if (!panel.pendingSelectId.empty()) {
+        const std::string& pending = panel.pendingSelectId;
+        auto found = std::find_if(
+            panel.sessions.begin(), panel.sessions.end(),
+            [&pending](const ::llmfun::tui::SessionEntry& s) { return s.id == pending; });
+        if (found == panel.sessions.end() || panel.activeId != prevActiveId)
+            panel.pendingSelectId.clear();
     }
     // The rename box binds to the active row; when the active row is no
     // longer in the snapshot (deleted between refreshes, or the snapshot

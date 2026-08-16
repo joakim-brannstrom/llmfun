@@ -371,6 +371,148 @@ unittest {
             "preview should skip non-string content and find next user message");
 }
 
+// --- Test: preview truncation is grapheme-safe (A17) ---
+
+unittest {
+    auto tmpDir = makeTempDir("preview_grapheme");
+    scope (exit)
+        cleanupDir(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    // 24 ASCII chars + a 2-byte char at the boundary: a raw byte slice
+    // would split the multi-byte char; grapheme truncation keeps it whole.
+    auto twentyFourAscii = "aaaaaaaaaaaaaaaaaaaaaaa" ~ "a";
+
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+
+    JSONValue userMsg;
+    userMsg["role"] = "user";
+    userMsg["content"] = twentyFourAscii ~ "\u00E9" ~ " rest of message";
+    doc["messages"].array ~= userMsg;
+
+    auto savedMeta = store.save(meta.id, meta, doc);
+    import std.uni : byGrapheme;
+    import std.algorithm : count;
+
+    assert(savedMeta.preview.byGrapheme.count == PreviewMaxChars,
+            "preview should hold exactly PreviewMaxChars graphemes");
+    assert(savedMeta.preview == twentyFourAscii ~ "\u00E9",
+            "multi-byte grapheme at the boundary must stay intact: got '" ~ savedMeta.preview ~ "'");
+
+    // e + combining acute accent is ONE grapheme; it must never be split.
+    JSONValue doc2;
+    doc2["messages"] = JSONValue();
+    doc2["messages"].array = [];
+
+    JSONValue userMsg2;
+    userMsg2["role"] = "user";
+    userMsg2["content"] = twentyFourAscii ~ "e\u0301" ~ "x";
+    doc2["messages"].array ~= userMsg2;
+
+    auto savedMeta2 = store.save(meta.id, savedMeta, doc2);
+    assert(savedMeta2.preview == twentyFourAscii ~ "e\u0301",
+            "combining grapheme must stay whole: got '" ~ savedMeta2.preview ~ "'");
+}
+
+// --- Test: preview normalizes newlines/tabs/control bytes to spaces (A17) ---
+
+unittest {
+    auto tmpDir = makeTempDir("preview_single_line");
+    scope (exit)
+        cleanupDir(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+
+    JSONValue userMsg;
+    userMsg["role"] = "user";
+    userMsg["content"] = "line1\nline2\ttabbed\r\nend";
+    doc["messages"].array ~= userMsg;
+
+    auto savedMeta = store.save(meta.id, meta, doc);
+    auto preview = savedMeta.preview;
+
+    assert(!canFind(preview, "\n") && !canFind(preview, "\r") && !canFind(preview,
+            "\t"), "preview must be a single line: got '" ~ preview ~ "'");
+    assert(preview == "line1 line2 tabbed  end",
+            "control bytes should become spaces: got '" ~ preview ~ "'");
+}
+
+// --- Test: sweepEmptySessions removes empty non-kept sessions only ---
+
+unittest {
+    auto tmpDir = makeTempDir("sweep_empty");
+    scope (exit)
+        cleanupDir(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+
+    // Active session stays empty on purpose: keep must exempt it (W15).
+    auto active = store.create();
+    auto emptyNonActive = store.create();
+
+    auto nonEmpty = store.create();
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+    JSONValue userMsg;
+    userMsg["role"] = "user";
+    userMsg["content"] = "hello";
+    doc["messages"].array ~= userMsg;
+    auto savedMeta = store.save(nonEmpty.id, nonEmpty, doc);
+    assert(savedMeta.userMessageCount == 1, "setup: non-empty session should have 1 user message");
+
+    auto removed = store.sweepEmptySessions(active.id);
+
+    assert(removed.length == 1 && removed[0] == emptyNonActive.id,
+            "only the empty non-active session should be swept");
+    assert(!exists(buildPath(tmpDir, emptyNonActive.id.get ~ ".json")),
+            "empty non-active file should be gone");
+    assert(exists(buildPath(tmpDir, active.id.get ~ ".json")),
+            "active session must survive even when empty");
+    assert(exists(buildPath(tmpDir, nonEmpty.id.get ~ ".json")), "non-empty session must survive");
+}
+
+// --- Test: sweepEmptySessions never touches corrupt files ---
+
+unittest {
+    auto tmpDir = makeTempDir("sweep_corrupt");
+    scope (exit)
+        cleanupDir(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto empty1 = store.create();
+    auto empty2 = store.create();
+
+    writeFileContent(buildPath(tmpDir, "20250101-120000-abcd.json"), "not valid json");
+
+    // keep id not in the store: all empty sessions are swept
+    auto removed = store.sweepEmptySessions(SessionId("20250101-120000-9999"));
+    assert(removed.length == 2, "both empty sessions should be swept");
+    assert(exists(buildPath(tmpDir, "20250101-120000-abcd.json")),
+            "corrupt file must never be swept");
+}
+
+// --- Test: sweepEmptySessions on an empty store ---
+
+unittest {
+    auto tmpDir = makeTempDir("sweep_empty_store");
+    scope (exit)
+        cleanupDir(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto removed = store.sweepEmptySessions(SessionId("20250101-120000-9999"));
+    assert(removed.length == 0, "no sessions to sweep");
+}
+
 // --- Test: extra key preservation round-trip ---
 
 unittest {

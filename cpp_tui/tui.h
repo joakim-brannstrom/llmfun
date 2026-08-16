@@ -187,6 +187,8 @@ struct SessionEntry {
 
 struct ChatTabSessionPanel {
     ImVec4 activeButton = ImVec4(0.4f, 0.4f, 0.45f, 1.0f);
+    ImVec4 previewColor = ImVec4(0.55f, 0.55f, 0.58f, 1.0f);  // dimmed preview line (A14)
+    ImVec4 pendingButton = ImVec4(0.60f, 0.52f, 0.25f, 1.0f); // queued-switch row color (R18)
     int panelW = 0; // 0 = unset; init to PanelWActivated on first render
     static constexpr int PanelWActivated = 30;
     bool panelOpen{true}; // auto-open at startup
@@ -203,6 +205,11 @@ struct ChatTabSessionPanel {
     int renameSeq{0};            // bumped on each toggle-open; keeps the
                                  // InputText state fresh per open
     std::string pendingDeleteId; // two-step delete state (A5)
+    std::string pendingSelectId; // queued switch while busy (A12/R18); single
+                                 // slot, last click wins; set by the busy
+                                 // row-click branch, flushed as an ordinary
+                                 // Select on the first ready frame, cleared
+                                 // by tuiSetSessionList when stale (M3)
 };
 
 struct ChatTab {

@@ -165,6 +165,8 @@ private AgentStatus clearHandler(ref AgentApp app, string arg) {
     app.uiMsg.clearChat();
     app.lastServerStat = ServerStat(startContext: 0); // context resets to 0
     app.uiMsg.pipelineClear();
+    // The wipe changed the chat: the commit below must actually write.
+    app.chatDirty = true;
     app.commitActiveSession();
     app.sendChatMessage("Cleared chat history in session '%s'.",
             TuiChatMessageType_Assistant, app.shortSessionId(app.activeSession.id));

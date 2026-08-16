@@ -4,15 +4,17 @@
 module llm.session.store;
 
 import logger = std.logger;
-import std.algorithm : canFind, min, sort;
+import std.algorithm : canFind, map, sort;
 import std.conv : text;
 import std.datetime : Clock;
 import std.file : dirEntries, exists, readText, stdRemove = remove,
     stdRename = rename, SpanMode, mkdirRecurse;
 import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
 import std.path : buildPath, baseName;
+import std.range : take;
 import std.stdio : File;
 import std.string : strip;
+import std.uni : byCodePoint, byGrapheme, isControl;
 
 import my.optional : Optional, none, some, hasValue, orElse;
 import my.path : AbsolutePath, Path;
@@ -121,7 +123,12 @@ class SessionStore {
                     if (previewStr.length == 0) {
                         auto content = getValue!(string)(entry, v => v["content"].str, "");
                         if (content.length > 0) {
-                            previewStr = content[0 .. min(content.length, PreviewMaxChars)];
+                            // First PreviewMaxChars graphemes; newlines, tabs,
+                            // and control bytes normalized to spaces so the
+                            // preview is always a single line (A17). Grapheme
+                            // iteration never splits multi-byte UTF-8.
+                            previewStr = content.byGrapheme.take(PreviewMaxChars)
+                                .byCodePoint.map!(c => isControl(c) ? ' ' : c).text;
                         }
                     }
                 }
@@ -315,6 +322,38 @@ class SessionStore {
         } catch (Exception e) {
             safeWarn("Failed to remove session '%s': %s", id.get, e.msg);
         }
+    }
+
+    /** Remove every listed session with no user messages, except `keep`.
+     *
+     * Built on `list()`: corrupt/invalid files are never candidates (C7).
+     * Per-file best effort - `remove` already swallows errors with
+     * `safeWarn`. The active session is never removed, even when empty
+     * (W15). A session with assistant/tool messages but no user messages
+     * IS swept (it matches "no user messages").
+     *
+     * Params:
+     *   keep = id of the session to exempt (the active session)
+     *
+     * Returns: the ids whose files were actually removed (for logging/tests)
+     */
+    SessionId[] sweepEmptySessions(SessionId keep) @trusted {
+        SessionId[] removed;
+
+        foreach (s; list()) {
+            if (s.userMessageCount == 0 && s.id != keep) {
+                remove(s.id);
+                // Only report ids whose file is really gone: remove() can
+                // swallow a delete failure (safeWarn), and the return value
+                // feeds the exit log - listing a still-existing file would
+                // overstate the sweep.
+                if (!exists(filePathFor(s.id))) {
+                    removed ~= s.id;
+                }
+            }
+        }
+
+        return removed;
     }
 
     /** Rename a session title.
