@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -189,6 +190,7 @@ struct ChatTabSessionPanel {
     ImVec4 activeButton = ImVec4(0.4f, 0.4f, 0.45f, 1.0f);
     ImVec4 previewColor = ImVec4(0.55f, 0.55f, 0.58f, 1.0f);  // dimmed preview line (A14)
     ImVec4 pendingButton = ImVec4(0.60f, 0.52f, 0.25f, 1.0f); // queued-switch row color (R18)
+    ImVec4 matchColor = ImVec4(1.0f, 0.85f, 0.45f, 1.0f);     // filter match highlight (R25)
     int panelW = 0; // 0 = unset; init to PanelWActivated on first render
     static constexpr int PanelWActivated = 30;
     bool panelOpen{true}; // auto-open at startup
@@ -197,19 +199,31 @@ struct ChatTabSessionPanel {
     std::string activeId;               // active session id from the snapshot
     std::deque<SessionAction> actions;  // UI -> D queue (A2/A7)
 
-    char renameBuf[128] = {};    // rename input; init on row change or
-                                 // toggle-open, never per frame
-    bool renameActive{false};    // rename input visible (L8)
-    std::string renameRowId;     // row renameBuf was initialized for (L3)
-    bool renameFocus{false};     // focus the rename input on the next frame
-    int renameSeq{0};            // bumped on each toggle-open; keeps the
-                                 // InputText state fresh per open
-    std::string pendingDeleteId; // two-step delete state (A5)
-    std::string pendingSelectId; // queued switch while busy (A12/R18); single
-                                 // slot, last click wins; set by the busy
-                                 // row-click branch, flushed as an ordinary
-                                 // Select on the first ready frame, cleared
-                                 // by tuiSetSessionList when stale (M3)
+    char renameBuf[128] = {};            // rename input; init on row change or
+                                         // toggle-open, never per frame
+    bool renameActive{false};            // rename input visible (L8)
+    std::string renameRowId;             // row renameBuf was initialized for (L3)
+    bool renameFocus{false};             // focus the rename input on the next frame
+    int renameSeq{0};                    // bumped on each toggle-open; keeps the
+                                         // InputText state fresh per open
+    std::string pendingDeleteId;         // two-step delete state (A5)
+    std::string pendingSelectId;         // queued switch while busy (A12/R18); single
+                                         // slot, last click wins; set by the busy
+                                         // row-click branch, flushed as an ordinary
+                                         // Select on the first ready frame, cleared
+                                         // by tuiSetSessionList when stale (M3)
+    std::array<char, 64> filterBuf = {}; // filter query (A19); whitespace = no
+                                         // filter; zero-init because TuiState's
+                                         // user-provided ctor skips value-init
+    int filterSeq{0};                    // bumped on every programmatic clear
+                                         // (A23); suffixes the InputText id to
+                                         // force a fresh state (C10)
+    bool filterNonEmptyLastFrame{false}; // rendered buffer was a real query at
+                                         // the end of the last frame; lets A23
+                                         // tell that 1.81's cancel_edit revert
+                                         // already emptied the buffer on the
+                                         // Esc frame (the revert runs in
+                                         // NewFrame, before this code)
 };
 
 struct ChatTab {

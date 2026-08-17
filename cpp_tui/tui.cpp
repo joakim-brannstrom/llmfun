@@ -1,7 +1,10 @@
 #include "tui.h"
+#include "session_fuzzy.h"
 
 #include "imtui/imtui-impl-ncurses.h"
 #include "imtui/imtui-impl-text.h"
+
+#include "imgui/imgui_internal.h"
 
 #include <algorithm>
 #include <cctype>
@@ -61,6 +64,58 @@ bool renderButton(const std::string& label, int width, bool active, ImVec4 color
     ImGui::SetCursorScreenPos(p0);
     ImGui::Text("%s", label.c_str());
     ImGui::PopStyleColor(npop);
+    ImGui::PopID();
+
+    return result;
+}
+
+// Session row title button with filter-match highlighting (R25). Same
+// button and widget id as renderButton (id = the full label), same hover /
+// active color, but the label bytes covered by `runs` (label offsets [begin,
+// end)) are over-drawn in `matchColor`. The overdraw happens on top of the
+// just-drawn base label, so an empty `runs` leaves the frame exactly as
+// renderButton draws it (one Text call, no extra items). `runs` must stay
+// within the title portion of the label so the ellipsis and the " [N]"
+// count suffix are never highlighted (R25).
+bool renderTitleButton(const std::string& label, int width, bool active, ImVec4 colorActive,
+                       const ImVec4& matchColor,
+                       const std::vector<std::pair<std::size_t, std::size_t>>& runs) {
+    bool result = false;
+
+    ImGui::PushID(label.c_str());
+    const auto p0 = ImGui::GetCursorScreenPos();
+    if (ImGui::Button("##but", ImVec2(width, 1))) {
+        result = true;
+    }
+
+    int npop = 0;
+    if (ImGui::IsItemHovered() || active) {
+        ImGui::PushStyleColor(ImGuiCol_Text, colorActive);
+        ++npop;
+    }
+    ImGui::SetCursorScreenPos(p0);
+    ImGui::Text("%s", label.c_str());
+    ImGui::PopStyleColor(npop);
+    if (!runs.empty()) {
+        const char* lbl = label.c_str();
+        for (const auto& run : runs) {
+            const float x = p0.x + ImGui::CalcTextSize(lbl, lbl + run.first).x;
+            ImGui::SetCursorScreenPos(ImVec2(x, p0.y));
+            ImGui::PushStyleColor(ImGuiCol_Text, matchColor);
+            ImGui::TextUnformatted(lbl + run.first, lbl + run.second);
+            ImGui::PopStyleColor();
+        }
+        // The overdraw runs are real items, so after the loop SameLine's
+        // anchor (DC.CursorPosPrevLine - each item's right edge, published
+        // by ItemSize) is the last run's right edge, not the label's.
+        // Restore both cursor positions to the label's right edge so
+        // sameLineAfterButton places the del button where it sits without a
+        // filter, instead of pulling it left over the title.
+        const ImVec2 anchor(p0.x + ImGui::CalcTextSize(label.c_str()).x, p0.y);
+        ImGui::SetCursorScreenPos(anchor);
+        ImGui::GetCurrentWindow()->DC.CursorPosPrevLine = anchor;
+        // ImGui::SetCursorScreenPos(p0);
+    }
     ImGui::PopID();
 
     return result;
@@ -184,7 +239,6 @@ public:
     StyleColorGuard& operator=(StyleColorGuard&&) = delete;
 };
 
-// Number of ImGui style colors pushed per header
 static constexpr int HEADER_COLOR_COUNT = 4;
 
 struct HeaderColors {
@@ -246,7 +300,6 @@ static void buildRenderGroups(ChatTab& chat) {
             chat.renderGroups.push_back({i, i + 1, kind});
             ++i;
         } else {
-            // Start of an assistant-work run
             size_t start = i;
             while (i < chat.outputLines.size() && isAssistantWork(chat.outputLines[i].type)) {
                 ++i;
@@ -350,7 +403,6 @@ static void renderNestedMessage(TuiState& state, size_t i, ImVec2 displaySize) {
     textUnformattedMultiline(state.mdConfig, entry.text, renderAsMarkdown(entry.type));
     ImGui::PopTextWrapPos();
 
-    // offset to avoid collision with thinking ID
     ImGui::PushID((int)(i + state.chat.outputLines.size()));
     if (ImGui::Button(" [c] ")) {
         ImGui::SetClipboardText(entry.text.c_str());
@@ -592,9 +644,6 @@ void initMarkdownConfig(TuiState& state) {
     auto& mdConfig = state.mdConfig;
 
     mdConfig.linkCallback = &markdownLinkCallback;
-    // mdConfig.tooltipCallback =      nullptr;
-    // mdConfig.imageCallback =        nullptr;
-    // mdConfig.linkIcon =             "";
 
     // TODO: This must be a runtime parameter because it is different depending on backend
 #ifdef IMGUI_HAS_TEXTURES // used to detect dynamic font capability
@@ -623,13 +672,12 @@ bool tuiInit(ImTui::TScreen** screen) {
     *screen = ImTui_ImplNcurses_Init(true, 60.0f, 3.0f);
     if (!*screen) {
         std::fprintf(stderr, "Failed to initialize ncurses terminal. Aborting.\n");
-        ImGui::DestroyContext(); // clean up context on failure
+        ImGui::DestroyContext();
         return false;
     }
 
     ImTui_ImplText_Init();
 
-    // In your Init function:
     ImGuiIO& io = ImGui::GetIO();
     io.GetClipboardTextFn = GetClipboardText;
     io.SetClipboardTextFn = SetClipboardText;
@@ -719,50 +767,109 @@ void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
     }
     ImGui::EndChild();
 }
-// ---- Session sidebar panel (Phase 2) ----
 
-// True when c is a UTF-8 continuation byte (0b10xxxxxx).
 static bool isUtf8Continuation(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
 
-// One session row label: title truncated to the row width with an ellipsis,
-// plus the always-kept " [N]" message-count suffix (L4). Truncation is
-// byte-based but backed off to a UTF-8 boundary so a multi-byte character
-// is never split.
-static std::string sessionRowLabel(const SessionEntry& entry, int rowWidth) {
-    std::string count = " [" + std::to_string(entry.messageCount) + "]";
+// Word separator for the R25 highlight runs: the same four bytes the fuzzy
+// matcher treats as word boundaries (A21, fuzzyIsBoundary). Separators are
+// always whole ASCII characters, so walking over them never splits a
+// multi-byte character.
+static bool isWordSeparator(char c) { return c == ' ' || c == '-' || c == '_' || c == '/'; }
+
+// Title bytes shown in a session row of width `rowWidth` (UTF-8-safe
+// truncation, ellipsis only when something was cut). Shared by
+// sessionRowLabel and the match highlight (R25) so the displayed prefix and
+// the highlight clip never disagree.
+static std::size_t sessionTitlePortionLen(const SessionEntry& entry, int rowWidth) {
+    const std::string count = " [" + std::to_string(entry.messageCount) + "]";
     const int titleBudget = rowWidth - static_cast<int>(count.size());
     if (titleBudget <= 0) {
-        // No room for the title at all (e.g. an absurd message count):
-        // emit only the count rather than overflowing the row.
-        return count;
+        return 0;
     }
-    std::string title;
-    if (static_cast<int>(entry.title.size()) > titleBudget) {
-        // Reserve 3 cells for the ellipsis when there is room for it.
-        // titleBudget == 3 fits the ellipsis alone (the title text then
-        // contributes nothing); smaller budgets drop the ellipsis entirely.
-        int n = titleBudget >= 3 ? titleBudget - 3 : 0;
-        while (n > 0 && isUtf8Continuation(entry.title[n - 1])) {
-            --n;
-        }
-        title.assign(entry.title, 0, n);
-        if (n > 0 || titleBudget >= 3) {
-            title += "...";
-        }
-    } else {
-        title = entry.title;
+    if (static_cast<int>(entry.title.size()) <= titleBudget) {
+        return entry.title.size();
+    }
+    // Reserve 3 cells for the ellipsis when there is room for it.
+    // titleBudget == 3 fits the ellipsis alone (the title text then
+    // contributes nothing); smaller budgets drop the ellipsis entirely.
+    int n = titleBudget >= 3 ? titleBudget - 3 : 0;
+    while (n > 0 && isUtf8Continuation(entry.title[n - 1])) {
+        --n;
+    }
+    return static_cast<std::size_t>(n);
+}
+
+static std::string sessionRowLabel(const SessionEntry& entry, int rowWidth) {
+    const std::string count = " [" + std::to_string(entry.messageCount) + "]";
+    const std::size_t portion = sessionTitlePortionLen(entry, rowWidth);
+    if (portion >= entry.title.size()) {
+        return entry.title + count;
+    }
+    std::string title = entry.title.substr(0, portion);
+    // The ellipsis is kept whenever there is room for it or any title text survived.
+    const int titleBudget = rowWidth - static_cast<int>(count.size());
+    if (portion > 0 || titleBudget >= 3) {
+        title += "...";
     }
     return title + count;
 }
 
-// One dimmed preview line for a session row: the first user message
-// truncated to the row width with an ellipsis (A14). Returns the empty
-// string when the preview is empty so the row stays single-line. Residual
-// control bytes are collapsed to spaces - belt-and-braces on top of the
-// D-side A17 normalization, so a preview can never break the two-line row
-// layout (M1). Truncation is byte-based but backed off to a UTF-8 boundary
-// like sessionRowLabel; a multi-byte character at the row edge is never
-// split.
+static void titleMatchRuns(const std::string& query, const std::string& title, std::size_t portion,
+                           std::vector<std::pair<std::size_t, std::size_t>>& runs) {
+    runs.clear();
+    std::vector<std::size_t> pos;
+    if (!fuzzyMatchPositions(query, title, pos)) {
+        return;
+    }
+    const std::size_t n = title.size();
+    for (std::size_t i = 0; i < pos.size();) {
+        std::size_t s = pos[i];
+        std::size_t e = s;
+        while (i < pos.size() && pos[i] == e) {
+            ++e;
+            ++i;
+        }
+        // Snap to the enclosing character(s): a character is highlighted iff
+        // any of its bytes matched (no mid-character splits, N7). A matched
+        // continuation byte walks s back to its character start; a matched
+        // byte whose character continues walks e forward to the end.
+        while (s > 0 && isUtf8Continuation(title[s])) {
+            --s;
+        }
+        while (e < n && isUtf8Continuation(title[e])) {
+            ++e;
+        }
+        // The highlight covers the whole word enclosing the matched
+        // character(s) (word = maximal span between the A21 separator
+        // bytes), so an ASCII prefix match lights an accented word whole
+        // ("caf" -> "Café") instead of leaving the accented tail unlit
+        // (S13). The walks stop only on separator bytes - always whole
+        // ASCII characters - so s/e remain at character starts (N7).
+        while (s > 0 && !isWordSeparator(title[s - 1])) {
+            --s;
+        }
+        while (e < n && !isWordSeparator(title[e])) {
+            ++e;
+        }
+        if (s >= portion) {
+            continue; // matched only beyond the displayed prefix
+        }
+        if (e > portion) {
+            e = portion; // clip to the character-boundary prefix
+        }
+        // Two raw runs can snap into the same character; merge on touch.
+        if (!runs.empty() && s <= runs.back().second) {
+            runs.back().second = std::max(runs.back().second, e);
+        } else {
+            runs.emplace_back(s, e);
+        }
+    }
+}
+
+// One dimmed preview line: the first user message truncated to the row width
+// with an ellipsis. Returns empty for an empty preview so the row stays
+// single-line. Control bytes are collapsed to spaces as a backstop on top of
+// the D-side normalization, so a preview can never break the two-line layout.
 static std::string previewRowLabel(const SessionEntry& entry, int rowWidth) {
     if (entry.preview.empty() || rowWidth <= 0) {
         return std::string();
@@ -821,6 +928,14 @@ static void initRenameBuf(ChatTabSessionPanel& panel, const std::string& title) 
     }
 }
 
+// Programmatic filter clear (A23): reset the buffer and bump filterSeq so
+// the InputText id changes and the widget re-reads the now-empty user
+// buffer instead of its stale internal edit state (C10).
+static void clearFilter(ChatTabSessionPanel& panel) {
+    panel.filterBuf.fill('\0');
+    ++panel.filterSeq;
+}
+
 static void renderTabChatSessionPanel(TuiState& state, Log& log) {
     auto& panel = state.sessionPanel;
 
@@ -858,7 +973,7 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
 
     // The rename input is bound to the active row; when the active row is
     // absent from the snapshot (deleted session), close the box - an open
-    // box bound to a missing row is dead state (Task 8 tracked fix).
+    // box bound to a missing row is dead state.
     if (panel.renameActive) {
         auto it = std::find_if(panel.sessions.begin(), panel.sessions.end(),
                                [&panel](const SessionEntry& e) { return e.id == panel.activeId; });
@@ -913,6 +1028,131 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
 
     renderSeparator("Sessions ", "-", ImGui::GetContentRegionMax().x, true);
 
+    // Filter input (A19): a single-line InputText fixed in the header,
+    // between the separator and the rows child, so it stays put while the
+    // rows scroll (A15). Click-to-focus only (C11): no
+    // SetKeyboardFocusHere, so the always-rendered input never steals
+    // keyboard focus from the main query input. The id is suffixed by
+    // filterSeq so a programmatic clear (Escape, A23) can force a fresh InputText
+    // state (C10). EnterReturnsTrue: the return value is handled after the
+    // visible list is computed below (Enter selects the top match, A22/R23).
+    // S11: snapshot for the rename-Esc compensation at the end of the rows
+    // loop. 1.81's InputText treats Escape as cancel_edit: an ACTIVE input
+    // reverts its buffer to the value at activation (InitialTextA,
+    // imgui_widgets.cpp:4260-4275). While the rename box is open, Escape
+    // must close the box only - if the filter input is the focused one,
+    // its same-frame revert would wipe the query along with the box.
+    const std::string filterPreFrame(panel.filterBuf.data());
+    bool renameEscClosedThisFrame = false;
+
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    const std::string filterId = "##session_filter_" + std::to_string(panel.filterSeq);
+    const bool filterEnter =
+        ImGui::InputText(filterId.c_str(), panel.filterBuf.data(), panel.filterBuf.size(),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+
+    // Real-time filter + ranking (A20/A21/A27/A28): compute the visible
+    // (filtered + ranked) list each frame from the local snapshot. A
+    // whitespace-only filter is "no filter" (A19): all entries in snapshot
+    // order, no reordering. Otherwise keep the entries whose title OR preview
+    // matches (fuzzyScoreFields >= 0, R26) and rank them by descending score;
+    // stable ties keep snapshot order.
+    // Per-frame local (N5, no caching): store an index into panel.sessions
+    // plus the score, not a copy of the SessionEntry (three std::strings)
+    // per match per frame.
+    struct VisibleRow {
+        std::size_t index; // index into panel.sessions
+        int score;         // fuzzyScoreFields (0 when unfiltered)
+    };
+    std::vector<VisibleRow> visible;
+    const std::string filterQuery(panel.filterBuf.data());
+    if (isWhitespaceOnly(filterQuery)) {
+        visible.reserve(panel.sessions.size());
+        for (std::size_t i = 0; i < panel.sessions.size(); ++i) {
+            visible.push_back(VisibleRow{i, 0});
+        }
+    } else {
+        for (std::size_t i = 0; i < panel.sessions.size(); ++i) {
+            const SessionEntry& e = panel.sessions[i];
+            // Multi-field match (R26): title + preview, title weighted
+            // 2x. A session shows if either field matches.
+            const int s = fuzzyScoreFields(filterQuery, e.title, e.preview);
+            if (s >= 0) {
+                visible.push_back(VisibleRow{i, s});
+            }
+        }
+        std::stable_sort(
+            visible.begin(), visible.end(),
+            [](const VisibleRow& a, const VisibleRow& b) { return a.score > b.score; });
+    }
+
+    // A28: if the filter hides the active row while the rename box is open,
+    // close the box - an open box bound to a hidden row is dead state
+    // (mirrors the tuiSetSessionList "active row absent" rule). This also
+    // keeps the two Esc branches disjoint: the rename's own Esc check (inside
+    // the row loop, active row only) is the only live rename-Esc path, and it
+    // runs only when the active row is visible.
+    if (panel.renameActive) {
+        const bool activeVisible =
+            std::any_of(visible.begin(), visible.end(), [&panel](const VisibleRow& v) {
+                return panel.sessions[v.index].id == panel.activeId;
+            });
+        if (!activeVisible) {
+            panel.renameActive = false;
+            panel.renameFocus = false;
+            log("session panel: rename closed (active row filtered out, A28)\n");
+        }
+    }
+
+    // Escape clears the filter (A23): the filter input has no key binding
+    // of its own (InputText only drops focus on Escape), so the key is
+    // caught here, before the row loop. The rename box owns Escape while
+    // open: its own check runs in the row loop (active row only), and
+    // renameActive is read AFTER the A28 close above, so the frame where
+    // A28 closed the box (the active row was filtered out by a keystroke in
+    // this very input) still clears the filter, while a frame where the box
+    // is still live only closes the box - the two Escape paths stay
+    // disjoint. A whitespace-only query is already "no filter" (A19), so it
+    // never triggers the clear (no pointless id churn). While the input is
+    // ACTIVE, 1.81's cancel_edit (NavUpdate Cancel -> ClearActiveID,
+    // imgui.cpp:9010-9016) reverts the buffer to its activation value
+    // during NewFrame - before this code runs - so "was the query real" is
+    // also read from the end-of-last-frame snapshot: a query that was
+    // non-empty last frame and is empty now counts as the clear, which
+    // keeps C10's filterSeq bump firing on the Esc frame (S18).
+    const bool filterRevertedEmpty = panel.filterNonEmptyLastFrame && isWhitespaceOnly(filterQuery);
+    if (!panel.renameActive && (!isWhitespaceOnly(filterQuery) || filterRevertedEmpty) &&
+        ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape))) {
+        clearFilter(panel);
+        log("session panel: filter cleared (Escape)\n");
+    }
+
+    // Enter selects the top visible match (A22/R23/A24): with a non-empty
+    // visible list, Enter in the filter input selects visible[0]'s id. A
+    // non-empty filter ranks best-first, so visible[0] is the best match; an
+    // empty filter keeps snapshot order, so visible[0] is the first session.
+    // Reuses the existing Select path: queue when ready, else defer in the
+    // single pending slot (A12, last action wins; it flushes as an ordinary
+    // Select on the first ready frame at the top of this function). Selecting
+    // the already-active session is a no-op (log only, no action). An empty
+    // visible list is a no-op. The filter clears at selection time
+    // (clearFilter), independent of the async switch. Enter only fires while the
+    // filter input itself is active (EnterReturnsTrue), so it cannot race the
+    // rename input's own Enter handling.
+    if (filterEnter && !visible.empty()) {
+        const std::string& topId = panel.sessions[visible[0].index].id;
+        if (topId == panel.activeId) {
+            log("session panel: filter select %s skipped (already active)\n", topId.c_str());
+        } else if (canQueue) {
+            queueSessionAction(panel, SessionActionType::Select, topId, "");
+            log("session panel: filter queued select %s\n", topId.c_str());
+        } else {
+            panel.pendingSelectId = topId;
+            log("session panel: filter pending select %s (busy)\n", topId.c_str());
+        }
+        clearFilter(panel);
+    }
+
     // The rows live in a child of their own, sized to the remaining panel
     // height, so ImGui 1.81 enables the scrollbar when the list overflows
     // (R15). The id is stable, so the scroll position survives snapshot
@@ -936,21 +1176,22 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
                             static_cast<int>(std::floor(ImGui::GetCursorScreenPos().x)) - 1;
     const int rowWidth =
         usableWidth - delWidth - static_cast<int>(ImGui::GetStyle().ItemSpacing.x) - 1;
-    for (const auto& entry : panel.sessions) {
+    for (const auto& row : visible) {
+        const SessionEntry& entry = panel.sessions[row.index];
         const bool isActive = (entry.id == panel.activeId);
         const bool delPending = (panel.pendingDeleteId == entry.id);
         const std::string label = sessionRowLabel(entry, rowWidth);
         const float labelWidth = ImGui::CalcTextSize(label.c_str()).x;
-        // A queued switch target renders with the pending color so the
-        // click that will apply on the next ready frame stays visible
-        // (R18); while the slot is empty every row renders with the
-        // active color as before.
+        std::vector<std::pair<std::size_t, std::size_t>> matchRuns;
+        if (!isWhitespaceOnly(filterQuery)) {
+            titleMatchRuns(filterQuery, entry.title, sessionTitlePortionLen(entry, rowWidth),
+                           matchRuns);
+        }
         const ImVec4& rowColor =
             (entry.id == panel.pendingSelectId) ? panel.pendingButton : panel.activeButton;
-
         // The session id keeps row widgets unique even when titles collide.
         ImGui::PushID(entry.id.c_str());
-        if (renderButton(label, rowWidth, isActive, rowColor)) {
+        if (renderTitleButton(label, rowWidth, isActive, rowColor, panel.matchColor, matchRuns)) {
             panel.pendingDeleteId.clear(); // non-delete control (L1)
             if (canQueue && !isActive) {
                 queueSessionAction(panel, SessionActionType::Select, entry.id, "");
@@ -969,6 +1210,7 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
                 // armed (A12).
                 log("session panel: select %s skipped (already active)\n", entry.id.c_str());
             }
+            clearFilter(panel);
         }
         if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
@@ -1021,17 +1263,20 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
                 const bool enter =
                     ImGui::InputText(inputId.c_str(), panel.renameBuf, sizeof(panel.renameBuf),
                                      ImGuiInputTextFlags_EnterReturnsTrue);
+
                 // The vendored InputText clears its own ActiveId on Escape
                 // (1.81 behavior, no EscapeClearsAll flag needed), so
                 // IsItemActive() is false by the time we check - gate on
                 // the key alone. Trade-off: Escape closes the rename box
                 // even when another widget holds the keyboard focus (e.g.
                 // the query input); acceptable, because Escape has no other
-                // TUI binding and canceling the rename is the safe action.
+                // TUI binding - the filter clear (A23) is gated on
+                // !renameActive - and canceling the rename is the safe action.
                 const bool esc = ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape));
                 if (esc) {
                     panel.renameActive = false;
                     panel.renameFocus = false;
+                    renameEscClosedThisFrame = true;
                     log("session panel: rename cancelled\n");
                 } else if (enter) {
                     const std::string newTitle(panel.renameBuf);
@@ -1065,6 +1310,37 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
         }
         ImGui::PopID();
     }
+    // S11 compensation: when the box just closed via Escape above, the
+    // filter widget (if it was the active input) reverted its buffer to
+    // InitialTextA on the same frame (cancel_edit, see snapshot above).
+    // Restore the pre-frame query and bump filterSeq so the next frame
+    // re-initializes a fresh InputText state from the restored buffer
+    // (C10 pattern); without the bump the deactivated widget's stale stb
+    // (holding the reverted text) would resurface on the next
+    // click-to-focus.
+    if (renameEscClosedThisFrame && strcmp(panel.filterBuf.data(), filterPreFrame.c_str()) != 0) {
+        panel.filterBuf.fill('\0');
+        std::copy_n(filterPreFrame.begin(),
+                    std::min<std::size_t>(filterPreFrame.size(), panel.filterBuf.size() - 1),
+                    panel.filterBuf.begin());
+        ++panel.filterSeq;
+        log("session panel: filter restored (rename Esc frame)\n");
+    }
+
+    // No-match indicator (A26): when a non-empty filter matches nothing
+    // but the snapshot is non-empty, render a single dimmed "no matches"
+    // line instead of a blank area. The !panel.sessions.empty() clause
+    // keeps this consistent with the edge-case table: an empty snapshot
+    // renders no rows and no indicator regardless of the filter.
+    if (!isWhitespaceOnly(filterQuery) && visible.empty() && !panel.sessions.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, panel.previewColor);
+        ImGui::TextUnformatted("no matches");
+        ImGui::PopStyleColor();
+    }
+    // End-of-frame snapshot of the rendered query for A23's revert
+    // detection next frame (filterNonEmptyLastFrame); reads the final
+    // buffer so the S11 rename-Esc restore is counted.
+    panel.filterNonEmptyLastFrame = !isWhitespaceOnly(std::string(panel.filterBuf.data()));
     ImGui::EndChild(); // session_rows
     ImGui::EndChild(); // Session child window
 }
@@ -1213,14 +1489,6 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
             return;
         }
 
-        // this code do not work until ImGui::ImGui::ClearActiveID() is available
-        // if (!ImGui::IsItemActive() || state.inputHistory.empty()) {
-        //     return;
-        // }
-        // auto& io = ImGui::GetIO();
-        // const bool isPageUp = ImGui::IsItemActive() && io.KeysDown[io.KeyMap[ImGuiKey_PageUp]];
-        // const bool isPageDown = ImGui::IsItemActive() &&
-        // io.KeysDown[io.KeyMap[ImGuiKey_PageDown]];
         if (!(isPageUp || isPageDown)) {
             return;
         }
@@ -1228,7 +1496,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         bool setInput = false;
         if (isPageUp) {
             if (state.historyPos == -1) {
-                // First press: save draft and push current input to history.
+                // First press: save the draft so PageDown can restore it.
                 state.draftBuf = state.inputBuf;
             }
             state.historyPos =
@@ -1256,16 +1524,13 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
     };
 
     auto inputArea = [&state, &inputBufLines, &inputHistory, &focusInput]() {
-        // Estimate "button" width (text + padding)
         float buttonWidth =
             ImGui::CalcTextSize("Send   ").x + ImGui::GetStyle().FramePadding.x * 2.0f;
 
-        // Input field width = remaining space
         float inputWidth =
             ImGui::GetContentRegionAvail().x - buttonWidth - ImGui::GetStyle().ItemSpacing.x;
         inputWidth = std::max(0.0f, inputWidth);
 
-        // Height for text (including frame padding)
         float lineHeight = 1.0f + ImGui::GetTextLineHeight() * inputBufLines;
         float framePaddingY = ImGui::GetStyle().FramePadding.y;
         float inputHeight = lineHeight + framePaddingY * 2.0f;
@@ -1309,7 +1574,7 @@ void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
 
         if (state.userQuery.isSubmitted) {
             std::string query = state.userQuery.inputBuf;
-            // ImGui may insert a trailing for example when ctrl+enter.
+            // ImGui may insert a trailing newline (e.g. ctrl+enter).
             if (!query.empty() && query.back() == '\n') {
                 query.pop_back();
             }

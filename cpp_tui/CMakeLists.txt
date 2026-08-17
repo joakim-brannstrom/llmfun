@@ -81,3 +81,33 @@ add_executable(imtui_ncurses_fold_redraw_test
     ../vendor/imtui/test/test_ncurses_fold_redraw.cpp
 )
 target_link_libraries(imtui_ncurses_fold_redraw_test PRIVATE imtui-ncurses)
+
+# Standalone unit test for the session fuzzy matcher (Phase 4 item 2, Task 1).
+# Links ONLY the standard library (no imtui/ncurses/ImGui), which also
+# verifies that session_fuzzy.h compiles standalone (no TUI dependency).
+# Built by the normal `make -f tui.mak` and run headless from the build dir.
+add_executable(test_session_fuzzy
+    test_session_fuzzy.cpp
+)
+
+# Panel-level headless smoke harness for the session filter (Phase 4, Task 8,
+# A29) and the filter nav-focus hardening (Phase 4, Task 11, A31). Drives the
+# real TuiState through the llmfun_tui frame loop (skipping only the terminal
+# write) and asserts on the C++ state and the TScreen cell grid (labels,
+# order, "no matches", UTF-8 validity, match highlight colors, nav/active id
+# stability, log lines). Runs headless from the build dir:
+#   ./test_session_filter_smoke < /dev/null
+add_executable(test_session_filter_smoke
+    test_session_filter_smoke.cpp
+)
+add_dependencies(test_session_filter_smoke llmfun_tui_all_lib)
+# tui.h (the C++ header) needs the imtui + imgui_markdown include paths and
+# the IMGUI_USE_WCHAR32 definition; link the interface-providing targets for
+# exactly that (their archives are already inside llmfun_tui_all_lib, so they
+# contribute no extra objects).
+target_link_libraries(test_session_filter_smoke PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    imgui_markdown
+    ncursesw
+)

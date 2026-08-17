@@ -30,6 +30,14 @@ The session layer is deliberately chat-free: it stores and parses JSON only and 
   - [Rename and Delete Semantics](#rename-and-delete-semantics)
   - [Refresh Rule](#refresh-rule)
   - [C API](#c-api)
+- [TUI Search/Filter (Phase 4)](#tui-searchfilter-phase-4)
+  - [Filtering](#filtering)
+  - [Ranking](#ranking)
+  - [Highlighting](#highlighting)
+  - [Selection and Escape](#selection-and-escape)
+  - [Filter Lifecycle](#filter-lifecycle)
+  - [Test Coverage](#test-coverage)
+  - [Follow-ups (designed for, deferred)](#follow-ups-designed-for-deferred)
 - [Error Handling](#error-handling)
 - [Concurrency and Atomicity](#concurrency-and-atomicity)
 - [Tests](#tests)
@@ -338,6 +346,154 @@ The sidebar boundary lives in the pure C API (`cpp_tui/tui_api.h`, `TUI_API_VERS
 
 See `doc/tui_design.md` for the panel internals and layout comments.
 
+## TUI Search/Filter (Phase 4)
+
+Phase 4 adds fzf-style search/filter to the session panel: a single-line
+filter input in the panel header narrows the visible session rows in real
+time, ranks them best-match first, and Enter or a click selects a match.
+The feature is C++-only: it filters the local snapshot in the render loop
+and reuses the existing Select action (and the busy-defer pending-switch
+slot), so there is no D-side change, no C API change
+(`TUI_API_VERSION` stays 2), no file-format change, and no slash-command
+change.
+
+### Filtering
+
+- The filter is a single-line text input fixed in the panel header (below
+  the `Sessions` separator, above the scrollable rows; it takes one header
+  row from the row area). It stays put while the rows scroll. Click to
+  focus — it never auto-focuses, so it cannot steal keyboard focus from the
+  main query input.
+- A session matches when the query is a case-insensitive byte-level
+  subsequence of its **title or its preview**. Matching is byte-level with
+  no slicing, so it is UTF-8 safe: a multi-byte character matches as its
+  exact byte sequence and is never split, and case-folding is ASCII-only.
+- An empty or whitespace-only query means "no filter": the full list in
+  snapshot order, identical to the unfiltered panel.
+- The list re-filters and re-ranks every frame as the query changes — a
+  pure local computation (no caching, no agent round-trip), so it works
+  while the agent is busy.
+- A query longer than 64 bytes is truncated by the input.
+
+### Ranking
+
+Matching rows are ordered best-match first by a simplified fzf score
+computed on the leftmost subsequence alignment of the query in the text:
+
+| Factor | Points |
+|--------|--------|
+| each matched query byte | +100 |
+| matched byte at a word boundary (start of text, or right after a space, `-`, `_`, `/`) | +40 |
+| consecutive match (adjacent text byte) | +25 |
+| skipped byte between consecutive matches | -3 each |
+| position of the first matched byte | -1 each |
+
+- Higher score = better match. Equal scores keep the snapshot order (stable
+  sort), so the unfiltered order is the tie-break.
+- For both fields combined, the score is `max(titleScore, previewScore/2)`
+  — the title is weighted 2x over the preview.
+- The raw score can be negative for a valid but poor match on a long title
+  (the gap and first-position penalties are unbounded by title length). The
+  returned score is therefore clamped to a floor of 0: `-1` means no match,
+  `>= 0` means match. Clamped very-poor matches all tie at 0 and keep
+  snapshot order.
+- The weights are named constants in `cpp_tui/session_fuzzy.h`
+  (`kFuzzyBase`, `kFuzzyBoundary`, `kFuzzyConsecutive`, `kFuzzyGap`,
+  `kFuzzyFirstPos`), kept as a tunable baseline for the deferred
+  best-alignment (DP) scoring.
+
+### Highlighting
+
+With a non-empty filter, the matched characters of each visible row's title
+are rendered in a distinct highlight color. The highlight covers the whole
+word enclosing each matched character, snapped to UTF-8 character
+boundaries (a multi-byte character is highlighted whole or not at all — an
+ASCII prefix match lights an accented word whole, e.g. `caf` highlights
+`Café`), and is clipped to the displayed title prefix: the ellipsis and the
+` [N]` count suffix are never highlighted. A session that matches only
+through its preview shows no title highlight. With an empty filter, titles
+render exactly as before.
+
+### Selection and Escape
+
+- **Enter** in the filter input selects the best-ranked visible session (a
+  no-op when nothing is visible). Selecting the already-active session is a
+  no-op select (logged, no action).
+- **Click** on a filtered row selects it (the existing row-click behavior).
+- **Busy deferral**: while the agent is ready the Select action is queued
+  immediately; while busy the selection is deferred in the pending-switch
+  slot (last action wins) and flushes as an ordinary Select on the first
+  ready frame — the same busy-defer logic as row clicks.
+- **Clear on selection**: the filter clears at selection time — Enter with
+  a non-empty visible list (even when the top match is already the active
+  session) or a click on a row — so the panel returns to the full list
+  immediately. The switch itself is async: the switched session becomes
+  active when the snapshot refreshes.
+- **Escape** clears the filter (the rename box closed): the full list
+  returns. When the rename box is open (its active row visible), Escape
+  closes the rename box instead — rename wins, the filter is untouched.
+- **Rename box and the filter**: if the filter hides the active row while
+  the rename box is open, the box closes automatically (logged) — an open
+  box bound to a hidden row would be dead state its own Escape handling can
+  no longer reach.
+- **No-match indicator**: a non-empty filter that matches nothing renders a
+  single dimmed `no matches` line in the rows area (instead of a blank
+  area). Clearing the filter (Escape or backspace) restores the full list.
+  An empty snapshot (no sessions) renders no rows and no indicator,
+  regardless of the filter.
+
+### Filter Lifecycle
+
+The filter text is C++ panel state. It **persists** across:
+
+- **snapshot refreshes** — setting a new session list does not touch the
+  filter; it re-applies to the new list (re-ranked, or `no matches` if it
+  now matches nothing),
+- **panel close/reopen** — the text survives in the buffer and re-applies
+  on reopen (the collapsed 8-wide strip renders no filter),
+- **pipeline-panel occupancy** — the session panel is hidden while the
+  pipeline panel owns the left slot, but the filter survives and re-applies
+  when the session panel returns.
+
+It is **cleared** by Escape and by a selection. Every programmatic clear
+also forces a fresh input widget state, so a cleared field can never be
+re-asserted with stale text.
+
+### Test Coverage
+
+- `test_session_fuzzy` (`cpp_tui/test_session_fuzzy.cpp`) — standalone
+  unit test for the matcher: match/no-match, case-folding, subsequence
+  order, ranking, clamping, multi-byte behavior. Links only the standard
+  library, which also verifies the header is TUI-independent.
+- `test_session_filter_smoke` (`cpp_tui/test_session_filter_smoke.cpp`) —
+  committed panel-level headless smoke harness driving the real
+  `TuiState` and frame loop through the text backend (no terminal), with a
+  13-session seed: type/narrow/rank, no-match, Esc, Enter, click,
+  busy-defer + flush, snapshot refresh, rename-box close, Esc priority,
+  rename+filter coexistence, multi-byte + highlight, clamp, >64-byte
+  truncation, focus, nav stability, persistence, empty snapshot, log-line
+  verification.
+- `llmfun_tui --frames N` (`--smoke` = 30 frames) — the Phase 2 dry-run
+  seed (three sessions) exercises the panel render path with the filter
+  input in the header.
+
+Build and run from the repo root (glibc environment):
+
+```
+make -f tui.mak
+cd build/tui
+./test_session_fuzzy
+TERM=xterm-256color COLUMNS=80 LINES=24 timeout 300 ./test_session_filter_smoke < /dev/null
+```
+
+### Follow-ups (designed for, deferred)
+
+Keyboard list navigation (up/down cursor + Enter on the cursor row), query
+operators (`^` start anchor, space-separated multi-word), and
+best-alignment (DP) scoring replacing the leftmost alignment. See
+`plan/implementation_plan.md` (Phase 4, P3) and `doc/tui_design.md`
+(Filter Input) for the internals.
+
 ---
 
 ## Error Handling
@@ -378,3 +534,7 @@ Unit tests live in `session/tests.d` (module `llm.session.tests`) and cover:
 The agent-side helpers (`decideDeleteCommand`, `pickFallbackAfterDelete`) are unit-tested in `app_agent.d`.
 
 Run them with `dub test`; the session warnings printed during the run are the expected negative-path test output.
+
+The Phase 4 C++ filter has its own executables in `cpp_tui/` — see
+[TUI Search/Filter (Phase 4)](#tui-searchfilter-phase-4) (Test Coverage)
+for build and run details.

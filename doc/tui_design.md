@@ -352,6 +352,153 @@ panel's own width. `renderTabChat` calls `renderTabChatSessionPanel` before
 Sidebar interactions are logged through the shared `Log& log` parameter
 (`session panel: ...` lines in the Log tab).
 
+### Filter Input (Phase 4)
+
+Phase 4 adds an fzf-style filter to the panel header: a single-line
+`InputText` between the `Sessions` separator and the `session_rows` child,
+so it stays fixed while the rows scroll (A19). It adds one header row; the
+rows child is sized to the remaining height, so the panel shows one fewer
+row than before. The collapsed 8-wide strip renders no filter.
+
+**Panel state** (`ChatTabSessionPanel`, `tui.h`):
+
+```cpp
+    std::array<char, 64> filterBuf = {}; // query; whitespace = no filter
+    int filterSeq{0};                    // suffixes the input widget id
+    bool filterNonEmptyLastFrame{false}; // end-of-last-frame query snapshot
+    ImVec4 matchColor = ImVec4(1.0f, 0.85f, 0.45f, 1.0f); // highlight (R25)
+```
+
+**Input** (`renderTabChatSessionPanel`, `tui.cpp`):
+`SetNextItemWidth(GetContentRegionAvail().x)` +
+`ImGui::InputText("##session_filter_" + std::to_string(filterSeq), filterBuf,
+sizeof filterBuf, ImGuiInputTextFlags_EnterReturnsTrue)`. Click-to-focus
+only (C11): no `SetKeyboardFocusHere`, so the always-rendered input never
+steals keyboard focus from the main query input.
+
+**Per-frame visible list** (no caching, N5): a local `std::vector` of
+`{index into panel.sessions, score}` (no `SessionEntry` copies). A
+whitespace-only query keeps all entries in snapshot order; otherwise
+entries with `fuzzyScoreFields(query, title, preview) >= 0` are kept and
+`std::stable_sort`ed by score descending (ties keep snapshot order).
+`visible` is computed every frame — the filter is a pure function of the
+snapshot + `filterBuf`.
+
+**Matcher** (`cpp_tui/session_fuzzy.h`, pure, TUI-independent):
+
+- `fuzzyScore(query, text) -> int`: case-insensitive byte-level subsequence
+  (ASCII-only case fold; multi-byte bytes match exactly, never split —
+  deliberately not `std::tolower`, which is locale-dependent).
+  Leftmost-alignment score: +100/byte, +40 word boundary (start, or after
+  space/`-`/`_`/`/`), +25 consecutive, -3/gap byte, -1/first-match position;
+  -1 = no match, match score clamped to a floor of 0 (A27). Weights are
+  named constants (`kFuzzyBase`/`kFuzzyBoundary`/`kFuzzyConsecutive`/
+  `kFuzzyGap`/`kFuzzyFirstPos`) for the P3 DP scoring.
+- `fuzzyScoreFields(query, title, preview) -> int`: multi-field (R26) —
+  matches if either field matches; score = `max(titleScore,
+  previewScore/2)` (title weighted 2x).
+- `fuzzyMatchPositions(query, text, positions&) -> bool`: the leftmost
+  alignment's matched byte offsets for highlighting (R25); caller-owned,
+  reusable vector (no per-frame allocation churn).
+
+**Escape (clears the filter)**: a global `IsKeyPressed(Escape)` check in
+the open-panel branch, before the row loop, gated on `!panel.renameActive`.
+The rename box owns Escape while open (its own check runs in the row loop,
+active row only), and A28 (below) guarantees `renameActive` is false
+whenever the active row is filtered out, so the two Escape paths are
+disjoint on every frame. The check fires when the query is non-empty **or**
+`filterRevertedEmpty` (non-empty last frame, empty now): on an *active*
+input, 1.81's `cancel_edit` reverts the buffer to its activation value
+during `NewFrame` — before this code runs — so the end-of-last-frame
+snapshot is what tells the handler the user really had a query (S18).
+`clearFilter()` empties `filterBuf` and bumps `filterSeq` (see below);
+logs `filter cleared (Escape)`.
+
+**Enter (selects the top match)**: the `EnterReturnsTrue` return value
+selects `visible[0]` when the visible list is non-empty: already-active →
+log-only no-op; ready → queue `{Select, id}`; busy →
+`pendingSelectId = id` (A12, flushes as an ordinary Select on the first
+ready frame, top of the function). The filter clears at selection time
+(`clearFilter()`), independent of the async switch. Enter only fires while
+the filter input itself is active, so it cannot race the rename input's
+own Enter handling.
+
+**Row clicks**: the existing click handler (queue Select /
+pendingSelectId / active-row no-op) plus `clearFilter()` in every branch —
+a click on a filtered row clears the filter as well.
+
+**A28 — rename box closes when its row is filtered out**: after computing
+`visible`, if `renameActive` and the active row is not in `visible`, the
+box closes (`renameActive = renameFocus = false`) and is logged — mirroring
+the "active row absent from snapshot" rule at the top of the function and
+keeping the Escape branches disjoint.
+
+**S11 — rename-Esc filter restore**: on the frame the rename box closes
+via Escape, an *active* filter input reverts its buffer to its activation
+value (`cancel_edit`) in the same frame, which would wipe the query along
+with the box. The handler snapshots the pre-frame query
+(`filterPreFrame`), and if the buffer changed, restores it and bumps
+`filterSeq` (log `filter restored (rename Esc frame)`), so the query
+survives a rename-cancel and a later Escape still clears it.
+
+**Highlighting (R25)**: with a non-empty filter, `titleMatchRuns` maps
+`fuzzyMatchPositions` offsets to label byte ranges — consecutive matches
+grouped, snapped to UTF-8 character boundaries (a character is highlighted
+iff any of its bytes matched), extended to the whole word enclosing each
+match (word = maximal span between the A21 separator bytes), and clipped
+to the displayed title prefix (`sessionTitlePortionLen`) — and
+`renderTitleButton` over-draws those ranges in `matchColor` on top of the
+plain label. Same widget id (`##but` + label) and hover/active colors as
+`renderButton`; empty runs render exactly as before (no extra items). The
+ellipsis and the ` [N]` count suffix are never highlighted; a preview-only
+match has no title runs. The cursor is restored after the overdraw so
+`sameLineAfterButton`'s anchor is unaffected.
+
+**No-match indicator (A26)**: inside the rows child, when the query is
+non-empty, `visible` is empty, and the snapshot is non-empty, a single
+dimmed (`previewColor`) `no matches` line replaces the blank area.
+
+**`clearFilter()` and the C10 seq-bump rationale**: `clearFilter(panel)`
+fills `filterBuf` with NUL and does `++filterSeq`. The seq suffixes the
+InputText widget id, so a programmatic clear changes the id and forces a
+fresh InputText state that reads the now-empty buffer. This is robust
+against the vendored ImGui 1.81, whose InputText (a) reverts an active
+edit to its activation value on Escape (`cancel_edit`,
+`imgui_widgets.cpp:4260-4275`) and (b) can re-assert stale internal edit
+state from a deactivated widget on refocus — both bypassed by the id
+change. (The same pattern powers `renameSeq`.)
+
+**End-of-frame snapshot**: `filterNonEmptyLastFrame` is set from the final
+buffer after the rows child closes, so the S11 restore counts as a real
+query for the next frame's A23 check.
+
+**Smoke harness** (`test_session_filter_smoke`, A29): a committed CMake
+executable driving the real `TuiState` through the imtui text backend
+(same frame pipeline as `main.cpp`, no terminal; 80x24; a 13-session seed
+with distinct filterable titles). Scenarios: type/narrow/rank, no-match
+indicator, Esc clear, Enter top-match select, row click, busy-defer +
+flush (last wins), snapshot refresh with an active filter, A28 rename-box
+close, R21 Esc priority (rename wins), rename+filter coexistence (S11
+restore), Enter-on-active no-op + clear, multi-byte + whole-word highlight,
+A27 clamp, >64-byte truncation, C11 focus (does not steal from the main
+query input), A31 nav stability (arrow keys move neither the active id nor
+the nav state while a filter is active), C10 re-apply after clear (no
+stale-text resurface), close/reopen + pipeline-occupancy persistence (A23),
+empty snapshot, and log-line verification. Build/run (glibc environment):
+
+```
+make -f tui.mak
+cd build/tui
+./test_session_filter_smoke < /dev/null
+# (or: TERM=xterm-256color COLUMNS=80 LINES=24 timeout 300 ./test_session_filter_smoke < /dev/null)
+```
+
+Exits 0 on pass, non-zero on the first failed assertion (full grid dump on
+stderr). The binary statically links imtui/ncurses and needs glibc to
+execute — run it in a glibc environment (dev box / glibc CI), not a musl
+sandbox. `test_session_fuzzy` (matcher unit test, stdlib-only) and the
+`llmfun_tui --frames N` dry-run round out the headless coverage.
+
 ---
 
 ## Main Event Loop (`main.cpp`)
@@ -375,6 +522,9 @@ frames, verifies the session action queue is empty (`tuiIsSessionActionReady`
 == 0 and `tuiGetSessionAction` returns the None sentinel), prints
 `smoke ok: ...`, and exits 0. Without the argument the interactive loop is
 unchanged. `--frames` requires a non-negative integer; usage errors exit 2.
+The committed `test_session_filter_smoke` harness (see [Filter Input (Phase
+4)](#filter-input-phase-4) above) covers the session filter panel flows
+headlessly the same way.
 
 ### Keyboard Shortcuts
 
