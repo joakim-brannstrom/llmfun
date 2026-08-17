@@ -9,7 +9,7 @@ import std.json : JSONValue, JSONOptions, parseJSON, JSONType;
 import std.range : enumerate, isOutputRange, empty;
 import std.sumtype : SumType, match;
 import std.typecons : Tuple, tuple;
-
+import std.utf : byUTF, toUTF8, validate, UTFException;
 import llm.common.config : ApproxTokenSize;
 import llm.utility : getValue;
 
@@ -155,6 +155,45 @@ struct Chat {
             logger.trace(e).collectException;
             logger.trace(e.msg).collectException;
         }
+    }
+
+    /// Replaces invalid UTF-8 sequences in all messages with U+FFFD (Unicode
+    /// replacement character). Never discards a message; valid content is left
+    /// untouched (no copy).
+    /// JSONValue fields (metadata, saveData, toolCalls) are intentionally NOT
+    /// sanitized here; they are covered by body-level sanitization when the
+    /// history is serialized for a request.
+    /// Returns: number of messages that were modified.
+    size_t sanitizeHistory() @safe {
+        size_t modified;
+        foreach (ref msg; history) {
+            bool changed = false;
+            msg.match!(
+                (ref Message a) {
+                    changed = sanitizeField(a.content);
+                    if (sanitizeField(a.thinking))
+                        changed = true;
+                },
+                (ref ToolMessage a) {
+                    changed = sanitizeField(a.thinking);
+                },
+                (ref ToolResponse a) {
+                    changed = sanitizeField(a.content);
+                    if (sanitizeField(a.toolCallId))
+                        changed = true;
+                    if (sanitizeField(a.toolName))
+                        changed = true;
+                },
+                (ref VisionMessage a) {
+                    changed = sanitizeField(a.content);
+                    if (sanitizeField(a.imageDataUrl))
+                        changed = true;
+                }
+            );
+            if (changed)
+                modified++;
+        }
+        return modified;
     }
 
     JSONValue toJson() @safe {
@@ -617,6 +656,23 @@ bool isHiddenToolResponse(string toolName) {
 }
 
 private:
+
+/// Replaces invalid UTF-8 sequences in s with U+FFFD (in place).
+/// Fast path: if s is already valid UTF-8 it is left untouched (no copy).
+/// Returns: true if s was modified.
+bool sanitizeField(ref string s) @safe {
+    if (s.empty)
+        return false;
+    try {
+        validate(s); // O(n) scan; throws UTFException on the first bad byte
+        return false;
+    } catch (UTFException) {
+        // byUTF!char on char[] is a byte pass-through (no validation);
+        // decoding to dchar replaces invalid sequences with U+FFFD.
+        s = s.byUTF!dchar.toUTF8;
+        return true;
+    }
+}
 
 // Tools that should not be displayed to the user
 enum hiddenToolNames = ["taskDone"];

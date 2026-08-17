@@ -46,11 +46,13 @@ private struct CollectedOutput {
 /// Collect output from a proc drain range with per-stream byte limits.
 /// Appends truncation warnings to stderr when limits are exceeded.
 /// Continues draining after truncation to prevent pipe blocking.
-/// Note: Assumes UTF-8 text; binary output may result in corrupted data.
+/// Note: invalid UTF-8 is replaced with U+FFFD.
 /// Template accepts any range of DrainElement (streaming range or materialized array).
 /// Marked @trusted because it casts string literals to ubyte[] for efficient appending.
 CollectedOutput collectOutputLimited(R)(R elems, long maxOutputBytes) @trusted
         if (isInputRange!R) {
+    import llm.utility : sanitizeUtf8;
+
     auto stdoutApp = appender!(char[])();
     auto stderrApp = appender!(char[])();
 
@@ -84,7 +86,7 @@ CollectedOutput collectOutputLimited(R)(R elems, long maxOutputBytes) @trusted
                 ~ " bytes collected, limit: " ~ maxOutputBytes.to!string ~ " bytes]"));
     }
 
-    return CollectedOutput(stdoutApp.data[].idup, stderrApp.data[].idup);
+    return CollectedOutput(stdoutApp.data[].sanitizeUtf8.idup, stderrApp.data[].sanitizeUtf8.idup);
 }
 
 /// Interface for command execution backends (container or host).

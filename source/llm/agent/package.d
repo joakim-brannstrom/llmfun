@@ -520,6 +520,7 @@ private:
 
     void handleToolCalls(string thinking, ref StreamResponse.ToolCall[long] toolCalls) {
         import llm.tool_call : executeFunc;
+        import llm.utility : sanitizeUtf8;
 
         foreach (call; toolCalls.byValue) {
             try {
@@ -542,7 +543,7 @@ private:
             string result;
             try {
                 auto res = executeFunc(toolCtx, call.name, parseJSON(call.arguments), toolFilter);
-                result = res.msg;
+                result = res.msg.sanitizeUtf8;
                 success = res.success;
             } catch (Exception e) {
                 logger.tracef("Broken tool call. Incoming json: %s", e.msg);

@@ -80,6 +80,8 @@ struct LlmRequester {
     }
 
     SumType!(HttpResult, HttpError) request(Chat chat) nothrow {
+        import llm.utility : sanitizeUtf8;
+
         alias ReturnT = typeof(return);
 
         try {
@@ -94,7 +96,7 @@ struct LlmRequester {
                 logger.trace(jsonReq.toPrettyString);
 
             auto res = httpPostWithRetry(cfg.chatUrl,
-                    jsonReq.toString(JSONOptions.doNotEscapeSlashes), rqCfg);
+                    jsonReq.toString(JSONOptions.doNotEscapeSlashes).sanitizeUtf8, rqCfg);
 
             if (cfg.verbosity >= 2)
                 logger.trace(res);
@@ -237,6 +239,8 @@ struct LibRequestConfig {
 /// Execute an HTTP request with retry and exponential backoff.
 SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(string url,
         string body, ref LibRequestConfig cfg) {
+    import llm.utility : sanitizeUtf8;
+
     alias ReturnT = typeof(return);
 
     int attempt = 0;
@@ -295,14 +299,7 @@ SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(string url,
 
             const int code = http.statusLine.code;
             string response;
-            try {
-                response = (cast(const(char)[])(sbl.fullResponse)).byUTF!char.text;
-            } catch (UTFException e) {
-                // Malformed body on a completed transfer: keep the HTTP status
-                // instead of retrying a request that already got a response.
-                logger.tracef("invalid UTF-8 in response body: %s", e.msg);
-                response = "";
-            }
+            response = (cast(const(char)[])(sbl.fullResponse)).byUTF!char.text.sanitizeUtf8;
 
             if (code >= 500) {
                 lastError = HttpError(code, response, i"HTTP $(code) (server error, retryable): $(

@@ -6,10 +6,83 @@ import std.array : array, appender, empty, join;
 import std.format : format, formattedWrite;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.stdio : writef, stdout;
+import std.utf : byUTF, toUTF8, validate, UTFException;
 
 import my.path;
 
 import llm.chat : Role, ToolResponse;
+
+/// Replaces invalid UTF-8 sequences with U+FFFD (Unicode replacement character).
+/// Fast path: returns s unchanged (same allocation) if it is already valid.
+/// Never throws; idempotent (U+FFFD is itself valid UTF-8).
+/// @trusted: the fast path returns the input bytes as `string` (immutable),
+/// which requires a const-to-immutable cast that @safe disallows.
+T sanitizeUtf8(T)(T s) @safe nothrow {
+    if (s.empty)
+        return s;
+    try {
+        validate(s); // O(n) scan, throws UTFException on the first bad byte
+        return s;
+    } catch (Exception) {
+        // byUTF!char on a char[] is a byte pass-through (no validation);
+        // decoding to dchar replaces invalid sequences with U+FFFD.
+        static if (is(T == string))
+            return s.byUTF!dchar.toUTF8;
+        else
+            return s.byUTF!dchar.toUTF8.dup;
+    }
+}
+
+/// Test: sanitizeUtf8 returns an empty string unchanged.
+unittest {
+    assert(sanitizeUtf8("") == "");
+}
+
+/// Test: sanitizeUtf8 returns valid ASCII unchanged without copying.
+unittest {
+    string s = "hello world";
+    assert(sanitizeUtf8(s) is s);
+}
+
+/// Test: sanitizeUtf8 returns valid multibyte UTF-8 unchanged without copying.
+unittest {
+    string s = "héllo wörld ☕";
+    assert(sanitizeUtf8(s) is s);
+}
+
+/// Test: sanitizeUtf8 replaces a lone 0xF0 (incomplete 4-byte sequence).
+unittest {
+    assert(sanitizeUtf8("\xF0") == "\uFFFD");
+}
+
+/// Test: sanitizeUtf8 replaces a truncated 3-byte sequence.
+unittest {
+    assert(sanitizeUtf8("\xE2\x82") == "\uFFFD");
+}
+
+/// Test: sanitizeUtf8 replaces malformed 0xFF sequences with U+FFFD.
+unittest {
+    assert(sanitizeUtf8("\xFF") == "\uFFFD");
+    // Two adjacent 0xFF bytes form one malformed sequence (lead byte +
+    // continuation byte), so they yield a single U+FFFD.
+    assert(sanitizeUtf8("\xFF\xFF") == "\uFFFD");
+    assert(sanitizeUtf8("\xFF\xFF\xFF") == "\uFFFD\uFFFD");
+    // 0xFF is an invalid lead byte; the decoder consumes the following
+    // byte as part of the malformed sequence, so 'c' is dropped too.
+    assert(sanitizeUtf8("ab\xFFcd") == "ab\uFFFDd");
+}
+
+/// Test: sanitizeUtf8 preserves valid content around invalid bytes.
+unittest {
+    assert(sanitizeUtf8("ab\x80cd") == "ab\uFFFDcd");
+}
+
+/// Test: sanitizeUtf8 is idempotent for input already containing U+FFFD.
+unittest {
+    string s = "a\uFFFDb";
+    assert(sanitizeUtf8(s) is s);
+    assert(sanitizeUtf8(sanitizeUtf8("\xF0")) == sanitizeUtf8("\xF0"));
+}
 
 // Convert a 4-byte hash to a long (little-endian byte order).
 private long toLong(ubyte[4] a) @safe {
