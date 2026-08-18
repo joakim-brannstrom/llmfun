@@ -521,8 +521,6 @@ struct CodeModelConfig {
     double temp = 0.0;
     long contextSize;
     long maxTokens;
-    long reasoningBudget;
-    bool preserveThinking;
 }
 
 struct SummaryModelConfig {
@@ -532,8 +530,6 @@ struct SummaryModelConfig {
     double temp = 0.0;
     long contextSize;
     long contextChunkSize = 32768;
-    long reasoningBudget;
-    bool preserveThinking;
     long maxTokens;
 }
 
@@ -544,8 +540,6 @@ struct VisionModelConfig {
     double temp = 0.0;
     long contextSize;
     long maxTokens;
-    long reasoningBudget;
-    bool preserveThinking;
     long timeoutSecs = 60;
 
     invariant {
@@ -577,27 +571,23 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
         case EndpointType.openAiv1:
             break;
         case EndpointType.llamaCpp:
-            if (conf.reasoningBudget != 0 || conf.preserveThinking) {
-                j["chat_template_kwargs"] = JSONValue.emptyObject;
-                if (conf.reasoningBudget != 0)
-                    j["chat_template_kwargs"]["reasoning_budget"] = conf.reasoningBudget;
-                if (conf.preserveThinking)
-                    j["chat_template_kwargs"]["preserve_thinking"] = true;
-            }
             break;
         case EndpointType.deepseek:
-            if (conf.reasoningBudget != 0 || conf.preserveThinking) {
-                j["thinking"] = JSONValue.emptyObject;
-                j["thinking"]["type"] = "enabled";
-            }
-            if (conf.reasoningBudget >= 4096) {
-                j["reasoning_effort"] = "max";
-            } else if (conf.reasoningBudget >= 2048) {
-                j["reasoning_effort"] = "high";
-            }
             if (maxTokens == -1)
                 j["max_tokens"] = null;
             break;
+        }
+
+        if (!cfg.jsonFields.empty) {
+            try {
+                auto fields = parseJSON(cfg.jsonFields);
+                foreach (key, value; fields.object) {
+                    j[key] = value;
+                }
+            } catch (Exception e) {
+                logger.warningf("Unable to parse jsonFields '%s' in model config '%s': %s",
+                        cfg.jsonFields, model, e.msg);
+            }
         }
 
         return j;
@@ -958,6 +948,16 @@ private void checkApiKeyWarnings(LlmConfig conf) {
             logger.warningf("No API key found in environment variable '%s' for %s: %s",
                     conf.apiKeyEnv, helpText, name);
             warned = true;
+        }
+
+        if (!conf.jsonFields.empty) {
+            try {
+                auto dummy = parseJSON(conf.jsonFields);
+            } catch (Exception e) {
+                logger.warningf("Unable to parse jsonFields '%s' in model config '%s': %s",
+                        conf.jsonFields, name, e.msg);
+                warned = true;
+            }
         }
     }
 

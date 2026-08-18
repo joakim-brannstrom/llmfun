@@ -357,6 +357,7 @@ codeModels:
       maxRetries: 3
       backoffMs: 500
       apiKey: ""
+      jsonFields: '{"chat_template_kwargs": {"reasoning_budget": 4096, "preserve_thinking": true}}'
     name: local-model
     temp: 0.6
     contextSize: 128000
@@ -680,6 +681,7 @@ codeModels:
 | `maxTokens` | long | -1 | Maximum tokens to generate (-1 = unlimited) |
 | `reasoningBudget` | long | 0 | Token budget for reasoning/thinking |
 | `preserveThinking` | bool | false | Preserve thinking tags in output |
+| `jsonFields` | string | null | a json object as a string which is merged into the chat message |
 
 ### Server Configuration (`server`)
 
@@ -698,7 +700,8 @@ server:
   verifySslCert: true
   maxRetries: 3
   backoffMs: 500
-  apiKey: ""
+  apiKeyEnv: "OPENAI_API_KEY"
+  jsonFields: '{"chat_template_kwargs": {"reasoning_budget": 4096, "preserve_thinking": true}}'
 ```
 
 | Field | Type | Default | Description |
@@ -713,7 +716,7 @@ server:
 | `verifySslCert` | bool | true | Verify SSL/TLS certificates |
 | `maxRetries` | long | 3 | Maximum retries for transient failures |
 | `backoffMs` | long | 500 | Initial backoff in milliseconds (exponential) |
-| `apiKey` | string | "" | API key for Bearer token auth (falls back to `OPENAI_API_KEY` env var) |
+| `apiKeyEnv` | string | "" | Environment variable to read the API key from for Bearer token auth. If not set no Bearer token is added |
 | `type` | string | "" | Endpoint type: `llamaCpp`, `deepseek`, or empty for generic |
 
 **Endpoint Types:**
@@ -738,7 +741,7 @@ summaryModel:
     verifySslCert: true
     maxRetries: 3
     backoffMs: 500
-    apiKey: ""
+    apiKeyEnv: "OPENAI_API_KEY"
   name: summary-model
   prompt: SUMMARY.md
   temp: 0.3
@@ -779,7 +782,7 @@ visionModel:
     verifySslCert: true
     maxRetries: 3
     backoffMs: 500
-    apiKey: ""
+    apiKeyEnv: "OPENAI_API_KEY"
   name: vision-model
   systemPrompt: ""
   temp: 0.3
@@ -824,7 +827,7 @@ embedConfig:
     verifySslCert: true
     maxRetries: 3
     backoffMs: 500
-    apiKey: ""
+    apiKeyEnv: "OPENAI_API_KEY"
   name: nomic-embed-text
   nBatch: 512
   dimensions: 768
@@ -911,8 +914,7 @@ These are useful in `sandboxConfig.defaultOptions` for mount paths.
 
 llmfun requires API keys for LLM providers. These should be configured via:
 
-- **Environment variables**: `OPENAI_API_KEY` (checked as fallback when no API key is configured in the config file)
-- **Configuration file**: Server configuration with `apiKey` field
+- **Environment variables**: The variable to read from is in the configuration files `apiKeyEnv` field.
 
 ### Best Practices
 

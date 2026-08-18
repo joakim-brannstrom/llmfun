@@ -28,6 +28,7 @@ struct ServerConfig {
     bool verifySslCert = true;
     long maxRetries = 3; // maximum number of retries for transient failures
     long backoffMs = 500; // initial backoff in milliseconds (exponential)
+    string jsonFields; // a JSON object that is merged into the chat message
 
     /** Environment variable to read the API key from.
      * API key for Bearer token authentication (e.g. OpenAI API key).
