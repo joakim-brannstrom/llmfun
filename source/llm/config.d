@@ -5,7 +5,7 @@ import std.algorithm : filter, map, sort, among;
 import std.array : array, empty, appender, join;
 import std.conv : to, text;
 import std.datetime : Clock;
-import std.file : readText, exists, mkdirRecurse, rename, rmdirRecurse, thisExePath;
+import std.file : readText, exists, mkdirRecurse, rename, rmdirRecurse, thisExePath, isDir;
 import std.format : format;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.path : dirName;
@@ -101,6 +101,10 @@ struct LlmConfig {
 
     Path[] promptDir;
 
+    Path chatDir;
+    /// Active chat session id (stored in state.json; empty = none).
+    string activeChatSessionId;
+
     Path[] skillPathsUser;
     Path[] skillPathsSystem;
     long maxManifestSkills = 200;
@@ -154,6 +158,19 @@ struct LlmConfig {
         }
         skillPathsUser = skillPathsUser.map!(a => replaceMagicWord(a,
                 workArea.AbsolutePath).Path).array;
+
+
+        auto localChat = (ProgramName ~ "/data/chat").Path;
+        if (localChat.exists && localChat.isDir) {
+            chatDir = localChat;
+        } else if (chatDir.empty) {
+            // TODO: not using cwdConfig because chatDir must be set. What should the fallback be?
+            dataSearch(ProgramName).resolve("chat".Path).match!((ResourceFile a) {
+                chatDir = a.get;
+            }, (_) {
+                chatDir = localChat;
+            });
+        }
     }
 
     /// Directory where the LLM can work with assets, create files etc.
@@ -173,9 +190,6 @@ struct LlmConfig {
 
     CodeModelConfig[] codeModels;
     long activeCodeModelIndex = 0;
-
-    /// Active chat session id (stored in state.json; empty = none).
-    string activeChatSessionId;
 
     /// Tracks total session starts (incremented at the beginning of each session).
     uint sessionCount = 0;
@@ -469,7 +483,8 @@ void makeDefaultFileStructure() {
 
     foreach (path; [
         (xdgDataHome ~ Path(ProgramName) ~ Path("memory")),
-        (xdgDataHome ~ Path(ProgramName) ~ Path("skills"))
+        (xdgDataHome ~ Path(ProgramName) ~ Path("skills")),
+        (xdgDataHome ~ Path(ProgramName) ~ Path("chat"))
     ].filter!(a => !a.exists)) {
         try {
             logger.trace("Creating directory ", path);
@@ -483,7 +498,7 @@ void makeDefaultFileStructure() {
 void makeLocalSetupFileStructure(LlmConfig conf) {
     import std.file : mkdirRecurse;
 
-    foreach (path; [conf.dataDir, conf.workArea].filter!(a => !a.exists)) {
+    foreach (path; [conf.dataDir, conf.workArea, conf.dataDir ~ "chat"].filter!(a => !a.exists)) {
         try {
             logger.info("Creating directory ", path);
             mkdirRecurse(path);

@@ -709,7 +709,7 @@ struct AgentApp {
     }
 
     private void setupSession(AgentMdState agentMdState) {
-        sessionStore = new SessionStore(llmConf.dataDir ~ "chat");
+        sessionStore = new SessionStore(llmConf.chatDir);
         auto sessions = sessionStore.list();
 
         // Resolve active session: saved id -> most recent -> create fresh
