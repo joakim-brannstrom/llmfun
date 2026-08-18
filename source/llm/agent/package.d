@@ -265,6 +265,14 @@ Output only the taskDone tool call. No other text.)";
                 } else {
                     logger.trace("unhandled error: ", sp.error);
                     rval.status = ProcessResult.Status.unknownFailure;
+
+                    // Recovery: the server rejected the request and the
+                    // history may cotanin invalid UTF-8 (typically binary
+                    // command output). Sanitize the history in place (messages
+                    // preserved).
+                    if (chat.sanitizeHistory > 0) {
+                        logger.warning("Sanitized chat history (invalid UTF-8)");
+                    }
                 }
             } else {
                 rval.stat = useOrApproxStatistic(sp.stat);

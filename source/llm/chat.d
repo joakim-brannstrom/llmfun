@@ -690,3 +690,90 @@ shared static this() {
         RoleLength = tmp;
     }
 }
+
+// ===================== Tests for Chat.sanitizeHistory =====================
+
+/// Test: sanitizeHistory on an empty chat returns 0.
+unittest {
+    Chat chat;
+    assert(chat.sanitizeHistory() == 0);
+}
+
+/// Test: sanitizeHistory returns 0 for a clean chat and leaves valid
+/// multibyte UTF-8 untouched (no copy).
+unittest {
+    Chat chat;
+    chat.add(Message(Role.system, userQuery: false, content: "sys", thinking: null));
+    chat.add(Message(Role.user, userQuery: true, content: "héllo 🚀", thinking: "über dacht"));
+    chat.add(Message(Role.assistant, userQuery: false, content: "ok", thinking: "nope"));
+    chat.add(ToolMessage("dacht", parseJSON("[{\"id\": \"c1\", \"type\": \"function\", "
+            ~ "\"function\": {\"name\": \"t\", \"arguments\": \"{}\"}}]")));
+    chat.add(ToolResponse("result", "c1", "t", true));
+    chat.add(VisionMessage("caption", "data:image/png;base64,AAAA"));
+
+    assert(chat.sanitizeHistory() == 0);
+    assert(chat.length == 6);
+    chat.getMessages[1].match!((Message a) {
+        assert(a.content == "héllo 🚀");
+        assert(a.thinking == "über dacht");
+    }, (ToolMessage _) {}, (ToolResponse _) {}, (VisionMessage _) {});
+}
+
+/// Test: the original crash scenario — a poisoned ToolResponse (raw bytes from
+/// command output) is healed in place; no message is discarded.
+unittest {
+    Chat chat;
+    chat.add(Message(Role.system, userQuery: false, content: "sys", thinking: null));
+    chat.add(Message(Role.user, userQuery: true, content: "run printf", thinking: null));
+    chat.add(ToolResponse("\x80\x81", "call_42", "executeCommand", true));
+    auto len = chat.length;
+
+    auto n = chat.sanitizeHistory();
+
+    assert(n == 1);
+    assert(chat.length == len);
+    chat.getMessages[2].match!((Message _) {}, (ToolMessage _) {}, (ToolResponse a) {
+        assert(a.content == "\uFFFD\uFFFD");
+        assert(a.toolCallId == "call_42"); // valid fields untouched
+        assert(a.toolName == "executeCommand");
+    }, (VisionMessage _) {});
+}
+
+/// Test: sanitizeHistory heals every message type and counts each modified
+/// message; result is idempotent.
+unittest {
+    Chat chat;
+    chat.add(Message(Role.system, userQuery: false, content: "sys", thinking: null));
+    chat.add(Message(Role.user, userQuery: true, content: "a\x80b", thinking: "t\xFFx"));
+    chat.add(ToolMessage("think\x80", parseJSON("[{\"id\": \"c1\", \"type\": \"function\", "
+            ~ "\"function\": {\"name\": \"t\", \"arguments\": \"{}\"}}]")));
+    chat.add(ToolResponse("out\x80\x81", "id\xFF", "name\x80", true));
+    chat.add(VisionMessage("cap\x80", "data:img\xFF"));
+
+    auto n = chat.sanitizeHistory();
+
+    assert(n == 4); // system message clean; the other four modified
+    assert(chat.length == 5); // no messages discarded
+
+    auto msgs = chat.getMessages;
+    msgs[1].match!((Message a) {
+        assert(a.content == "a\uFFFDb");
+        // 0xFF is an invalid lead byte; the decoder consumes the following
+        // byte ('x') as part of the malformed sequence (see utility.d tests).
+        assert(a.thinking == "t\uFFFD");
+    }, (ToolMessage _) {}, (ToolResponse _) {}, (VisionMessage _) {});
+    msgs[2].match!((Message _) {}, (ToolMessage a) {
+        assert(a.thinking == "think\uFFFD");
+    }, (ToolResponse _) {}, (VisionMessage _) {});
+    msgs[3].match!((Message _) {}, (ToolMessage _) {}, (ToolResponse a) {
+        assert(a.content == "out\uFFFD\uFFFD");
+        assert(a.toolCallId == "id\uFFFD");
+        assert(a.toolName == "name\uFFFD");
+    }, (VisionMessage _) {});
+    msgs[4].match!((Message _) {}, (ToolMessage _) {}, (ToolResponse _) {}, (VisionMessage a) {
+        assert(a.content == "cap\uFFFD");
+        assert(a.imageDataUrl == "data:img\uFFFD");
+    });
+
+    assert(chat.sanitizeHistory() == 0); // idempotent: healed history is valid
+}
