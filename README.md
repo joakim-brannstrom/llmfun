@@ -521,7 +521,7 @@ environments:
 | `capabilities` | string[] | no | Tags for categorization (e.g. "dev", "python", "isolated") |
 | `isIsolated` | bool | no | Whether the environment provides isolation (default: false) |
 | `timeout` | int | yes | Maximum execution time in seconds |
-| `commandJoinMode` | string | no | How command array elements are joined: `"whitespace"` (join with spaces, default) or `"append"` (each element as separate argument) |
+| `commandJoinMode` | string | no | How command array elements are joined: `"single"` (only zero or a single argument allowed, default) `"whitespace"` (join with spaces) or `"append"` (each element as separate argument) |
 | `config` | object | yes | Environment-specific configuration (see below) |
 
 **Container config** (`type: "container"`):

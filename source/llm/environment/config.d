@@ -29,10 +29,12 @@ enum ExecutionType {
 
 /// Strategy for combining the LLM's command array into the final command line.
 enum CommandJoinMode {
+    /// The argument can only be [0, 1] so no joining
+    single,
     /// Join all elements with spaces into a single argument string.
     whitespace,
     /// Each element of the array is treated as a separate argument.
-    append
+    append,
 }
 
 /// Configuration for container-based execution environments.
@@ -95,8 +97,8 @@ struct EnvironmentBackend {
     /// Environment-specific configuration (container or host).
     EnvironmentConfig config;
 
-    /// How command arguments are combined (default: whitespace).
-    CommandJoinMode commandJoinMode = CommandJoinMode.whitespace;
+    /// How command arguments are combined
+    CommandJoinMode commandJoinMode = CommandJoinMode.single;
 
     invariant {
         assert(tag.length > 0, "EnvironmentBackend tag must not be empty");
@@ -278,15 +280,13 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
 
         bool isIsolated = getValue(entry, (v) => v["isIsolated"].boolean, false);
 
-        CommandJoinMode commandJoinMode = CommandJoinMode.whitespace;
-        string joinModeStr = getValue(entry, (v) => v["commandJoinMode"].str, null);
-        if (joinModeStr == "append") {
-            commandJoinMode = CommandJoinMode.append;
-        } else if (joinModeStr == "whitespace" || joinModeStr.empty) {
-            commandJoinMode = CommandJoinMode.whitespace;
-        } else {
+        CommandJoinMode commandJoinMode = CommandJoinMode.single;
+        try {
+            commandJoinMode = getValue(entry, (v) => v["commandJoinMode"].str, null)
+                .to!CommandJoinMode;
+        } catch (Exception e) {
             logger.warningf("Unknown commandJoinMode '%s' for environment '%s' - defaulting to 'whitespace'",
-                    joinModeStr, tag);
+                    getValue(entry, (v) => v["commandJoinMode"].str, null), tag);
         }
 
         if ("config" !in entry) {
@@ -469,6 +469,13 @@ environments:
       envVars:
         HOME: /tmp
         PATH: /usr/bin
+  - tag: default_value
+    description: Default values
+    timeout: 30
+    config:
+      type: container
+      runtimeCli: docker
+      image: foobar
 `;
     File(tmpFile, "w").write(yaml);
 
@@ -476,7 +483,7 @@ environments:
     string defaultTag;
     auto result = loadExecutionBackends(tmpFile.Path, null, state, defaultTag);
     assert(state == ExecutionConfigState.loaded);
-    assert(result.length == 2);
+    assert(result.length == 3);
     assert(defaultTag == "sandbox");
 
     // Verify container environment
@@ -499,6 +506,13 @@ environments:
     assert(result[1].config.match!((ContainerConfig c) => false,
             (HostConfig h) => h.workingDir == "/tmp"
             && h.envVars["HOME"] == "/tmp" && h.envVars["PATH"] == "/usr/bin"));
+
+    // Verify default values environment
+    assert(result[2].tag == "default_value");
+    assert(!result[2].isIsolated);
+    assert(result[2].commandJoinMode == CommandJoinMode.single);
+    assert(result[2].timeout == 30.dur!"seconds");
+    assert(result[2].config.match!((ContainerConfig c) => true, (HostConfig h) => false));
 }
 
 /// Test: missing file returns null with notConfigured state.
@@ -1070,10 +1084,11 @@ unittest {
     // merged network-isolation default must survive the load.
     foreach (env; envs[0 .. 5]) {
         assert(env.config.match!((ContainerConfig c) {
-                assert(c.options["05_mounts"] == ["-v", "@{llmfun_workarea}:/workarea"],
-                        "container " ~ env.tag ~ " lost its workarea mount");
+                assert(c.options["05_mounts"] == [
+                    "-v", "@{llmfun_workarea}:/workarea"
+                ], "container " ~ env.tag ~ " lost its workarea mount");
                 assert(c.options["06_network"] == ["--network", "none"],
-                        "container " ~ env.tag ~ " lost network isolation");
+                "container " ~ env.tag ~ " lost network isolation");
                 return true;
             }, (HostConfig h) => false), "environment " ~ env.tag ~ " must be a container");
     }

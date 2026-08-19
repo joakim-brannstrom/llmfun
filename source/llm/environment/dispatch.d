@@ -37,6 +37,9 @@ interface EnvironmentContext : Context {
     /// Get the default environment tag from configuration.
     /// Returns: The default tag, or null if not configured.
     string getDefaultEnvironmentTag();
+
+    /// Returns: the max output to read from a command.
+    long getMaxOutputBytes();
 }
 
 /// Parameters for the listEnvironments tool.
@@ -61,8 +64,17 @@ ExecuteFuncResult listEnvironments(Context baseCtx, ListEnvironmentsParams param
             obj["description"] = env.description;
             obj["capabilities"] = JSONValue(env.capabilities);
             obj["isIsolated"] = env.isIsolated;
-            obj["commandJoinMode"] = env.commandJoinMode == CommandJoinMode.whitespace
-                ? "whitespace" : "append";
+            final switch (env.commandJoinMode) {
+            case CommandJoinMode.single:
+                obj["commandJoinMode"] = "one command string";
+                break;
+            case CommandJoinMode.whitespace:
+                obj["commandJoinMode"] = "whitespace, no quote";
+                break;
+            case CommandJoinMode.append:
+                obj["commandJoinMode"] = "append";
+                break;
+            }
             obj["timeoutSeconds"] = env.timeout.total!"seconds";
             entries ~= obj;
         }
@@ -81,7 +93,7 @@ struct ExecuteCommandParams {
     string environmentTag;
 
     @ParamDescription(
-            "Command elements to execute. Joined according to the environment's commandJoinMode setting.")
+            "Command or parameter for a command to execute. See environment description for details.")
     string[] command;
 
     @ParamOptional @ParamDescription(
@@ -114,20 +126,25 @@ ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) n
         }
 
         auto env = ctx.getEnvironment(tag);
-        if (env.tag == "") {
+        if (env.tag.empty) {
             return ExecuteFuncResult(
                     "error: Environment '" ~ tag ~ "' not found. Call listEnvironments() to see available options.",
                     success: false);
         }
 
+        if (params.command.length > 1 && env.commandJoinMode == CommandJoinMode.single) {
+            return ExecuteFuncResult(i"error: Environment $(tag) may only be called with one command argument".text,
+                    success: false);
+        }
+
         auto runner = env.config.match!((ContainerConfig c) {
-            return cast(RunnerBackend) new ContainerRunner(c.runtimeCli, c.image, c.options, ctx.workArea(),
-                env.commandJoinMode, timeout: env.timeout, maxOutputBytes: 1_048_576);
+            return cast(RunnerBackend) new ContainerRunner(c.runtimeCli, c.image, c.options,
+                ctx.workArea(), env.commandJoinMode, timeout: env.timeout,
+                maxOutputBytes: ctx.getMaxOutputBytes);
         }, (HostConfig h) {
             auto wd = h.workingDir.empty ? AbsolutePath.init : h.workingDir.AbsolutePath;
-            return cast(RunnerBackend) new HostRunner(h.options, wd, h.envVars,
-                env.commandJoinMode, ctx.workArea(), timeout: env.timeout,
-                maxOutputBytes: 1_048_576);
+            return cast(RunnerBackend) new HostRunner(h.options, wd, h.envVars, env.commandJoinMode,
+                ctx.workArea(), timeout: env.timeout, maxOutputBytes: ctx.getMaxOutputBytes);
         });
 
         scope (exit)
@@ -171,6 +188,10 @@ version (unittest) {
 
         override string getDefaultEnvironmentTag() {
             return defaultTag;
+        }
+
+        override long getMaxOutputBytes() {
+            return 424242;
         }
     }
 }
@@ -282,7 +303,7 @@ unittest {
     assert(json.array[0]["tag"].str == "sandbox");
     assert(json.array[0]["description"].str == "Test sandbox");
     assert(json.array[0]["isIsolated"].boolean == true);
-    assert(json.array[0]["commandJoinMode"].str == "whitespace");
+    assert(json.array[0]["commandJoinMode"].str == "whitespace, no quote");
     assert(json.array[0]["capabilities"].array.length == 1);
     assert(json.array[0]["capabilities"].array[0].str == "container");
 

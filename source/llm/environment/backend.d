@@ -295,6 +295,7 @@ private string[] buildCommand(string[][string] options, string[] command,
     case CommandJoinMode.whitespace:
         args ~= command.join(" ");
         break;
+    case CommandJoinMode.single:
     case CommandJoinMode.append:
         args ~= command;
         break;
