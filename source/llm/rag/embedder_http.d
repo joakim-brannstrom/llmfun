@@ -46,7 +46,7 @@ class RemoteEmbedder : Embedder {
     }
 
     override string modelName() {
-        return cfg.name;
+        return cfg.modelName;
     }
 
     override long dimensions() {
@@ -95,7 +95,7 @@ class RemoteEmbedder : Embedder {
         }
 
         JSONValue jsonReq;
-        jsonReq["model"] = cfg.name;
+        jsonReq["model"] = cfg.modelName;
         jsonReq["input"] = text;
         jsonReq["encoding_format"] = "float";
         EmbedResult rval;

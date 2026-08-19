@@ -35,12 +35,12 @@ private AgentStatus modelHandler(ref AgentApp app, string arg) {
         foreach (i, model; app.llmConf.codeModels) {
             auto activeMarker = (i == cast(size_t) app.llmConf.activeCodeModelIndex) ? " [active]"
                 : "";
-            m ~= format("  %s  %s%s\n", i, model.name, activeMarker);
+            m ~= format("  %s  %s%s\n", i, model.modelName, activeMarker);
         }
         m ~= "Use /model <index> or /model <name> to switch.";
         app.sendChatMessage(m, TuiChatMessageType_Assistant);
     } else {
-        const oldModel = app.llmConf.activeCodeModel.name;
+        const oldModel = app.llmConf.activeCodeModel.modelName;
         bool switched;
         long idx = ifThrown(arg.to!long, -1); // signed: -1 routes to name match
         if (idx >= 0) {
@@ -116,7 +116,7 @@ unittest {
     // Give the app a single model so `activeCodeModel()` works and
     // selectModelByIndex can be exercised.
     app.llmConf.codeModels = [
-        CodeModelConfig(server: ServerConfig.init, name: "gpt-test")
+        CodeModelConfig(server: ServerConfig.init, modelName: "gpt-test")
     ];
     app.llmConf.activeCodeModelIndex = 0;
 

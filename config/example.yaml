@@ -93,7 +93,8 @@ codeModels:
       maxRetries: 3
       backoffMs: 500
       apiKey: ""
-    name: local-model
+    display: x-high
+    modelName: local-model-xyz-high-reason-15b
     temp: 0.6
     contextSize: 128000
     maxTokens: -1

@@ -2,6 +2,7 @@ module llm.tool_call.vision;
 
 import logger = std.logger;
 import std.algorithm : startsWith;
+import std.array : empty;
 import std.base64 : Base64;
 import std.conv : text;
 import std.datetime : Clock;
@@ -118,8 +119,8 @@ class DedicatedVisionAgent : IAgent {
     /// Create a new vision agent with the given config and system prompt.
     /// When systemPrompt is empty, falls back to DefaultVisionSystemPrompt.
     this(VisionModelConfig config, string systemPrompt) {
-        modelName_ = config.name;
-        auto prompt = systemPrompt.length == 0 ? DefaultVisionSystemPrompt : systemPrompt;
+        modelName_ = config.modelName;
+        auto prompt = systemPrompt.empty ? DefaultVisionSystemPrompt : systemPrompt;
         chat.setSystemPrompt(prompt);
 
         auto reqCfg = toRequestConfig(config);
@@ -159,7 +160,7 @@ class DedicatedVisionAgent : IAgent {
         auto timer = Clock.currTime;
 
         // Validate input
-        if (imageDataUrl.length == 0 || !imageDataUrl.startsWith("data:")) {
+        if (imageDataUrl.empty || !imageDataUrl.startsWith("data:")) {
             auto duration = Clock.currTime - timer;
             logger.warningf("Vision processing failed after %s: model=%s, reason=invalid image data URL",
                     duration.toString, modelName_).collectException;
@@ -181,7 +182,7 @@ class DedicatedVisionAgent : IAgent {
 
             jsonResult.match!((JSONValue j) {
                 auto choices = getValue(j, (v) => v["choices"].array, null);
-                if (choices.length == 0) {
+                if (choices.empty) {
                     result = Error("Vision model returned no choices");
                     return;
                 }
@@ -251,7 +252,7 @@ ExecuteFuncResult loadImageApi(Context baseCtx, LoadImageApiParams params) nothr
             }
             auto result = agent.processImage(imageResult.dataUrl, params.query);
             return result.match!((string description) {
-                if (description.length == 0)
+                if (description.empty)
                     return ExecuteFuncResult("Vision model returned empty response", success: false);
                 return ExecuteFuncResult(description, success: true);
             }, (DedicatedVisionAgent.Error err) {

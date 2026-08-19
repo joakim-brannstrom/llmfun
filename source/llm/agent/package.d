@@ -120,7 +120,7 @@ class Agent : IBasicAgent {
         import llm.tool_call : descAllFunctions, filterToolDescriptions;
         import llm.endpoint : getContextSize;
 
-        if (modelConfig.name == "") {
+        if (modelConfig.modelName.empty) {
             throw new Exception("Cannot reset to empty model config");
         }
 
@@ -131,10 +131,10 @@ class Agent : IBasicAgent {
 
         this.contextSize_ = modelConfig.getContextSize;
 
-        this.modelName_ = modelConfig.name;
+        this.modelName_ = modelConfig.modelName;
 
         logger.tracef("Agent model reset: %s -> %s, context: %s", oldModel,
-                modelConfig.name, this.contextSize_);
+                modelConfig.modelName, this.contextSize_);
     }
 
     Message[] getUserQueries() @safe nothrow {

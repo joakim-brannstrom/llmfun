@@ -159,7 +159,6 @@ struct LlmConfig {
         skillPathsUser = skillPathsUser.map!(a => replaceMagicWord(a,
                 workArea.AbsolutePath).Path).array;
 
-
         auto localChat = (ProgramName ~ "/data/chat").Path;
         if (localChat.exists && localChat.isDir) {
             chatDir = localChat;
@@ -167,9 +166,7 @@ struct LlmConfig {
             // TODO: not using cwdConfig because chatDir must be set. What should the fallback be?
             dataSearch(ProgramName).resolve("chat".Path).match!((ResourceFile a) {
                 chatDir = a.get;
-            }, (_) {
-                chatDir = localChat;
-            });
+            }, (_) { chatDir = localChat; });
         }
     }
 
@@ -231,7 +228,12 @@ struct LlmConfig {
 
     /// Return: the name of the active model.
     string activeModelName() @safe const {
-        return activeCodeModel().name;
+        return activeCodeModel().modelName;
+    }
+
+    /// Return: the name of the active model.
+    string activeModelDisplayName() @safe const {
+        return activeCodeModel().display;
     }
 
     /// Select model by index. Returns true on success, false if index out of bounds.
@@ -259,20 +261,20 @@ struct LlmConfig {
         size_t matchIndex = size_t.max;
 
         foreach (i, model; codeModels) {
-            if (model.name.toLower == lowerName) {
+            if (model.display.toLower == lowerName) {
                 matchCount++;
                 matchIndex = i;
             }
         }
 
         if (matchCount == 0) {
-            return i"No model matches '$(name)'. Available models: $(codeModels.map!(m => m.name))"
-                .text;
+            return i"No model matches '$(name)'. Available models: $(
+                    codeModels.map!(m => m.display))".text;
         }
         if (matchCount > 1) {
             return i"Ambiguous model name '$(name)'. Matches: $(
-                    codeModels.filter!(m => m.name.toLower == lowerName)
-                    .map!(m => m.name))".text;
+                    codeModels.filter!(m => m.display.toLower == lowerName)
+                    .map!(m => m.display))".text;
         }
 
         activeCodeModelIndex = matchIndex;
@@ -284,7 +286,7 @@ struct LlmConfig {
     string[] listModels() const @safe {
         auto app = appender!(string[])();
         foreach (i, model; codeModels) {
-            app.put(i"$(model.name) (index: $(i))$(i == activeCodeModelIndex ? " [active]" : "")"
+            app.put(i"$(model.display) (index: $(i))$(i == activeCodeModelIndex ? " [active]" : "")"
                     .text);
         }
         return app.data;
@@ -532,7 +534,10 @@ struct RagFilter {
 
 struct CodeModelConfig {
     ServerConfig server;
-    string name;
+    /// What is shown to the user
+    string display;
+    /// The name of the model in the request to the server
+    string modelName;
     double temp = 0.0;
     long contextSize;
     long maxTokens;
@@ -540,7 +545,7 @@ struct CodeModelConfig {
 
 struct SummaryModelConfig {
     ServerConfig server;
-    string name;
+    string modelName;
     string prompt = "SUMMARY.md";
     double temp = 0.0;
     long contextSize;
@@ -550,7 +555,7 @@ struct SummaryModelConfig {
 
 struct VisionModelConfig {
     ServerConfig server;
-    string name;
+    string modelName;
     string systemPrompt;
     double temp = 0.0;
     long contextSize;
@@ -558,7 +563,7 @@ struct VisionModelConfig {
     long timeoutSecs = 60;
 
     invariant {
-        assert(!name.empty, "Vision model name must not be empty");
+        assert(!modelName.empty, "Vision model name must not be empty");
         assert(!server.url.empty, "Vision model server URL must not be empty");
         assert(temp >= 0.0 && temp <= 2.0, i"Temperature must be in [0.0, 2.0], got $(temp)".text);
         assert(contextSize > 0, i"Context size must be positive, got $(contextSize)".text);
@@ -617,7 +622,7 @@ RequestConfig toRequestConfig(ConfigT)(ConfigT conf) {
          verifySslCert: conf.server.verifySslCert,
          verbosity: cast(int) conf.server.httpVerbosity,
          apiKey: conf.server.apiKeyEnv.empty ? "" : getEnvApiKey(conf.server.apiKeyEnv),
-         header: makeHeader(conf.name, conf.temp, conf.maxTokens, conf.server));
+         header: makeHeader(conf.modelName, conf.temp, conf.maxTokens, conf.server));
     // dfmt on
 }
 
@@ -977,19 +982,19 @@ private void checkApiKeyWarnings(LlmConfig conf) {
     }
 
     foreach (model; conf.codeModels) {
-        warnOrNot(model.server, model.name, "code model");
+        warnOrNot(model.server, model.display, "code model");
     }
 
     if (!conf.summaryModel.server.url.empty) {
-        warnOrNot(conf.summaryModel.server, conf.summaryModel.name, "summary model");
+        warnOrNot(conf.summaryModel.server, conf.summaryModel.modelName, "summary model");
     }
 
     if (!conf.visionModel.isNull && !conf.visionModel.get.server.url.empty) {
-        warnOrNot(conf.visionModel.get.server, conf.visionModel.get.name, "vision model");
+        warnOrNot(conf.visionModel.get.server, conf.visionModel.get.modelName, "vision model");
     }
 
     conf.embedConfig.match!((RemoteEmbedConfig r) {
-        warnOrNot(r.server, r.name, "embed model");
+        warnOrNot(r.server, r.modelName, "embed model");
     }, (LocalEmbedConfig) {} // No API key needed for local embed
     );
 
@@ -1010,11 +1015,13 @@ void validateConfig(LlmConfig conf) {
                 conf.codeModels.length))".text);
 
     foreach (i, model; conf.codeModels) {
-        if (model.name.empty)
-            throw new Exception(i"codeModels[$(i)].name must not be empty".text);
+        if (model.modelName.empty)
+            throw new Exception(i"codeModels[$(i)].modelName must not be empty".text);
+        if (model.display.empty)
+            throw new Exception(i"codeModels[$(i)].display must not be empty".text);
         if (model.server.url.empty)
-            throw new Exception(i"codeModels[$(i)].server.url must not be empty for $(model.name)"
-                    .text);
+            throw new Exception(i"codeModels[$(i)].server.url must not be empty for $(
+                    model.modelName)".text);
     }
 
     if (!conf.visionModel.isNull) {
@@ -1197,7 +1204,8 @@ unittest {
     string configYaml = `sandboxConfig:
   maxOutputBytes: 42
 codeModels:
-  - name: test
+  - modelName: test
+    display: test42
     server:
       url: http://localhost:8080
 `;
@@ -1221,7 +1229,8 @@ unittest {
 
     auto configFile = buildPath(tmpDir, ".llmfun.yaml");
     string configYaml = `codeModels:
-  - name: test
+  - modelName: test
+    display: test42
     server:
       url: http://localhost:8080
 `;
@@ -1280,7 +1289,8 @@ unittest {
     auto configFile = buildPath(tmpDir, "my_base.yaml");
     string configYaml = `warnIfNoApiKey: false
 codeModels:
-  - name: base
+  - modelName: base
+    display: test42
     server:
       url: http://localhost:8080
 `;
@@ -1300,7 +1310,7 @@ codeModels:
     environment["LLMFUN_SYSTEM_CONFIG"] = configFile;
     auto conf = readConfig(Path.init, silent: true, noCwdConfig: true, trustedConfig: false);
     assert(conf.codeModels.length == 1, "Layer 1 YAML config must be loaded: " ~ conf.to!string);
-    assert(conf.codeModels[0].name == "base");
+    assert(conf.codeModels[0].modelName == "base");
 }
 
 /// Test: the shipped config/example.yaml loads with a complete defaultOptions

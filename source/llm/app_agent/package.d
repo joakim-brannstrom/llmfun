@@ -16,7 +16,7 @@ import std.sumtype : match;
 import llm.agent;
 import llm.agent_md;
 import llm.app_agent.slash;
-import llm.app_agent.ui; // UiMessenger, formatStatusText, stream updaters
+import llm.app_agent.ui;
 import llm.app_config : UserConfig, userToLlmConfig, createRag;
 import llm.chat;
 import llm.config;
@@ -172,7 +172,7 @@ struct AgentApp {
 
     private void setStatusText(bool readyState) {
         uiMsg.statusText(formatStatusText(readyState, agent_.modelContextSize,
-                lastServerStat, llmConf.activeModelName()));
+                lastServerStat, llmConf.activeModelDisplayName()));
     }
 
     package void doCompress(bool force) {
@@ -1317,7 +1317,7 @@ version (unittest) {
 
         LlmConfig cfg;
         cfg.codeModels = [
-            CodeModelConfig(server: ServerConfig.init, name: "test-model")
+            CodeModelConfig(server: ServerConfig.init, modelName: "test-model")
         ];
         cfg.activeCodeModelIndex = 0;
         cfg.promptDir = [promptDir.Path];

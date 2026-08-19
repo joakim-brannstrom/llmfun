@@ -359,6 +359,7 @@ codeModels:
       apiKey: ""
       jsonFields: '{"chat_template_kwargs": {"reasoning_budget": 4096, "preserve_thinking": true}}'
     name: local-model
+    display: super-coder
     temp: 0.6
     contextSize: 128000
     maxTokens: -1
@@ -665,6 +666,7 @@ codeModels:
       backoffMs: 500
       apiKey: ""
     name: local-model
+    display: super-coder
     temp: 0.6
     contextSize: 128000
     maxTokens: -1
