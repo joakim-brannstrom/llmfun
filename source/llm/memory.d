@@ -110,18 +110,22 @@ Optional!ProcessResult runConsolidateAgent(LlmConfig llmConf, RAG rag,
         MetricMonitor monitor, void delegate(string, TuiChatMessageType) sendChatMessage) {
     string consolidationPrompt = q{Perform memory consolidation. Follow these steps:
 
+Use the tool currentDateTime and note when you start working.
+You may spend at most 10 minutes on consolidating memories. After your time is up stop.
+
 1. Call `getMemoryTopics` to review all memory topics and their summaries.
 2. Analyze the topics and identify:
    - Topics that could be merged (similar or overlapping content)
    - Topics that are no longer relevant or obsolete
-3. For topics that should be merged:
+3. Choose two groups of topics to process.
+4. For topics that should be merged:
    - Call `readMemory` on each topic to read full content
    - Combine the content into a single coherent memory
    - Call `writeMemory` to save the consolidated topic
    - Call `removeMemory` on the original topics that were merged
-4. For obsolete topics:
+5. For obsolete topics:
    - Call `removeMemory` to delete them
-5. At the very end of your response, output a JSON summary line on a single line:
+6. At the very end of your response, output a JSON summary line on a single line:
    {"consolidation_result": {"merged": ["topic1", "topic2"], "removed": ["topic3"], "new_topics": ["combined_topic"]}}
 
 If there are no topics to consolidate or remove, output:
