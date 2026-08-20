@@ -280,13 +280,19 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
 
         bool isIsolated = getValue(entry, (v) => v["isIsolated"].boolean, false);
 
-        CommandJoinMode commandJoinMode = CommandJoinMode.single;
+        CommandJoinMode commandJoinMode;
         try {
-            commandJoinMode = getValue(entry, (v) => v["commandJoinMode"].str, null)
-                .to!CommandJoinMode;
+            auto s = getValue(entry, (v) => v["commandJoinMode"].str, null);
+            if (s.empty) {
+                logger.tracef("Empty commandJoinMode for environment '%s' - defaulting to '%s'",
+                        tag, commandJoinMode);
+            } else {
+                commandJoinMode = getValue(entry, (v) => v["commandJoinMode"].str, null)
+                    .to!CommandJoinMode;
+            }
         } catch (Exception e) {
-            logger.warningf("Unknown commandJoinMode '%s' for environment '%s' - defaulting to 'whitespace'",
-                    getValue(entry, (v) => v["commandJoinMode"].str, null), tag);
+            logger.warningf("Unknown commandJoinMode '%s' for environment '%s' - defaulting to '%s'",
+                    getValue(entry, (v) => v["commandJoinMode"].str, null), tag, commandJoinMode);
         }
 
         if ("config" !in entry) {
