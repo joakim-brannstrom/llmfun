@@ -35,12 +35,12 @@ private AgentStatus modelHandler(ref AgentApp app, string arg) {
         foreach (i, model; app.llmConf.codeModels) {
             auto activeMarker = (i == cast(size_t) app.llmConf.activeCodeModelIndex) ? " [active]"
                 : "";
-            m ~= format("  %s  %s%s\n", i, model.modelName, activeMarker);
+            m ~= format("  %s  %s%s\n", i, model.display, activeMarker);
         }
         m ~= "Use /model <index> or /model <name> to switch.";
         app.sendChatMessage(m, TuiChatMessageType_Assistant);
     } else {
-        const oldModel = app.llmConf.activeCodeModel.modelName;
+        const oldModel = app.llmConf.activeCodeModel.display;
         bool switched;
         long idx = ifThrown(arg.to!long, -1); // signed: -1 routes to name match
         if (idx >= 0) {
@@ -61,10 +61,8 @@ private AgentStatus modelHandler(ref AgentApp app, string arg) {
         if (switched) {
             app.agent_.resetModel(app.llmConf.activeCodeModel());
             app.agent_.setStreamUpdate(app.makeStreamCallback);
-            app.sendChatMessage("switched to model: %s\nAgent model reset: %s -> %s, context: %s",
-                    TuiChatMessageType_Assistant,
-                    app.llmConf.activeModelName(), oldModel,
-                    app.agent_.modelName, app.agent_.modelContextSize);
+            app.sendChatMessage("switched agent model: %s -> %s context: %s", TuiChatMessageType_Assistant, oldModel,
+                    app.llmConf.activeModelDisplayName(), app.agent_.modelContextSize);
         }
     }
     return AgentStatus.active;
