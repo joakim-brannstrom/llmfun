@@ -662,7 +662,8 @@ struct AgentApp {
     }
 
     package IStreamCallback makeStreamCallback() {
-        return new StreamMessageUpdater(uiMsg, agent_.modelContextSize, llmConf.activeModelDisplayName);
+        return new StreamMessageUpdater(uiMsg, agent_.modelContextSize,
+                llmConf.activeModelDisplayName);
     }
 
     package IStreamCallback makePipelineStreamCallback() {

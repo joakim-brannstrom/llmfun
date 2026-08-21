@@ -1,6 +1,9 @@
 #!/bin/bash -ex
 
 rsync --delete -a .git/ llmfun/workarea/llmfun/.git/
+pushd llmfun/workarea/llmfun/
+git checkout .
+popd
 rsync -va --delete source/ llmfun/workarea/llmfun/source/
 rsync -va --delete cpp_tui/ llmfun/workarea/llmfun/cpp_tui/
 rsync -va --delete common/ llmfun/workarea/llmfun/common/
