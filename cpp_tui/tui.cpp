@@ -1051,6 +1051,21 @@ static void renderTabChatSessionPanel(TuiState& state, Log& log) {
         ImGui::InputText(filterId.c_str(), panel.filterBuf.data(), panel.filterBuf.size(),
                          ImGuiInputTextFlags_EnterReturnsTrue);
 
+    // while the filter input is active, arrow keys must
+    // not move the keyboard nav focus. A single-line InputText declares only
+    // Left/Right in ActiveIdUsingNavDirMask when it activates
+    // (imgui_widgets.cpp:3983-3985), so Up/Down fall through to NavUpdate's
+    // directional checks (imgui.cpp:9085-9088) and move g.NavId onto the next
+    // widget mid-edit. Declare Up/Down as used by this widget while it is
+    // active; NavUpdate then skips the move request because the active id
+    // claims those directions. The mask is only cleared when the active id
+    // changes (SetActiveID) or drops to 0 (NewFrame), so the declaration
+    // persists for the whole interaction.
+    if (ImGui::IsItemActive()) {
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        g.ActiveIdUsingNavDirMask |= (1 << ImGuiDir_Up) | (1 << ImGuiDir_Down);
+    }
+
     // Real-time filter + ranking (A20/A21/A27/A28): compute the visible
     // (filtered + ranked) list each frame from the local snapshot. A
     // whitespace-only filter is "no filter" (A19): all entries in snapshot
