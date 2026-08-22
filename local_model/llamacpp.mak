@@ -11,8 +11,9 @@ build/llama_cpp: build/llama_cpp.stamp
 	cd build/llama_cpp && make -j $(nproc) llama-common
 
 build/llama_cpp_install.stamp: build/llama_cpp
+	mkdir -p build
 	find build/llama_cpp -iname '*.so' -exec cp '{}' build/ \; 
-	cd build && ln -sfT libllama.so libllama.so.0
+	for LIB in $$(ls build/*.so); do ln -sfT "$${LIB##*/}" "$${LIB}.0"; done
 	mkdir -p ../build
 	cp -P build/*.so* ../build/
 	touch build/llama_cpp_install.stamp
