@@ -115,7 +115,7 @@ class RemoteEmbedder : Embedder {
     override int batchSize() {
         import llm.common.config : ApproxTokenSize;
 
-        return cast(int) cfg.nBatch * ApproxTokenSize;
+        return cast(int) cfg.chunkSize * ApproxTokenSize;
     }
 
     override bool supportsTokenization() @safe {

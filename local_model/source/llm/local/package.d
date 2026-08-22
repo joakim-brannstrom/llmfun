@@ -58,7 +58,7 @@ Embedder createLocalEmbedder(EmbedConfig config) {
             return new LlamaEmbedder(local.modelName, new Model(m), destroyModel: true);
         }
 
-        auto params = contextEmbedding(LlamaParams.make(), cast(uint) local.nBatch);
+        auto params = contextEmbedding(LlamaParams.make(), ctxSize: cast(uint) local.chunkSize, nBatch: cast(uint) local.nBatch, uBatch: cast(uint) local.uBatch, threads: cast(int) local.cpuThreads);
         if (local.onlyCpu) {
             params = params.onlyCpu;
         } else {

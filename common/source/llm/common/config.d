@@ -73,18 +73,21 @@ struct ServerConfig {
 /// Configuration for a local embedding backend (llama.cpp).
 struct LocalEmbedConfig {
     string modelName;
-    long nBatch = 512;
+    long chunkSize = 512;
     long dimensions;
     // if the model should run only on CPU
     bool onlyCpu = true;
     Path modelPath;
+    long cpuThreads; // 0: use as many as there are cores
+    long uBatch = 512;
+    long nBatch = 512;
 }
 
 /// Configuration for a remote embedding backend (HTTP API).
 struct RemoteEmbedConfig {
     ServerConfig server;
     string modelName;
-    long nBatch = 512;
+    long chunkSize = 512;
     long dimensions;
 }
 
