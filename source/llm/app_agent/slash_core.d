@@ -20,6 +20,9 @@ package void registerCoreCommands(ref SlashCommandRegistry registry) {
     ignore = registry.register(SlashCommand("stop", [],
             ["   /stop              Stop processing the currently active query"],
             SlashArgMode.none, 30, toDelegate(&stopHandler)));
+    ignore = registry.register(SlashCommand("continue", ["c", "cont"],
+            ["   /continue, /c      Continue processing the last query"],
+            SlashArgMode.none, 30, toDelegate(&continueHandler)));
     ignore = registry.register(SlashCommand("compact", [], [
         "   /compact           Force compress the chat history"
     ], SlashArgMode.none, 40, toDelegate(&compactHandler)));
@@ -59,9 +62,15 @@ private AgentStatus debugHandler(ref AgentApp app, string arg) {
 /// trailing space and one-shot `-p "/stop"`. Neutral wording: no query is in flight on this path, and calling stopAgent() at idle
 /// is harmless (cleared before the next runAgent).
 private AgentStatus stopHandler(ref AgentApp app, string arg) {
-    clearStopAgent();
     stopAgent();
-    app.sendChatMessage("assistant: Stop requested.", TuiChatMessageType_Assistant);
+    app.sendChatMessage("harness: Stop requested", TuiChatMessageType_Assistant);
+    return AgentStatus.active;
+}
+
+/// Instruct the agent to continue working without injecting a user query.
+private AgentStatus continueHandler(ref AgentApp app, string arg) {
+    app.continueAgent();
+    app.sendChatMessage("harness: Continue requested", TuiChatMessageType_Assistant);
     return AgentStatus.active;
 }
 
@@ -99,6 +108,7 @@ unittest {
     assert(help.canFind("   /stop              Stop processing the currently active query"));
     assert(help.canFind("   /compact           Force compress the chat history"));
     assert(help.canFind("   /debug             Toggle verbose debug output"));
+    assert(help.canFind("   /continue, /c      Continue processing the last query"));
 
     // Help ordering is (order asc, registration index asc): 10, 20, 30, 40, 140
     assert(help.indexOf("   /help") < help.indexOf("   /quit"));

@@ -50,18 +50,24 @@ struct AgentApp {
         SessionStore sessionStore;
         SessionMeta activeSession;
         SessionId pendingDeleteId; // session id awaiting /delete confirmation
+
         // True while the in-memory chat differs from the last persisted
         // state. commitActiveSession() only writes (and bumps updatedAt)
         // when this is set, so mere navigation - switching or re-clicking a
         // row - never rewrites a file and never changes the sidebar sort
         // order. Sorting is by the latest message in a session.
         bool chatDirty;
+
         ServerStat lastServerStat;
         bool debugMode;
         UserConfig.AgentChatConfig conf_;
         UiMessenger uiMsg;
         SkillManager skillManager_;
         SlashCommandRegistry slashCommands_;
+
+        // The agent loop is commanded to continue.
+        // Cleared after it has successfully started working.
+        bool forceRunAgentLoop;
     }
 
     private {
@@ -636,8 +642,8 @@ struct AgentApp {
         if (!query.startsWith("/delete"))
             pendingDeleteId = SessionId.init;
 
-        if (query.empty)
-            return AgentStatus.active;
+        bool runAgentLoop;
+        AgentStatus rval;
 
         if (slashCommands_.isSlashCommand(query)) {
             // /delete-prefixed non-commands like `/deletefoo` skip the top
@@ -647,18 +653,31 @@ struct AgentApp {
             // re-prompting.
             if (query.startsWith("/delete") && !slashCommands_.isRegistered(query))
                 pendingDeleteId = SessionId.init;
-            return slashCommands_.execute(this, query);
+            rval = slashCommands_.execute(this, query);
+            query = null; // consume the query so it isn't added to the chat
+            runAgentLoop = forceRunAgentLoop;
+            logger.trace(forceRunAgentLoop, "agent loop forced to start");
+            forceRunAgentLoop = false;
         }
 
-        agent_.addUserQuery(query);
-        // The chat now carries a message that is not persisted yet.
-        chatDirty = true;
-        this.doCompress(false);
-        auto result = agent_.runToCompletion(&this.processResult,
-                compressCallback: &this.progressCallback, interrupt: () {
-            return isStopAgentTriggered;
-        });
-        return AgentStatus.active;
+        if (!query.empty) {
+            agent_.addUserQuery(query);
+            // The chat now carries a message that is not persisted yet.
+            chatDirty = true;
+
+            runAgentLoop = true;
+        }
+
+        if (runAgentLoop) {
+            this.doCompress(false);
+            // the result has already been processed by this.processResult
+            auto ignored = agent_.runToCompletion(&this.processResult,
+                    compressCallback: &this.progressCallback, interrupt: () {
+                return isStopAgentTriggered;
+            });
+        }
+
+        return rval;
     }
 
     package IStreamCallback makeStreamCallback() {
@@ -748,6 +767,10 @@ struct AgentApp {
         llmConf.saveState();
 
         lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
+    }
+
+    package void continueAgent() {
+        forceRunAgentLoop = true;
     }
 
     private int run(UserConfig uconf) {
