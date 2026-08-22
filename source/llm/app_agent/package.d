@@ -419,9 +419,8 @@ struct AgentApp {
      */
     package void doRenameSession(string title) {
         auto stripped = title.strip;
-        if (stripped.length == 0) {
-            // runAgent already rejects empty args; this guards direct callers
-            // (e.g. Phase 2 sidebar reuse, D5).
+        if (stripped.empty) {
+            // runAgent already rejects empty args; this guards direct callers.
             this.sendChatMessage("error: Rename rejected — empty title, keeping previous title '%s'.",
                     TuiChatMessageType_Assistant, activeSession.title);
             return;
@@ -635,6 +634,7 @@ struct AgentApp {
         }
     }
 
+    // TODO: make the method nothrow to ensure it never accidentally exited
     private AgentStatus runAgent(string query) {
         // Any input other than /delete clears the pending delete confirmation.
         // It applies to bare queries and unknown commands too, so it lives here,
@@ -861,9 +861,9 @@ struct AgentApp {
                         break;
                     }
                     uiMsg.ready();
-                    // R8/M2: every completed query can change counts/preview
-                    // and the updatedAt sort order (commitActiveSession on
-                    // save), so refresh the sidebar snapshot.
+                    // every completed query can change counts/preview and the
+                    // updatedAt sort order (commitActiveSession on save), so
+                    // refresh the sidebar snapshot.
                     sendSessionList();
                 }
             }, (UiSessionSelect a) { this.doSidebarSelect(a.id); }, (UiSessionNew _) {
