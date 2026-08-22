@@ -222,6 +222,7 @@ Output only the taskDone tool call. No other text.)";
 
     ProcessResult process(bool delegate() interrupt) @trusted nothrow {
         import std.functional : toDelegate;
+        import llm.query : HttpResult, HttpError;
 
         ProcessResult rval;
 
@@ -252,7 +253,15 @@ Output only the taskDone tool call. No other text.)";
 
             auto res = rq.request(chat);
 
-            if (sp.hasError) {
+            bool hasHttpError;
+            res.match!((HttpResult _) {}, (HttpError e) {
+                logger.trace(e);
+                hasHttpError = true;
+            });
+
+            if (hasHttpError) {
+                rval.status = ProcessResult.Status.unknownFailure;
+            } else if (sp.hasError) {
                 if (sp.error.codeNr == 400 && sp.error.type == "exceed_context_size_error") {
                     // llama.cpp
                     logger.trace("Context overflow detected: ", sp.error);
@@ -276,17 +285,17 @@ Output only the taskDone tool call. No other text.)";
                 }
             } else {
                 rval.stat = useOrApproxStatistic(sp.stat);
-                rval.status = parseResponse(sp);
+                rval.status = parseResponse(sp); // adds messages to chat
+                rval.chat = chat.lastResponses;
+                chat.resetResponseIndex;
+
+                if (!rval.chat.empty) {
+                    rval.hasToolCall = rval.chat[$ - 1].match!((ToolMessage _) => true,
+                            (ToolResponse _) => true, (_) => false);
+                }
             }
 
             prevStat = useOrApproxStatistic(sp.stat).newTurn;
-            rval.chat = chat.lastResponses;
-            chat.resetResponseIndex;
-
-            if (!rval.chat.empty) {
-                rval.hasToolCall = rval.chat[$ - 1].match!((ToolMessage _) => true,
-                        (ToolResponse _) => true, (_) => false);
-            }
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
             rval.status = ProcessResult.Status.unknownFailure;

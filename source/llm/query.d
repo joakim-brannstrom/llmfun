@@ -275,7 +275,7 @@ SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(string url,
             auto sbl = StreamByLine(cfg.stream, cfg.interrupt);
             http.onReceive = (ubyte[] data) {
                 if (sbl.checkInterrupt()) {
-                    logger.trace("user interrupted stream");
+                    logger.trace("interrupted stream");
                     return 0;
                 }
                 sbl.feed(data);
@@ -283,10 +283,10 @@ SumType!(HttpResult, HttpError) httpWithRetry(string HttpReqType)(string url,
             };
 
             auto curlCode = http.perform(ThrowOnError.no);
-            // On user interrupt, stop immediately: no partial-line flush and
-            // no retry. Otherwise flush any trailing partial line first.
+            // On interrupt, stop immediately: no partial-line flush and no
+            // retry. Otherwise flush any trailing partial line first.
             if (sbl.checkInterrupt())
-                return ReturnT(HttpError(0, "", "user interrupted stream"));
+                return ReturnT(HttpError(-1, "", "interrupted stream"));
             sbl.flush();
             if (curlCode != CurlError.ok) {
                 // Full messages would require linking libcurl directly
