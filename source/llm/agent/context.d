@@ -25,7 +25,7 @@ import llm.skill : SkillManager;
 import llm.tool_call : Context;
 import llm.tool_call.completion : CompletionContext;
 import llm.tool_call.io : FileContext;
-import llm.tool_call.memory : MemoryContext;
+import llm.tool_call.memory : MemoryContext, MemoryTopic;
 import llm.tool_call.metrics : MetricsContext;
 import llm.tool_call.pipeline : PipelineControlContext;
 import llm.tool_call.rag : RAGContext;
@@ -179,9 +179,11 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext, Completion
             return conf.ragConfig;
         }
 
-        override string[] getMemoryFileTopics() {
+        override MemoryTopic[] getMemoryFileTopics() {
+            import std.file : timeLastModified;
+
             try {
-                return memoryVfs.getAllFiles.map!(a => a.baseName.stripExtension).array;
+                return memoryVfs.getAllFiles.map!(a => MemoryTopic(name: a.baseName.stripExtension, lastModified: timeLastModified(a))).array;
             } catch (Exception e) {
                 logger.warning("unable to read memory directories: ", e.msg);
             }

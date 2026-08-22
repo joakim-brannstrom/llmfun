@@ -1,10 +1,12 @@
 module llm.tool_call.memory;
 
 import logger = std.logger;
-import std.algorithm : map, filter, startsWith, count;
+import std.algorithm : map, filter, startsWith, count, sort;
 import std.array : empty, appender, array;
 import std.conv : text;
+import std.datetime : SysTime;
 import std.json : JSONValue;
+import std.range : take;
 import std.regex : Regex, regex;
 import std.string : join, splitLines, indexOf, lastIndexOf, strip, split;
 import std.sumtype : match;
@@ -19,8 +21,13 @@ import llm.config : ToolLimits;
 
 mixin RegisterLlmFunctions!();
 
+struct MemoryTopic {
+    string name;
+    SysTime lastModified;
+}
+
 interface MemoryContext : Context {
-    string[] getMemoryFileTopics();
+    MemoryTopic[] getMemoryFileTopics();
 
     bool saveMemoryFile(string topic, string content);
     Optional!string readMemory(string topic);
@@ -40,29 +47,29 @@ private string checkTopic(MemoryContext ctx, string topic) {
     return null;
 }
 
-private string getMemorySummary(MemoryContext ctx, string topic) {
-    if (auto e = checkTopic(ctx, topic))
+private string getMemorySummary(MemoryContext ctx, string topicName) {
+    if (auto e = checkTopic(ctx, topicName))
         return e;
 
     try {
-        auto maxSummaryLen = ctx.getToolLimits().maxSummaryLength;
-        auto content = ctx.readMemory(topic).match!((string a) => a, (_) => "");
-        foreach (line; content.splitLines) {
-            auto trimmed = line.strip;
-            if (!trimmed.empty) {
-                if (trimmed.length > maxSummaryLen) {
-                    auto cutoff = trimmed[0 .. maxSummaryLen];
-                    auto spacePos = cutoff.lastIndexOf(" ");
-                    if (spacePos > maxSummaryLen / 2 && spacePos != size_t.max) {
-                        return trimmed[0 .. spacePos].strip ~ "...";
-                    }
-                    // Fallback: hard-truncate at maxSummaryLen
-                    return trimmed[0 .. maxSummaryLen] ~ "...";
+        const maxSummaryLen = ctx.getToolLimits().maxSummaryLength;
+        auto content = ctx.readMemory(topicName).match!((string a) => a, (_) => "");
+
+        string summary = "error: no summary available";
+        foreach (trimmed; content.splitLines.map!(a => a.strip).filter!(a => !a.empty).take(1)) {
+            if (trimmed.length > maxSummaryLen) {
+                auto cutoff = trimmed[0 .. maxSummaryLen];
+                auto spacePos = cutoff.lastIndexOf(" ");
+                if (spacePos > maxSummaryLen / 2 && spacePos != size_t.max) {
+                    return trimmed[0 .. spacePos].strip ~ "...";
                 }
-                return trimmed;
+                // Fallback: hard-truncate at maxSummaryLen
+                summary = trimmed[0 .. maxSummaryLen] ~ "...";
+            } else {
+                summary = trimmed;
             }
         }
-        return "error: no summary available";
+        return summary;
     } catch (Exception e) {
         return "error: reading memory";
     }
@@ -166,9 +173,9 @@ ExecuteFuncResult getMemoryTopics(Context baseCtx, GetMemoryTopicsParams params)
 
     auto buf = appender!string();
     buf.put("Available memory topics:\n");
-    foreach (topic; topics) {
-        auto summary = getMemorySummary(ctx, topic);
-        buf.put(i"\n# Memory: $(topic)\nSummary: $(summary)\n".text);
+    foreach (topic; topics.sort!((a,b) => a.lastModified > b.lastModified)) {
+        auto summary = getMemorySummary(ctx, topic.name);
+        buf.put(i"\n# Memory: $(topic.name)\nSummary: $(summary)\nLast modified: $(topic.lastModified.toISOExtString(0))\n\n".text);
     }
     return ExecuteFuncResult(buf.data, success: true);
 }
