@@ -22,6 +22,10 @@ find_package(Threads REQUIRED)
 # Enables D code (and other languages) to link against the library independently
 add_library(llmfun_tui_lib STATIC
     tui.cpp
+    tui_common.cpp
+    tui_widgets.cpp
+    session_panel.cpp
+    tui_chat.cpp
     tui_api.cpp
 )
 

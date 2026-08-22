@@ -1,3 +1,5 @@
+/// TUI core: the TuiState aggregate and the public tui* API.
+/// Holds the shared UI state structs and the entry points the C API drives.
 #pragma once
 
 #include <algorithm>
@@ -6,7 +8,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
