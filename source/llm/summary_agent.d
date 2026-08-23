@@ -284,6 +284,9 @@ struct SummaryAgent {
         size_t successfulChunks;
         size_t failedChunks;
 
+        // TODO: a bug is hidden here. The agent will deadlock if there are too
+        // few messages in the history but one or a few of those are so big the
+        // context is full.
         // Quirk to document, not fix (A6/H4): when the purge empties the chat
         // below the compression floor, compress returns WITHOUT setHistory —
         // the purge was applied only to the local copy, so nothing was
@@ -399,9 +402,9 @@ struct SummaryAgent {
             CompressionCheckpoint checkpoint;
             checkpoint.timestamp = Clock.currTime;
             checkpoint.sessionId = checkpointSessionId;
-            checkpoint.evictedSummarized = remaining.dup;
-            checkpoint.evictedPurged = evictedPurged.dup;
-            checkpoint.evictedInPlace = evictedInPlace.dup;
+            checkpoint.evictedSummarized = remaining;
+            checkpoint.evictedPurged = evictedPurged;
+            checkpoint.evictedInPlace = evictedInPlace;
             // One concatenation per compression (the event path is cold).
             // turnRangeOf counts unstamped (turnId == 0) entries, so a slice
             // containing any of them reports turnStart == 0 — Phase 1
@@ -436,6 +439,7 @@ struct SummaryAgent {
         return cast(long) text.length / ApproxTokenSize;
     }
 
+    // TODO: it should, for tool messages and response, summarize and convert to a Message.
     // Apply summarizeToolCalls to tool messages to reduce size
     Chat.MessageT summarizeToolCallsIfNeeded(Chat.MessageT msg) {
         auto r = msg.match!((Message m) => Chat.MessageT(m),
