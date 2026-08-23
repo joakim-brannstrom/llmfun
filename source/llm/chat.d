@@ -218,25 +218,7 @@ struct Chat {
     }
 
     long approxContextSize() @safe nothrow {
-        long ctx;
-        try {
-            foreach (msg; history) {
-                // dfmt off
-                ctx += msg.match!(
-                (Message a) {
-                    return (a.content.length + a.thinking.length) / ApproxTokenSize;
-                }, (ToolMessage a) {
-                    return (a.toolCalls.toString(JSONOptions.doNotEscapeSlashes).length + a.thinking.length) / ApproxTokenSize;
-                }, (ToolResponse a) {
-                    return a.content.length / ApproxTokenSize;
-                }, (VisionMessage a) {
-                    return (a.content.length + a.imageDataUrl.length) / ApproxTokenSize;
-                });
-                // dfmt on
-            }
-        } catch (Exception e) {
-        }
-        return ctx;
+        return history.map!(a => approxMessageSize(a)).sum;
     }
 
     // Raw history replacement - compression's only path to rewrite history.
@@ -294,7 +276,7 @@ struct Chat {
             logger.trace(e.msg).collectException;
         }
     }
-    
+
     /// Replaces invalid UTF-8 sequences in all messages with U+FFFD (Unicode
     /// replacement character). Never discards a message; valid content is left
     /// untouched (no copy).
@@ -448,6 +430,26 @@ struct Chat {
         }
         put(w, ")");
     }
+}
+
+/// Returns: the approximate tokens a message consist of including the thinking part.
+long approxMessageSize(T)(T msg) @safe nothrow {
+    try {
+        // dfmt off
+        return msg.match!(
+        (Message a) {
+            return (a.content.length + a.thinking.length) / ApproxTokenSize;
+        }, (ToolMessage a) {
+            return (a.toolCalls.toString(JSONOptions.doNotEscapeSlashes).length + a.thinking.length) / ApproxTokenSize;
+        }, (ToolResponse a) {
+            return a.content.length / ApproxTokenSize;
+        }, (VisionMessage a) {
+            return (a.content.length + a.imageDataUrl.length) / ApproxTokenSize;
+        });
+        // dfmt on
+    } catch (Exception e) {
+    }
+    return 0;
 }
 
 // Typed TurnID on every message type: 0 = unstamped (system prompt, temporary
