@@ -626,6 +626,7 @@ struct StreamResponse {
     import std.range : isOutputRange;
     import std.datetime : Clock;
     import llm.types : ServerStat, StreamMessage, StreamToolCall;
+    import llm.utility : RollingAvg;
 
     struct ToolCall {
         string id;
@@ -694,10 +695,14 @@ struct StreamResponse {
 
     private {
         SysTime start;
+        RollingAvg ravg;
+        long accumulatedChars;
     }
 
     this(ServerStat prevStat) {
         stat = prevStat;
+        ravg = RollingAvg(window: 10.dur!"seconds");
+        ravg.put(stat.tokenCount);
     }
 
     string toString() @safe const {
@@ -780,8 +785,12 @@ struct StreamResponse {
         }
     }
 
-    void incrToken() @safe nothrow {
-        stat.tokenCount++;
+    void incrToken(long textLen) @safe nothrow {
+        import llm.common.config : ApproxTokenSize;
+
+        double ratio = stat.charTokenRatio < 1.0 ? ApproxTokenSize : stat.charTokenRatio;
+        stat.tokenCount += cast(long)(textLen / ratio) + 1;
+        accumulatedChars += textLen;
     }
 
     void parseStat(ref JSONValue json) @safe nothrow {
@@ -792,8 +801,16 @@ struct StreamResponse {
                         (v) => v["predicted_per_second"].floating, stat.predictedPerSecond);
                 stat.promptPerSecond = getValue(*timings,
                         (v) => v["prompt_per_second"].floating, stat.promptPerSecond);
+                auto oldCtx = stat.startContext;
                 stat.startContext = getValue(*timings, (v) => v["cache_n"].integer, stat.context);
                 stat.tokenCount = 0;
+
+                auto completedTokens = getValue(*timings,
+                        (v) => v["predicted_n"].integer, stat.startContext - oldCtx);
+
+                if (completedTokens > 0)
+                    stat.charTokenRatio = cast(double) accumulatedChars / (
+                            cast(double) completedTokens);
             } else if (auto usage = "usage" in json) {
                 // deepseek and maybe others
                 stat.startContext = getValue(*usage, (v) => v["total_tokens"].integer, stat.context);
@@ -806,11 +823,12 @@ struct StreamResponse {
                 const pTokens = getValue(*usage, (v) => v["prompt_tokens"].integer, 0);
                 if (s > 0 && pTokens > 0)
                     stat.promptPerSecond = cast(double) pTokens / cast(double)(s);
-            } else {
-                const s = (Clock.currTime - start).total!"seconds";
-                if (s > 0 && stat.tokenCount > 0) {
-                    stat.predictedPerSecond = cast(double) stat.tokenCount / cast(double)(s);
-                }
+
+                if (cTokens > 0)
+                    stat.charTokenRatio = cast(double) accumulatedChars / (cast(double) cTokens);
+            } else if (stat.tokenCount > 0) {
+                ravg.put(stat.tokenCount);
+                stat.predictedPerSecond = ravg.avg();
             }
         } catch (Exception e) {
             try {
@@ -826,13 +844,18 @@ struct StreamResponse {
         foreach (jcall; getValue(jtoolCalls, (v) => v.array, null)) {
             try {
                 long index = jcall["index"].integer;
+                long txtLen;
                 if (auto a = index in toolCalls) {
-                    (*a).arguments ~= jcall["function"]["arguments"].str;
-                    incrToken;
+                    auto arg = jcall["function"]["arguments"].str;
+                    (*a).arguments ~= arg;
+                    txtLen = arg.length;
                 } else {
-                    toolCalls[index] = ToolCall(id: jcall["id"].str, name: jcall["function"]["name"].str,
-                            arguments: jcall["function"]["arguments"].str);
+                    auto name = jcall["function"]["name"].str;
+                    auto arg = jcall["function"]["arguments"].str;
+                    toolCalls[index] = ToolCall(id: jcall["id"].str, name: name, arguments: arg);
+                    txtLen = arg.length + name.length;
                 }
+                incrToken(txtLen);
             } catch (Exception e) {
                 logger.tracef("invalid tool call structure '%s': %s", jcall, e.msg);
             }
@@ -847,8 +870,9 @@ struct StreamResponse {
             }
             if (auto content = "content" in delta) {
                 if (content.type == JSONType.string) {
-                    message.content ~= content.str;
-                    incrToken;
+                    auto s = content.str;
+                    message.content ~= s;
+                    incrToken(s.length);
                 }
             }
         } catch (Exception e) {
@@ -861,8 +885,9 @@ struct StreamResponse {
         try {
             if (json.type != JSONType.null_) {
                 // if it isn't null then it must be a string or something is wrong
-                message.reasoning ~= json.str;
-                incrToken;
+                auto s = json.str;
+                message.reasoning ~= s;
+                incrToken(s.length);
             }
         } catch (Exception e) {
             logger.tracef("invalid reasoning structure '%s': %s", json, e.msg);

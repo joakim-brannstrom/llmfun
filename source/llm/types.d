@@ -87,10 +87,12 @@ struct ServerStat {
     long tokenCount;
     double predictedPerSecond = 0;
     double promptPerSecond = 0;
+    // How many characters there are per token.
+    double charTokenRatio = 0.0;
 
     ServerStat newTurn() @safe pure nothrow const @nogc {
         return ServerStat(startContext: context, tokenCount: 0, predictedPerSecond: predictedPerSecond,
-                promptPerSecond: promptPerSecond);
+                promptPerSecond: promptPerSecond, charTokenRatio: charTokenRatio);
     }
 
     long context() @safe pure nothrow const @nogc {
@@ -100,8 +102,8 @@ struct ServerStat {
     string toString() @safe const {
         import std.format : format;
 
-        return format("ServerStat(contextUsed:%s predictedPerSecond:%s promptPerSecond:%s",
-                context, predictedPerSecond, promptPerSecond);
+        return format("ServerStat(contextUsed:%s predictedPerSecond:%s promptPerSecond:%s charTokenRatio: %.2f)",
+                context, predictedPerSecond, promptPerSecond, charTokenRatio);
     }
 }
 

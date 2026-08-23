@@ -417,3 +417,100 @@ bool isPathInsideWorkarea(AbsolutePath path, AbsolutePath workArea) @safe pure n
         return true;
     return path[workArea.length] == '/';
 }
+
+struct RollingAvg {
+    import std.datetime : Duration, dur, SysTime, Clock;
+
+    static struct DataPoint {
+        SysTime t;
+        double v = 0.0;
+    }
+
+    private {
+        static immutable size_t MinMeasures = 3;
+        static immutable size_t MaxMeasures = 100;
+
+        Duration window;
+        Duration minStep;
+        DataPoint[] measures;
+    }
+
+    this(Duration window) @safe pure nothrow {
+        this.window = window;
+        this.minStep = window / MaxMeasures;
+    }
+
+    void put(double v, SysTime now = Clock.currTime) @safe nothrow {
+        if (measures.empty) {
+            measures ~= DataPoint(now, v);
+        } else if ((now - measures[$ - 1].t) >= minStep) {
+            measures ~= DataPoint(now, v);
+        }
+
+        if (measures.length > MaxMeasures) {
+            measures = measures[1 .. $];
+        }
+
+        purgeOld(now);
+    }
+
+    double avg() @safe pure nothrow const @nogc {
+        if (measures.length < MinMeasures)
+            return 0;
+        auto m0 = measures[0];
+        auto m1 = measures[$ - 1];
+        auto t = cast(double)((m1.t - m0.t).total!"msecs") / 1000.0;
+        if (t < 0.001)
+            return 0;
+        return (m1.v - m0.v) / t;
+    }
+
+    private void purgeOld(const SysTime now) @safe nothrow {
+        if (measures.length <= MinMeasures)
+            return;
+
+        auto tmp = measures.filter!(a => (now - a.t) < window).array;
+        if (tmp.length > MinMeasures) {
+            measures = tmp;
+        }
+    }
+}
+
+@("test rolling avg")
+unittest {
+    import std.conv : to;
+    import std.datetime;
+    import std.math : abs;
+
+    auto ravg = RollingAvg(10.dur!"seconds");
+    assert(ravg.avg == 0.0);
+
+    const t = SysTime(DateTime.init, Duration.zero, UTC());
+
+    // cannot calculate avg on one value
+    ravg.put(1.0, t);
+    assert(ravg.avg == 0.0);
+
+    // data points that are too close in time are not added
+    ravg.put(1.0, t + 1.dur!"msecs");
+    assert(ravg.avg == 0.0);
+    assert(ravg.measures.length == 1);
+
+    // avg is calculated first when there are a minimum amount
+    ravg.put(2.0, t + 1.dur!"seconds");
+    assert(ravg.avg == 0.0);
+    assert(ravg.measures.length == 2);
+    ravg.put(3.0, t + 2.dur!"seconds");
+    assert(abs(ravg.avg - 1.0) < 0.00001, ravg.avg.to!string);
+    assert(ravg.measures.length == 3);
+    ravg.put(4.0, t + 3.dur!"seconds");
+    assert(abs(ravg.avg - 1.0) < 0.00001, ravg.avg.to!string);
+    assert(ravg.measures.length == 4);
+
+    // old are purged
+    foreach (i; 1 .. 11) {
+        ravg.put(cast(double) i * 2, t + (3 + i).dur!"seconds");
+    }
+    assert(abs(ravg.avg - 2.0) < 0.00001, ravg.avg.to!string);
+    assert(ravg.measures.length == 10);
+}
