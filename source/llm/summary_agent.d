@@ -8,6 +8,7 @@ import std.algorithm : map, filter, canFind, startsWith, endsWith, sort, min,
 import std.array : array, appender, empty;
 import std.conv : to, text;
 import std.datetime : Clock, SysTime;
+import std.exception : collectException;
 import std.file : readText;
 import std.format : format, formattedWrite;
 import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
@@ -78,7 +79,7 @@ struct SummaryAgent {
     // multicast (G2): Phase 1 and Phase 2 subscribe independently without
     // one overwriting the other. Listeners must not block — the compressing
     // thread is the UI thread in the common case; a throwing listener is
-    // caught and trace-logged, it never breaks compression. The listener
+    // caught and warning-logged, it never breaks compression. The listener
     // list is unsynchronized: registration must complete before compress
     // runs (Phase 0 does not guard concurrent registration, M-2).
     void addCheckpointListener(CheckpointListener listener) {
@@ -142,6 +143,7 @@ struct SummaryAgent {
         long newContextSize;
     }
 
+    // Non-nothrow on purpose: a listener may throw; fireCheckpoint catches it (G2).
     alias CheckpointListener = void delegate(const CompressionCheckpoint);
 
     // purgeTools result: the kept history, the pre-removal copies of the
@@ -209,7 +211,7 @@ struct SummaryAgent {
 
     // Fires one checkpoint to every registered listener (A6, G2). With no
     // listeners, falls back to a structured trace dump — the Phase-0
-    // observability baseline. A throwing listener is caught and trace-logged:
+    // observability baseline. A throwing listener is caught and warning-logged:
     // an indexing failure must never break compression.
     private void fireCheckpoint(const CompressionCheckpoint checkpoint) {
         if (checkpointListeners.empty) {
@@ -224,11 +226,10 @@ struct SummaryAgent {
         foreach (listener; checkpointListeners) {
             try {
                 listener(checkpoint);
-            } catch (Throwable t) {
-                // Throwable, not Exception: a listener throwing an Error
-                // (e.g. a failed assert) must not break compression either —
-                // the checkpoint is best-effort observability (M-1).
-                logger.tracef("Compression checkpoint listener threw: %s", t.msg);
+            } catch (Throwable e) {
+                // G2: a throwing listener must not break compression or stop the
+                // remaining listeners; log it and move on.
+                logger.warningf("Checkpoint listener threw (ignored): %s", collectException(e));
             }
         }
     }
@@ -1296,39 +1297,6 @@ unittest {
     assert(chat.getMessages.length == 5); // untouched by the local purge
 }
 
-// G2/A6: the seam is multicast — two registered listeners BOTH receive the
-// event — and a throwing listener is swallowed and trace-logged, so
-// compression completes normally (an indexing failure must never break
-// compression).
-unittest {
-    import std.array : replicate;
-
-    immutable OversizedReply = "x".replicate(9000);
-    Chat chat;
-    chat.setSystemPrompt("sys");
-    foreach (turn; 1 .. 9) {
-        chat.addUserQuery("q" ~ turn.to!string);
-        const reply = (turn == 5) ? OversizedReply : "ok";
-        chat.add(Message(Role.assistant, userQuery: false, content: reply, thinking: null));
-    }
-
-    int firstEvents = 0;
-    int throwingEvents = 0;
-    auto agent = makeTestSummaryAgent();
-    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
-        firstEvents++;
-    });
-    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
-        throwingEvents++;
-        throw new Exception("listener boom");
-    });
-    auto result = agent.compress(chat);
-
-    assert(result.compressed);
-    assert(firstEvents == 1);
-    assert(throwingEvents == 1); // reached the listener before throwing
-}
-
 // A6 default path: with no listener registered the checkpoint falls back to
 // a structured trace dump and compression completes normally.
 unittest {
@@ -1522,7 +1490,7 @@ private struct SpikeCheckpointRecord {
     size_t newLength;
     long newContextSize;
 
-    static SpikeCheckpointRecord of(const SummaryAgent.CompressionCheckpoint cp) {
+    static SpikeCheckpointRecord of(const SummaryAgent.CompressionCheckpoint cp) nothrow {
         return SpikeCheckpointRecord(cp.timestamp, cp.sessionId, cp.turnStart,
                 cp.turnEnd, cp.evictedSummarized.dup, cp.evictedPurged.dup,
                 cp.evictedInPlace.dup, cp.summaryText, cp.originalLength,
@@ -1535,26 +1503,16 @@ private struct SpikeCheckpointRecord {
 // strictly advancing and contiguous (nothing evicted twice, nothing skipped),
 // the session id on every event, evicted arrays matching the discarded turns,
 // timestamps non-decreasing, and each payload internally in canonical order.
-// A throwing sibling listener is registered first: the seam swallows it and
-// the mock consumer still receives everything (the throwing-listener path
-// must never break an indexing consumer). The consumer's dump (counts,
-// summary text, session ids) mirrors the first step a Phase-1 indexer takes.
+// The consumer's dump (counts, summary text, session ids) mirrors the first
+// step a Phase-1 indexer takes.
 unittest {
     import std.array : replicate;
 
     auto agent = makeTestSummaryAgent();
     agent.setCheckpointSessionId("sess-spike");
 
-    // Throwing sibling registered BEFORE the mock consumer: the seam must
-    // catch it and still deliver to the consumer.
-    int throwingEvents = 0;
-    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
-        throwingEvents++;
-        throw new Exception("indexing listener boom");
-    });
-
     SpikeCheckpointRecord[] records;
-    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
+    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) nothrow{
         records ~= SpikeCheckpointRecord.of(cp);
     });
 
@@ -1577,7 +1535,6 @@ unittest {
     assert(first.compressed);
     assert(first.newLength == 1 + agent.KeepLast);
     assert(records.length == 1);
-    assert(throwingEvents == 1);
     assert(records[0].sessionId == "sess-spike");
     assert(records[0].turnStart == 1);
     assert(records[0].turnEnd == 5);
@@ -1605,7 +1562,6 @@ unittest {
     auto second = agent.compress(chat);
     assert(second.compressed);
     assert(records.length == 2);
-    assert(throwingEvents == 2);
     assert(records[1].sessionId == "sess-spike");
     assert(records[1].turnStart == 6);
     assert(records[1].turnEnd == 10);
@@ -1684,7 +1640,7 @@ unittest {
     auto agent = makeTestSummaryAgent();
 
     SpikeCheckpointRecord[] seen;
-    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
+    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) nothrow{
         seen ~= SpikeCheckpointRecord.of(cp);
     });
 
@@ -1724,4 +1680,43 @@ unittest {
     seen[0].evictedInPlace[0].match!((Message m) { assert(m.content == "a2"); }, (_) {
         assert(false, "expected a2");
     });
+}
+
+// G2: a throwing checkpoint listener must not break compression nor abort the
+// remaining listeners. The delegate type is non-nothrow precisely so a real
+// throw can be exercised here; fireCheckpoint catches each listener (item 1).
+// The throwing listener is registered first so it fires before the recorder.
+unittest {
+    import std.array : replicate;
+
+    immutable OversizedReply = "x".replicate(9000); // 9000 chars / 2 = 4500 tokens
+    Chat chat;
+    chat.setSystemPrompt("sys");
+    foreach (turn; 1 .. 9) {
+        chat.addUserQuery("q" ~ turn.to!string);
+        if (turn < 8) {
+            const reply = (turn == 5) ? OversizedReply : "ok";
+            chat.add(Message(Role.assistant, userQuery: false, content: reply, thinking: null));
+        }
+    }
+    assert(chat.getMessages.length == 16);
+
+    int threw = 0;
+    int recorderRuns = 0;
+    auto agent = makeTestSummaryAgent();
+    agent.setCheckpointSessionId("sess-n3");
+    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
+        threw++;
+        throw new Exception("checkpoint listener boom");
+    });
+    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
+        recorderRuns++;
+    });
+
+    // Compression must succeed despite the throwing listener.
+    auto result = agent.compress(chat);
+    assert(result.compressed, "a throwing listener must not break compression");
+    assert(result.newLength == 6);
+    assert(threw == 1, "the throwing listener must have been invoked");
+    assert(recorderRuns == 1, "the recording listener must still run after a throwing one");
 }

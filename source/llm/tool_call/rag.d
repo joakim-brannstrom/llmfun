@@ -19,6 +19,7 @@ import std.process : execute;
 
 import my.path : Path, AbsolutePath;
 import miniorm : spinSql;
+import llm.test_util : retrySql;
 
 import llm.tool_call;
 import llm.rag.rag;
@@ -254,7 +255,7 @@ ExecuteFuncResult loadFileToRAG(Context baseCtx, LoadFileToRAGParams params) {
         auto normalizedPath = buildNormalizedPath(relPath);
         auto result = ctx.getRAG().add(Document(Origin(Path(normalizedPath)),
                 data, Offset.init), ctx.getRagConfig());
-        spinSql!(() => ctx.getRAG.fts5Rebuild);
+        retrySql!(() => ctx.getRAG.fts5Rebuild);
         return ExecuteFuncResult(i"File '$(params.path)' ($(result.length) length) added as $(
                 result.chunks) chunks to the RAG".text, success: true);
     } catch (Exception e) {
@@ -297,7 +298,7 @@ ExecuteFuncResult loadContentToRAG(Context baseCtx, LoadContentToRAGParams param
     try {
         auto result = ctx.getRAG().add(Document(Origin(Topic(params.topic)),
                 params.content, Offset.init), ctx.getRagConfig());
-        spinSql!(() => ctx.getRAG.fts5Rebuild);
+        retrySql!(() => ctx.getRAG.fts5Rebuild);
         return ExecuteFuncResult(i"Content ($(result.length) length) added to '$(params.topic)' as $(
                 result.chunks) chunks to the RAG".text, success: true);
     } catch (Exception e) {
@@ -328,8 +329,8 @@ ExecuteFuncResult removeTopicFromRAG(Context baseCtx, RemoveTopicFromRAGParams p
     }
 
     try {
-        const chunks = spinSql!(() => ctx.getRAG().removeSource(Origin(Topic(params.topic))));
-        spinSql!(() => ctx.getRAG.fts5Rebuild);
+        const chunks = retrySql!(() => ctx.getRAG().removeSource(Origin(Topic(params.topic))));
+        retrySql!(() => ctx.getRAG.fts5Rebuild);
         return ExecuteFuncResult(i"removed topic '$(params.topic)' with $(chunks) chunks from RAG".text,
                 success: true);
     } catch (Exception e) {

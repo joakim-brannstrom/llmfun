@@ -21,6 +21,7 @@ import llm.environment.dispatch : EnvironmentContext;
 import llm.metric.calculator : MetricsCalculator;
 import llm.metric.monitor : MetricMonitor, ToolCallEvent;
 import llm.rag.rag : RAG;
+import llm.rag.dialogue_index : DialogueIndex, DialogueContext;
 import llm.skill : SkillManager;
 import llm.tool_call : Context;
 import llm.tool_call.completion : CompletionContext;
@@ -30,6 +31,7 @@ import llm.tool_call.memory : MemoryContext, MemoryTopic;
 import llm.tool_call.metrics : MetricsContext;
 import llm.tool_call.pipeline : PipelineControlContext;
 import llm.tool_call.rag : RAGContext;
+import llm.tool_call.dialogue;
 import llm.tool_call.skill : SkillContext;
 import llm.tool_call.vision : VisionContext, DedicatedVisionAgent, DefaultVisionSystemPrompt;
 import llm.types : IAgent;
@@ -42,8 +44,9 @@ struct VisionImage {
     }
 }
 
-class AgentContext : Context, FileContext, RAGContext, MemoryContext, CompletionContext, MetricsContext,
-    PipelineControlContext, VisionContext, SkillContext, EnvironmentContext, ContextManagement {
+class AgentContext : Context, FileContext, RAGContext, MemoryContext,
+    CompletionContext, MetricsContext, PipelineControlContext,
+    VisionContext, SkillContext, EnvironmentContext, ContextManagement, DialogueContext {
         import llm.vfs : FlatVfs;
 
         private {
@@ -63,6 +66,8 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext, Completion
             SkillManager skillManager;
 
             EnvironmentBackend[string] envLookup_;
+
+            DialogueIndex dialogueIndex;
 
             bool agentRequstedCompression;
             string agentMessageToSelf;
@@ -118,8 +123,7 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext, Completion
             return envLookup_.byValue.array.sort!((a, b) => a.tag < b.tag).array;
         }
 
-        /// Get the default environment tag.
-        /// Returns: The default tag, or null if not configured.
+        /// Returns: Get the maximum output bytes for command results.
         override long getMaxOutputBytes() @safe nothrow {
             return conf.sandboxConfig.maxOutputBytes;
         }
@@ -195,6 +199,19 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext, Completion
             return conf.ragConfig;
         }
 
+        /// Set the dialogue index (wired by AgentApp after construction).
+        void setDialogueIndex(DialogueIndex di) {
+            dialogueIndex = di;
+        }
+
+        override DialogueIndex getDialogueIndex() {
+            return dialogueIndex;
+        }
+
+        override string currentSessionId() {
+            return conf.activeChatSessionId;
+        }
+
         override MemoryTopic[] getMemoryFileTopics() {
             import std.file : timeLastModified;
 
@@ -243,7 +260,7 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext, Completion
 
         override ref MetricsCalculator getCalculator() {
             if (Clock.currTime > nextMetricCalculation) {
-                if (monitor !is null) // new guard: prevents NPE with null monitor
+                if (monitor !is null) // monitor is optional (null by default)
                     calculator.setEvents(monitor.getRecentEvents(10000));
                 nextMetricCalculation = Clock.currTime + 10.dur!"seconds";
             }

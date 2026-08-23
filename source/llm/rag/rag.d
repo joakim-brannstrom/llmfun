@@ -28,12 +28,13 @@ import std.uni : Grapheme;
 import std.parallelism;
 
 import miniorm : spinSql;
+import llm.test_util : retrySql;
 import my.path;
 public import my.path : Path;
 
 import llm.common.embedder;
 import llm.config : RagDatabaseConfig, RagConfig;
-import llm.rag.database : SourceMatch;
+import llm.rag.database : SourceMatch, Database;
 
 struct Topic {
     string name;
@@ -119,6 +120,10 @@ class RAG {
     Embedder embedder;
     Array!Database dbs;
     DatabaseInfo[] databases;
+    // Per-caller batch-size adaptation state for the addToDatabase seam. Kept
+    // on the instance (not a shared global) so concurrent indexers on other
+    // threads never share mutable batch state (see addToDatabase).
+    size_t nBatchCache;
 
     ref Database db() {
         return dbs[0];
@@ -214,7 +219,7 @@ class RAG {
 
         Document[] runMatch(float[] embed) {
             return parallelQuery(indices,
-                    (size_t i) => spinSql!(() => dbs[i].querySemantic(Search(embed), getTopK))).randomizeRanks()
+                    (size_t i) => retrySql!(() => dbs[i].querySemantic(Search(embed), getTopK))).randomizeRanks()
                 .sort!((a, b) => a.rank > b.rank).take(getTopK).map!(a => Document(origin: a.origin,
                     data: a.text, offset: a.offset, line: a.line, added: a.added,
                     databaseName: databases[a.dbIndex].name)).array;
@@ -232,7 +237,7 @@ class RAG {
             return null;
 
         return parallelQuery(indices,
-                (size_t i) => spinSql!(() => dbs[i].queryTextSearch(query, getTopK))).randomizeRanks()
+                (size_t i) => retrySql!(() => dbs[i].queryTextSearch(query, getTopK))).randomizeRanks()
             .sort!((a, b) => a.rank < b.rank).take(getTopK).map!(a => Document(origin: a.origin, data: a.text, offset: a
                 .offset, line: a.line, added: a.added, databaseName: databases[a.dbIndex].name))
             .array;
@@ -245,7 +250,7 @@ class RAG {
 
         Document[] runMatch(float[] embed) {
             return parallelQuery(indices,
-                    (size_t i) => spinSql!(() => dbs[i].queryCombineSemanticText(Search(embed),
+                    (size_t i) => retrySql!(() => dbs[i].queryCombineSemanticText(Search(embed),
                         textQuery, getTopK))).randomizeRanks().sort!((a,
                     b) => a.rank > b.rank).take(getTopK).map!(a => Document(origin: a.origin, data: a.text, offset: a
                     .offset, line: a.line,
@@ -270,7 +275,7 @@ class RAG {
             return null;
 
         auto results = parallelQuery(indices,
-                (size_t i) => spinSql!(() => dbs[i].queryByPathAndLine(filePath, lineNumber))).map!(
+                (size_t i) => retrySql!(() => dbs[i].queryByPathAndLine(filePath, lineNumber))).map!(
                 a => Document(origin: a.origin, data: a.text, offset: a.offset,
                 line: a.line, added: a.added, databaseName: databases[a.dbIndex].name)).array;
 
@@ -309,11 +314,24 @@ struct RagAddResult {
     size_t chunks;
 }
 
-// the configured nBatch is too large but the server has informed us of what it should be.
-size_t ServerNBatch = 0;
-
-// Add a document to the RAG.
+// Add a document to the RAG. Delegates to the addToDatabase seam using the
+// RAG's own per-instance embedder and batch-size cache.
 RagAddResult add(RAG rag, Document doc, RagConfig config) {
+    return addToDatabase(rag.db, rag.embedder, doc, config, rag.nBatchCache);
+}
+
+/// Index a single document into `db`, embedding its chunks with `embedder`.
+/// All indexing (knowledge RAG and dialogue) flows through this seam.
+///
+/// `dedupSalt` (opt-in, empty by default) extends the dedup identity: a
+/// non-empty salt makes the identity hash input `dedupSalt ~ "\n" ~ doc.data`
+/// instead of `doc.data`, so identical content indexes as a distinct source
+/// under each salt. The dialogue worker passes the episode's topic name
+/// (topic names are `[a-z0-9_]+` and never contain "\n", so the concatenation
+/// is unambiguous); an empty salt hashes `doc.data` exactly as before, keeping
+/// knowledge-RAG checksums byte-identical.
+RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
+        RagConfig config, ref size_t nBatchCache, string dedupSalt = null) {
     import std.algorithm : max, min, countUntil;
     import std.array : Appender;
     import std.json : parseJSON;
@@ -322,9 +340,12 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     import llm.rag.database;
     import llm.utility : getValue, computeContentHash;
 
-    long dataHash = computeContentHash(doc.data);
+    // Dedup identity: salted (topic in the key) for dialogue; the empty-salt
+    // path hashes doc.data exactly as before (knowledge-RAG parity).
+    const string hashInput = dedupSalt.empty ? doc.data : dedupSalt ~ "\n" ~ doc.data;
+    long dataHash = computeContentHash(hashInput);
 
-    if (spinSql!(() => rag.hasSource(Source(doc.origin, dataHash.SourceChecksum)))) {
+    if (retrySql!(() => db.hasSource(Source(doc.origin, dataHash.SourceChecksum)))) {
         logger.trace("source already exist in database");
         return RagAddResult(doc.data.length, 0);
     }
@@ -339,12 +360,12 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
         scope (exit)
             GC.enable();
 
-        if (ServerNBatch == 0)
-            ServerNBatch = rag.embedder.batchSize();
+        if (nBatchCache == 0)
+            nBatchCache = embedder.batchSize();
 
         immutable nBatchStep = 128;
         immutable MaxIterations = 8;
-        size_t nBatch = ServerNBatch;
+        size_t nBatch = nBatchCache;
 
         // used to detect if the fallback mode where nBatch is halfed always used.
         // If it has been used for 5 consecutive turns the nBatch is probably just
@@ -356,15 +377,15 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
             auto data = graphemes.byCodePoint.toUTF8;
 
             float[] emb;
-            rag.embedder.embed(data).match!((float[] embed) { emb = embed; }, (EmbedError e) {
+            embedder.embed(data).match!((float[] embed) { emb = embed; }, (EmbedError e) {
                 logger.tracef("Failed to generate embedding '%s' (len:%s): %s",
                     e.errorMsg, graphemes.length, data);
                 try {
                     const old = nBatch;
-                    ServerNBatch = max(nBatchStep, ServerNBatch);
-                    nBatch = max(nBatchStep, min(nBatch, ServerNBatch));
-                    logger.tracef(old != nBatch, "Changed nBatch (ServerNBatch:%s) from %s->%s",
-                        ServerNBatch, old, nBatch);
+                    nBatchCache = max(nBatchStep, nBatchCache);
+                    nBatch = max(nBatchStep, min(nBatch, nBatchCache));
+                    logger.tracef(old != nBatch, "Changed nBatch (nBatchCache:%s) from %s->%s",
+                        nBatchCache, old, nBatch);
                 } catch (Exception e) {
                     logger.trace(e.msg);
                 }
@@ -430,14 +451,14 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
                 nBatch -= nBatchStep;
                 failureCount = 0;
                 failureCount = max(0, failureCount - 1);
-                // trim the server down so future RAG chunking on other documents work better
-                ServerNBatch = nBatch;
-            } else if (successCount > 5 && nBatch < rag.embedder.batchSize) {
+                // remember the lower bound so future chunking on other documents works better
+                nBatchCache = nBatch;
+            } else if (successCount > 5 && nBatch < embedder.batchSize) {
                 logger.tracef("Adjusting up nBatch %s -> %s", nBatch, nBatch + nBatchStep);
-                nBatch = min(nBatch + nBatchStep, rag.embedder.batchSize);
+                nBatch = min(nBatch + nBatchStep, embedder.batchSize);
                 successCount = 0;
-                // up the server so future RAG chunking on other documents work better
-                ServerNBatch = nBatch;
+                // remember the higher bound so future chunking on other documents works better
+                nBatchCache = nBatch;
             }
         }
         if (!graphemes.empty) {
@@ -446,7 +467,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     }
 
     void runOnTokens(ref size_t chunks, ref Appender!(Embedding[]) embeddings) {
-        const nBatch = rag.embedder.batchSize;
+        const nBatch = embedder.batchSize;
         const size_t advance = max(cast(size_t) 1,
                 cast(size_t)(nBatch * (100.0 - config.windowOverlapPercent) / 100.0));
 
@@ -465,7 +486,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
             const lines = countLines(textChunk);
 
             float[] emb;
-            rag.embedder.embed(tokens).match!((float[] embed) { emb = embed; }, (EmbedError e) {
+            embedder.embed(tokens).match!((float[] embed) { emb = embed; }, (EmbedError e) {
                 logger.tracef("Failed to generate embedding '%s' (toks:%s text:%s%s): %s",
                     e.errorMsg, tokens.length, text.length, text);
             });
@@ -486,7 +507,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
             startCharPos += advStep.length;
             startLine += countLines(advStep);
             halfIndex = 0;
-            tokens = rag.embedder.tokenize(textChunk.byCodePoint.toUTF8);
+            tokens = embedder.tokenize(textChunk.byCodePoint.toUTF8);
         }
 
         foreach (graphem; doc.data.byGrapheme) {
@@ -498,7 +519,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
 
             // assuming that no sane word is larger than 50 characters
             if (graphem[0].isWhite || currentWord.length > 50) {
-                auto wordTokens = rag.embedder.tokenize(currentWord.byCodePoint.toUTF8);
+                auto wordTokens = embedder.tokenize(currentWord.byCodePoint.toUTF8);
                 // logger.tracef("%s %s %s %s", tokens.length, textChunk.length, currentWord.length, wordTokens.length);
                 if (tokens.length + wordTokens.length > nBatch) {
                     addChunk;
@@ -510,7 +531,7 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
         }
 
         if (!currentWord.empty) {
-            auto wordTokens = rag.embedder.tokenize(currentWord.byCodePoint.toUTF8);
+            auto wordTokens = embedder.tokenize(currentWord.byCodePoint.toUTF8);
             if (tokens.length + wordTokens.length > nBatch) {
                 addChunk;
             }
@@ -525,19 +546,19 @@ RagAddResult add(RAG rag, Document doc, RagConfig config) {
     size_t chunks;
     auto embeddings = appender!(Embedding[])();
 
-    if (rag.embedder.supportsTokenization) {
+    if (embedder.supportsTokenization) {
         runOnTokens(chunks, embeddings);
     } else {
         runOnText(chunks, embeddings);
     }
 
-    spinSql!(() {
-        auto trans = rag.db.transaction;
+    retrySql!(() {
+        auto trans = db.transaction;
         // try to remove the source before adding to ensure old cruft isn't left
-        rag.removeSource(doc.origin);
-        auto srcId = rag.db.addSource(Source(doc.origin, SourceChecksum(dataHash)));
+        db.removeSource(doc.origin);
+        auto srcId = db.addSource(Source(doc.origin, SourceChecksum(dataHash)));
         foreach (ref e; embeddings[]) {
-            rag.db.addEmbedding(srcId, e);
+            db.addEmbedding(srcId, e);
         }
         trans.commit;
     });
@@ -568,50 +589,366 @@ SourceMatch makeMatch(double rank) {
     return SourceMatch(Origin(Topic("")), Offset(0, 0), Line(0, 0), "", rank, SysTime.init);
 }
 
-unittest {
-    // Test 4: Shuffle produces different orderings
-    // Probabilistic: 5-element array has 120 permutations;
-    // chance of false failure is ~ (1/120)^99 ≈ 0
-    {
-        SourceMatch[] input = [
-            makeMatch(1.0), makeMatch(2.0), makeMatch(3.0), makeMatch(4.0),
-            makeMatch(5.0)
-        ];
-        bool gotDifferent = false;
-        auto first = randomizeRanks(input.dup);
-        foreach (_; 0 .. 100) {
-            auto current = randomizeRanks(input);
-            if (current != first) {
-                gotDifferent = true;
-                break;
-            }
+version (unittest) {
+    import std.file : mkdirRecurse, rmdirRecurse;
+
+    // Deterministic hash-based fake (supportsTokenization == false).
+    // embed(x) returns a fixed-dim (8) vector derived from x's contents so
+    // equal text -> equal vector and different text -> different vector.
+    private class TestEmbedder : Embedder {
+        private int batch;
+
+        this(int batchSize = 50) {
+            this.batch = batchSize;
         }
-        assert(gotDifferent, "Shuffle should produce different orderings");
+
+        override string modelName() {
+            return "test";
+        }
+
+        override long dimensions() {
+            return 8;
+        }
+
+        override bool supportsTokenization() {
+            return false;
+        }
+
+        override EmbedResult embed(string text) {
+            // FNV-1a 64-bit: deterministic, no imports needed
+            immutable ulong prime = 0x00000100000001B3;
+            ulong h = 0xCBF29CE484222325;
+            foreach (b; text[])
+                h = (h ^ cast(ulong) b) * prime;
+            auto vec = new float[8];
+            foreach (i; 0 .. 8)
+                vec[i] = cast(float)((h >> (8 * i)) & 0xFF) / 255.0;
+            return EmbedResult(vec);
+        }
+
+        override EmbedResult embed(int[] tokens) {
+            // never called: supportsTokenization is false
+            char[] text = new char[tokens.length];
+            foreach (i, ref c; text)
+                c = cast(char)(tokens[i] & 0x7F);
+            return embed(cast(string) text);
+        }
+
+        override int[] tokenize(string text) {
+            return null;
+        }
+
+        override string detokenize(int[] tokens) {
+            return null;
+        }
+
+        override int batchSize() {
+            return batch;
+        }
+
+        override void destroy() {
+        }
     }
 
-    // Test 5: Uniform distribution check
-    {
-        SourceMatch[] input = [
-            makeMatch(10.0), makeMatch(20.0), makeMatch(30.0), makeMatch(40.0)
-        ];
-        long[4] counts;
-        foreach (_; 0 .. 10_000) {
-            auto result = randomizeRanks(input.dup);
-            double rank = result[0].rank;
-            if (rank == 10.0)
-                counts[0]++;
-            else if (rank == 20.0)
-                counts[1]++;
-            else if (rank == 30.0)
-                counts[2]++;
-            else if (rank == 40.0)
-                counts[3]++;
-        }
-        foreach (count; counts) {
-            import std.math : abs;
+    private AbsolutePath makeScratchDir(long line = __LINE__) {
+        import std.conv : to;
 
-            assert(abs(cast(long)(count - 2500)) < 500,
-                    "Distribution should be roughly uniform, got count: " ~ count.stringof);
+        auto dir = ("llmfun_test/rag/" ~ line.to!string).AbsolutePath;
+        mkdirRecurse(dir);
+        return dir;
+    }
+
+    // 50 single-letter words separated by spaces: "a b c ... " (100 chars).
+    private string sampleText() {
+        string text;
+        foreach (i; 0 .. 50)
+            text ~= cast(char)('a' + i % 26) ~ " ";
+        return text;
+    }
+}
+
+// Test 4: Shuffle produces different orderings
+// Probabilistic: 5-element array has 120 permutations;
+// chance of false failure is ~ (1/120)^99 ≈ 0
+unittest {
+    SourceMatch[] input = [
+        makeMatch(1.0), makeMatch(2.0), makeMatch(3.0), makeMatch(4.0),
+        makeMatch(5.0)
+    ];
+    bool gotDifferent = false;
+    auto first = randomizeRanks(input.dup);
+    foreach (_; 0 .. 100) {
+        auto current = randomizeRanks(input);
+        if (current != first) {
+            gotDifferent = true;
+            break;
         }
+    }
+    assert(gotDifferent, "Shuffle should produce different orderings");
+}
+
+// Test 5: Uniform distribution check
+unittest {
+    SourceMatch[] input = [
+        makeMatch(10.0), makeMatch(20.0), makeMatch(30.0), makeMatch(40.0)
+    ];
+    long[4] counts;
+    foreach (_; 0 .. 10_000) {
+        auto result = randomizeRanks(input.dup);
+        double rank = result[0].rank;
+        if (rank == 10.0)
+            counts[0]++;
+        else if (rank == 20.0)
+            counts[1]++;
+        else if (rank == 30.0)
+            counts[2]++;
+        else if (rank == 40.0)
+            counts[3]++;
+    }
+    foreach (count; counts) {
+        import std.math : abs;
+
+        assert(abs(cast(long)(count - 2500)) < 500,
+                "Distribution should be roughly uniform, got count: " ~ count.stringof);
+    }
+}
+
+// Test 6: addToDatabase indexes a scratch DB; overlap honored; re-add no-op
+unittest {
+    import std.conv : to;
+    import llm.rag.database : openDatabase, Search;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TestEmbedder(50);
+    float[] vec(string s) {
+        return emb.embed(s).match!((float[] v) => v, (EmbedError e) {
+            assert(false, "TestEmbedder failed: " ~ e.errorMsg);
+            return null;
+        });
+    }
+
+    auto dbOpt = openDatabase((dir ~ "t.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+
+    auto doc = Document(origin: Origin(Topic("t1")), data: sampleText());
+    size_t nBatchCache = 0;
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+    auto res = addToDatabase(db, emb, doc, cfg, nBatchCache);
+    assert(res.length == doc.data.length);
+    assert(res.chunks == 3, "10% overlap: expected 3 chunks, got " ~ res.chunks.to!string);
+
+    // consecutive chunks overlap with 10% overlap
+    auto chunks = db.querySemantic(Search(vec(doc.data)), 100).sort!((a,
+            b) => a.offset.begin < b.offset.begin).array;
+    assert(chunks.length == res.chunks);
+    assert(chunks[1].offset.begin < chunks[0].offset.end, "chunk 1 must overlap chunk 0");
+    assert(chunks[2].offset.begin < chunks[1].offset.end, "chunk 2 must overlap chunk 1");
+
+    // re-adding the same document is a no-op (hasSource short-circuit)
+    auto res2 = addToDatabase(db, emb, doc, cfg, nBatchCache);
+    assert(res2.chunks == 0, "re-add of unchanged source must be a no-op");
+    assert(db.getSources().length == 1);
+    db.destroy;
+
+    // 0% overlap produces non-overlapping chunks for the same text
+    auto db0Opt = openDatabase((dir ~ "t0.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(db0Opt.hasValue);
+    auto db0 = db0Opt.match!((Database d) => d, (None _) => Database.init);
+    nBatchCache = 0;
+    immutable cfg0 = RagConfig(windowOverlapPercent: 0);
+    auto res0 = addToDatabase(db0, emb, doc, cfg0, nBatchCache);
+    assert(res0.chunks == 2, "0% overlap: expected 2 chunks, got " ~ res0.chunks.to!string);
+    auto chunks0 = db0.querySemantic(Search(vec(doc.data)), 100).sort!((a,
+            b) => a.offset.begin < b.offset.begin).array;
+    assert(chunks0[1].offset.begin >= chunks0[0].offset.end, "0% overlap must not overlap");
+    db0.destroy;
+}
+
+// Test 6b: addToDatabase dedup salt (FX1/B4). The same content under two
+// different topic/salt pairs indexes as two distinct sources (content-only
+// dedup would collapse them to one); a re-add under the same salt is still a
+// no-op; and a salt-less add keeps today's bare-content identity (a third
+// source here). Mirrors production: the worker's salt is the episode's topic
+// name, which is also the document origin.
+unittest {
+    import std.conv : to;
+    import llm.rag.database : openDatabase;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TestEmbedder(50);
+    auto dbOpt = openDatabase((dir ~ "s.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        db.destroy;
+
+    const text = sampleText();
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+
+    // saltA indexes its chunks...
+    auto docA = Document(origin: Origin(Topic("saltA")), data: text);
+    size_t nBatchA = 0;
+    auto resA = addToDatabase(db, emb, docA, cfg, nBatchA, "saltA");
+    assert(resA.chunks > 0, "salted add must index chunks, got " ~ resA.chunks.to!string);
+
+    // ...and the same content under saltB must NOT be deduped against it.
+    auto docB = Document(origin: Origin(Topic("saltB")), data: text);
+    size_t nBatchB = 0;
+    auto resB = addToDatabase(db, emb, docB, cfg, nBatchB, "saltB");
+    assert(resB.chunks > 0, "identical content under a different salt must index");
+    assert(db.getSources().length == 2,
+            "two topic/salt pairs must yield two sources, got " ~ db.getSources().length.to!string);
+
+    // Re-add under saltA: the salted identity matches -> no-op (per-salt dedup).
+    size_t nBatchA2 = 0;
+    auto resAgain = addToDatabase(db, emb, docA, cfg, nBatchA2, "saltA");
+    assert(resAgain.chunks == 0, "re-add with the same salt must be a no-op");
+    assert(db.getSources().length == 2, "deduped re-add must not add a source");
+
+    // Knowledge-RAG parity: a salt-less add keeps the bare-content identity ->
+    // a third, distinct source.
+    auto docP = Document(origin: Origin(Topic("plain")), data: text);
+    size_t nBatchP = 0;
+    auto resP = addToDatabase(db, emb, docP, cfg, nBatchP);
+    assert(resP.chunks > 0, "salt-less add must index chunks");
+    assert(db.getSources().length == 3,
+            "salt-less identity must differ from the salted ones, got " ~ db.getSources()
+                .length.to!string);
+}
+
+// Test 7: re-adding a changed source purges stale chunks
+// (removeSource-then-add order inside one transaction)
+// The FTS5 index is external-content (database.d FTSChunksSql): it is not
+// maintained by the indexing path, so the test rebuilds it explicitly,
+// mirroring the production caller contract (tool_call/rag.d, app_rag.d).
+// The purge itself is verified at the TextChunkTbl row level.
+unittest {
+    import llm.rag.database : openDatabase;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TestEmbedder(50);
+    auto dbOpt = openDatabase((dir ~ "p.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        db.destroy;
+
+    long countChunkRowsContaining(string needle) {
+        static immutable sql = "SELECT count(*) FROM TextChunkTbl WHERE text LIKE :needle";
+        auto stmt = db.prepare(sql);
+        stmt.get.bind(":needle", "%" ~ needle ~ "%");
+        foreach (ref r; stmt.get.execute) {
+            return r.peek!long(0);
+        }
+        return -1;
+    }
+
+    auto origin = Origin(Topic("t1"));
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+
+    // first version
+    auto text1 = sampleText() ~ "zebra ";
+    size_t nBatchCache = 0;
+    auto res1 = addToDatabase(db, emb, Document(origin: origin, data: text1), cfg, nBatchCache);
+    assert(res1.chunks > 0);
+    assert(countChunkRowsContaining("zebra") > 0, "first version must be stored");
+    db.fts5Rebuild;
+    auto hit1 = db.queryTextSearch("zebra", 10);
+    assert(hit1 != null && hit1.length > 0, "first version must be searchable");
+
+    // changed content, same origin: old chunks must be purged, not accumulated
+    auto text2 = sampleText() ~ "quokka ";
+    nBatchCache = 0;
+    auto res2 = addToDatabase(db, emb, Document(origin: origin, data: text2), cfg, nBatchCache);
+    assert(res2.chunks > 0);
+    assert(db.getSources().length == 1, "changed source must replace, not accumulate");
+    assert(countChunkRowsContaining("zebra") == 0, "stale chunk rows must be purged");
+    assert(countChunkRowsContaining("quokka") > 0, "new chunk rows must be stored");
+    db.fts5Rebuild;
+    auto stale = db.queryTextSearch("zebra", 10);
+    assert(stale == null || stale.length == 0, "stale chunks of changed source must be purged");
+    auto fresh = db.queryTextSearch("quokka", 10);
+    assert(fresh != null && fresh.length > 0, "new chunks must be queryable");
+}
+
+// Test 8: add(rag, ...) and addToDatabase(rag.db, rag.embedder, ...)
+// produce identical database contents
+unittest {
+    import std.conv : to;
+    import llm.rag.database : openDatabase, Search;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto embA = new TestEmbedder(50);
+    auto rag = new RAG(embA, RagDatabaseConfig(dir ~ "a.db", "a"), null);
+    scope (exit)
+        rag.destroy;
+
+    auto embB = new TestEmbedder(50);
+    auto dbBOpt = openDatabase((dir ~ "b.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbBOpt.hasValue);
+    auto dbB = dbBOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        dbB.destroy;
+
+    float[] vecA(string s) {
+        return embA.embed(s).match!((float[] v) => v, (EmbedError e) {
+            assert(false, "TestEmbedder failed: " ~ e.errorMsg);
+            return null;
+        });
+    }
+
+    auto doc = Document(origin: Origin(Topic("t1")), data: sampleText());
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+    size_t nBatchCache = 0;
+    auto resA = add(rag, doc, cfg);
+    size_t nBatchCacheB = 0;
+    auto resB = addToDatabase(dbB, embB, doc, cfg, nBatchCacheB);
+    assert(resA.chunks > 0 && resA.chunks == resB.chunks,
+            "chunk counts differ: " ~ resA.chunks.to!string ~ " vs " ~ resB.chunks.to!string);
+
+    auto dbA = rag.db;
+
+    // same source: origin + checksum
+    auto srcA = dbA.getSources;
+    auto srcB = dbB.getSources;
+    assert(srcA.length == 1 && srcB.length == 1);
+    assert(srcA[0].origin == srcB[0].origin, "origins differ");
+    assert(srcA[0].checksum == srcB[0].checksum, "checksums differ");
+
+    // same chunk texts and offsets for a series of probe vectors
+    string[] probes = [doc.data, "a b c", "y z x"];
+    foreach (probe; probes) {
+        auto ra = dbA.querySemantic(Search(vecA(probe)), 100);
+        auto rb = dbB.querySemantic(Search(vecA(probe)), 100);
+        assert(ra.length == rb.length, "probe '" ~ probe ~ "': result counts differ");
+        foreach (i; 0 .. ra.length) {
+            assert(ra[i].text == rb[i].text, "probe '" ~ probe ~ "': chunk text differs");
+            assert(ra[i].offset == rb[i].offset, "probe '" ~ probe ~ "': chunk offset differs");
+        }
+    }
+
+    // stored vectors equal the expected per-chunk vectors: querying with
+    // a chunk's own vector returns that chunk at rank 1 (distance 0)
+    foreach (m; dbA.querySemantic(Search(vecA(doc.data)), 100)) {
+        auto hit = dbA.querySemantic(Search(vecA(m.text)), 10);
+        assert(hit.length > 0 && hit[0].rank == 1 && hit[0].text == m.text,
+                "chunk must self-locate: " ~ m.text);
     }
 }

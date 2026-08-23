@@ -16,6 +16,8 @@ import llm.config;
 import llm.rag.rag : Origin, Topic, Url, Path, Document, add;
 import miniorm : spinSql;
 import my.filter : ReFilter;
+import my.optional;
+import my.path : AbsolutePath;
 
 int appMain(UserConfig uconf, UserConfig.Rag conf) {
     import llm.subsystem : initLlmfunLocalModel, deinitLlmfunLocalModel;
@@ -29,6 +31,12 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     }
     auto llmConf = readConfig(uconf.config, false, uconf.noCwdConfig, uconf.trustedConfig)
         .userToLlmConfig(conf);
+
+    // Read-only dialogue report: no embedder, local model, or primary RAG
+    // database is needed (session DBs are opened read-only, sources only).
+    if (conf.dialogue) {
+        return dialogueReport(llmConf);
+    }
 
     auto rag = createRag(llmConf, openSecondary: false);
     if (rag is null)
@@ -361,4 +369,288 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     }
 
     return 0;
+}
+
+/// Per-session statistics for the read-only dialogue report.
+private struct DialogueSessionStats {
+    string sessionId;
+    size_t sources;
+    long minTurn;
+    long maxTurn;
+    bool hasTurns;
+}
+
+/// Compute per-session statistics from a single session database (read-only).
+///
+/// The report path never issues vector queries (getSources only), so no
+/// embedder is needed. The stored model and dimensions are probed from
+/// VersionTbl first, because openDatabase refuses a read-only open on a
+/// dimension mismatch. Returns none when the DB cannot be probed or opened.
+private Optional!DialogueSessionStats sessionStats(AbsolutePath dbPath) {
+    import llm.rag.database : Database, openDatabase;
+    import llm.rag.dialogue_index : EpisodeMeta, decodeTopicName;
+    import llm.rag.sqlite3_vec;
+    import miniorm : Miniorm;
+
+    string model;
+    long dims = 0;
+    bool probed = false;
+    try {
+        auto probe = Miniorm(dbPath.toString, SQLITE_OPEN_READONLY);
+        auto stmt = probe.prepare("SELECT model, embedDimensions FROM VersionTbl");
+        foreach (ref r; stmt.get.execute) {
+            model = r.peek!string(0);
+            dims = r.peek!long(1);
+            probed = true;
+        }
+    } catch (Exception e) {
+        logger.warningf("Unable to probe version of dialogue database '%s': %s", dbPath, e.msg);
+        return none!DialogueSessionStats();
+    }
+    if (!probed || dims <= 0) {
+        logger.warningf("No version info in dialogue database '%s', skipping", dbPath);
+        return none!DialogueSessionStats();
+    }
+
+    auto dbOpt = openDatabase(dbPath, model, dims, readOnly: true);
+    if (!hasValue(dbOpt)) {
+        logger.warningf("Unable to open dialogue database '%s' read-only, skipping", dbPath);
+        return none!DialogueSessionStats();
+    }
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        db.destroy();
+
+    DialogueSessionStats stats;
+    foreach (src; db.getSources) {
+        stats.sources++;
+        src.origin.match!((Topic t) {
+            decodeTopicName(t.name).match!((EpisodeMeta m) {
+                if (!stats.hasTurns) {
+                    stats.minTurn = m.turnStart;
+                    stats.maxTurn = m.turnEnd;
+                    stats.hasTurns = true;
+                } else {
+                    if (m.turnStart < stats.minTurn)
+                        stats.minTurn = m.turnStart;
+                    if (m.turnEnd > stats.maxTurn)
+                        stats.maxTurn = m.turnEnd;
+                }
+            }, (None _) {});
+        }, (Url _) {}, (Path _) {});
+    }
+    return some(stats);
+}
+
+/// All valid per-session database files directly under dir.
+///
+/// std.file's DirEntry.name is the full path, so baseName() must be applied
+/// before any session-id handling. Only D12-valid names pass (path-traversal
+/// guard); anything else is silently ignored.
+private AbsolutePath[] validSessionDatabases(AbsolutePath dir) {
+    import llm.session.types : SessionId, isValidId;
+
+    AbsolutePath[] result;
+    foreach (entry; dirEntries(dir, SpanMode.shallow)) {
+        auto fileName = baseName(entry.name);
+        if (!entry.isFile || extension(fileName) != ".db")
+            continue;
+
+        auto sessionId = fileName[0 .. $ - ".db".length];
+        if (!isValidId(SessionId(sessionId)))
+            continue;
+
+        result ~= (dir ~ fileName).AbsolutePath;
+    }
+    return result;
+}
+
+/// Read-only report over the per-session dialogue history databases.
+///
+/// Per session: source count and the indexed turn range (min turnStart - max
+/// turnEnd, decoded from topic names, never from worker memory). A missing
+/// directory or a session with no history is an info line, not an error.
+/// Returns a process exit code (0 on success, even when nothing to report).
+int dialogueReport(LlmConfig llmConf) {
+    auto dir = llmConf.dialogueDir.AbsolutePath;
+    if (!exists(dir) || !isDir(dir)) {
+        logger.infof("No dialogue history to report. Directory '%s' is missing or is not a directory.",
+                dir);
+        return 0;
+    }
+
+    size_t sessionsReported = 0;
+    size_t totalSources = 0;
+    foreach (dbPath; validSessionDatabases(dir)) {
+        auto sessionId = baseName(dbPath.toString)[0 .. $ - ".db".length];
+        sessionStats(dbPath).match!((DialogueSessionStats s) {
+            string turns = s.hasTurns ? format("turns %s-%s", s.minTurn, s.maxTurn) : "no turn info";
+            logger.infof("session '%s': %s source(s), %s", sessionId, s.sources, turns);
+            sessionsReported++;
+            totalSources += s.sources;
+        }, (None _) {});
+    }
+
+    if (sessionsReported == 0) {
+        logger.infof("No dialogue history found in '%s'.", dir);
+        return 0;
+    }
+
+    logger.infof("Total: %s session(s), %s source(s)", sessionsReported, totalSources);
+    return 0;
+}
+
+version (unittest) {
+    import llm.common.embedder : Embedder, EmbedResult, EmbedError;
+    import my.path : AbsolutePath;
+    import std.file : mkdirRecurse, rmdirRecurse;
+
+    /// Deterministic test embedder: FNV-1a 64-bit over the input, expanded
+    /// into 8 float dimensions.
+    private class TestEmbedder : Embedder {
+        override string modelName() {
+            return "app_rag_test_embedder";
+        }
+
+        override long dimensions() {
+            return 8;
+        }
+
+        override bool supportsTokenization() {
+            return false;
+        }
+
+        override int batchSize() {
+            return 1;
+        }
+
+        override EmbedResult embed(string text) {
+            ulong h = 14695981039346656037;
+            foreach (byte b; text) {
+                h ^= b;
+                h *= 1099511628211;
+            }
+            auto vec = new float[8];
+            foreach (i, ref f; vec) {
+                f = cast(float)((h >> (8 * i)) & 0xFF) / 255.0;
+            }
+            return EmbedResult(vec);
+        }
+
+        override EmbedResult embed(int[] tokens) {
+            // never called: supportsTokenization is false
+            char[] text = new char[tokens.length];
+            foreach (i, ref c; text)
+                c = cast(char)(tokens[i] & 0x7F);
+            return embed(cast(string) text);
+        }
+
+        override int[] tokenize(string text) {
+            return null;
+        }
+
+        override string detokenize(int[] tokens) {
+            return null;
+        }
+
+        override void destroy() {
+        }
+    }
+
+    private AbsolutePath makeScratchDir(long line = __LINE__) {
+        import std.conv : to;
+
+        auto dir = ("llmfun_test/app_rag/" ~ line.to!string).AbsolutePath;
+        mkdirRecurse(dir);
+        return dir;
+    }
+}
+
+unittest {
+    // Seeded dialogue directory: two valid sessions, one invalid file name.
+    // sessionStats must report the per-session source counts and the turn
+    // ranges decoded from the topic names; dialogueReport must exit 0.
+    import llm.common.embedder : EmbedResult;
+    import llm.rag.database : Database, openDatabase;
+    import llm.rag.dialogue_index : encodeTopicName;
+    import llm.rag.rag : addToDatabase;
+    import my.optional;
+    import my.path : AbsolutePath, Path;
+    import std.file : rmdirRecurse, write;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TestEmbedder;
+    auto cfg = RagConfig.init;
+    size_t nBatchCache;
+
+    auto seed = (string sessionId, long ts, long te) {
+        auto dbPath = (dir ~ (sessionId ~ ".db")).AbsolutePath;
+        auto dbOpt = openDatabase(dbPath, emb.modelName(), emb.dimensions());
+        assert(hasValue(dbOpt));
+        auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+        scope (exit)
+            db.destroy();
+        auto doc = Document(origin: Origin(Topic(encodeTopicName(sessionId, ts,
+                te, 1000))), data: "episode text for " ~ sessionId ~ " turns "
+                ~ ts.to!string ~ "-" ~ te.to!string);
+        addToDatabase(db, emb, doc, cfg, nBatchCache);
+    };
+
+    seed("20240101-120000-abcd", 1, 3);
+    seed("20240101-120000-abcd", 4, 6);
+    seed("20240102-000000-beef", 7, 9);
+
+    // A file with a non-D12 session name must be ignored by the report.
+    write(dir ~ "not_a_session.db", "junk");
+
+    // The report must see exactly the two valid session databases
+    // (DirEntry.name is the full path; baseName must be applied, and the
+    // invalid name must be filtered out).
+    auto sessionDbs = validSessionDatabases(dir);
+    assert(sessionDbs.length == 2);
+
+    auto stats1 = sessionStats((dir ~ "20240101-120000-abcd.db").AbsolutePath);
+    assert(hasValue(stats1));
+    assert(stats1.match!((DialogueSessionStats s) => s.sources == 2, (None _) => false));
+    assert(stats1.match!((DialogueSessionStats s) => s.minTurn == 1
+            && s.maxTurn == 6, (None _) => false));
+
+    auto stats2 = sessionStats((dir ~ "20240102-000000-beef.db").AbsolutePath);
+    assert(hasValue(stats2));
+    assert(stats2.match!((DialogueSessionStats s) => s.sources == 1, (None _) => false));
+    assert(stats2.match!((DialogueSessionStats s) => s.minTurn == 7
+            && s.maxTurn == 9, (None _) => false));
+
+    // A non-database file must be reported as none (probe fails).
+    auto statsBad = sessionStats((dir ~ "not_a_session.db").AbsolutePath);
+    assert(!hasValue(statsBad));
+
+    auto conf = LlmConfig.init;
+    conf.dialogueDir = Path(dir.toString);
+    assert(dialogueReport(conf) == 0);
+}
+
+unittest {
+    // Missing dialogue directory: info line, exit 0 (N3).
+    import my.path : Path;
+
+    auto conf = LlmConfig.init;
+    conf.dialogueDir = Path("/nonexistent_dialogue_dir_t16");
+    assert(dialogueReport(conf) == 0);
+}
+
+unittest {
+    // Existing but empty directory: info line, exit 0 (N3).
+    import my.path : AbsolutePath, Path;
+    import std.file : rmdirRecurse;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+    auto conf = LlmConfig.init;
+    conf.dialogueDir = Path(dir.toString);
+    assert(dialogueReport(conf) == 0);
 }

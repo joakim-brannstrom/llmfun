@@ -9,7 +9,7 @@ import std.file : readText, exists, mkdirRecurse, rename, rmdirRecurse, thisExeP
 import std.format : format;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.path : dirName;
-import std.string : toLower, startsWith;
+import std.string : toLower, startsWith, indexOf;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable;
 
@@ -52,6 +52,10 @@ struct RagConfig {
     /// 50 means each chunk overlaps 50% with the previous one.
     /// Must be in range [0, 99]. Value of 100 would cause infinite loop.
     long windowOverlapPercent = 50;
+
+    long nBatch;
+
+    long maxChunksPerTopic;
 
     invariant {
         assert(windowOverlapPercent >= 0 && windowOverlapPercent <= 99,
@@ -106,6 +110,9 @@ struct LlmConfig {
     Path[] promptDir;
 
     Path chatDir;
+    /// Directory holding per-session dialogue RAG databases (Phase 1).
+    /// Defaults to <dataDir>/dialogue (see resolvePaths).
+    Path dialogueDir;
     /// Active chat session id (stored in state.json; empty = none).
     string activeChatSessionId;
 
@@ -171,6 +178,15 @@ struct LlmConfig {
             dataSearch(ProgramName).resolve("chat".Path).match!((ResourceFile a) {
                 chatDir = a.get;
             }, (_) { chatDir = localChat; });
+        }
+
+        auto localDialogue = (ProgramName ~ "/data/dialogue").Path;
+        if (localDialogue.exists && localDialogue.isDir) {
+            dialogueDir = localDialogue;
+        } else if (dialogueDir.empty) {
+            dataSearch(ProgramName).resolve("dialogue".Path).match!((ResourceFile a) {
+                dialogueDir = a.get;
+            }, (_) { dialogueDir = localDialogue; });
         }
     }
 
@@ -506,8 +522,9 @@ void makeLocalSetupFileStructure(LlmConfig conf) {
     import std.file : mkdirRecurse;
 
     foreach (path; [
-        conf.dataDir, conf.workArea, conf.dataDir ~ "chat", conf.dataDir ~ "memory"
-    ].filter!(a => !a.exists)) {
+        conf.dataDir, conf.workArea, conf.dataDir ~ "chat",
+        conf.dataDir ~ "memory", conf.dataDir ~ "dialogue"
+    ].filter!(a => !a.empty && !a.exists)) {
         try {
             logger.info("Creating directory ", path);
             mkdirRecurse(path);
@@ -1463,4 +1480,72 @@ unittest {
     auto conf = applyLlmConfig(LlmConfig.init, json);
     assert(conf.tui.maxWidth == 0,
             "shipped example.yaml must keep default 0, got " ~ conf.tui.maxWidth.to!string);
+}
+
+unittest {
+    // Round-trip: an explicit dialogueDir in YAML is preserved through
+    // applyConfig (reflection) and not overwritten by resolvePaths (it is set).
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "dialogueDir_roundtrip_" ~ __LINE__.to!string);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto configFile = buildPath(tmpDir, "test.yaml");
+    string yaml = i`dialogueDir: $(tmpDir)
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080`
+        .text;
+    File(configFile, "w").write(yaml);
+
+    auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: true, trustedConfig: false);
+    assert(conf.dialogueDir == tmpDir,
+            "dialogueDir round-trip failed: " ~ conf.dialogueDir.to!string);
+}
+
+unittest {
+    // Absent key -> resolvePaths defaults dialogueDir to dataDir ~ "dialogue".
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "dialogueDir_default_" ~ __LINE__.to!string);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto configFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(configFile, "w").write(yaml);
+
+    auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: true, trustedConfig: false);
+    assert(!conf.dialogueDir.empty, "dialogueDir should be non-empty after defaulting");
+    assert(conf.dialogueDir == (conf.dataDir ~ "dialogue"),
+            "dialogueDir default mismatch: " ~ conf.dialogueDir.to!string);
+}
+
+unittest {
+    // validateConfig accepts the default (empty) and a safe dialogueDir
+    import std.exception : assertThrown;
+
+    LlmConfig conf;
+    conf.codeModels ~= CodeModelConfig(server: ServerConfig(url: "http://localhost:8080"),
+            display: "test", modelName: "test");
+
+    // Empty (the pre-resolution default) is accepted.
+    conf.dialogueDir = Path.init;
+    validateConfig(conf);
+
+    // A safe explicit value is accepted.
+    conf.dialogueDir = (Path("llmfun/data/dialogue"));
+    validateConfig(conf);
 }

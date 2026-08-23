@@ -19,10 +19,13 @@ import llm.app_agent.slash;
 import llm.app_agent.ui;
 import llm.app_config : UserConfig, userToLlmConfig, createRag;
 import llm.chat;
+import llm.config : RagConfig;
 import llm.config;
 import llm.memory;
 import llm.metric.monitor : MetricMonitor;
 import llm.query;
+import llm.rag.dialogue_index : DialogueIndex;
+import llm.rag.dialogue_worker : DiDegraded;
 import llm.rag.rag : RAG;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
 import llm.skill;
@@ -45,6 +48,7 @@ struct AgentApp {
     package {
         LlmConfig llmConf;
         RAG rag;
+        DialogueIndex dialogueIndex;
         MetricMonitor monitor;
         Agent agent_;
         SessionStore sessionStore;
@@ -101,6 +105,12 @@ struct AgentApp {
     }
 
     private void dispose() {
+        // CRITICAL ORDER: drain the dialogue worker BEFORE rag.destroy
+        // so no embedding runs against weights being destroyed.
+        if (dialogueIndex) {
+            dialogueIndex.dispose();
+            dialogueIndex = null;
+        }
         if (uiTid != Tid.init) {
             try {
                 uiMsg.terminate();
@@ -121,13 +131,12 @@ struct AgentApp {
                 // updatedAt stays untouched.
                 commitActiveSession();
             }
-            // A13: empty-session cleanup on clean exit, after the final
-            // commit. The guard is REQUIRED (M9): dispose() runs on the
-            // scope(exit) path and a failed setupSession leaves the store
-            // null while agent_ is already set. The active session is
-            // exempted (W15) even when empty. Single-writer (C8): the
-            // sweep runs on the agent thread only; state.json is not
-            // touched by it (saved below, unchanged order).
+            // Empty-session cleanup on clean exit, after the final commit.
+            // The store guard is REQUIRED: dispose() runs on the scope(exit)
+            // path and a failed setupSession leaves the store null while
+            // agent_ is already set. The active session is exempted even
+            // when empty. Single-writer: the sweep runs on the agent thread
+            // only; it never touches state.json (saved below, unchanged order).
             if (sessionStore) {
                 try {
                     auto swept = sessionStore.sweepEmptySessions(activeSession.id);
@@ -184,9 +193,9 @@ struct AgentApp {
     package void doCompress(bool force) {
         if (!agent_.needCompression && !force)
             return;
-        // G1: stamp the owning session into any checkpoint event this
-        // compression fires. Pool callbacks set their own or leave "" —
-        // Phase 1 refuses to index events with an empty sessionId.
+        // Stamp the owning session into any checkpoint event this compression
+        // fires. Pool callbacks set their own or leave "" — the dialogue
+        // indexer refuses to index events with an empty sessionId.
         agent_.setCompressionCheckpointSessionId(activeSession.id.get);
         logger.tracef("compression checkpoint session id: %s", activeSession.id.get);
         const ctxUsed = agent_.stat.context;
@@ -253,14 +262,13 @@ struct AgentApp {
         try {
             auto doc = agent_.chat.toSaveJson();
 
-            // Strip role: "system" entries from messages
             auto msgs = doc["messages"].array.filter!(entry => entry.type != JSONType.object
                     || !("role" in entry.object) || entry["role"].str != "system").array;
             doc["messages"] = msgs;
 
             // Persist the TurnID counter high-water mark as a session-header
-            // key (A5); the session store preserves unknown header keys via
-            // meta.extra (D2) and rebuilds the header on save.
+            // key; the session store preserves unknown header keys via
+            // meta.extra and rebuilds the header on save.
             if (activeSession.extra.type == JSONType.null_) {
                 activeSession.extra = JSONValue.emptyObject;
             }
@@ -276,7 +284,7 @@ struct AgentApp {
     /** Activate a session by id: load into memory, clear UI, replay history.
      *
      * Loads the session FIRST — on failure: send error and abort, keeping
-     * the current in-memory chat and active id (W4). On success: clear
+     * the current in-memory chat and active id. On success: clear
      * history, load doc, reset response index, sync context, clear UI,
      * replay messages, resend UiInitHistory, update status and state.
      */
@@ -288,18 +296,19 @@ struct AgentApp {
         if (!hasValue(sfOpt)) {
             this.sendChatMessage("error: Cannot load session '%s' (not found or corrupt). Staying in current session.",
                     TuiChatMessageType_Assistant, id);
-            return; // W4: keep current session unchanged
+            return; // keep the current session unchanged
             // Note: no sendSessionList() here - the list refresh happens
             // only on the success path to keep exactly one send per
-            // sidebar action (L10). Adding a send here would double-send
-            // in doDeleteSession's defensive branch (failed first
-            // activation, then a successful create() activation).
+            // sidebar action. Adding a send here would double-send in
+            // doDeleteSession's defensive branch (failed first activation,
+            // then a successful create() activation).
         }
 
         auto sf = orElse(sfOpt, SessionFile());
 
-        // Clear chat history, keeping system prompt at history[0] (I1: use chat.clear
-        // directly instead of clearHistory() to avoid redundant syncContextFromChat)
+        // Clear chat history, keeping system prompt at history[0]. Use
+        // chat.clear directly instead of clearHistory() to avoid redundant
+        // syncContextFromChat.
         agent_.chat.clear;
         agent_.chat.load(sf.doc);
         // The loaded chat matches the persisted file: nothing to save yet.
@@ -326,15 +335,15 @@ struct AgentApp {
         llmConf.activeChatSessionId = id.get;
         llmConf.saveState();
 
-        // R8/L10: the switch path terminates here - send the refreshed
-        // snapshot (covers switch, delete-active fallback, and any
-        // startup-triggered switches). Guarded for one-shot mode inside.
+        // The switch path terminates here - send the refreshed snapshot
+        // (covers switch, delete-active fallback, and any startup-triggered
+        // switches). Guarded for one-shot mode inside.
         sendSessionList();
     }
 
     /** Switch to a different session: commit current + activate target.
      *
-     * Single commit of the current session (W11), then activate the target.
+     * Single commit of the current session, then activate the target.
      * A no-op switch to the already-active session still commits, so pending
      * changes are persisted. The commit is dirty-gated: when the chat is
      * already persisted it is a no-op and `updatedAt` stays untouched, so
@@ -343,12 +352,12 @@ struct AgentApp {
     package void switchToSession(SessionId id) {
         if (id == activeSession.id) {
             commitActiveSession(); // persist pending changes on a no-op switch
-            // R8/L10: activateSession is not called on the no-op path, so
-            // refresh here - the commit may have changed counts/preview.
+            // activateSession is not called on the no-op path, so refresh
+            // here - the commit may have changed counts/preview.
             sendSessionList();
         } else {
             commitActiveSession();
-            activateSession(id); // sends the refreshed list itself (L10)
+            activateSession(id); // sends the refreshed list itself
         }
     }
 
@@ -356,7 +365,7 @@ struct AgentApp {
     private string formatSessionDate(long unixSec) @trusted {
         if (unixSec == 0)
             return "never";
-        // C1: use proper Unix epoch (1970-01-01), not DateTime.init (year 0)
+        // Use proper Unix epoch (1970-01-01), not DateTime.init (year 0)
         auto dt = (UnixEpoch + unixSec.dur!"seconds").toLocalTime();
         auto now = Clock.currTime();
 
@@ -364,7 +373,7 @@ struct AgentApp {
         if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
             return format("%02d:%02d", dt.hour, dt.minute);
         }
-        // Same year: show month abbreviation and day (M1: use lookup table)
+        // Same year: show month abbreviation and day
         if (dt.year == now.year) {
             return format("%s %02d", MonthAbbr[cast(size_t)(dt.month - 1)], dt.day);
         }
@@ -415,13 +424,13 @@ struct AgentApp {
 
     /** Create a new session and switch to it.
      *
-     * Exactly one save of the current session (W11).
-     * The confirmation message appears in the new session's chat view (I2).
+     * Exactly one save of the current session.
+     * The confirmation message appears in the new session's chat view.
      */
     package void doCreateSession() {
         auto newMeta = sessionStore.create();
         switchToSession(newMeta.id);
-        // Confirmation message sent in the new session's context (I2)
+        // Confirmation message sent in the new session's context
         this.sendChatMessage("Created new session: '%s' (%s)",
                 TuiChatMessageType_Assistant, newMeta.title, shortSessionId(newMeta.id));
     }
@@ -448,9 +457,9 @@ struct AgentApp {
             this.sendChatMessage("error: Failed to rename session '%s'.",
                     TuiChatMessageType_Assistant, shortSessionId(activeSession.id));
         }
-        // R8/L10: mutating callee - the active session's title changed, so
-        // the sidebar snapshot is refreshed here (slash /rename is exempt
-        // from the single-send rule: the receive-loop refresh may repeat it).
+        // Mutating callee - the active session's title changed, so the
+        // sidebar snapshot is refreshed here (slash /rename is exempt from
+        // the single-send rule: the receive-loop refresh may repeat it).
         sendSessionList();
     }
     /** Pick the fallback session after deleting the active one (pure).
@@ -476,9 +485,9 @@ struct AgentApp {
     /** Delete a session by id.
      *
      * If the deleted session is the active one, activates a fallback WITHOUT
-     * committing first (W2 skip-save: the deleted file must not be recreated
-     * by the fallback switch). Fallback = most recently updated remaining
-     * session, else a fresh session.
+     * committing first - the deleted file must not be recreated by the
+     * fallback switch. Fallback = most recently updated remaining session,
+     * else a fresh session.
      */
     package void doDeleteSession(SessionId id) {
         auto wasActive = (id == activeSession.id);
@@ -492,10 +501,10 @@ struct AgentApp {
                 fallbackId = sessionStore.create().id;
                 createdFresh = true;
             }
-            activateSession(fallbackId); // never commits (W2)
+            activateSession(fallbackId); // never commits
             // Defensive: if the fallback failed to load, do not keep pointing
-            // at the deleted id — a later commit would resurrect the file (W2).
-            // L10 single-send note: a FAILED activation returns before
+            // at the deleted id — a later commit would resurrect the file.
+            // Single-send note: a FAILED activation returns before
             // sendSessionList() (see activateSession's load-failure path), so
             // this defensive second activation is the only successful one on
             // this path and sends the list exactly once. The branch never
@@ -512,9 +521,9 @@ struct AgentApp {
         } else {
             this.sendChatMessage("Session deleted: %s",
                     TuiChatMessageType_Assistant, shortSessionId(id));
-            // R8/L10: no activateSession on this path, so the removed session
-            // must leave the sidebar here (the active-delete path refreshes
-            // inside activateSession).
+            // No activateSession on this path, so the removed session must
+            // leave the sidebar here (the active-delete path refreshes inside
+            // activateSession).
             sendSessionList();
         }
     }
@@ -550,46 +559,46 @@ struct AgentApp {
         send(uiTid, cast(immutable) UiSessionList(items));
     }
 
-    /** Sidebar select handler (UiSessionSelect): clear pending delete (A5),
-     * D12-validate the untrusted UI id, then switch. Store failures degrade
-     * to a chat message (N2/L9) - the receive loop keeps running.
+    /** Sidebar select handler (UiSessionSelect): clear pending delete,
+     * validate the untrusted UI id, then switch. Store failures degrade
+     * to a chat message - the receive loop keeps running.
      */
     package void doSidebarSelect(SessionId id) {
-        pendingDeleteId = SessionId.init; // A5
+        pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
                 this.sendChatMessage("error: Invalid session id '%s'. Switch rejected.",
                         TuiChatMessageType_Assistant, id);
                 return;
             }
-            switchToSession(id); // sends the refreshed list (L10)
+            switchToSession(id); // sends the refreshed list
         } catch (Exception e) {
             this.sendChatMessage("error: Failed to switch session: %s.",
                     TuiChatMessageType_Assistant, e.msg);
         }
     }
 
-    /** Sidebar new handler (UiSessionNew): clear pending delete (A5), then
-     * create + switch. Store failures degrade to a chat message (N2/L9).
+    /** Sidebar new handler (UiSessionNew): clear pending delete, then
+     * create + switch. Store failures degrade to a chat message.
      */
     package void doSidebarNew() {
-        pendingDeleteId = SessionId.init; // A5
+        pendingDeleteId = SessionId.init;
         try {
-            doCreateSession(); // sends the refreshed list (L10)
+            doCreateSession(); // sends the refreshed list
         } catch (Exception e) {
             this.sendChatMessage("error: Failed to create session: %s.",
                     TuiChatMessageType_Assistant, e.msg);
         }
     }
 
-    /** Sidebar rename handler (UiSessionRename): clear pending delete (A5),
-     * D12-validate the id, reject empty titles only (no length cap, mirrors
-     * /rename), rename the CARRIED id (A8), refresh the active meta on
-     * success, and always send the refreshed list (L10 - the rename goes
-     * straight to the store, so this handler owns the send on both paths).
+    /** Sidebar rename handler (UiSessionRename): clear pending delete,
+     * validate the id, reject empty titles only (no length cap, mirrors
+     * /rename), rename the CARRIED id, refresh the active meta on
+     * success, and always send the refreshed list - the rename goes
+     * straight to the store, so this handler owns the send on both paths.
      */
     package void doSidebarRename(SessionId id, string title) {
-        pendingDeleteId = SessionId.init; // A5
+        pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
                 this.sendChatMessage("error: Invalid session id '%s'. Rename rejected.",
@@ -613,12 +622,12 @@ struct AgentApp {
                 this.sendChatMessage("Session renamed to '%s'.",
                         TuiChatMessageType_Assistant, newMeta.title);
             } else {
-                // M3: unknown/corrupt id - error message, active meta
+                // Unknown/corrupt id - error message, active meta
                 // unchanged, list still refreshed below.
                 this.sendChatMessage("error: Failed to rename session '%s'.",
                         TuiChatMessageType_Assistant, shortSessionId(id));
             }
-            // L10: rename goes straight to the store (no sending callee),
+            // The rename goes straight to the store (no sending callee),
             // so this handler sends the refreshed list on both paths.
             sendSessionList();
         } catch (Exception e) {
@@ -627,20 +636,20 @@ struct AgentApp {
         }
     }
 
-    /** Sidebar delete handler (UiSessionDelete): clear pending delete (A5),
-     * D12-validate the id, then delete. The C++ panel already ran the
-     * two-step confirmation, so D delegates to the Phase 1 method (active
+    /** Sidebar delete handler (UiSessionDelete): clear pending delete,
+     * validate the id, then delete. The C++ panel already ran the
+     * two-step confirmation, so D delegates to doDeleteSession (active
      * fallback incl.).
      */
     package void doSidebarDelete(SessionId id) {
-        pendingDeleteId = SessionId.init; // A5
+        pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
                 this.sendChatMessage("error: Invalid session id '%s'. Delete rejected.",
                         TuiChatMessageType_Assistant, id);
                 return;
             }
-            doDeleteSession(id); // sends the refreshed list (L10)
+            doDeleteSession(id); // sends the refreshed list
         } catch (Exception e) {
             this.sendChatMessage("error: Failed to delete session: %s.",
                     TuiChatMessageType_Assistant, e.msg);
@@ -661,7 +670,7 @@ struct AgentApp {
         if (slashCommands_.isSlashCommand(query)) {
             // /delete-prefixed non-commands like `/deletefoo` skip the top
             // rule, and the registry's unknown path does not clear pending
-            // state . Clear before dispatch — a stale confirmation would
+            // state. Clear before dispatch — a stale confirmation would
             // otherwise make the next `/delete <n>` confirm-delete without
             // re-prompting.
             if (query.startsWith("/delete") && !slashCommands_.isRegistered(query))
@@ -710,8 +719,8 @@ struct AgentApp {
         import my.set;
         import my.path : AbsolutePath;
 
-        // do not slowdown startup if the user only have an in-memory because
-        // then they are indexed every time the user start
+        // do not slow down startup if the user only has an in-memory RAG:
+        // then the memory files are indexed every time the app starts
         if (rag is null || rag.isPrimaryInMemory || llmConf.noMemory)
             return;
 
@@ -769,8 +778,8 @@ struct AgentApp {
             logger.warningf("Failed to load active session '%s'. Starting with empty chat.",
                     activeSession.id);
         }
-        agent_.chat.resetResponseIndex; // W1: prevent replay of old history
-        agent_.syncContextFromChat(); // W5: set prevStat.context from loaded chat
+        agent_.chat.resetResponseIndex; // prevent replay of old history
+        agent_.syncContextFromChat(); // set prevStat.context from the loaded chat
 
         agent_.setSystemPrompt(llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf.agentPrompt,
                 addSkills: true, agentMdSummary: agentMdState.summary));
@@ -808,9 +817,17 @@ struct AgentApp {
         monitor = new MetricMonitor(llmConf.dataDir ~ "monitor.jsonl");
         agent_ = new Agent("main", llmConf, skillManager_, monitor, rag, llmConf.toolFilter.to());
 
+        // Create the DialogueIndex (spawns the worker actor on its own thread).
+        auto dialogueRagCfg = RagConfig(windowOverlapPercent: 10, nBatch: 1,
+                maxChunksPerTopic: 512);
+        dialogueIndex = new DialogueIndex(llmConf.dialogueDir.AbsolutePath,
+                llmConf.embedConfig, dialogueRagCfg);
+        agent_.addCompressionCheckpointListener(&dialogueIndex.onCheckpoint);
+        agent_.toolContext().setDialogueIndex(dialogueIndex);
+
         // Register BEFORE setupSession(): a throw in setupSession (e.g. an
         // unusable session dir) must still run dispose(), which then finds
-        // sessionStore null while agent_ is set - the M9 guard inside
+        // sessionStore null while agent_ is set - the store guard inside
         // dispose() covers exactly this production-reachable shape.
         scope (exit)
             this.dispose(); // Ensures cleanup on any exception after setup
@@ -827,7 +844,7 @@ struct AgentApp {
             return 0;
         }
 
-        // only update memory for non-oneshot because it is assumed that oneshot need max speed/low latency
+        // only update memory for non-oneshot: oneshot mode is assumed to need max speed/low latency
         updateRagMemory();
 
         uiTid = spawn(&spawnUserInterface, thisTid, llmConf.tui.maxWidth);
@@ -841,7 +858,7 @@ struct AgentApp {
             this.processChatMessage(m, printUser: true);
         }
 
-        // R8: initial sidebar snapshot right after the message replay;
+        // Initial sidebar snapshot right after the message replay;
         // guarded by uiMsg.isActive() so one-shot mode never sends.
         sendSessionList();
 
@@ -883,7 +900,14 @@ struct AgentApp {
                 this.doSidebarNew();
             }, (UiSessionRename a) { this.doSidebarRename(a.id, a.title); }, (UiSessionDelete a) {
                 this.doSidebarDelete(a.id);
-            }, (UiTerminated _) { running = false; });
+            }, (UiTerminated _) { running = false; }, (DiDegraded d) {
+                // The dialogue worker sends this exactly once (its embedder
+                // is unavailable for the process lifetime). The worker already
+                // logged the cause; this owner-side line records the
+                // degradation state for the agent.
+                logger.warningf("dialogue index worker degraded: %s (dialogue indexing disabled for process lifetime)",
+                    d.reason);
+            });
         }
         while (running);
 
@@ -940,8 +964,7 @@ unittest {
             "ties should resolve deterministically to the first occurrence");
 }
 
-// --- Test: dispatcher-level pending-delete parity ---
-
+@("dispatcher-level pending-delete parity")
 unittest {
     // The most safety-critical behavior of the dispatcher: a stale
     // `pendingDeleteId` must never make the next `/delete <n>` confirm-delete
@@ -952,7 +975,7 @@ unittest {
     // The registry's unknown path does NOT clear pending state.
     import llm.app_config : UserConfig;
 
-    // Blocked UiMessenger (W5) — the unknown path writes via writeln, never
+    // Blocked UiMessenger - the unknown path writes via writeln, never
     // a null uiMsg dereference.
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
     auto stale = SessionId("stale-id");
@@ -1022,8 +1045,7 @@ unittest {
     assert(noActive.length == 1 && !noActive[0].isActive);
 }
 
-// --- Test: sidebar invalid-id rejection for each action type (D12) ---
-
+@("Test: sidebar invalid-id rejection for each action type")
 unittest {
     import llm.app_config : UserConfig;
 
@@ -1134,14 +1156,13 @@ unittest {
     assert(gotList, "corrupt-file rename must still refresh the sidebar list");
 }
 
-// --- Test: stale pending-delete clearing by the sidebar New handler (A5)
-// and store-exception degradation in a sidebar handler (L9) ---
-
+@(
+        "stale pending-delete clearing by the sidebar New handler and store-exception degradation in a sidebar handler")
 unittest {
     import std.file : exists, rmdirRecurse, mkdirRecurse;
     import std.path : buildPath;
 
-    // A store whose create() throws simulates a disk-full failure (L9).
+    // A store whose create() throws simulates a disk-full failure.
     static class ThrowingStore : SessionStore {
         this(string dir) {
             super(dir.Path);
@@ -1162,9 +1183,9 @@ unittest {
     auto stale = SessionId("stale-pending");
     app.pendingDeleteId = stale;
 
-    // The handler clears pendingDeleteId on entry (A5) even though the
+    // The handler clears pendingDeleteId on entry even though the
     // create() below throws; the exception is caught and logged as a chat
-    // message (N2/L9) - the receive loop keeps running.
+    // message - the receive loop keeps running.
     app.doSidebarNew();
     assert(app.pendingDeleteId == SessionId.init,
             "New handler must clear stale pending delete on entry (A5)");
@@ -1363,8 +1384,7 @@ version (unittest) {
     }
 }
 
-// --- Test: dispose() sweeps empty non-active sessions on exit (A13) ---
-
+@("dispose() sweeps empty non-active sessions on exit")
 unittest {
     import my.filter : ReFilter;
     import std.file : exists, mkdirRecurse, rmdirRecurse;
@@ -1420,8 +1440,7 @@ unittest {
     assert(app.agent_ is null, "dispose() must clear the agent");
 }
 
-// --- Test: dispose() with a null session store (M9 guard) ---
-
+@("dispose() with a null session store")
 unittest {
     import my.filter : ReFilter;
     import std.file : exists, mkdirRecurse, rmdirRecurse;
@@ -1438,15 +1457,14 @@ unittest {
 
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
     app.llmConf = cfg;
-    // M9: a failed setupSession leaves the store null while agent_ is set
+    // A failed setupSession leaves the store null while agent_ is set
     // and the active id empty; dispose() must not dereference the store.
     app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
     app.dispose(); // must not throw
     assert(app.agent_ is null, "dispose() must clear the agent");
 }
 
-// --- Test: dispose() keeps the active session even when empty (W15) ---
-
+@("Test: dispose() keeps the active session even when empty")
 unittest {
     import my.filter : ReFilter;
     import std.file : exists, mkdirRecurse, rmdirRecurse;
@@ -1462,7 +1480,7 @@ unittest {
     auto cfg = testLlmConfig(tmpDir);
 
     auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
-    auto active = store.create(); // stays empty on purpose (W15)
+    auto active = store.create(); // stays empty on purpose
     auto emptyOther = store.create();
 
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
@@ -1479,8 +1497,8 @@ unittest {
             "empty non-active session must be swept on exit");
 }
 
-// --- Test: switch-after-compression resets stat().startContext to the
-// target chat's approxContextSize (R16) ---
+// switch-after-compression resets stat().startContext to the
+// target chat's approxContextSize ---
 //
 // Regression lock for the activate pipeline: activateSession must call
 // syncContextFromChat() AFTER chat.load so prevStat no longer carries the
@@ -1488,7 +1506,6 @@ unittest {
 // (no server call): loading the small session and syncing leaves exactly
 // the invariant a real compression leaves behind (prevStat.startContext ==
 // current chat context). A stale value would fail the asserts below.
-
 unittest {
     import my.filter : ReFilter;
     import std.array : replicate;
@@ -1567,9 +1584,8 @@ unittest {
             "target context must be clearly larger than the stale compressed value");
 }
 
-// --- Test: delete-active falls back to the most recently updated
-// remaining session and the snapshot drops the deleted id (R16) ---
-
+// delete-active falls back to the most recently updated
+// remaining session and the snapshot drops the deleted id
 unittest {
     import my.filter : ReFilter;
     import std.file : exists, mkdirRecurse, rmdirRecurse, write;
@@ -1640,8 +1656,8 @@ unittest {
     });
     assert(gotList, "delete-active must refresh the sidebar snapshot");
 
-    // Confirmation chat message on the fallback path (exact string locks
-    // the user-facing wording per R16).
+    // Confirmation chat message on the fallback path (the exact string
+    // locks the user-facing wording).
     bool gotDeleted = false;
     string lastChatMsg;
     receiveTimeout(dur!"seconds"(1), (UiChatMessage m) {
@@ -1667,9 +1683,8 @@ unittest {
     }
 }
 
-// --- Test: corrupt session files are skipped by listing and the sweep,
-// and switchToSession keeps the current session on load failure (R16) ---
-
+// corrupt session files are skipped by listing and the sweep,
+// and switchToSession keeps the current session on load failure
 unittest {
     import my.filter : ReFilter;
     import std.file : exists, mkdirRecurse, rmdirRecurse, write;
@@ -1687,8 +1702,8 @@ unittest {
     auto good = store.create();
     auto emptyOther = store.create();
 
-    // Corrupt file with a D12-valid id: present on disk, must never be
-    // listed, loaded, or swept (C7/W16).
+    // Corrupt file with a valid id: present on disk, must never be
+    // listed, loaded, or swept.
     auto corrupt = SessionId("20260618-153046-0bad");
     auto corruptPath = buildPath(tmpDir, "chat", corrupt.get ~ ".json");
     write(corruptPath, "{ not json !!!");
@@ -1732,7 +1747,7 @@ unittest {
     assert(gotList, "sendSessionList must emit the snapshot");
 
     // switchToSession on the corrupt id: error message, current session kept
-    // (exact string locks the user-facing wording per R16).
+    // (the exact string locks the user-facing wording).
     app.switchToSession(corrupt);
     bool gotError = false;
     receiveTimeout(dur!"seconds"(1), (UiChatMessage m) {
@@ -1743,12 +1758,12 @@ unittest {
     assert(app.activeSession.id == good.id, "a failed load must keep the current session unchanged");
 
     // The sweep removes only list() candidates: the corrupt file is never
-    // a candidate and survives untouched (W16), the empty non-active
-    // session is removed, and the kept (active) id is exempted (W15).
+    // a candidate and survives untouched, the empty non-active session is
+    // removed, and the kept (active) id is exempted.
     // Note: good is empty from creation (store.create() writes messages:
     // []); the failed switch commits nothing (the chat is clean), so the
     // keep-exemption is what protects it here; non-empty survival is
-    // covered by the Task 1 store-level tests.
+    // covered by the store-level tests.
     auto swept = store.sweepEmptySessions(good.id);
     assert(swept.length == 1 && swept[0] == emptyOther.id,
             "sweep must remove only the empty non-active session");

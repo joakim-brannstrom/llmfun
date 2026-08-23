@@ -69,6 +69,9 @@ struct UserConfig {
             bool list;
             @(NamedArgument().Description("Sync files with database"))
             bool sync;
+            @(NamedArgument()
+                    .Description("Report per-session dialogue history databases (read-only)"))
+            bool dialogue;
         }
 
         @(NamedArgument("db").Description("Primary RAG database (read/write)"))

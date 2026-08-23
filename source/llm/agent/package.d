@@ -155,8 +155,8 @@ class Agent : IBasicAgent {
         toolCtx.setPipelineContext(ctx);
     }
 
-    /// Adds a user query. Chat owns the turn policy (A3): a user query always
-    /// opens a new turn inside Chat.add — call sites cannot violate it.
+    /// Adds a user query. Chat owns the turn policy: a user query always
+    /// opens a new turn inside Chat.add - call sites cannot violate it.
     void addUserQuery(string query) nothrow {
         chat.addUserQuery(query);
     }
@@ -263,7 +263,7 @@ Call `requestCompression` now to compress on your own terms. Write a self-contai
 
         ServerStat useOrApproxStatistic(ServerStat stat) {
             if (stat.startContext == prevStat.startContext) {
-                // the model never finished with a timing/usage message so total context need to be estimated
+                // no timing/usage message received, so the context size must be estimated
                 stat.startContext = chat.approxContextSize;
             }
             return stat;
@@ -318,10 +318,9 @@ Call `requestCompression` now to compress on your own terms. Write a self-contai
                     logger.trace("unhandled error: ", sp.error);
                     rval.status = ProcessResult.Status.unknownFailure;
 
-                    // Recovery: the server rejected the request and the
-                    // history may cotanin invalid UTF-8 (typically binary
-                    // command output). Sanitize the history in place (messages
-                    // preserved).
+                    // Recovery: the server rejected the request.
+                    // The history may contain invalid UTF-8 (typically binary command output).
+                    // Sanitize it in place (messages preserved).
                     if (chat.sanitizeHistory > 0) {
                         logger.warning("Sanitized chat history (invalid UTF-8)");
                     }
@@ -391,18 +390,25 @@ Continue your work from where you left off.";
         return result;
     }
 
-    /// Register a listener for compression checkpoints (A6/G2). The seam is
-    /// multicast: Phase 1 and Phase 2 subscribe independently. A listener
-    /// fires exactly once per compression that actually evicts verbatim
-    /// content, and a throwing listener never breaks compression.
+    /// Register a listener for compression checkpoints. The seam is
+    /// multicast: interested subsystems (currently the dialogue indexer)
+    /// subscribe independently. A listener fires exactly once per
+    /// compression that actually evicts verbatim content, and a throwing
+    /// listener never breaks compression.
     void addCompressionCheckpointListener(SummaryAgent.CheckpointListener listener) {
         summary.addCheckpointListener(listener);
     }
 
-    /// Set the session id stamped into each checkpoint event (A6/G1). Call
+    /// Public accessor for the tool context (needed by app_agent to inject
+    /// the DialogueIndex after construction).
+    AgentContext toolContext() {
+        return toolCtx;
+    }
+
+    /// Set the session id stamped into each checkpoint event. Call
     /// sites that know the owning session (doCompress: activeSession.id) set
     /// it before compressing; pool callbacks set their own or leave "".
-    /// Phase 1 refuses to index events with an empty sessionId.
+    /// The dialogue indexer refuses checkpoints with an empty or invalid sessionId.
     void setCompressionCheckpointSessionId(string sessionId) {
         summary.setCheckpointSessionId(sessionId);
     }
@@ -990,8 +996,6 @@ struct StreamResponse {
     }
 }
 
-// --- Task 6 tests: call-site integration (real Agent, no LLM calls) ---
-
 version (unittest) {
     /// Builds a minimal LlmConfig for a real Agent with no network, no skills
     /// and no RAG. promptDir points at the temp dir holding the one prompt
@@ -1028,18 +1032,17 @@ version (unittest) {
     }
 }
 
-/// Integration: a real Agent (no LLM calls) delegates addUserQuery to the
-/// Chat, which owns the turn policy — §4.5 matrix agent:157: the system
-/// prompt stamps 0, the first query opens turn 1, harness nudges (incl.
-/// addContinueMessage, the pipeline retry path) continue the current turn,
-/// and the next query opens turn 2 (A3, H1, Task 6).
+// Integration: a real Agent (no LLM calls) delegates addUserQuery to the
+// Chat, which owns the turn policy: the system prompt stamps 0, the first
+// query opens turn 1, harness nudges (incl. addContinueMessage, the
+// pipeline retry path) continue the current turn, and the next query
+// opens turn 2.
 unittest {
     import std.datetime : Clock;
     import std.file : mkdirRecurse, write;
     import std.format : format;
 
-    // stdTime (100ns resolution) keeps two runs in the same second from
-    // colliding on the temp dir.
+    // stdTime (100ns resolution) keeps two runs in the same second from colliding on the temp dir.
     auto now = Clock.currTime();
     auto tmpDir = format("llmfun_test/agent_turnid_%d_%d", now.toUnixTime(), now.stdTime);
     mkdirRecurse(tmpDir);
@@ -1067,10 +1070,27 @@ unittest {
     assert(turnIdOf(msgs[4]) == 2);
     assert(turnIdOf(msgs[5]) == 2, "retry nudge continues turn 2, never opens one");
 
-    // H1: the retry nudge is harness traffic — it appears in neither
-    // projection and did not fragment the turn sequence.
+    // The retry nudge is harness traffic: it appears in neither projection and did not fragment the turn sequence.
     auto dialogue = agent.chat.getDialogueHistory();
     assert(dialogue.length == 2, "only the two real user queries are dialogue");
     assert(turnIdOf(dialogue[0]) == 1 && turnIdOf(dialogue[1]) == 2);
     assert(agent.chat.getReasoningTrace().length == 0, "harness nudges are not trace");
+}
+
+// The trigger rule lives in prompt data, not code, so in-tree removal of
+// the section would silently change the main agent's behavior. This guard
+// loads the real llmfun/config/prompt/AGENT.md through the production
+// getPrompt/getBasePrompt path (FlatVfs) and asserts the section heading
+// and the exact tool name are present. A missing file makes getBasePrompt
+// throw, which fails the test.
+unittest {
+    const agentPromptFile = "llmfun/config/prompt/AGENT.md";
+    assert(agentPromptFile.exists,
+            "in-tree AGENT.md missing; getBasePrompt would throw at startup (R12)");
+    auto llmConf = makeAgentTestConfig("llmfun/config/prompt");
+    auto prompt = llmConf.getPrompt(null, "AGENT.md");
+    assert(prompt.canFind("# Dialogue History Retrieval"),
+            "Task 8 trigger-rule section missing from the composed main-agent prompt (R12)");
+    assert(prompt.canFind("queryDialogueHistory"),
+            "Task 8 rule must name the queryDialogueHistory tool (R12)");
 }

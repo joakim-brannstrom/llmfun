@@ -220,16 +220,8 @@ int appMain(UserConfig uconf, UserConfig.FuncCallPrint conf) {
             return AbsolutePath(".");
         }
 
-        override string[] getMemoryFileTopics() {
-            import std.file : dirEntries, SpanMode;
-            import std.path : stripExtension, baseName;
-
-            try {
-                return dirEntries("scratch/memory", SpanMode.shallow).map!(
-                        a => a.name.baseName.stripExtension).array;
-            } catch (Exception e) {
-                logger.warning("unable to read file area for memory topics: ", e.msg);
-            }
+        override MemoryTopic[] getMemoryFileTopics() {
+            // Test stub: memory topics are not used by the func_call_print harness.
             return null;
         }
 

@@ -159,27 +159,12 @@ struct Chat {
         return app[];
     }
 
-    // A4 Facts projection: dialogue entries in canonical order — user queries
-    // (user role with isUserQuery), assistant final text Messages (non-empty
-    // content), and ToolMessages carrying taskDoneAnswer (isFinalAnswer).
-    // Harness control traffic (userQuery:false nudges) is excluded (H1).
-    // VisionMessage is not classified by A4 and appears in neither projection.
-    // Entries are returned whole, keeping their typed TurnIDs. Note:
-    // isUserQuery() checks save_data["user"] key presence, not its value, so a
-    // hand-edited {"user": false} entry would still classify as a user query.
+    // A4 Facts projection: the live history's dialogue entries in canonical
+    // order. Delegates to the pure, Chat-free classifier dialogueOf, which the
+    // Phase 1 dialogue indexer (Task 5) reuses on a checkpoint's evicted slices
+    // once setHistory has replaced the live history.
     MessageT[] getDialogueHistory() @safe nothrow const {
-        MessageT[] result;
-
-        foreach (msg; history) {
-            const bool isDialogue = msg.match!((Message m) {
-                return (m.role == Role.user && m.isUserQuery)
-                    || (m.role == Role.assistant && !m.content.empty);
-            }, (ToolMessage m) { return m.isFinalAnswer(); }, (_) { return false; });
-            if (isDialogue) {
-                result ~= msg;
-            }
-        }
-        return result;
+        return dialogueOf(history);
     }
 
     // A4 Trace projection: reasoning entries in canonical order — non-final
@@ -467,6 +452,39 @@ Tuple!(long, "turnStart", long, "turnEnd") turnRangeOf(const(Chat.MessageT)[] ms
             hi = id;
     }
     return tuple!("turnStart", "turnEnd")(lo, hi);
+}
+
+// A4 Facts classifier (pure, Chat-free): dialogue entries in canonical order -
+// user queries (user role with isUserQuery), assistant final text Messages
+// (non-empty content), and ToolMessages carrying taskDoneAnswer
+// (isFinalAnswer). Harness control traffic (userQuery:false nudges) is
+// excluded (H1). VisionMessage is not classified by A4 and appears in neither
+// projection. Entries are returned whole, keeping their typed TurnIDs. Note:
+// isUserQuery() checks save_data["user"] key presence, not its value, so a
+// hand-edited {"user": false} entry would still classify as a user query.
+//
+// A4 classifies a merged compression summary (an assistant Message with
+// non-empty content) as dialogue - the F10 exclusion of such entries (and of
+// turnId == 0 legacy entries) is the job of the Phase 1 dialogue indexer
+// (Tasks 5/15), NOT this predicate; do not "fix" it by adding a
+// summary-marker check here.
+Chat.MessageT[] dialogueOf(const(Chat.MessageT)[] msgs) @safe nothrow pure {
+    static bool isDialogue(Chat.MessageT msg) @safe nothrow pure {
+        return msg.match!((Message m) {
+            return (m.role == Role.user && m.isUserQuery)
+                    || (m.role == Role.assistant && !m.content.empty);
+        }, (ToolMessage m) {
+            return m.isFinalAnswer();
+        }, (_) {
+            return false;
+        });
+    }
+
+    Chat.MessageT[] result;
+    foreach (a; msgs.filter!(a => isDialogue(a))) {
+        result ~= a;
+    }
+    return result;
 }
 
 // Writes the typed field onto the message. Plain field store — the stamp
@@ -782,7 +800,7 @@ struct ToolMessage {
     }
 
     /// Returns true if this ToolMessage represents a final answer.
-    bool isFinalAnswer() const @safe nothrow {
+    bool isFinalAnswer() const @safe pure nothrow {
         if (saveData.type != JSONType.object)
             return false;
         try {
@@ -1570,6 +1588,87 @@ unittest {
     chat.setSystemPrompt("sys");
     assert(chat.getDialogueHistory.length == 0);
     assert(chat.getReasoningTrace.length == 0);
+}
+
+// --- Test: dialogueOf classifies a mixed slice identically to the projection ---
+unittest {
+    auto chat = Chat();
+    chat.setSystemPrompt("sys"); // system prompt: neither projection
+
+    // Turn 1: query + empty assistant + non-final tool + tool response +
+    // taskDone final + harness nudge.
+    chat.addUserQuery("what is 2+2?");
+    chat.add(Message(Role.assistant, userQuery: false, content: null,
+            thinking: null));
+    chat.add(ToolMessage("computing", JSONValue([JSONValue("call-math")])));
+    chat.add(ToolResponse("4", "call-math", "math", true));
+    JSONValue sd;
+    sd["taskDoneAnswer"] = JSONValue("The answer is 4.");
+    chat.add(ToolMessage("final reasoning", JSONValue([JSONValue("call-done")]),
+            JSONValue.init, sd));
+    chat.add(Message(Role.user, userQuery: false, content: "SYSTEM NUDGE",
+            thinking: null));
+
+    // Turn 2: query + assistant final.
+    chat.addUserQuery("explain it");
+    chat.add(Message(Role.assistant, userQuery: false,
+            content: "Because 2 and 2 make 4.", thinking: null));
+
+    // Turn 3: vision (A4 classifies neither projection).
+    chat.beginNewTurn();
+    chat.add(VisionMessage("what is in this image?", "data:image/png;base64,abc"));
+
+    // The Chat-free classifier and the projection agree on membership/order.
+    auto viaChat = chat.getDialogueHistory();
+    auto viaFree = dialogueOf(chat.getMessages());
+    assert(viaFree.length == 4);
+    assert(viaFree.length == viaChat.length);
+
+    // Query 1, taskDone final, query 2, assistant final (canonical order).
+    assert(viaFree[0].match!((Message m) =>
+            m.role == Role.user && m.isUserQuery && m.content == "what is 2+2?"
+            && m.turnId == 1, (_) => false));
+    assert(viaFree[1].match!((ToolMessage m) =>
+            m.isFinalAnswer() && m.getFinalAnswer() == "The answer is 4."
+            && m.turnId == 1, (_) => false));
+    assert(viaFree[2].match!((Message m) =>
+            m.role == Role.user && m.isUserQuery && m.content == "explain it"
+            && m.turnId == 2, (_) => false));
+    assert(viaFree[3].match!((Message m) =>
+            m.role == Role.assistant && m.content == "Because 2 and 2 make 4."
+            && m.turnId == 2, (_) => false));
+
+    // Element-for-element agreement (same typed TurnID at each position).
+    foreach (i, m; viaFree) {
+        assert(turnIdOf(m) == turnIdOf(viaChat[i]));
+    }
+}
+
+// --- Test: dialogueOf is pure nothrow and works on an arbitrary copy ---
+unittest {
+    auto chat = Chat();
+    chat.addUserQuery("q1");
+    chat.add(Message(Role.assistant, userQuery: false, content: "a1",
+            thinking: null));
+    chat.add(ToolResponse("r", "c", "t", true)); // trace: not dialogue
+
+    // A copy out of the Chat: the classifier never sees a Chat instance.
+    auto copy = chat.getMessages().dup;
+
+    // Calling dialogueOf from a pure nothrow body is the compile-time proof of
+    // its `pure nothrow` contract (a non-pure/nothrow callee would not build).
+    pure nothrow long countOf(Chat.MessageT[] m) {
+        return dialogueOf(m).length;
+    }
+    assert(countOf(copy) == 2);
+    assert(countOf(chat.getMessages()) == 2);
+
+    // Membership: the query and the assistant final, in order.
+    auto viaCopy = dialogueOf(copy);
+    assert(viaCopy.length == 2);
+    assert(viaCopy[0].match!((Message m) => m.isUserQuery && m.content == "q1",
+            (_) => false));
+    assert(viaCopy[1].match!((Message m) => m.content == "a1", (_) => false));
 }
 
 // --- Test: header next_turn_id lagging the message stamps self-heals (R6) ---

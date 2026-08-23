@@ -358,6 +358,36 @@ struct Database {
         return rval[];
     }
 
+    /// Reconstruct a source's full text from its chunks: chunks are read in
+    /// charBeginPos order and each chunk's leading graphemes overlapping the
+    /// previous chunk's end are stripped (the sliding-window overlap), so the
+    /// result equals the original document text (chunks are parts of one
+    /// document - no separator). Returns "" for a source without chunks; SQL
+    /// errors propagate to the caller (the worker catches them).
+    string sourceText(SourceId id) {
+        import std.conv : text;
+        import std.range : drop;
+        import std.uni : byGrapheme, byCodePoint;
+
+        static immutable sql = `SELECT t.text, t.charBeginPos, t.charEndPos FROM TextChunkTbl t
+            JOIN EmbeddingsTbl e ON t.embedId = e.id
+            WHERE e.sourceId = :id ORDER BY t.charBeginPos`;
+
+        auto rval = appender!string();
+        long prevEnd;
+        auto stmt = db.prepare(sql);
+        stmt.get.bind(":id", id.get);
+        foreach (ref r; stmt.get.execute) {
+            const string chunk = r.peek!string(0);
+            const long begin = r.peek!long(1);
+            const long end = r.peek!long(2);
+            const size_t k = begin < prevEnd ? cast(size_t)(prevEnd - begin) : 0;
+            rval.put(chunk.byGrapheme.drop(k).byCodePoint.text);
+            prevEnd = end;
+        }
+        return rval[];
+    }
+
     long removeSource(Origin origin) {
         return getSource(origin).match!((None _) => 0, a => removeSource(a.id));
     }

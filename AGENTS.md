@@ -76,6 +76,7 @@ dub build --config=application-with-local-model   # Build with llama.cpp support
 dub build --config=llmfun_test              # Build test utility (manual testing)
 ./build/llmfun agent                        # Run interactive agent
 ./build/llmfun rag add <path>               # Add file to RAG index
+./build/llmfun rag --dialogue               # Report per-session dialogue history databases (read-only)
 ./build/llmfun rag query "question"         # Query RAG knowledge base
 ./build/llmfun tool_metrics --data llmfun/data/monitor.jsonl   # View tool metrics
 ./build/llmfun mcp --stdio                                              # Run MCP server over stdio
@@ -145,6 +146,13 @@ dub build --config=llmfun_test              # Build test utility (manual testing
   if (isOk) status = "ok";
   else if (isWarning) status = "warn";
   else status = "error";
+  ```
+
+- **Floating point initialization** should be zero initialized. The default initialization in D is NaN.
+
+  ```d
+  auto x = new float[42]; // NaN
+  x[] = 0; // zero init
   ```
 
 ### Naming & Formatting
@@ -258,6 +266,25 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 - Counter state is per-Chat (`nextTurnId_` / `currentTurnId_`, no static/shared/atomic state). The high-water mark is persisted as the session-header key `next_turn_id`; on disk the stamp lives inside each message's `save_data["turn_id"]` (typed field in memory, `save_data` on disk — no new top-level message keys). Invariants I1–I4 (history sorted by `(turn_id, position)`, active-turn stamps > 0, counter never decreases, no ID reuse within a session — including across restarts, `clear()`/reload never recycle IDs) are pinned by unittests in `llm/chat.d`; legacy files are reconstructed on load (`reconstructTurnIds`).
 - Projections: `getDialogueHistory()` (Facts) and `getReasoningTrace()` (Trace) in `llm/chat.d`. Harness control traffic (user-role messages with `userQuery == false`) appears in neither projection.
 - Compression is observable: `SummaryAgent` multicasts a `CompressionCheckpoint` via `addCheckpointListener` exactly once per compression that actually evicts verbatim content, carrying the session id, the evicted message arrays, the evicted turn range, and the final context size. Listeners must not block (the compressing thread is usually the UI thread) and must not throw (throwing listeners are caught and logged).
+
+### Searchable Dialogue History (Phase 1)
+
+- `DialogueIndex` (`llm/rag/dialogue_index.d`) is owned by the agent thread; it spawns an actor worker (`llm/rag/dialogue_worker.d`) on its own thread. The worker owns its own embedder (never the shared agent embedder) and all communication is via value messages only.
+- Episodes are indexed into per-session SQLite WAL databases under `dialogueDir` (config key `dialogueDir`, default `llmfun/data/dialogue`): one `<sessionId>.db` per session, opened/created with the `openDatabase`/`addToDatabase` seam as Topic sources named `d_<sess>__t<turnStart>_<turnEnd>__<epochMillis>` (`encodeTopicName`/`decodeTopicName`; hyphens → underscores in the name).
+- Dialogue dedup identity is topic + content: the worker passes the episode
+  topic name as the `addToDatabase` dedup salt, so byte-identical exchanges in
+  two different turns are indexed separately under their own turn metadata,
+  while re-indexing the same topic+content stays a no-op. A turn split across
+  two compression checkpoints merges: the worker reconstructs the existing
+  episode text (`Database.sourceText`) and indexes `existingText + "\n" + new
+  piece` under the same topic name. The FTS index is rebuilt synchronously after
+  every job that committed chunks (no coalescing). Known no-fix: changing the
+  embedding model or dimensions makes the write path drop and recreate a
+  dialogue DB (all indexed history for that session is lost) — intentional,
+  the loss is the operator's responsibility.
+- Turn metadata is always derived by decoding the DB topic names, never from worker memory (F5). The `queryDialogueHistory` tool (`llm/tool_call/dialogue.d`) takes `maxTurnAge`: 0/negative = no filtering, positive N keeps episodes with `turnEnd >= maxTurn - N` (`maxTurn` computed from the DB).
+- Indexing is asynchronous with a small lag (~2-3 s, R3 — documented in the tool description). Indexing itself is triggered in code at each compression checkpoint (F1). The F7 trigger rule — when the main agent should call `queryDialogueHistory` — lives in `config/prompt/AGENT.md` ("# Dialogue History Retrieval"), user-tunable, with no code-side constant.
+- Admin/reporting: `llmfun rag --dialogue` produces a read-only report over the session databases (per-session source count, indexed turn range, totals). It dispatches before `createRag` (no embedder/local model/primary RAG DB needed), probes each DB's `VersionTbl` for model/dimensions before the read-only open, and only considers D12-valid session file names (path-traversal guard). A session whose read-only open fails (e.g. WAL recovery after an abnormal shutdown, or a read-only directory where `-shm` cannot be created) is skipped with a warning. No destructive `rag` subcommands in Phase 1.
 
 ### Slash Commands
 
