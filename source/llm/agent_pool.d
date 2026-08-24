@@ -210,8 +210,8 @@ version (unittest) {
             chat.setSystemPrompt("sys");
             foreach (i; 0 .. turns) {
                 chat.addUserQuery("q" ~ i.to!string);
-                chat.add(Message(Role.assistant, userQuery: false,
-                        content: "a" ~ i.to!string, thinking: null));
+                chat.add(Message(Role.assistant, userQuery: false, content: "a" ~ i.to!string,
+                        thinking: null));
             }
             ProcessResult result;
             result.status = ProcessResult.Status.ok;

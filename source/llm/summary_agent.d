@@ -214,11 +214,11 @@ struct SummaryAgent {
     private void fireCheckpoint(const CompressionCheckpoint checkpoint) {
         if (checkpointListeners.empty) {
             logger.tracef("Compression checkpoint: session=%s turns=%s..%s evicted(summarized=%s purged=%s inPlace=%s) %s->%s messages, context=%s, summary=%s chars",
-                    checkpoint.sessionId, checkpoint.turnStart, checkpoint.turnEnd,
-                    checkpoint.evictedSummarized.length, checkpoint.evictedPurged.length,
-                    checkpoint.evictedInPlace.length, checkpoint.originalLength,
-                    checkpoint.newLength, checkpoint.newContextSize,
-                    checkpoint.summaryText.length);
+                    checkpoint.sessionId, checkpoint.turnStart,
+                    checkpoint.turnEnd, checkpoint.evictedSummarized.length,
+                    checkpoint.evictedPurged.length, checkpoint.evictedInPlace.length,
+                    checkpoint.originalLength, checkpoint.newLength,
+                    checkpoint.newContextSize, checkpoint.summaryText.length);
             return;
         }
         foreach (listener; checkpointListeners) {
@@ -239,10 +239,8 @@ struct SummaryAgent {
     // the summarized ids) without breaking I1, and carrying
     // save_data["summary_turn_start"]/["summary_turn_end"] = the summarized
     // turn range for the Phase 3 router.
-    private Chat.MessageT buildMergedSummary(string summaryText, long turnStart,
-            long turnEnd) {
-        auto m = Message(Role.assistant, userQuery: false, content: summaryText,
-                thinking: null);
+    private Chat.MessageT buildMergedSummary(string summaryText, long turnStart, long turnEnd) {
+        auto m = Message(Role.assistant, userQuery: false, content: summaryText, thinking: null);
         m.turnId = turnEnd;
         m.saveData["summary_turn_start"] = turnStart;
         m.saveData["summary_turn_end"] = turnEnd;
@@ -376,8 +374,8 @@ struct SummaryAgent {
             if (!result.summaries.empty) {
                 summaryText = mergeSummary(result.summaries);
                 const summaryRange = turnRangeOf(remaining);
-                newHistory ~= buildMergedSummary(summaryText, summaryRange.turnStart,
-                        summaryRange.turnEnd);
+                newHistory ~= buildMergedSummary(summaryText,
+                        summaryRange.turnStart, summaryRange.turnEnd);
             } else {
                 logger.warning("All chunks failed to produce summaries");
             }
@@ -410,8 +408,9 @@ struct SummaryAgent {
             // containing any of them reports turnStart == 0 — Phase 1
             // consumers must filter turnId != 0 (see llm.chat.turnRangeOf
             // docs, M-4).
-            const evictedRange = turnRangeOf(checkpoint.evictedSummarized
-                    ~ checkpoint.evictedPurged ~ checkpoint.evictedInPlace);
+            const evictedRange = turnRangeOf(
+                    checkpoint.evictedSummarized ~ checkpoint.evictedPurged
+                    ~ checkpoint.evictedInPlace);
             checkpoint.turnStart = evictedRange.turnStart;
             checkpoint.turnEnd = evictedRange.turnEnd;
             checkpoint.summaryText = summaryText;
@@ -457,10 +456,11 @@ struct SummaryAgent {
     // no-behavior-change boundary.
     private Chat.MessageT replacementFor(Chat.MessageT original, Role role, string content) {
         JSONValue saveData;
-        original.match!((Message m) { saveData = m.saveData; },
-                (ToolMessage m) { saveData = m.saveData; },
-                (ToolResponse m) { saveData = m.saveData; },
-                (VisionMessage m) { saveData = JSONValue.init; });
+        original.match!((Message m) { saveData = m.saveData; }, (ToolMessage m) {
+            saveData = m.saveData;
+        }, (ToolResponse m) { saveData = m.saveData; }, (VisionMessage m) {
+            saveData = JSONValue.init;
+        });
         // L4: copy the entries into a fresh JSONValue so the replacement does
         // NOT alias the checkpoint payload's saveData AA (JSONValue copies
         // share the underlying object — the same care as chat.d's
@@ -473,8 +473,8 @@ struct SummaryAgent {
             }
             saveData = fresh;
         }
-        auto replacement = Message(role, userQuery: false, content: content, thinking: null,
-                saveData: saveData);
+        auto replacement = Message(role, userQuery: false, content: content,
+                thinking: null, saveData: saveData);
         replacement.turnId = turnIdOf(original);
         return Chat.MessageT(replacement);
     }
@@ -981,25 +981,25 @@ private string stripFences(string text) {
 // --- Task 5 tests: compression checkpoint event (A6) ---
 
 version (unittest) {
-// Synthetic SummaryAgent: no system prompt is set, so requestSummary bails
-// out on the empty prompt and no LLM call is made. The constructor only
-// builds the requester config (no network I/O).
-private SummaryAgent makeTestSummaryAgent() {
-    SummaryModelConfig cfg;
-    cfg.modelName = "test";
-    cfg.contextSize = 8192;
-    cfg.contextChunkSize = 8192;
-    return SummaryAgent(cfg);
-}
+    // Synthetic SummaryAgent: no system prompt is set, so requestSummary bails
+    // out on the empty prompt and no LLM call is made. The constructor only
+    // builds the requester config (no network I/O).
+    private SummaryAgent makeTestSummaryAgent() {
+        SummaryModelConfig cfg;
+        cfg.modelName = "test";
+        cfg.contextSize = 8192;
+        cfg.contextChunkSize = 8192;
+        return SummaryAgent(cfg);
+    }
 
-// JSON tool call entry {"function": {"name": name}, "id": callId} — the
-// shape ToolMessage.getFunctions reads.
-private JSONValue makeToolCall(string name, string callId) {
-    return JSONValue([
-        "function": JSONValue(["name": JSONValue(name)]),
-        "id": JSONValue(callId)
-    ]);
-}
+    // JSON tool call entry {"function": {"name": name}, "id": callId} — the
+    // shape ToolMessage.getFunctions reads.
+    private JSONValue makeToolCall(string name, string callId) {
+        return JSONValue([
+            "function": JSONValue(["name": JSONValue(name)]),
+            "id": JSONValue(callId)
+        ]);
+    }
 }
 
 // C2: the merged summary Message is stamped with the summarized slice's
@@ -1014,9 +1014,7 @@ unittest {
         assert(m.saveData["summary_turn_start"].integer == 3);
         assert(m.saveData["summary_turn_end"].integer == 7);
         assert(m.content == "- summary line");
-    }, (_) {
-        assert(false, "expected a Message");
-    });
+    }, (_) { assert(false, "expected a Message"); });
 }
 
 // H3: replacementFor copies the original's saveData and turnId onto the
@@ -1032,9 +1030,7 @@ unittest {
         assert(m.turnId == 7);
         assert(m.saveData["k"].str == "v");
         assert(m.content == "short");
-    }, (_) {
-        assert(false, "expected a Message");
-    });
+    }, (_) { assert(false, "expected a Message"); });
 }
 
 // A6 end-to-end: compressing a chat that evicts turns 1-5 fires exactly one
@@ -1090,10 +1086,12 @@ unittest {
     assert(sessionId == "sess-1");
     assert(evictedCount == 10);
     // evicted slice: first entry is q1 (turn 1), last is the oversized a5
-    capturedEvicted[0].match!((Message m) { assert(m.content == "q1"); },
-            (_) { assert(false, "expected q1"); });
-    capturedEvicted[$ - 1].match!((Message m) { assert(m.content.length == 9000); },
-            (_) { assert(false, "expected oversized a5"); });
+    capturedEvicted[0].match!((Message m) { assert(m.content == "q1"); }, (_) {
+        assert(false, "expected q1");
+    });
+    capturedEvicted[$ - 1].match!((Message m) { assert(m.content.length == 9000); }, (_) {
+        assert(false, "expected oversized a5");
+    });
     assert(turnRangeOf(capturedEvicted).turnStart == 1);
     assert(turnRangeOf(capturedEvicted).turnEnd == 5);
     // I1: the compressed history stays (turn_id, position)-sorted
@@ -1124,7 +1122,9 @@ unittest {
 unittest {
     int events = 0;
     auto agent = makeTestSummaryAgent();
-    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) { events++; });
+    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
+        events++;
+    });
 
     Chat small;
     small.setSystemPrompt("sys");
@@ -1159,13 +1159,15 @@ unittest {
     Chat chat;
     chat.setSystemPrompt("sys");
     chat.addUserQuery("q1");
-    chat.add(ToolMessage("", JSONValue([makeToolCall("toolA", "call1"),
-            makeToolCall("toolB", "call2")]), JSONValue.init, JSONValue.init));
+    chat.add(ToolMessage("", JSONValue([
+        makeToolCall("toolA", "call1"), makeToolCall("toolB", "call2")
+    ]), JSONValue.init, JSONValue.init));
     chat.add(ToolResponse("resp1", "call1", "toolA", true));
     chat.add(Message(Role.assistant, userQuery: false, content: "a1", thinking: null));
     chat.addUserQuery("q2");
-    chat.add(ToolMessage("", JSONValue([makeToolCall("toolA", "callA1"),
-            makeToolCall("toolA", "callA2")]), JSONValue.init, JSONValue.init));
+    chat.add(ToolMessage("", JSONValue([
+        makeToolCall("toolA", "callA1"), makeToolCall("toolA", "callA2")
+    ]), JSONValue.init, JSONValue.init));
     chat.add(ToolResponse("resp2", "callA1", "toolA", true));
     chat.add(ToolResponse("resp3", "callA2", "toolA", true));
     chat.add(Message(Role.assistant, userQuery: false, content: "a2", thinking: null));
@@ -1194,15 +1196,18 @@ unittest {
     assert(turnStart == 1);
     assert(turnEnd == 2);
     assert(purged.length == 4);
-    purged[0].match!((ToolResponse m) { assert(m.toolCallId == "call1"); },
-            (_) { assert(false, "expected tr1"); });
+    purged[0].match!((ToolResponse m) { assert(m.toolCallId == "call1"); }, (_) {
+        assert(false, "expected tr1");
+    });
     purged[1].match!((ToolMessage m) {
         assert(m.toolCalls.array.length == 2); // pre-removal copy (H4)
     }, (_) { assert(false, "expected tm2"); });
-    purged[2].match!((ToolResponse m) { assert(m.toolCallId == "callA1"); },
-            (_) { assert(false, "expected tr2"); });
-    purged[3].match!((ToolResponse m) { assert(m.toolCallId == "callA2"); },
-            (_) { assert(false, "expected tr3"); });
+    purged[2].match!((ToolResponse m) { assert(m.toolCallId == "callA1"); }, (_) {
+        assert(false, "expected tr2");
+    });
+    purged[3].match!((ToolResponse m) { assert(m.toolCallId == "callA2"); }, (_) {
+        assert(false, "expected tr3");
+    });
     // the kept ToolMessage: original TurnID (1) and only toolB survives
     assert(turnIdOf(chat.getMessages[2]) == 1);
     chat.getMessages[2].match!((ToolMessage m) {
@@ -1243,7 +1248,9 @@ unittest {
 
     int events = 0;
     auto agent = makeTestSummaryAgent();
-    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) { events++; });
+    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
+        events++;
+    });
 
     auto result = agent.compress(chat);
 
@@ -1278,7 +1285,9 @@ unittest {
 
     int events = 0;
     auto agent = makeTestSummaryAgent();
-    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) { events++; });
+    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
+        events++;
+    });
 
     auto result = agent.compress(chat, null, ["toolA"]);
     assert(!result.compressed);
@@ -1306,7 +1315,9 @@ unittest {
     int firstEvents = 0;
     int throwingEvents = 0;
     auto agent = makeTestSummaryAgent();
-    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) { firstEvents++; });
+    agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
+        firstEvents++;
+    });
     agent.addCheckpointListener((const SummaryAgent.CompressionCheckpoint cp) {
         throwingEvents++;
         throw new Exception("listener boom");
@@ -1357,8 +1368,8 @@ unittest {
     chat.addUserQuery("q1");
     chat.add(Message(Role.assistant, userQuery: false, content: "a1", thinking: null));
     chat.addUserQuery("q2");
-    chat.add(Message(Role.assistant, userQuery: false, content: OversizedReply, thinking: null,
-            saveData: JSONValue(["note": JSONValue(42)])));
+    chat.add(Message(Role.assistant, userQuery: false, content: OversizedReply,
+            thinking: null, saveData: JSONValue(["note": JSONValue(42)])));
     chat.addUserQuery("q3");
     chat.add(Message(Role.assistant, userQuery: false, content: "a3", thinking: null));
     assert(chat.getMessages.length == 7);
@@ -1395,13 +1406,13 @@ unittest {
     }, (_) { assert(false, "expected the truncated replacement"); });
     // L4 (I-2): the replacement's saveData is an independent copy — mutating
     // it in place must not affect the checkpoint payload's original.
-    chat.getMessages[4].match!((Message m) {
-        m.saveData["mutated"] = true;
-    }, (_) { assert(false, "expected the truncated replacement"); });
+    chat.getMessages[4].match!((Message m) { m.saveData["mutated"] = true; }, (_) {
+        assert(false, "expected the truncated replacement");
+    });
     inPlace[0].match!((Message m) {
         assert(m.saveData["note"].integer == 42);
         assert(("mutated" in m.saveData) is null,
-                "payload original must not alias the live replacement");
+            "payload original must not alias the live replacement");
     }, (_) { assert(false, "expected the original oversized a2"); });
     // I1: the compressed history stays sorted
     long prev = 0;
@@ -1440,14 +1451,13 @@ unittest {
     // same call id (tmB vs resp2 both use "call2").
     string markerOf(Chat.MessageT m) {
         string marker;
-        m.match!((Message x) { marker = "msg:" ~ x.content; },
-                (ToolMessage x) {
-                    marker = "tm:";
-                    if (x.toolCalls.type == JSONType.array && !x.toolCalls.array.empty)
-                        marker ~= x.toolCalls.array[0]["id"].str;
-                },
-                (ToolResponse x) { marker = "tr:" ~ x.toolCallId; },
-                (VisionMessage x) { marker = "vis:" ~ x.content; });
+        m.match!((Message x) { marker = "msg:" ~ x.content; }, (ToolMessage x) {
+            marker = "tm:";
+            if (x.toolCalls.type == JSONType.array && !x.toolCalls.array.empty)
+                marker ~= x.toolCalls.array[0]["id"].str;
+        }, (ToolResponse x) { marker = "tr:" ~ x.toolCallId; }, (VisionMessage x) {
+            marker = "vis:" ~ x.content;
+        });
         return marker;
     }
 
@@ -1513,12 +1523,10 @@ private struct SpikeCheckpointRecord {
     long newContextSize;
 
     static SpikeCheckpointRecord of(const SummaryAgent.CompressionCheckpoint cp) {
-        return SpikeCheckpointRecord(
-            cp.timestamp, cp.sessionId, cp.turnStart, cp.turnEnd,
-            cp.evictedSummarized.dup,
-            cp.evictedPurged.dup,
-            cp.evictedInPlace.dup,
-            cp.summaryText, cp.originalLength, cp.newLength, cp.newContextSize);
+        return SpikeCheckpointRecord(cp.timestamp, cp.sessionId, cp.turnStart,
+                cp.turnEnd, cp.evictedSummarized.dup, cp.evictedPurged.dup,
+                cp.evictedInPlace.dup, cp.summaryText, cp.originalLength,
+                cp.newLength, cp.newContextSize);
     }
 }
 
@@ -1560,8 +1568,7 @@ unittest {
         chat.addUserQuery("q" ~ turn.to!string);
         if (turn < 8) {
             const reply = (turn == 5) ? OversizedReply : "ok";
-            chat.add(Message(Role.assistant, userQuery: false, content: reply,
-                    thinking: null));
+            chat.add(Message(Role.assistant, userQuery: false, content: reply, thinking: null));
         }
     }
     assert(chat.getMessages.length == 16);
@@ -1589,8 +1596,7 @@ unittest {
         chat.addUserQuery("q" ~ turn.to!string);
         if (turn < 13) {
             const reply = (turn == 10) ? OversizedReply : "ok";
-            chat.add(Message(Role.assistant, userQuery: false, content: reply,
-                    thinking: null));
+            chat.add(Message(Role.assistant, userQuery: false, content: reply, thinking: null));
         }
     }
     assert(chat.getMessages.length == 16);
@@ -1660,9 +1666,10 @@ unittest {
     // The consumer-visible dump: counts, summary text and session ids per
     // checkpoint, in delivery order (the Phase-1 indexer's first step).
     foreach (i, r; records) {
-        logger.tracef("spike checkpoint %s: session=%s turns=%s..%s summarized=%s purged=%s inPlace=%s summaryChars=%s",
-                i, r.sessionId, r.turnStart, r.turnEnd,
-                r.evictedSummarized.length, r.evictedPurged.length,
+        logger.tracef(
+                "spike checkpoint %s: session=%s turns=%s..%s summarized=%s purged=%s inPlace=%s summaryChars=%s",
+                i, r.sessionId, r.turnStart,
+                r.turnEnd, r.evictedSummarized.length, r.evictedPurged.length,
                 r.evictedInPlace.length, r.summaryText.length);
     }
 }
@@ -1694,12 +1701,11 @@ unittest {
         Chat.MessageT(Message(Role.user, userQuery: true, content: "q1", thinking: null))
     ];
     synthetic.evictedPurged = [
-        Chat.MessageT(ToolMessage("", JSONValue([makeToolCall("toolA", "call1")]),
-                JSONValue.init, JSONValue.init))
+        Chat.MessageT(ToolMessage("", JSONValue([makeToolCall("toolA",
+                    "call1")]), JSONValue.init, JSONValue.init))
     ];
     synthetic.evictedInPlace = [
-        Chat.MessageT(Message(Role.assistant, userQuery: false, content: "a2",
-                thinking: null))
+        Chat.MessageT(Message(Role.assistant, userQuery: false, content: "a2", thinking: null))
     ];
     agent.fireCheckpoint(synthetic);
 
@@ -1715,7 +1721,7 @@ unittest {
     assert(seen[0].evictedSummarized.length == 1);
     assert(seen[0].evictedPurged.length == 1);
     assert(seen[0].evictedInPlace.length == 1);
-    seen[0].evictedInPlace[0].match!((Message m) {
-        assert(m.content == "a2");
-    }, (_) { assert(false, "expected a2"); });
+    seen[0].evictedInPlace[0].match!((Message m) { assert(m.content == "a2"); }, (_) {
+        assert(false, "expected a2");
+    });
 }

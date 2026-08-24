@@ -183,7 +183,8 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext, Completion
             import std.file : timeLastModified;
 
             try {
-                return memoryVfs.getAllFiles.map!(a => MemoryTopic(name: a.baseName.stripExtension, lastModified: timeLastModified(a))).array;
+                return memoryVfs.getAllFiles.map!(a => MemoryTopic(name: a.baseName.stripExtension,
+                        lastModified: timeLastModified(a))).array;
             } catch (Exception e) {
                 logger.warning("unable to read memory directories: ", e.msg);
             }

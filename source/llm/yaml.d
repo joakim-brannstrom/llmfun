@@ -89,49 +89,49 @@ JSONValue yamlToJson(Node node) {
 
 private JSONValue yamlToJsonImpl(Node node, ref size_t visited) {
     if (++visited > MaxYamlToJsonNodes) {
-        throw new Exception(("YAML conversion aborted: more than %d nodes"
-                ~ " (possible alias expansion bomb)").format(MaxYamlToJsonNodes));
+        throw new Exception(("YAML conversion aborted: more than %d nodes" ~ " (possible alias expansion bomb)")
+                .format(MaxYamlToJsonNodes));
     }
     JSONValue output;
     switch (node.type) {
-        case NodeType.null_:
-            output = JSONValue(null);
-            break;
-        case NodeType.boolean:
-            output = JSONValue(node.as!bool);
-            break;
-        case NodeType.integer:
-            output = JSONValue(node.as!long);
-            break;
-        case NodeType.decimal:
-            output = JSONValue(node.as!real);
-            break;
-        case NodeType.string:
-            output = JSONValue(node.as!string);
-            break;
-        case NodeType.timestamp:
-            output = JSONValue(node.as!SysTime.toISOExtString());
-            break;
-        case NodeType.sequence:
-            output = JSONValue(JSONValue[].init);
-            foreach (Node child; node)
-                output.array ~= yamlToJsonImpl(child, visited);
-            break;
-        case NodeType.mapping:
-            output = JSONValue(string[string].init);
-            foreach (Node keyNode, Node valueNode; node)
-                output[keyNode.as!string] = yamlToJsonImpl(valueNode, visited);
-            break;
-        case NodeType.binary:
-            logger.warningf("YAML binary value ignored (converted to null)");
-            output = JSONValue(null);
-            break;
-        default:
-            // NodeType.invalid (and NodeType.merge, which the composer resolves
-            // at load time — this is dead defensive code).
-            logger.warningf("Unexpected YAML node type %s ignored (converted to null)", node.type);
-            output = JSONValue(null);
-            break;
+    case NodeType.null_:
+        output = JSONValue(null);
+        break;
+    case NodeType.boolean:
+        output = JSONValue(node.as!bool);
+        break;
+    case NodeType.integer:
+        output = JSONValue(node.as!long);
+        break;
+    case NodeType.decimal:
+        output = JSONValue(node.as!real);
+        break;
+    case NodeType.string:
+        output = JSONValue(node.as!string);
+        break;
+    case NodeType.timestamp:
+        output = JSONValue(node.as!SysTime.toISOExtString());
+        break;
+    case NodeType.sequence:
+        output = JSONValue(JSONValue[].init);
+        foreach (Node child; node)
+            output.array ~= yamlToJsonImpl(child, visited);
+        break;
+    case NodeType.mapping:
+        output = JSONValue(string[string].init);
+        foreach (Node keyNode, Node valueNode; node)
+            output[keyNode.as!string] = yamlToJsonImpl(valueNode, visited);
+        break;
+    case NodeType.binary:
+        logger.warningf("YAML binary value ignored (converted to null)");
+        output = JSONValue(null);
+        break;
+    default:
+        // NodeType.invalid (and NodeType.merge, which the composer resolves
+        // at load time — this is dead defensive code).
+        logger.warningf("Unexpected YAML node type %s ignored (converted to null)", node.type);
+        output = JSONValue(null);
+        break;
     }
     return output;
 }
@@ -145,8 +145,8 @@ private JSONValue yamlToJsonImpl(Node node, ref size_t visited) {
 JSONValue loadYamlValue(Path filePath) {
     auto node = loadYamlNode(filePath);
     if (node.type != NodeType.mapping) {
-        throw new Exception(
-                "YAML config %s: root must be a mapping, got %s".format(filePath, node.type));
+        throw new Exception("YAML config %s: root must be a mapping, got %s".format(filePath,
+                node.type));
     }
     try {
         return yamlToJson(node);

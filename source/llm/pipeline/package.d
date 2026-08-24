@@ -142,7 +142,8 @@ class PipelineAgent : IBasicAgent {
             // Retry nudge is harness traffic (H1): continue the current turn
             // instead of opening a new one, and keep it out of the Facts
             // projection. addUserQuery would fragment the node's logical turn.
-            wrappedAgent.addContinueMessage("You stopped without calling 'pipelineOutput'. Please continue your work, "
+            wrappedAgent.addContinueMessage(
+                    "You stopped without calling 'pipelineOutput'. Please continue your work, "
                     ~ "or call 'pipelineOutput' followed by 'taskDone' if you're finished.");
         }
     }

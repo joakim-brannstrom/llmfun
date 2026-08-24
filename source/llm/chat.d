@@ -173,12 +173,8 @@ struct Chat {
         foreach (msg; history) {
             const bool isDialogue = msg.match!((Message m) {
                 return (m.role == Role.user && m.isUserQuery)
-                        || (m.role == Role.assistant && !m.content.empty);
-            }, (ToolMessage m) {
-                return m.isFinalAnswer();
-            }, (_) {
-                return false;
-            });
+                    || (m.role == Role.assistant && !m.content.empty);
+            }, (ToolMessage m) { return m.isFinalAnswer(); }, (_) { return false; });
             if (isDialogue) {
                 result ~= msg;
             }
@@ -203,13 +199,9 @@ struct Chat {
                 if (m.role == Role.user && !m.isUserQuery)
                     return false; // H1: harness control traffic is neither projection
                 return !m.thinking.empty;
-            }, (ToolMessage m) {
-                return !m.isFinalAnswer();
-            }, (ToolResponse m) {
+            }, (ToolMessage m) { return !m.isFinalAnswer(); }, (ToolResponse m) {
                 return true;
-            }, (_) {
-                return false;
-            });
+            }, (_) { return false; });
             if (isTrace) {
                 result ~= msg;
             }
@@ -267,8 +259,8 @@ struct Chat {
                     break;
                 }
             }
-            reconstructTurnIds(history[startLen .. $],
-                    getValue!long(json, (v) => v["next_turn_id"].integer, 0L));
+            reconstructTurnIds(history[startLen .. $], getValue!long(json,
+                    (v) => v["next_turn_id"].integer, 0L));
 
             logger.tracef("Loaded previous chat history. Size %s->%s", startLen, history.length);
         } catch (Exception e) {
@@ -288,28 +280,21 @@ struct Chat {
         size_t modified;
         foreach (ref msg; history) {
             bool changed = false;
-            msg.match!(
-                (ref Message a) {
-                    changed = sanitizeField(a.content);
-                    if (sanitizeField(a.thinking))
-                        changed = true;
-                },
-                (ref ToolMessage a) {
-                    changed = sanitizeField(a.thinking);
-                },
-                (ref ToolResponse a) {
-                    changed = sanitizeField(a.content);
-                    if (sanitizeField(a.toolCallId))
-                        changed = true;
-                    if (sanitizeField(a.toolName))
-                        changed = true;
-                },
-                (ref VisionMessage a) {
-                    changed = sanitizeField(a.content);
-                    if (sanitizeField(a.imageDataUrl))
-                        changed = true;
-                }
-            );
+            msg.match!((ref Message a) {
+                changed = sanitizeField(a.content);
+                if (sanitizeField(a.thinking))
+                    changed = true;
+            }, (ref ToolMessage a) { changed = sanitizeField(a.thinking); }, (ref ToolResponse a) {
+                changed = sanitizeField(a.content);
+                if (sanitizeField(a.toolCallId))
+                    changed = true;
+                if (sanitizeField(a.toolName))
+                    changed = true;
+            }, (ref VisionMessage a) {
+                changed = sanitizeField(a.content);
+                if (sanitizeField(a.imageDataUrl))
+                    changed = true;
+            });
             if (changed)
                 modified++;
         }
@@ -319,8 +304,7 @@ struct Chat {
     // A5 reconstruction for loaded entries: seed the counter from the header
     // high-water mark, then fill missing stamps in file order. Entries that
     // already carry a turn_id are never re-stamped (H2).
-    private void reconstructTurnIds(MessageT[] entries, long headerNextTurnId)
-            @safe nothrow {
+    private void reconstructTurnIds(MessageT[] entries, long headerNextTurnId) @safe nothrow {
         long maxStamped = 0;
         foreach (entry; entries) {
             const id = turnIdOf(entry);
@@ -461,11 +445,8 @@ mixin template TurnIdMixin() {
 
 // Reads a message's typed TurnID field. 0 = no turn. Pure field read, no JSON.
 long turnIdOf(Chat.MessageT msg) @safe pure nothrow @nogc {
-    return msg.match!(
-        (Message m) => m.turnId,
-        (ToolMessage m) => m.turnId,
-        (ToolResponse m) => m.turnId,
-        (VisionMessage m) => m.turnId);
+    return msg.match!((Message m) => m.turnId, (ToolMessage m) => m.turnId,
+            (ToolResponse m) => m.turnId, (VisionMessage m) => m.turnId);
 }
 
 // (min, max) TurnID over a slice. Phase 1 uses this directly as chunk metadata
@@ -473,8 +454,7 @@ long turnIdOf(Chat.MessageT msg) @safe pure nothrow @nogc {
 // (turnId == 0) participate in the range: a slice containing any of them yields
 // turnStart == 0. Phase 1 consumers must filter turnId != 0 or treat 0 as
 // "before the first stamped turn".
-Tuple!(long, "turnStart", long, "turnEnd") turnRangeOf(const(Chat.MessageT)[] msgs)
-        @safe pure nothrow @nogc {
+Tuple!(long, "turnStart", long, "turnEnd") turnRangeOf(const(Chat.MessageT)[] msgs) @safe pure nothrow @nogc {
     if (msgs.length == 0)
         return tuple!("turnStart", "turnEnd")(0L, 0L);
     long lo = long.max;
@@ -492,11 +472,9 @@ Tuple!(long, "turnStart", long, "turnEnd") turnRangeOf(const(Chat.MessageT)[] ms
 // Writes the typed field onto the message. Plain field store — the stamp
 // cannot fail (N3).
 private void stampEntry(ref Chat.MessageT entry, long id) @safe nothrow {
-    entry.match!(
-        (ref Message m) => m.turnId = id,
-        (ref ToolMessage m) => m.turnId = id,
-        (ref ToolResponse m) => m.turnId = id,
-        (ref VisionMessage m) => m.turnId = id);
+    entry.match!((ref Message m) => m.turnId = id,
+            (ref ToolMessage m) => m.turnId = id, (ref ToolResponse m) => m.turnId = id,
+            (ref VisionMessage m) => m.turnId = id);
 }
 
 // True only for user-query Messages whose save_data["user"] is the JSON
@@ -1100,7 +1078,9 @@ unittest {
     auto t = ToolMessage(null, JSONValue([JSONValue("call1")]));
     t.turnId = 2;
 
-    Chat.MessageT[] slice = [Chat.MessageT(m1), Chat.MessageT(t), Chat.MessageT(m2)];
+    Chat.MessageT[] slice = [
+        Chat.MessageT(m1), Chat.MessageT(t), Chat.MessageT(m2)
+    ];
     const range = turnRangeOf(slice);
     assert(range.turnStart == 2);
     assert(range.turnEnd == 9);
@@ -1349,7 +1329,6 @@ unittest {
     assert(chat.currentTurnId() == 1);
 }
 
-
 // --- Test: vision message round-tripped through fromUser keeps turn_id (M1) ---
 unittest {
     auto entry = parseJSON(`{
@@ -1449,8 +1428,8 @@ unittest {
     chat.add(ToolResponse("4", "call-math", "math", true));
     JSONValue sd;
     sd["taskDoneAnswer"] = JSONValue("The answer is 4.");
-    chat.add(ToolMessage("final reasoning", JSONValue([JSONValue("call-done")]),
-            JSONValue.init, sd));
+    chat.add(ToolMessage("final reasoning",
+            JSONValue([JSONValue("call-done")]), JSONValue.init, sd));
     chat.add(ToolResponse("done", "call-done", "taskDone", true));
 
     // Turn 2: query -> direct assistant final with content + thinking (H1).
@@ -1463,13 +1442,12 @@ unittest {
 
     // Dialogue: query1, final-answer ToolMessage, query2, assistant final.
     assert(dialogue.length == 4);
-    assert(dialogue[0].match!((Message m) => m.isUserQuery && m.content == "what is 2+2?",
-            (_) => false));
+    assert(dialogue[0].match!((Message m) => m.isUserQuery
+            && m.content == "what is 2+2?", (_) => false));
     assert(dialogue[1].match!((ToolMessage m) => m.isFinalAnswer(), (_) => false));
     assert(dialogue[2].match!((Message m) => m.isUserQuery && m.content == "explain it",
             (_) => false));
-    assert(dialogue[3].match!((Message m) => m.content == "Because 2 and 2 make 4.",
-            (_) => false));
+    assert(dialogue[3].match!((Message m) => m.content == "Because 2 and 2 make 4.", (_) => false));
 
     // Trace: non-final tool call, both tool responses, and the assistant final
     // that carries thinking (dual classification, H1).
@@ -1542,8 +1520,7 @@ unittest {
     chat.addUserQuery("q");
     // A stream can yield reasoning without text: agent:499-501 adds the
     // Message when content or reasoning is non-empty, so this shape is live.
-    chat.add(Message(Role.assistant, userQuery: false, content: null,
-            thinking: "reasoning without a text response"));
+    chat.add(Message(Role.assistant, userQuery: false, content: null, thinking: "reasoning without a text response"));
 
     auto dialogue = chat.getDialogueHistory;
     auto trace = chat.getReasoningTrace;
@@ -1669,13 +1646,12 @@ unittest {
     chat.addUserQuery("q2"); // turn 2
     chat.add(Message(Role.assistant, userQuery: false, content: "a2", thinking: null));
 
-    auto summary = Message(Role.assistant, userQuery: false,
-            content: "merged summary of turn 1", thinking: null);
+    auto summary = Message(Role.assistant, userQuery: false, content: "merged summary of turn 1",
+            thinking: null);
     summary.turnId = 1; // turnEnd of the summarized slice (C2)
     Chat.MessageT[] replacement = [
         chat.getMessages[0], // system prompt, turn 0
-        Chat.MessageT(summary),
-        chat.getMessages[3], // q2, turn 2
+        Chat.MessageT(summary), chat.getMessages[3], // q2, turn 2
         chat.getMessages[4], // a2, turn 2
     ];
     chat.setHistory(replacement);
@@ -1707,7 +1683,8 @@ unittest {
     chat.add(Message(Role.system, userQuery: false, content: "sys", thinking: null));
     chat.add(Message(Role.user, userQuery: true, content: "héllo 🚀", thinking: "über dacht"));
     chat.add(Message(Role.assistant, userQuery: false, content: "ok", thinking: "nope"));
-    chat.add(ToolMessage("dacht", parseJSON("[{\"id\": \"c1\", \"type\": \"function\", "
+    chat.add(ToolMessage("dacht", parseJSON(
+            "[{\"id\": \"c1\", \"type\": \"function\", "
             ~ "\"function\": {\"name\": \"t\", \"arguments\": \"{}\"}}]")));
     chat.add(ToolResponse("result", "c1", "t", true));
     chat.add(VisionMessage("caption", "data:image/png;base64,AAAA"));
@@ -1746,7 +1723,8 @@ unittest {
     Chat chat;
     chat.add(Message(Role.system, userQuery: false, content: "sys", thinking: null));
     chat.add(Message(Role.user, userQuery: true, content: "a\x80b", thinking: "t\xFFx"));
-    chat.add(ToolMessage("think\x80", parseJSON("[{\"id\": \"c1\", \"type\": \"function\", "
+    chat.add(ToolMessage("think\x80", parseJSON(
+            "[{\"id\": \"c1\", \"type\": \"function\", "
             ~ "\"function\": {\"name\": \"t\", \"arguments\": \"{}\"}}]")));
     chat.add(ToolResponse("out\x80\x81", "id\xFF", "name\x80", true));
     chat.add(VisionMessage("cap\x80", "data:img\xFF"));

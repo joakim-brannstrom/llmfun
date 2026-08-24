@@ -56,7 +56,10 @@ private string getMemorySummary(MemoryContext ctx, string topicName) {
         auto content = ctx.readMemory(topicName).match!((string a) => a, (_) => "");
 
         string summary = "error: no summary available";
-        foreach (trimmed; content.splitLines.map!(a => a.strip).filter!(a => !a.empty).take(1)) {
+        foreach (trimmed; content.splitLines
+                .map!(a => a.strip)
+                .filter!(a => !a.empty)
+                .take(1)) {
             if (trimmed.length > maxSummaryLen) {
                 auto cutoff = trimmed[0 .. maxSummaryLen];
                 auto spacePos = cutoff.lastIndexOf(" ");
@@ -173,9 +176,10 @@ ExecuteFuncResult getMemoryTopics(Context baseCtx, GetMemoryTopicsParams params)
 
     auto buf = appender!string();
     buf.put("Available memory topics:\n");
-    foreach (topic; topics.sort!((a,b) => a.lastModified > b.lastModified)) {
+    foreach (topic; topics.sort!((a, b) => a.lastModified > b.lastModified)) {
         auto summary = getMemorySummary(ctx, topic.name);
-        buf.put(i"\n# Memory: $(topic.name)\nSummary: $(summary)\nLast modified: $(topic.lastModified.toISOExtString(0))\n\n".text);
+        buf.put(i"\n# Memory: $(topic.name)\nSummary: $(summary)\nLast modified: $(
+                topic.lastModified.toISOExtString(0))\n\n".text);
     }
     return ExecuteFuncResult(buf.data, success: true);
 }

@@ -500,7 +500,9 @@ void makeDefaultFileStructure() {
 void makeLocalSetupFileStructure(LlmConfig conf) {
     import std.file : mkdirRecurse;
 
-    foreach (path; [conf.dataDir, conf.workArea, conf.dataDir ~ "chat", conf.dataDir ~ "memory"].filter!(a => !a.exists)) {
+    foreach (path; [
+        conf.dataDir, conf.workArea, conf.dataDir ~ "chat", conf.dataDir ~ "memory"
+    ].filter!(a => !a.exists)) {
         try {
             logger.info("Creating directory ", path);
             mkdirRecurse(path);
