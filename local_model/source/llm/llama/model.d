@@ -154,11 +154,12 @@ struct LlamaParams {
  *
  * Returns the modified `LlamaParams` so calls can be chained.
  */
-LlamaParams contextEmbedding(LlamaParams params, uint ctxSize, uint nBatch, uint uBatch, int threads) {
+LlamaParams contextEmbedding(LlamaParams params, uint ctxSize, uint nBatch,
+        uint uBatch, int threads, int threadsBatch) {
     import std.parallelism : totalCPUs;
 
     params.ctxParams.n_threads = threads <= 0 ? totalCPUs : threads;
-    params.ctxParams.n_threads_batch = threads <= 0 ? totalCPUs : threads;
+    params.ctxParams.n_threads_batch = threadsBatch <= 0 ? totalCPUs : threadsBatch;
 
     params.ctxParams.no_perf = true;
     params.ctxParams.embeddings = true;

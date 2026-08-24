@@ -159,5 +159,9 @@ embedConfig:
     backoffMs: 500
     apiKey: ""
   name: nomic-embed-text
-  nBatch: 512
+  chunkSize: 512
   dimensions: 768
+  nBatch: 512
+  uBatch: 512
+  cpuThreads: 0 # as many as there are cores
+  cpuThreadsBatch: 0 # as many as there are cores

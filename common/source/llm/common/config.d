@@ -79,6 +79,7 @@ struct LocalEmbedConfig {
     bool onlyCpu = true;
     Path modelPath;
     long cpuThreads; // 0: use as many as there are cores
+    long cpuThreadsBatch; // 0: use as many as there are cores
     long uBatch = 512;
     long nBatch = 512;
 }
