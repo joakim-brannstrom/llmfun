@@ -184,6 +184,8 @@ dub build --config=llmfun_test              # Build test utility (manual testing
   }
   ```
 
+- **NEVER** catch an Error or Throwable exception.
+
 ### Attributes
 
 - **@safe:** Mark functions `@safe` whenever possible. If the compiler rejects it,
