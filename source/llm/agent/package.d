@@ -794,6 +794,17 @@ struct StreamResponse {
     }
 
     void parseStat(ref JSONValue json) @safe nothrow {
+        void mergeTokenRatio(double newV) {
+            // smooth out "jitter" in the ratio. If the ratio is just set to
+            // the last value there will be a large "difference" that never
+            // "correct" itself when the LLM go between generating a lof of
+            // thinking and then go to generating code.
+            if (stat.charTokenRatio < 1.0)
+                stat.charTokenRatio = newV;
+            else
+                stat.charTokenRatio = stat.charTokenRatio * 0.8 + newV * 0.2;
+        }
+
         try {
             if (auto timings = "timings" in json) {
                 // llama.cpp and maybe others
@@ -809,8 +820,7 @@ struct StreamResponse {
                         (v) => v["predicted_n"].integer, stat.startContext - oldCtx);
 
                 if (completedTokens > 0)
-                    stat.charTokenRatio = cast(double) accumulatedChars / (
-                            cast(double) completedTokens);
+                    mergeTokenRatio(cast(double) accumulatedChars / (cast(double) completedTokens));
             } else if (auto usage = "usage" in json) {
                 // deepseek and maybe others
                 stat.startContext = getValue(*usage, (v) => v["total_tokens"].integer, stat.context);
@@ -825,7 +835,7 @@ struct StreamResponse {
                     stat.promptPerSecond = cast(double) pTokens / cast(double)(s);
 
                 if (cTokens > 0)
-                    stat.charTokenRatio = cast(double) accumulatedChars / (cast(double) cTokens);
+                    mergeTokenRatio(cast(double) accumulatedChars / (cast(double) cTokens));
             } else if (stat.tokenCount > 0) {
                 ravg.put(stat.tokenCount);
                 stat.predictedPerSecond = ravg.avg();
