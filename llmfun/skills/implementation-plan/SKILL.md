@@ -6,7 +6,7 @@ description: >-
   writing code. Triggers on: implementation plan, plan implementation, break
   down, task breakdown, task plan, feature plan, design tasks, what to build,
   plan the work, task order.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Implementation Plan Skill
@@ -27,7 +27,7 @@ Use this skill when:
 ## Rules
 
 - **Plan, don't code**: Produce tasks that describe what to build, not the code itself.
-- **Write the plan to a file**: Always save the plan and inform the user.
+- **Write the plan to files**: Save the overview and each task file to `plan/` and inform the user.
 - **Small, verifiable tasks**: Each task should be small enough to implement and verify in one pass.
 - **Dependency order**: Order tasks so foundations come before dependents.
 - **No significant code in tasks**: Tasks describe changes, not implementations.
@@ -38,17 +38,18 @@ Follow the planning protocol. See `references/workflow.md` for detailed steps.
 
 1. **Understand Requirements** — Read the design/use case, identify scope, note constraints and dependencies.
 2. **Survey the Codebase** — Read existing code at integration points, identify patterns, note what already exists.
-3. **Decompose into Tasks** — Break the feature into small, focused, verifiable tasks.
+3. **Decompose into Tasks** — Break the feature into small, focused, verifiable tasks. Draft each task file as you go.
 4. **Order by Dependency** — Arrange tasks so each builds on previously completed ones.
-5. **Write the Plan** — Document each task with description, files to change, and verification criteria.
-6. **Save and Report** — Write the plan to a file and present the task summary to the user.
+5. **Write the Overview** — Finalize each task file and write the overview to `plan/implementation_plan.md`: task order, cross-cutting concerns, and everything that is not the details of the individual tasks.
+6. **Revise** — Ensure the tasks, their content, and their order are consistent and logical; renumber task files if the order changed.
+7. **Save and Report** — Write the overview and task files to `plan/` and present the task summary to the user.
 
 ## Task Template
 
-Each task in the plan follows this structure (see `references/output-format.md`):
+Each task file (`task_NN.md`) follows this structure (see `references/output-format.md`):
 
 ```markdown
-## Task: [Task Name]
+## Task [Number]: [Task Name]
 
 ### Description
 [What this task accomplishes]

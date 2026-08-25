@@ -1,5 +1,8 @@
 # Implementation Plan Workflow — Detailed Steps
 
+All plan files shall be saved in the directory `plan/` (relative to the
+project root).
+
 ## Phase 1: Understand Requirements
 
 - **Read the design/use case**: Understand what needs to be built at a high level.
@@ -35,6 +38,10 @@ Break the feature into small, focused tasks. Each task should:
 - "Implement the entire feature" — too big
 - "Fix a typo" — too small (inline in another task)
 
+Write each task to `task_NN.md` (zero-padded, e.g. `task_01.md`) as soon as
+its scope and details are decided. The task will be revised later, but
+capturing the decomposition early is more important than getting it perfect.
+
 ## Phase 4: Order by Dependency
 
 Arrange tasks so each builds on previously completed ones:
@@ -54,7 +61,7 @@ Arrange tasks so each builds on previously completed ones:
 
 ## Phase 5: Write the Plan
 
-For each task, document:
+Write each task to its own file (`task_NN.md`). Each task documents:
 
 - **Task name**: Clear, action-oriented title
 - **Description**: What this task accomplishes (not how)
@@ -62,9 +69,27 @@ For each task, document:
 - **Verification checklist**: Criteria for marking the task complete
 - **Notes**: Any constraints, warnings, or context
 
-## Phase 6: Save and Report
+Write the implementation overview that ties all tasks together to
+`plan/implementation_plan.md`. It contains:
 
-- **Write the plan to a file**: Save as markdown in an accessible location.
+- **Overview**: What the plan as a whole implements
+- **Task Order**: An ordered list of the task files (e.g. `1. task_01.md — Create User Model`)
+- **Cross-cutting Concerns**: Anything more than one task depends on — shared types, conventions, test setup, error handling style
+
+Keep cross-cutting items terse. If a specific task depends on one, restate
+the relevant bit in that task's Notes — the executing skill reads only the
+task file.
+
+## Phase 6: Revise
+
+Revise the tasks, their content, and their order to ensure that the plan is
+consistent and logical. Revision may add, split, merge, or delete task files.
+If the order changed, renumber the task files and update the ordered list in
+`implementation_plan.md`.
+
+## Phase 7: Save and Report
+
+- **Write the files**: Ensure the overview and all task files are present in `plan/`.
 - **Present task summary**: Show the user the ordered task list.
 - **Explain dependencies**: Note why tasks are ordered as they are.
 - **Invite review**: Ask the user if the plan makes sense before execution.

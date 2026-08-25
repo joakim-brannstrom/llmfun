@@ -1,8 +1,8 @@
 # Implementation Plan Output Format
 
-## Plan Header
+## Overview File
 
-Start the plan with a header:
+The overview is saved to `plan/implementation_plan.md`. Start it with:
 
 ```markdown
 # Implementation Plan: [Feature/Use Case Name]
@@ -12,12 +12,22 @@ Start the plan with a header:
 
 ## Task Order
 Tasks should be executed in the order listed. Each task depends on the
-tasks before it. Tasks can be executed by the `code-task` skill.
+tasks before it. Tasks can be executed by the `code-task` skill — point it
+at the task file.
+
+1. task_01.md — [Task 1 name]
+2. task_02.md — [Task 2 name]
+
+## Cross-cutting Concerns
+[Anything more than one task depends on: shared types, conventions, test
+setup, error handling style. Keep items terse — if a specific task depends
+on one, restate it in that task's Notes.]
 ```
 
 ## Task Template
 
-Each task in the plan follows this structure:
+Each task is written to its own file.
+Each task file follows this structure:
 
 ```markdown
 ## Task [Number]: [Task Name]
@@ -40,8 +50,12 @@ Each task in the plan follows this structure:
 [Any additional context, constraints, or warnings]
 ```
 
+The filename is `task_NN.md`, with the number zero-padded (e.g. `task_01.md`,
+`task_12.md`) so that lexicographic sort matches numeric order.
+
 ## Example Plan
 
+`plan/implementation_plan.md`:
 ```markdown
 # Implementation Plan: User Authentication
 
@@ -51,9 +65,18 @@ login endpoint, token generation, and middleware.
 
 ## Task Order
 Tasks should be executed in the order listed. Each task depends on the
-tasks before it. Tasks can be executed by the `code-task` skill.
+tasks before it. Tasks can be executed by the `code-task` skill — point it
+at the task file.
 
-## Task: Create User Model
+1. task_01.md — Create User Model
+
+## Cross-cutting Concerns
+All models follow the patterns in models/. Passwords are hashed with bcrypt.
+```
+
+In `task_01.md`:
+```markdown
+## Task 1: Create User Model
 
 ### Description
 Define the User data structure and database schema for authentication.
