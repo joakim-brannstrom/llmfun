@@ -861,7 +861,7 @@ struct StreamResponse {
                     txtLen = arg.length;
                 } else {
                     auto name = jcall["function"]["name"].str;
-                    auto arg = jcall["function"]["arguments"].str;
+                    auto arg = getValue(jcall, (v) => v["function"]["arguments"].str, null); // arguments is optional for a new tool call
                     toolCalls[index] = ToolCall(id: jcall["id"].str, name: name, arguments: arg);
                     txtLen = arg.length + name.length;
                 }
