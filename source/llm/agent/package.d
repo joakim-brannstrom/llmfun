@@ -234,7 +234,7 @@ Output only the taskDone tool call. No other text.)";
 
     ProcessResult process(bool delegate() interrupt) @trusted nothrow {
         import std.functional : toDelegate;
-        import llm.query : HttpResult, HttpError;
+        import llm.query : HttpResult, HttpError, canRetry;
 
         ProcessResult rval;
 
@@ -268,12 +268,18 @@ Output only the taskDone tool call. No other text.)";
             auto res = rq.request(chat);
 
             bool hasHttpError;
+            bool httpRetryOnError;
             res.match!((HttpResult _) {}, (HttpError e) {
                 logger.trace(e);
                 hasHttpError = true;
+                httpRetryOnError = canRetry(e);
             });
 
-            if (hasHttpError) {
+            if (hasHttpError && httpRetryOnError) {
+                // soft http failures that can be retried
+                rval.status = ProcessResult.Status.retryLater;
+            } else if (hasHttpError) {
+                // hard failures
                 rval.status = ProcessResult.Status.unknownFailure;
             } else if (sp.hasError) {
                 if (sp.error.codeNr == 400 && sp.error.type == "exceed_context_size_error") {
@@ -406,6 +412,9 @@ Output only the taskDone tool call. No other text.)";
                 break;
             case unknownFailure:
                 keepRunning = false;
+                break;
+            case retryLater:
+                keepRunning = true;
                 break;
             case networkFailure:
                 keepRunning = false;

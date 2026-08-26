@@ -343,6 +343,13 @@ private string curlErrorText(int code) {
     return to!string(code);
 }
 
+/// Returns: true if it is possible to retry the http request
+bool canRetry(HttpError e) {
+    import std.algorithm : among;
+
+    return e.statusCode.among(408, 425, 429, 500, 502, 503, 504) != 0;
+}
+
 private:
 
 /// Line-buffering helper for std.net.curl's onReceive callback. Accumulates

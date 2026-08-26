@@ -113,7 +113,8 @@ struct ProcessResult {
         needCompression,
         unknownFailure,
         networkFailure,
-        needMoreThinking
+        needMoreThinking,
+        retryLater
     }
 
     Status status;
