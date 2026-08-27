@@ -142,9 +142,9 @@ ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) n
                 ctx.workArea(), env.commandJoinMode, timeout: env.timeout,
                 maxOutputBytes: ctx.getMaxOutputBytes);
         }, (HostConfig h) {
-            auto wd = h.workingDir.empty ? AbsolutePath.init : h.workingDir.AbsolutePath;
-            return cast(RunnerBackend) new HostRunner(h.options, wd, h.envVars, env.commandJoinMode,
-                ctx.workArea(), timeout: env.timeout, maxOutputBytes: ctx.getMaxOutputBytes);
+            return cast(RunnerBackend) new HostRunner(h.options, h.workingDir, h.envVars,
+                env.commandJoinMode, ctx.workArea(), timeout: env.timeout,
+                maxOutputBytes: ctx.getMaxOutputBytes);
         });
 
         scope (exit)
