@@ -145,6 +145,7 @@ void runMcpServer(Tid ownerTid) {
     try {
         llmConf = readConfig(conf.configData.configPath.Path, silent: true, noCwdConfig: conf.configData.noCwdConfig,
                 trustedConfig: conf.configData.trustedConfig);
+        logger.trace(llmConf);
     } catch (Exception e) {
         logger.errorf("Failed to read configuration: %s", e.msg);
         send(ownerTid, McpFailed("Failed to read configuration: " ~ e.msg));

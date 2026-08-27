@@ -24,6 +24,17 @@ import llm.mcp_server : McpConfigData, McpFailed, McpServerConfig, McpShutdown,
     McpStarted, McpStopped, runMcpServer;
 
 int appMain(UserConfig uconf, UserConfig.Mcp conf) {
+    import colorlog;
+    import llm.subsystem : initLlmfunLocalModel, deinitLlmfunLocalModel;
+
+    initLlmfunLocalModel();
+    scope (exit)
+        deinitLlmfunLocalModel();
+
+    if (uconf.verbosity != VerboseMode.trace) {
+        confLogger(VerboseMode.warning);
+    }
+
     LlmConfig llmConf;
     try {
         llmConf = readConfig(uconf.config.Path, silent: true, noCwdConfig: uconf.noCwdConfig,
