@@ -184,17 +184,21 @@ class HostRunner : RunnerBackend {
     ///     workArea = Workarea path for magic word substitution.
     ///     timeoutSec = Execution timeout in seconds (0 means no limit, default: 60).
     ///     maxOutputBytes = Maximum bytes per output stream (default: 1MB).
-    this(string[][string] options, AbsolutePath workingDir, string[string] envVars,
+    this(string[][string] options, string workingDir, string[string] envVars,
             CommandJoinMode commandJoinMode, AbsolutePath workArea,
             Duration timeout, long maxOutputBytes) @safe
     in (timeout.total!"seconds" > 0, "timeout must be >0") {
-        this.options_ = options;
-        this.workingDir_ = workingDir;
+        this.options_ = replaceContainerMagicWords(options, workArea);
+        this.workingDir_ = workingDir.replaceMagicWord(workArea);
         this.envVars_ = envVars;
         this.commandJoinMode_ = commandJoinMode;
         this.workArea_ = workArea;
         this.timeout = timeout;
         this.maxOutputBytes = maxOutputBytes;
+
+        foreach (key, val; this.envVars_) {
+            this.envVars_[key] = val.replaceMagicWord(workArea_);
+        }
     }
 
     /// Execute a command in the host environment.
@@ -208,20 +212,11 @@ class HostRunner : RunnerBackend {
     ExecutionResult execute(string[] command) nothrow {
         auto result = ExecutionResult(exitCode: -1);
         try {
-            auto resolvedWd = workingDir_.replaceMagicWord(workArea_);
-            string[string] resolvedEnv;
-            foreach (key, val; envVars_) {
-                resolvedEnv[key] = val.replaceMagicWord(workArea_);
-            }
+            auto fullCmd = buildCommand(options_, command, commandJoinMode_);
+            logger.tracef("Executing host command: %s work_dir: %s", fullCmd, workingDir_);
 
-            auto resolvedOpts = replaceContainerMagicWords(options_, workArea_);
-
-            auto fullCmd = buildCommand(resolvedOpts, command, commandJoinMode_);
-            logger.trace("Executing host command: ", fullCmd);
-
-            const(char)[] wd = resolvedWd.length > 0 ? resolvedWd : null;
-            auto p = proc.pipeProcess(fullCmd, Redirect.all, resolvedEnv,
-                    Config.none, wd).sandbox.timeout(timeout);
+            auto p = proc.pipeProcess(fullCmd, Redirect.all, envVars_,
+                    Config.none, workingDir_).sandbox.timeout(timeout);
             scope (exit)
                 p.dispose;
 
