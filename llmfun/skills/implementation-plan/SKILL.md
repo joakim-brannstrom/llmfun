@@ -6,7 +6,7 @@ description: >-
   writing code. Triggers on: implementation plan, plan implementation, break
   down, task breakdown, task plan, feature plan, design tasks, what to build,
   plan the work, task order.
-version: 1.3.0
+version: 1.4.0
 ---
 
 # Implementation Plan Skill
@@ -43,16 +43,17 @@ Use this skill when:
   verification, decision letters); split other overflow into companion
   files (e.g. `plan/anchors.md`).
 - **Dependency order**: Order tasks so foundations come before dependents.
+- **Externalize continuously**: Context may be compressed, losing details. Write notes to `plan/requirements_notes.md` and `plan/codebase_notes.md`, and draft tasks to `plan/task_NN.md` immediately. Do not rely on context.
 
 ## Workflow
 
 Follow the planning protocol. See `references/workflow.md` for detailed steps.
 
-1. **Understand Requirements** — Read the design/use case, identify scope, note constraints and dependencies.
-2. **Survey the Codebase** — Read existing code at integration points, identify patterns, note what already exists.
-3. **Decompose into Tasks** — Break the feature into small, focused, verifiable tasks. Draft each task file as you go.
+1. **Understand Requirements** — Read design/use case, identify scope, constraints, dependencies. Write notes to `plan/requirements_notes.md` immediately; do not keep findings only in context.
+2. **Survey the Codebase** — Read code at integration points, identify patterns, note existing assets. Write notes to `plan/codebase_notes.md` immediately; do not keep findings only in context.
+3. **Decompose into Tasks** — Break feature into small, verifiable tasks. Draft each task to `plan/task_NN.md` as soon as scope is decided; do not sit on drafts in context.
 4. **Order by Dependency** — Arrange tasks so each builds on previously completed ones.
-5. **Write the Overview** — Finalize each task file and write the overview to `plan/implementation_plan.md`: task order, standing executor rules, cross-cutting concerns, and everything that is not the details of the individual tasks.
+5. **Write the Overview** — Finalize tasks and write overview to `plan/implementation_plan.md`: task order, executor rules, cross-cutting concerns, and non-task details.
 6. **Revise** — Ensure the tasks, their content, and their order are consistent and logical; check size budgets (measure files, split over-budget tasks); renumber task files if the order changed.
 7. **Save and Report** — Write the overview and task files to `plan/` and present the task summary to the user.
 

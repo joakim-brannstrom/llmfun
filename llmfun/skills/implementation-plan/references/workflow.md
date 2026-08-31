@@ -3,6 +3,8 @@
 All plan files shall be saved in the directory `plan/` (relative to the
 project root).
 
+> **Context compression risk**: The planning session may be compressed one or more times, causing details held only in the context window to be lost. You must continuously externalize findings to files in `plan/`. Never assume the context will retain intermediate notes, drafts, or discoveries. Write notes for Phases 1-2 and draft task files as soon as they are decided; re-read the files you wrote to recover context after a compression.
+
 ## Phase 1: Understand Requirements
 
 - **Read the design/use case**: Understand what needs to be built at a high level.
@@ -10,6 +12,8 @@ project root).
 - **Extract acceptance criteria**: Determine what "done" looks like for the overall feature.
 - **Note constraints**: Identify technical constraints, performance requirements, or integration points.
 - **Identify dependencies**: Note required imports, types, interfaces, and external services.
+
+- **Write notes to file**: Persist all findings above to `plan/requirements_notes.md` now. Do not keep them only in context; context may be compressed and the details will be lost.
 
 ## Phase 2: Survey the Codebase
 
@@ -21,7 +25,10 @@ project root).
   integration points and pattern exemplars (`file.d:123-145`); reuse them as
   anchors in Phases 4–5 instead of re-reading files.
 
+- **Write notes to file**: Persist all findings above to `plan/codebase_notes.md` now. Include anchor candidates, patterns, and gaps. Do not keep them only in context.
+
 ## Phase 3: Decompose into Tasks
+> **Externalize drafts**: Draft each task file to `plan/task_NN.md` immediately after its scope is decided. Do not accumulate drafts in the context window; if the session is compressed, unsaved drafts are lost. Re-read the files you wrote to recover context.
 
 Break the feature into small, focused tasks. Each task should:
 
@@ -168,6 +175,7 @@ do not fix here") and task-specific open decisions with their placeholder
 constant and finalizing task.
 
 ## Phase 6: Revise
+> Before revising, re-read `plan/requirements_notes.md`, `plan/codebase_notes.md`, and the existing task drafts to recover full context. Context may have been compressed since Phases 1-3.
 
 Revise the tasks, their content, and their order to ensure that the plan is
 consistent and logical. Revision may add, split, merge, or delete task files.
