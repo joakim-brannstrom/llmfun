@@ -304,6 +304,7 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 - D bindings in `tui/package.d` handle streaming and inter-thread message passing.
 - Exposed via pure C API (`tui_api.h` / `tui_api.cpp`) for D interop.
 - Session sidebar (`ChatTabSessionPanel`): session rows with active marker and ` [N]` count, rename toggle + input on the active row, two-step delete, busy gating (guard-and-skip; the vendored ImGui 1.81 has no `BeginDisabled`). A filter input in the panel header with fzf-style fuzzy subsequence matching + ranking against title + preview (`session_fuzzy.h`, pure), Esc/Enter/click selection with busy-defer, whole-word match highlighting, and the headless `test_session_filter_smoke` harness. Mutually exclusive with the pipeline panel (the pipeline wins the left slot whenever it has agents); `leftPanelWidth(state)` resolves the output offset. See `doc/tui_design.md`.
+- D can import `.c` as they are, no binding is required, no `extern(C)` is required. See the D specification for more details.
 
 ### MCP Server
 
