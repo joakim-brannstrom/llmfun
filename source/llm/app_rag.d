@@ -88,9 +88,13 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
         if (isFile(root)) {
             files.put(root.buildNormalizedPath.Path);
         } else if (isDir(root)) {
-            foreach (p; dirEntries(root, SpanMode.depth).filter!(a => a.isFile)
-                    .filter!(a => filter.match(a.name))) {
-                files.put(p.name.buildNormalizedPath.Path);
+            try {
+                foreach (p; dirEntries(root, SpanMode.depth).filter!(a => a.isFile)
+                        .filter!(a => filter.match(a.name))) {
+                    files.put(p.name.buildNormalizedPath.Path);
+                }
+            } catch (Exception e) {
+                logger.warningf("Unable to scan '%s': %s", root, e.msg);
             }
         }
         return files[];
@@ -123,7 +127,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
                         logger.infof("  Skipped (unchanged): %s", f);
                     }
                 } catch (Exception e) {
-                    logger.warning(e.msg);
+                    logger.warningf("Unable to add '%s': %s", f, e.msg);
                 }
             }
         }
