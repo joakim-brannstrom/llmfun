@@ -261,6 +261,7 @@ struct MarkdownStyle {
 struct TuiState {
     bool isLogActive{false};
     std::string iniFilename;
+    int maxWidth = 0; // 0 = unlimited (current behavior)
 
     bool readyStatus{true};
     std::chrono::system_clock::time_point startProcesssingTime;
@@ -312,6 +313,12 @@ bool tuiRender(TuiState& state);
 
 /// Set the logging to on/off. Must be done before tuiRender is called.
 void tuiSetLogging(TuiState& state, bool onOff);
+
+/// Set the maximum rendered width in terminal columns. 0 = unlimited.
+/// Re-evaluated every frame, so the value applies from the next
+/// tuiRender regardless of when it is set.
+/// Effective width = min(terminal width, maxWidth).
+void tuiSetMaxWidth(TuiState& state, int maxWidth);
 
 /// Set the filename that imgui save window settings to.
 /// By default it is in the "$cwd/imgui.ini".

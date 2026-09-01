@@ -95,7 +95,6 @@ class TuiLogger : Logger {
     }
 }
 
-// Swaps the global logger to a `TuiLogger` and restores the previous logger on destruction.
 struct TuiLogSwap {
     private {
         bool isSwapped = false;
@@ -183,6 +182,10 @@ struct TextUserInterface {
         statusText = s;
     }
 
+    void setMaxWidth(int w) {
+        tuiSetMaxWidth(tuiState, w);
+    }
+
     void setReadyStatus(bool x) {
         tuiReadyStatus(tuiState, x ? 1 : 0);
     }
@@ -243,9 +246,7 @@ struct TextUserInterface {
         tuiInitQueryHistory(tuiState, app[].ptr, app[].length);
     }
 
-    // Replaces the sidebar session snapshot. The C++ panel copies all
-    // inbound strings during the call, so the D buffers may be reused
-    // or freed immediately afterwards.
+    // Replaces the sidebar session snapshot.
     void setSessionList(const(UiSessionItem)[] items) {
         if (items.length == 0) {
             tuiSetSessionList(tuiState, null, 0);
@@ -259,11 +260,8 @@ struct TextUserInterface {
         tuiSetSessionList(tuiState, app[].ptr, app[].length);
     }
 
-    // Pops at most one sidebar action from the C++ queue. Returned strings
-    // are owned by the C API and freed here exactly once (String_Free is a
-    // no-op for the {NULL, 0} fields of the empty-queue None sentinel).
+    // Pops at most one sidebar action from the C++ queue.
     void pollSessionAction(out TuiSessionActionType type, out string id, out string title) {
-        // `out` parameters default to .init on entry (None / null).
         if (tuiIsSessionActionReady(tuiState) == 0)
             return;
         auto action = tuiGetSessionAction(tuiState);
@@ -393,8 +391,6 @@ struct UiSessionItem {
 }
 
 struct UiSessionList {
-    // Immutable array so the message passes std.concurrency's send()
-    // no-mutable-aliasing check (same pattern as UiInitHistory.queries).
     UiSessionItem[] items;
 }
 
@@ -415,23 +411,21 @@ struct UiSessionDelete {
     SessionId id;
 }
 
-void spawnUserInterface(Tid ownerTid) {
+void spawnUserInterface(Tid ownerTid, long maxWidth) {
     import std.string : strip;
     import std.datetime : dur, Clock, Duration;
     import llm.utility : stopAgent, playNotification;
+    import std.conv : to;
 
     setMaxMailboxSize(thisTid, 100, OnCrowding.block);
     register("llmfun_tui", thisTid);
 
     auto ui = makeTui();
+    assert(maxWidth >= 0 && maxWidth <= 10_000,
+            "maxWidth out of int-safe range: " ~ maxWidth.to!string);
+    ui.setMaxWidth(cast(int) maxWidth);
     ui.setUiAsStdLogger;
     bool running = true;
-    // Stash for one session action per frame (L7 deferral): polled after
-    // render, forwarded at the top of the next iteration AFTER the drained
-    // user query, so the agent always sees the query before the click.
-    // If the owner dies mid-forward the send throws, the loop catch logs it,
-    // and the stash is retried next iteration; the UI thread terminates with
-    // the process, so this accepted teardown behavior is intentional.
     TuiSessionActionType pendingAction = TuiSessionAction_None;
     string pendingActionId;
     string pendingActionTitle;
@@ -474,9 +468,6 @@ void spawnUserInterface(Tid ownerTid) {
                 }
             }
 
-            // Forward the stashed sidebar action (if any) AFTER the drained
-            // user query: both share one sender mailbox, so the agent always
-            // sees the query before the click (L7).
             if (pendingAction != TuiSessionAction_None) {
                 switch (pendingAction) {
                 case TuiSessionAction_Select:

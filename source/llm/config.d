@@ -91,6 +91,13 @@ struct SandboxConfig {
     }
 }
 
+struct TuiConfig {
+    /// Maximum TUI width in terminal columns. 0 = unlimited (default).
+    /// Valid values: 0 or [40, 10000] (40 = C++ MIN_TERMINAL_WIDTH; 10000
+    /// caps the long->int conversion at the C API boundary).
+    long maxWidth = 0;
+}
+
 struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
@@ -176,6 +183,7 @@ struct LlmConfig {
     SandboxConfig sandboxConfig;
 
     ToolLimits toolLimits;
+    TuiConfig tui;
 
     ToolFilter toolFilter;
     RagFilter ragFilter;
@@ -1049,6 +1057,10 @@ void validateConfig(LlmConfig conf) {
     if (conf.toolLimits.maxArgLength < 1)
         throw new Exception("toolLimits.maxArgLength must be >= 1");
 
+    if (conf.tui.maxWidth != 0 && (conf.tui.maxWidth < 40 || conf.tui.maxWidth > 10_000))
+        throw new Exception(i"tui.maxWidth must be 0 or in [40, 10000], got $(conf.tui.maxWidth)"
+                .text);
+
     // Emit warnings for missing API keys (after all hard validation)
     checkApiKeyWarnings(conf);
 }
@@ -1343,4 +1355,120 @@ unittest {
     assert(opts["05_timeout"] == ["--stop-timeout", "60"]);
     assert(opts["06_network"] == ["--network", "none"]);
     assert(opts["entrypoint_shell"] == ["sh", "-c"]);
+}
+
+/// Test: tui.maxWidth parses from YAML into LlmConfig.tui.maxWidth.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "tuintest_parse");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `tui:
+  maxWidth: 255
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.maxWidth == 255, "expected 255, got " ~ conf.tui.maxWidth.to!string);
+}
+
+/// Test: absent tui key keeps the default maxWidth = 0.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "tuintest_absent");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.maxWidth == 0, "expected default 0, got " ~ conf.tui.maxWidth.to!string);
+}
+
+/// Test: maxWidth below 40 is rejected by validateConfig.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+    import std.algorithm : canFind;
+
+    auto tmpDir = buildPath("llmfun_test", "tuintest_toosmall");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+tui:
+  maxWidth: 20
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.maxWidth == 20, "parse must accept 20, got " ~ conf.tui.maxWidth.to!string);
+    bool threw;
+    string msg;
+    try {
+        validateConfig(conf);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for maxWidth < 40");
+    assert(canFind(msg, "tui.maxWidth"), "unexpected error message: " ~ msg);
+}
+
+/// Test: maxWidth above 10000 is rejected by validateConfig.
+unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+    import std.algorithm : canFind;
+
+    auto tmpDir = buildPath("llmfun_test", "tuintest_toobig");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+tui:
+  maxWidth: 999999
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.maxWidth == 999999,
+            "parse must accept 999999, got " ~ conf.tui.maxWidth.to!string);
+    bool threw;
+    string msg;
+    try {
+        validateConfig(conf);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for maxWidth > 10000");
+    assert(canFind(msg, "tui.maxWidth"), "unexpected error message: " ~ msg);
+}
+
+/// Test: shipped config/example.yaml still parses; tui key absent → maxWidth 0.
+unittest {
+    auto json = loadYamlValue(Path("config/example.yaml"));
+    auto conf = applyLlmConfig(LlmConfig.init, json);
+    assert(conf.tui.maxWidth == 0,
+            "shipped example.yaml must keep default 0, got " ~ conf.tui.maxWidth.to!string);
 }

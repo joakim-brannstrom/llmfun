@@ -5,7 +5,6 @@
 # - @-leading values (magic words) must be quoted.
 
 version: 1
-defaultEnvironment: llmfun
 environments:
   - tag: llmfun
     description: "llmfun development image with D toolchain (git, dub, ldc2, bash). Use for building and testing the llmfun project. **shell: sh**"

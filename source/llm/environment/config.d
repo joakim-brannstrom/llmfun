@@ -247,6 +247,7 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
                     ver);
         }
     }
+    // TODO: remove this. It is not used
     defaultTag = getValue(json, (v) => v["defaultEnvironment"].str, null);
 
     EnvironmentBackend[] result;

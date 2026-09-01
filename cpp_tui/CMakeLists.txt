@@ -115,3 +115,21 @@ target_link_libraries(test_session_filter_smoke PRIVATE
     imgui_markdown
     ncursesw
 )
+
+# Headless clamp test for tuiSetMaxWidth / the tuiRender clamp (Task 1).
+# Text backend only (no ncurses, no PTY) — runs a real TuiState through
+# tuiRender and checks the grid width. Invoke: ./test_tui_maxwidth
+add_executable(test_tui_maxwidth
+    test_tui_maxwidth.cpp
+)
+add_dependencies(test_tui_maxwidth llmfun_tui_all_lib)
+# tui.h (the C++ header) needs the imtui + imgui_markdown include paths and
+# the IMGUI_USE_WCHAR32 definition; link the interface-providing targets for
+# exactly that (their archives are already inside llmfun_tui_all_lib, so they
+# contribute no extra objects).
+target_link_libraries(test_tui_maxwidth PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    imgui_markdown
+    ncursesw
+)

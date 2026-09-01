@@ -183,6 +183,18 @@ void tuiSetLogging(TuiState* state, int onOff) {
     ::llmfun::tui::tuiSetLogging(*state->inner, onOff != 0);
 }
 
+void tuiSetMaxWidth(TuiState* state, int maxWidth) {
+    if (!state || !state->inner)
+        return;
+    // Enforce the shared cap invariant at the C API boundary (0 = unlimited,
+    // else [40, 10000]): a positive cap below the TUI's 40-column minimum
+    // render width would leave it stuck on the "Terminal too small!" screen,
+    // so raise sub-40 caps to the minimum.
+    if (maxWidth > 0 && maxWidth < 40)
+        maxWidth = 40;
+    ::llmfun::tui::tuiSetMaxWidth(*state->inner, maxWidth);
+}
+
 void tuiSetIniFilename(TuiState* state, String filename) {
     if (!state || !state->inner)
         return;

@@ -164,6 +164,11 @@ bool tuiRender(TuiState& state) {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImVec2 DisplaySize = ImGui::GetIO().DisplaySize;
 
+    if (state.maxWidth > 0 && DisplaySize.x > state.maxWidth) {
+        DisplaySize.x = static_cast<float>(state.maxWidth);
+        ImGui::GetIO().DisplaySize = DisplaySize; // propagate to grid sizing
+    }
+
     static constexpr float MIN_TERMINAL_WIDTH = 40.0f;
     static constexpr float MIN_TERMINAL_HEIGHT = 15.0f;
 
@@ -206,6 +211,8 @@ bool tuiRender(TuiState& state) {
 }
 
 void tuiSetLogging(TuiState& state, bool onOff) { state.isLogActive = onOff; }
+
+void tuiSetMaxWidth(TuiState& state, int maxWidth) { state.maxWidth = maxWidth; }
 
 void tuiSetIniFilename(TuiState& state, const std::string& filename) {
     // TODO: this doesn't work. It ends up creating junk files.

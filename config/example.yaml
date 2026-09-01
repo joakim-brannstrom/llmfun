@@ -34,6 +34,9 @@ toolLimits:
   maxTopK: 20
   maxArgLength: 200
 
+tui:
+  maxWidth: 0 # unlimited
+
 sandboxConfig:
   maxOutputBytes: 1048576
   # Every value is a CLI argument string. "0.5" and "60" must stay quoted:

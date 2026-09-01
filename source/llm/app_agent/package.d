@@ -830,7 +830,7 @@ struct AgentApp {
         // only update memory for non-oneshot because it is assumed that oneshot need max speed/low latency
         updateRagMemory();
 
-        uiTid = spawn(&spawnUserInterface, thisTid);
+        uiTid = spawn(&spawnUserInterface, thisTid, llmConf.tui.maxWidth);
         uiMsg = new UiMessenger(uiTid, false);
         uiMsg.setIniFile(llmConf.dataDir ~ "imgui.ini");
         send(uiTid, UiInitHistory(agent_.getUserQueries.map!(a => a.content).array.idup));

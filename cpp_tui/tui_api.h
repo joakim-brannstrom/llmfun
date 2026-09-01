@@ -46,8 +46,11 @@ extern "C" {
  *   1 - original API
  *   2 - session sidebar: SessionItem, TuiSessionActionType, SessionAction,
  *       tuiSetSessionList, tuiIsSessionActionReady, tuiGetSessionAction
+ *   3 - max width: tuiSetMaxWidth (cap the rendered width in columns;
+ *       0 = unlimited). No signature or struct-layout changes to existing
+ *       symbols.
  */
-#define TUI_API_VERSION 2
+#define TUI_API_VERSION 3
 
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
@@ -301,6 +304,16 @@ int tuiRender(TuiState* state);
 
 /* Set the logging to on/off. Must be done before tuiRender is called. */
 void tuiSetLogging(TuiState* state, int onOff);
+
+/* Cap the TUI's rendered width in terminal columns. 0 = unlimited (default,
+ * current behavior). Positive values are the cap in columns and should be in
+ * [40, 10000]; a positive value below 40 is raised to 40 (a smaller cap would
+ * leave the TUI stuck on its "Terminal too small!" screen). Negative values
+ * are treated as 0 (unlimited). Call after tuiCreateState and before the
+ * first tuiBackendNewFrame/tuiRender; a late call applies from the next
+ * frame. Effective width = min(terminal width, maxWidth). Null-safe.
+ */
+void tuiSetMaxWidth(TuiState* state, int maxWidth);
 
 /* Set the filename that imgui save window settings to.
     By default it is in the "$cwd/imgui.ini".
