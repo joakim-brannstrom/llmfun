@@ -133,8 +133,8 @@ ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) n
         }
 
         if (params.command.length > 1 && env.commandJoinMode == CommandJoinMode.single) {
-            return ExecuteFuncResult(i"error: Environment $(tag) may only be called with one command argument".text,
-                    success: false);
+            return ExecuteFuncResult(i"error: Environment $(tag) may only be called with parameter `command` as an array of strings with one element"
+                    .text, success: false);
         }
 
         auto runner = env.config.match!((ContainerConfig c) {
