@@ -239,17 +239,17 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 - Chat-free by design: the module only speaks JSON. `app_agent/package.d` bridges `SessionFile.doc` to `agent_.chat.load()` / `agent_.chat.toSaveJson()`.
 - Naming rule: "session" already means app-launch in `config.d` (`sessionCount` drives memory consolidation). The chat-history concept uses `SessionStore` / `SessionMeta` / `SessionFile` only.
 - `SessionId` is a `NamedType!string` strong type (mylib): a session id is not interchangeable with titles, previews, or other strings. `state.json` still stores the plain string (`activeChatSessionId`); conversion happens at the config boundary.
-- Session id = filename (immutable), format `<YYYYMMDD-HHMMSS>-<4hex>`; D12 regex validation at every store entry point prevents path traversal. Title lives in the header; rename edits the header only.
+- Session id = filename (immutable), format `<YYYYMMDD-HHMMSS>-<4hex>`; regex validation at every store entry point prevents path traversal. Title lives in the header; rename edits the header only.
 - The store resolves its directory to an `AbsolutePath` (independent of the CWD); file paths are built as `AbsolutePath`.
-- Unknown header keys round-trip through `SessionMeta.extra` (D2), so future per-session settings need no format migration.
+- Unknown header keys round-trip through `SessionMeta.extra`, so future per-session settings need no format migration.
 - Active session id is persisted in `state.json` as `activeChatSessionId` and reopened on startup. One-shot mode (`-p`) appends to the last active session.
 - Slash commands are registered in `app_agent/slash*.d` (registry in `slash.d`, one group module per command family) and dispatch through `AgentApp.slashCommands_`. Session commands (`/sessions`, `/switch <n|id|title>`, `/new`, `/rename <title>`, `/delete <n>` (repeat to confirm), `/clear`) reuse the same `AgentApp` methods (`doListSessions`, `switchToSession`, etc.) as the TUI sidebar.
-- System-prompt entries are stripped from `messages` before save (D13); the prompt is re-set at startup.
+- System-prompt entries are stripped from `messages` before save; the prompt is re-set at startup.
 - Single writer (the agent thread); all writes are atomic (tmp file + rename).
 - Full documentation: `doc/sessions.md`.
-- TUI sidebar: a left session panel (`ChatTabSessionPanel` in `cpp_tui/tui.h`) with switch / new / rename / delete. Messages: `UiSessionList` (D -> UI snapshot) and `UiSessionSelect` / `UiSessionNew` / `UiSessionRename` / `UiSessionDelete` (UI -> D actions) in `tui/package.d`; the agent handlers `doSidebarSelect` / `doSidebarNew` / `doSidebarRename` / `doSidebarDelete` reuse the Phase 1 methods. `isValidId` is public (`session/types.d`) for UI-boundary validation.
+- TUI sidebar: a left session panel (`ChatTabSessionPanel` in `cpp_tui/tui.h`) with switch / new / rename / delete. Messages: `UiSessionList` (D -> UI snapshot) and `UiSessionSelect` / `UiSessionNew` / `UiSessionRename` / `UiSessionDelete` (UI -> D actions) in `tui/package.d`; the agent handlers `doSidebarSelect` / `doSidebarNew` / `doSidebarRename` / `doSidebarDelete` reuse the existing session methods. `isValidId` is public (`session/types.d`) for UI-boundary validation.
 - Sidebar C API additions (`TUI_API_VERSION` 2, documentation marker): `SessionItem`, `SessionAction`, `tuiSetSessionList`, `tuiIsSessionActionReady`, `tuiGetSessionAction`. The session panel and the pipeline panel share one left slot: `leftPanelWidth(state)` resolves the output offset; the pipeline wins whenever it has agents.
-- TUI search/filter (C++-only; `TUI_API_VERSION` stays 2): single-line filter input in the session panel header; fzf-style case-insensitive byte-level subsequence match against title + preview (title weighted 2x) with simplified-fzf ranking (per-byte base / word-boundary / consecutive bonuses, gap penalty, score clamped to >= 0); per-frame filter + rank of the local snapshot (no D or C API change); Enter selects the top match, Escape clears (rename box wins while open), row click selects; busy selection defers in the pending-switch slot; the filter clears on selection and persists across snapshot refreshes, panel close/reopen, and pipeline occupancy; matched title words highlighted; `no matches` indicator; rename box closes when its row is filtered out. Matcher: `cpp_tui/session_fuzzy.h` (pure, standalone-tested); tests: `test_session_fuzzy` + `test_session_filter_smoke` (headless harness). Deferred (P3): keyboard list navigation, query operators, DP scoring. See `doc/sessions.md` (TUI Search/Filter, Phase 4) and `doc/tui_design.md` (Filter Input).
+- TUI search/filter (C++-only; `TUI_API_VERSION` stays 2): single-line filter input in the session panel header; fzf-style case-insensitive byte-level subsequence match against title + preview (title weighted 2x) with simplified-fzf ranking (per-byte base / word-boundary / consecutive bonuses, gap penalty, score clamped to >= 0); per-frame filter + rank of the local snapshot (no D or C API change); Enter selects the top match, Escape clears (rename box wins while open), row click selects; busy selection defers in the pending-switch slot; the filter clears on selection and persists across snapshot refreshes, panel close/reopen, and pipeline occupancy; matched title words highlighted; `no matches` indicator; rename box closes when its row is filtered out. Matcher: `cpp_tui/session_fuzzy.h` (pure, standalone-tested); tests: `test_session_fuzzy` + `test_session_filter_smoke` (headless harness). Deferred: keyboard list navigation, query operators, DP scoring. See `doc/sessions.md` (TUI Search/Filter) and `doc/tui_design.md` (Filter Input).
 
 ### Turn IDs and Compression Checkpoints
 
@@ -305,6 +305,13 @@ dub build --config=llmfun_test              # Build test utility (manual testing
 - Exposed via pure C API (`tui_api.h` / `tui_api.cpp`) for D interop.
 - Session sidebar (`ChatTabSessionPanel`): session rows with active marker and ` [N]` count, rename toggle + input on the active row, two-step delete, busy gating (guard-and-skip; the vendored ImGui 1.81 has no `BeginDisabled`). A filter input in the panel header with fzf-style fuzzy subsequence matching + ranking against title + preview (`session_fuzzy.h`, pure), Esc/Enter/click selection with busy-defer, whole-word match highlighting, and the headless `test_session_filter_smoke` harness. Mutually exclusive with the pipeline panel (the pipeline wins the left slot whenever it has agents); `leftPanelWidth(state)` resolves the output offset. See `doc/tui_design.md`.
 - D can import `.c` as they are, no binding is required, no `extern(C)` is required. See the D specification for more details.
+- Max width (`TuiConfig` / YAML `tui.maxWidth`): caps the TUI's rendered
+  width in terminal columns (0 = unlimited, default; valid 0 or [40, 10000],
+  enforced in `validateConfig`). The C++ core clamps at the top of `tuiRender`
+  every frame (`TuiState.maxWidth`, `tuiSetMaxWidth`, `TUI_API_VERSION` 3);
+  the margin right of the cap is never written (terminal-managed). Standalone
+  `cpp_tui` executable: `LLMFUN_TUI_MAX_WIDTH` env var (no CLI flag). See
+  `doc/tui_design.md`.
 
 ### MCP Server
 

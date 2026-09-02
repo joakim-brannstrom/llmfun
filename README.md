@@ -298,6 +298,9 @@ toolLimits:
   maxTopK: 20
   maxArgLength: 200
 
+tui:
+  maxWidth: 0 # TUI max width in terminal columns (0 = unlimited, default)
+
 sandboxConfig:
   maxOutputBytes: 1048576
   # Every value is a CLI argument string. "0.5" and "60" must stay quoted:
@@ -358,7 +361,7 @@ codeModels:
       backoffMs: 500
       apiKey: ""
       jsonFields: '{"chat_template_kwargs": {"reasoning_budget": 4096, "preserve_thinking": true}}'
-    name: local-model
+    modelName: local-model
     display: super-coder
     temp: 0.6
     contextSize: 128000
@@ -380,7 +383,7 @@ summaryModel:
     maxRetries: 3
     backoffMs: 500
     apiKey: ""
-  name: summary-model
+  modelName: summary-model
   prompt: SUMMARY.md
   temp: 0.3
   contextSize: 32768
@@ -403,7 +406,7 @@ visionModel:
     maxRetries: 3
     backoffMs: 500
     apiKey: ""
-  name: vision-model
+  modelName: vision-model
   systemPrompt: ""
   temp: 0.3
   contextSize: 32768
@@ -423,7 +426,7 @@ embedConfig:
     maxRetries: 3
     backoffMs: 500
     apiKey: ""
-  name: nomic-embed-text
+  modelName: nomic-embed-text
   nBatch: 512
   dimensions: 768
 ```
@@ -450,6 +453,7 @@ embedConfig:
 | `ragPrimary` | object | `llmfun/data/rag.sqlite3` | Primary RAG database (read/write) |
 | `ragSecondary` | object | `{}` | Additional read-only RAG databases |
 | `toolLimits` | object | defaults | Tool execution limits (see below) |
+| `tui` | object | no | TUI options; `maxWidth` caps rendered width in columns (0 = unlimited, default) |
 
 ### Sandbox Configuration (`sandboxConfig`)
 
@@ -493,7 +497,6 @@ The environment config format is a YAML file with `version`, `defaultEnvironment
 
 ```yaml
 version: 1
-defaultEnvironment: alpine
 environments:
   - tag: alpine
     description: "Minimal Linux environment. **shell: sh**"
@@ -664,8 +667,8 @@ codeModels:
       verifySslCert: true
       maxRetries: 3
       backoffMs: 500
-      apiKey: ""
-    name: local-model
+      apiKeyEnv: env variable to read the API key from
+    modelName: local-model
     display: super-coder
     temp: 0.6
     contextSize: 128000
@@ -677,7 +680,7 @@ codeModels:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `server` | object | (required) | Server configuration (see below) |
-| `name` | string | (required) | Model name (e.g. "gpt-4o", "local-model") |
+| `modelName` | string | (required) | Model name (e.g. "gpt-4o", "local-model") |
 | `temp` | double | 0 | Temperature for generation |
 | `contextSize` | long | 0 | Context window size in tokens |
 | `maxTokens` | long | -1 | Maximum tokens to generate (-1 = unlimited) |
@@ -744,7 +747,7 @@ summaryModel:
     maxRetries: 3
     backoffMs: 500
     apiKeyEnv: "OPENAI_API_KEY"
-  name: summary-model
+  modelName: summary-model
   prompt: SUMMARY.md
   temp: 0.3
   contextSize: 32768
@@ -757,7 +760,7 @@ summaryModel:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `server` | object | (required) | Server configuration |
-| `name` | string | (required) | Model name |
+| `modelName` | string | (required) | Model name |
 | `prompt` | string | `SUMMARY.md` | Summary prompt template file |
 | `temp` | double | 0 | Temperature |
 | `contextSize` | long | 0 | Context window size |
@@ -785,7 +788,7 @@ visionModel:
     maxRetries: 3
     backoffMs: 500
     apiKeyEnv: "OPENAI_API_KEY"
-  name: vision-model
+  modelName: vision-model
   systemPrompt: ""
   temp: 0.3
   contextSize: 32768
@@ -798,7 +801,7 @@ visionModel:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `server` | object | (required) | Server configuration (see Server Configuration) |
-| `name` | string | (required) | Vision model name (e.g. "llava", "qwen2.5-vl") |
+| `modelName` | string | (required) | Vision model name (e.g. "llava", "qwen2.5-vl") |
 | `systemPrompt` | string | "" | Custom system prompt for image description. Empty uses built-in prompt |
 | `temp` | double | 0 | Temperature for generation |
 | `contextSize` | long | 0 | Context window size in tokens |
@@ -830,7 +833,7 @@ embedConfig:
     maxRetries: 3
     backoffMs: 500
     apiKeyEnv: "OPENAI_API_KEY"
-  name: nomic-embed-text
+  modelName: nomic-embed-text
   nBatch: 512
   dimensions: 768
 ```
@@ -840,7 +843,7 @@ embedConfig:
 ```yaml
 embedConfig:
   type: local
-  name: nomic-embed-text
+  modelName: nomic-embed-text
   modelPath: /path/to/embedding-model.gguf
   onlyCpu: true
   nBatch: 512
@@ -851,7 +854,7 @@ embedConfig:
 |-------|------|---------|-------------|
 | `type` | string | (required) | Either `"remote"` or `"local"` |
 | `server` | object | - | Server config (remote only) |
-| `name` | string | - | Model name (remote: embedding model name; local: label) |
+| `modelName` | string | - | Model name (remote: embedding model name; local: label) |
 | `modelPath` | string | - | Path to GGUF model file (local only) |
 | `onlyCpu` | bool | `true` | Run local embedding on CPU only |
 | `nBatch` | long | 512 | Batch size for embedding |

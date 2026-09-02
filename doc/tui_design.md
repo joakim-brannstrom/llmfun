@@ -191,7 +191,7 @@ Returns an owned `String` with the last error message. Thread-local: each thread
 
 See `tui_api.h` for the complete C API. The header is self-documented with detailed comments for each function.
 
-### Session API (Phase 2)
+### Session API
 
 The session sidebar added a second API family to `tui_api.h`, and bumped
 `TUI_API_VERSION` from 1 to 2. The version macro is a **documentation marker
@@ -242,6 +242,35 @@ inbound (non-owning, copied during the call), `SessionAction` strings are
 outbound (owned, `String_Free`). See the header for byte-level layout
 comments.
 
+### Max Width
+
+Max width caps the TUI's rendered width in terminal columns and bumps
+`TUI_API_VERSION` from 2 to 3. As with version 2, the macro is a
+**documentation marker only** — nothing consumes it at compile time or
+runtime.
+
+New function:
+
+| Function | Semantics |
+|----------|-----------|
+| `tuiSetMaxWidth(TuiState*, int)` | Cap the rendered width in terminal columns. `0` = unlimited (default, current behavior). Positive values should be in `[40, 10000]`; a positive value below 40 is raised to 40 (below the TUI's `MIN_TERMINAL_WIDTH` it would be stuck on its "Terminal too small!" screen), and negative values are treated as 0 (unlimited). Null-safe. Call after `tuiCreateState` and before the first frame; a late call applies from the next frame. Effective width = `min(terminal width, maxWidth)` |
+
+Layout note: the cap is enforced in exactly one place — at the top of
+`llmfun::tui::tuiRender` (reading `TuiState.maxWidth`), re-evaluated every
+frame before the min-size check and `SetNextWindowSize`. It clamps
+`io.DisplaySize.x`, which the vendor `RenderDrawData` consumes to size the
+grid, so `DrawScreen` writes at most `maxWidth` columns: no byte reaches a
+column at or beyond the cap. The margin right of the cap is **never written**
+by the TUI; it is terminal/ncurses-managed (typically blank — the alternate
+screen + first-refresh clear). No vendor code and no C↔D render-loop ABI
+change.
+
+The standalone `cpp_tui` executable honors `LLMFUN_TUI_MAX_WIDTH=<cols>` (env
+var only; no CLI flag) for PTY debugging and the max-width byte-stream test. Unset,
+empty, non-numeric, or negative values are ignored (0 = unlimited); values
+above 10000 are clamped to 10000 (mirrors `validateConfig`), and positive
+sub-40 caps are raised to 40 by the C API.
+
 ---
 
 ## Internal C++ API
@@ -250,14 +279,14 @@ The internal C++ API (`tui.h` / `tui.cpp`) is used by `tui_api.cpp` and `main.cp
 
 See `tui.h` for the complete function declarations.
 
-## Session Sidebar (Phase 2)
+## Session Sidebar
 
 The session sidebar is a left panel in the chat tab that lists all chat
 sessions (title, message count, preview) and offers switch / new / rename /
 delete. It follows the same three-layer pattern as the query input: the C++
 panel owns all UI state and queues actions; the D UI thread polls the queue
 once per frame and forwards one action to the agent thread; the agent thread
-runs the Phase 1 session methods.
+runs the existing session methods.
 
 ### ChatTabSessionPanel
 
@@ -267,21 +296,21 @@ runs the Phase 1 session methods.
 struct ChatTabSessionPanel {
     ImVec4 activeButton = ImVec4(0.4f, 0.4f, 0.45f, 1.0f); // highlight color
     int panelW = 0;                    // 0 = unset; init to PanelWActivated
-                                       // on first render (F5)
+                                       // on first render
     static constexpr int PanelWActivated = 30;
     bool panelOpen{true};              // auto-open at startup
 
-    std::vector<SessionEntry> sessions; // full snapshot (A1)
+    std::vector<SessionEntry> sessions; // full snapshot
     std::string activeId;               // active session id from the snapshot
-    std::deque<SessionAction> actions;  // UI -> D queue (A2/A7)
+    std::deque<SessionAction> actions;  // UI -> D queue
 
     char renameBuf[128] = {};   // rename input; init on row change or
                                 // toggle-open, never per frame
-    bool renameActive{false};   // rename input visible (L8)
+    bool renameActive{false};   // rename input visible
     std::string renameRowId;    // row renameBuf was initialized for
     bool renameFocus{false};    // focus the rename input next frame
     int renameSeq{0};           // bumped per open; fresh InputText id
-    std::string pendingDeleteId; // two-step delete state (A5)
+    std::string pendingDeleteId; // two-step delete state
 };
 ```
 
@@ -297,7 +326,7 @@ so it always wins the slot while agents are present. The session panel
 renders only when the pipeline is empty; its state is preserved, so it
 reappears unchanged when the pipeline clears. `renderTabChatSessionPanel`
 starts with the early return `if (!state.left.agents.empty()) return;`
-(no overlap, R6/A6/H1).
+(no overlap).
 
 The output area offsets by the resolved width, kept in one place:
 
@@ -318,7 +347,7 @@ panel's own width. `renderTabChat` calls `renderTabChatSessionPanel` before
 
 - **First open**: `panelW == 0` is initialized to `PanelWActivated` (mirrors
   `renderTabChatLeftPanel`), so the first frame never offsets the output area
-  by 0 (F5).
+  by 0.
 - **Collapse**: the "Close" button clears the pending delete and rename state
   and sets `panelW = 8`; the collapsed strip shows an "Open" button that
   restores `PanelWActivated`.
@@ -332,14 +361,14 @@ panel's own width. `renderTabChat` calls `renderTabChatSessionPanel` before
 - **Rename**: a "Rename" toggle on the active row reveals the `InputText`
   (the toggle avoids an always-present tab-focus stop — imtui tab navigation
   does not reach plain buttons). The buffer is initialized from the current
-  title only on row change or toggle-open, never per frame (L3); a title
+  title only on row change or toggle-open, never per frame; a title
   longer than the 128-byte buffer initializes the buffer empty, so a blind
-  Enter is rejected as empty — no silent truncation (L4). Enter queues
+  Enter is rejected as empty — no silent truncation. Enter queues
   `{Rename, activeId, typedTitle}` (empty/whitespace-only titles rejected
   in-panel), Escape cancels.
 - **Delete**: each row has a `del` button; the first press arms the row
   (`del?`), a second press on the same row queues `{Delete, id}` and clears
-  the arm. Pressing another row's delete moves the pending target (L1); any
+  the arm. Pressing another row's delete moves the pending target; any
   non-delete control clears it.
 - **Busy gating**: when `!state.readyStatus`, every interactive widget is
   guarded so no action is queued (guard-and-skip only — the vendored ImGui
@@ -347,16 +376,16 @@ panel's own width. `renderTabChat` calls `renderTabChatSessionPanel` before
   flips is processed between queries (the mailbox race); see
   `doc/sessions.md` for the observable late-click effect.
 - **Scrolling**: the panel child window has no vertical scrollbar yet; rows
-  below the terminal height are unreachable until Phase 3.
+  below the terminal height are unreachable.
 
 Sidebar interactions are logged through the shared `Log& log` parameter
 (`session panel: ...` lines in the Log tab).
 
-### Filter Input (Phase 4)
+### Filter Input
 
-Phase 4 adds an fzf-style filter to the panel header: a single-line
+The panel header carries an fzf-style filter: a single-line
 `InputText` between the `Sessions` separator and the `session_rows` child,
-so it stays fixed while the rows scroll (A19). It adds one header row; the
+so it stays fixed while the rows scroll. It adds one header row; the
 rows child is sized to the remaining height, so the panel shows one fewer
 row than before. The collapsed 8-wide strip renders no filter.
 
@@ -366,17 +395,17 @@ row than before. The collapsed 8-wide strip renders no filter.
     std::array<char, 64> filterBuf = {}; // query; whitespace = no filter
     int filterSeq{0};                    // suffixes the input widget id
     bool filterNonEmptyLastFrame{false}; // end-of-last-frame query snapshot
-    ImVec4 matchColor = ImVec4(1.0f, 0.85f, 0.45f, 1.0f); // highlight (R25)
+    ImVec4 matchColor = ImVec4(1.0f, 0.85f, 0.45f, 1.0f); // highlight
 ```
 
 **Input** (`renderTabChatSessionPanel`, `tui.cpp`):
 `SetNextItemWidth(GetContentRegionAvail().x)` +
 `ImGui::InputText("##session_filter_" + std::to_string(filterSeq), filterBuf,
 sizeof filterBuf, ImGuiInputTextFlags_EnterReturnsTrue)`. Click-to-focus
-only (C11): no `SetKeyboardFocusHere`, so the always-rendered input never
+only: no `SetKeyboardFocusHere`, so the always-rendered input never
 steals keyboard focus from the main query input.
 
-**Per-frame visible list** (no caching, N5): a local `std::vector` of
+**Per-frame visible list** (no caching): a local `std::vector` of
 `{index into panel.sessions, score}` (no `SessionEntry` copies). A
 whitespace-only query keeps all entries in snapshot order; otherwise
 entries with `fuzzyScoreFields(query, title, preview) >= 0` are kept and
@@ -391,33 +420,33 @@ snapshot + `filterBuf`.
   deliberately not `std::tolower`, which is locale-dependent).
   Leftmost-alignment score: +100/byte, +40 word boundary (start, or after
   space/`-`/`_`/`/`), +25 consecutive, -3/gap byte, -1/first-match position;
-  -1 = no match, match score clamped to a floor of 0 (A27). Weights are
+  -1 = no match, match score clamped to a floor of 0. Weights are
   named constants (`kFuzzyBase`/`kFuzzyBoundary`/`kFuzzyConsecutive`/
-  `kFuzzyGap`/`kFuzzyFirstPos`) for the P3 DP scoring.
-- `fuzzyScoreFields(query, title, preview) -> int`: multi-field (R26) —
+  `kFuzzyGap`/`kFuzzyFirstPos`) for future DP scoring.
+- `fuzzyScoreFields(query, title, preview) -> int`: multi-field —
   matches if either field matches; score = `max(titleScore,
   previewScore/2)` (title weighted 2x).
 - `fuzzyMatchPositions(query, text, positions&) -> bool`: the leftmost
-  alignment's matched byte offsets for highlighting (R25); caller-owned,
+  alignment's matched byte offsets for highlighting; caller-owned,
   reusable vector (no per-frame allocation churn).
 
 **Escape (clears the filter)**: a global `IsKeyPressed(Escape)` check in
 the open-panel branch, before the row loop, gated on `!panel.renameActive`.
 The rename box owns Escape while open (its own check runs in the row loop,
-active row only), and A28 (below) guarantees `renameActive` is false
+active row only), and the rule below guarantees `renameActive` is false
 whenever the active row is filtered out, so the two Escape paths are
 disjoint on every frame. The check fires when the query is non-empty **or**
 `filterRevertedEmpty` (non-empty last frame, empty now): on an *active*
 input, 1.81's `cancel_edit` reverts the buffer to its activation value
 during `NewFrame` — before this code runs — so the end-of-last-frame
-snapshot is what tells the handler the user really had a query (S18).
+snapshot is what tells the handler the user really had a query.
 `clearFilter()` empties `filterBuf` and bumps `filterSeq` (see below);
 logs `filter cleared (Escape)`.
 
 **Enter (selects the top match)**: the `EnterReturnsTrue` return value
 selects `visible[0]` when the visible list is non-empty: already-active →
 log-only no-op; ready → queue `{Select, id}`; busy →
-`pendingSelectId = id` (A12, flushes as an ordinary Select on the first
+`pendingSelectId = id` (flushes as an ordinary Select on the first
 ready frame, top of the function). The filter clears at selection time
 (`clearFilter()`), independent of the async switch. Enter only fires while
 the filter input itself is active, so it cannot race the rename input's
@@ -427,13 +456,13 @@ own Enter handling.
 pendingSelectId / active-row no-op) plus `clearFilter()` in every branch —
 a click on a filtered row clears the filter as well.
 
-**A28 — rename box closes when its row is filtered out**: after computing
+**Rename box closes when its row is filtered out**: after computing
 `visible`, if `renameActive` and the active row is not in `visible`, the
 box closes (`renameActive = renameFocus = false`) and is logged — mirroring
 the "active row absent from snapshot" rule at the top of the function and
 keeping the Escape branches disjoint.
 
-**S11 — rename-Esc filter restore**: on the frame the rename box closes
+**Rename-Esc filter restore**: on the frame the rename box closes
 via Escape, an *active* filter input reverts its buffer to its activation
 value (`cancel_edit`) in the same frame, which would wipe the query along
 with the box. The handler snapshots the pre-frame query
@@ -441,11 +470,11 @@ with the box. The handler snapshots the pre-frame query
 `filterSeq` (log `filter restored (rename Esc frame)`), so the query
 survives a rename-cancel and a later Escape still clears it.
 
-**Highlighting (R25)**: with a non-empty filter, `titleMatchRuns` maps
+**Highlighting**: with a non-empty filter, `titleMatchRuns` maps
 `fuzzyMatchPositions` offsets to label byte ranges — consecutive matches
 grouped, snapped to UTF-8 character boundaries (a character is highlighted
 iff any of its bytes matched), extended to the whole word enclosing each
-match (word = maximal span between the A21 separator bytes), and clipped
+match (word = maximal span between the separator bytes), and clipped
 to the displayed title prefix (`sessionTitlePortionLen`) — and
 `renderTitleButton` over-draws those ranges in `matchColor` on top of the
 plain label. Same widget id (`##but` + label) and hover/active colors as
@@ -454,11 +483,11 @@ ellipsis and the ` [N]` count suffix are never highlighted; a preview-only
 match has no title runs. The cursor is restored after the overdraw so
 `sameLineAfterButton`'s anchor is unaffected.
 
-**No-match indicator (A26)**: inside the rows child, when the query is
+**No-match indicator**: inside the rows child, when the query is
 non-empty, `visible` is empty, and the snapshot is non-empty, a single
 dimmed (`previewColor`) `no matches` line replaces the blank area.
 
-**`clearFilter()` and the C10 seq-bump rationale**: `clearFilter(panel)`
+**`clearFilter()` and the seq-bump rationale**: `clearFilter(panel)`
 fills `filterBuf` with NUL and does `++filterSeq`. The seq suffixes the
 InputText widget id, so a programmatic clear changes the id and forces a
 fresh InputText state that reads the now-empty buffer. This is robust
@@ -469,21 +498,21 @@ state from a deactivated widget on refocus — both bypassed by the id
 change. (The same pattern powers `renameSeq`.)
 
 **End-of-frame snapshot**: `filterNonEmptyLastFrame` is set from the final
-buffer after the rows child closes, so the S11 restore counts as a real
-query for the next frame's A23 check.
+buffer after the rows child closes, so the rename-Esc restore counts as a
+real query for the next frame's filter-persistence check.
 
-**Smoke harness** (`test_session_filter_smoke`, A29): a committed CMake
+**Smoke harness** (`test_session_filter_smoke`): a committed CMake
 executable driving the real `TuiState` through the imtui text backend
 (same frame pipeline as `main.cpp`, no terminal; 80x24; a 13-session seed
 with distinct filterable titles). Scenarios: type/narrow/rank, no-match
 indicator, Esc clear, Enter top-match select, row click, busy-defer +
-flush (last wins), snapshot refresh with an active filter, A28 rename-box
-close, R21 Esc priority (rename wins), rename+filter coexistence (S11
-restore), Enter-on-active no-op + clear, multi-byte + whole-word highlight,
-A27 clamp, >64-byte truncation, C11 focus (does not steal from the main
-query input), A31 nav stability (arrow keys move neither the active id nor
-the nav state while a filter is active), C10 re-apply after clear (no
-stale-text resurface), close/reopen + pipeline-occupancy persistence (A23),
+flush (last wins), snapshot refresh with an active filter, rename-box close,
+Esc priority (rename wins), rename+filter coexistence (filter restore),
+Enter-on-active no-op + clear, multi-byte + whole-word highlight, score
+clamp, >64-byte truncation, focus (does not steal from the main query
+input), nav stability (arrow keys move neither the active id nor the nav
+state while a filter is active), seq-bump re-apply after clear (no
+stale-text resurface), close/reopen + pipeline-occupancy persistence,
 empty snapshot, and log-line verification. Build/run (glibc environment):
 
 ```
@@ -522,9 +551,9 @@ frames, verifies the session action queue is empty (`tuiIsSessionActionReady`
 == 0 and `tuiGetSessionAction` returns the None sentinel), prints
 `smoke ok: ...`, and exits 0. Without the argument the interactive loop is
 unchanged. `--frames` requires a non-negative integer; usage errors exit 2.
-The committed `test_session_filter_smoke` harness (see [Filter Input (Phase
-4)](#filter-input-phase-4) above) covers the session filter panel flows
-headlessly the same way.
+The committed `test_session_filter_smoke` harness (see
+[Filter Input](#filter-input) above) covers the session filter panel
+flows headlessly the same way.
 
 ### Keyboard Shortcuts
 

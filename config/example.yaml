@@ -34,8 +34,15 @@ toolLimits:
   maxTopK: 20
   maxArgLength: 200
 
-tui:
-  maxWidth: 0 # unlimited
+# tui:
+#   # Maximum TUI width in terminal columns. 0 = unlimited (default).
+#   # Values must be 0 or >= 40. On platforms whose terminals cap row width
+#   # (e.g. physical 255), set this to that cap; the TUI then never writes a
+#   # column at or beyond the cap (no line-wrap corruption). The area to the
+#   # right of the TUI is never written and is terminal-managed (typically
+#   # blank: ncurses clears the screen on first refresh / uses the alternate
+#   # screen).
+#   maxWidth: 255
 
 sandboxConfig:
   maxOutputBytes: 1048576
@@ -95,14 +102,13 @@ codeModels:
       verifySslCert: true
       maxRetries: 3
       backoffMs: 500
-      apiKey: ""
+      jsonFields: '{"chat_template_kwargs": {"preserve_thinking": true, "enable_thinking": true, "reasoning_effort": "medium"}}'
+      apiKeyEnv: ""
     display: x-high
     modelName: local-model-xyz-high-reason-15b
     temp: 0.6
     contextSize: 128000
     maxTokens: -1
-    reasoningBudget: 4096
-    preserveThinking: true
 
 summaryModel:
   server:
@@ -117,14 +123,13 @@ summaryModel:
     verifySslCert: true
     maxRetries: 3
     backoffMs: 500
-    apiKey: ""
+    apiKeyEnv: "env variable to read the API key from"
   name: summary-model
   prompt: SUMMARY.md
   temp: 0.3
   contextSize: 32768
   contextChunkSize: 32768
   maxTokens: 4096
-  reasoningBudget: 0
   preserveThinking: false
 
 visionModel:
@@ -141,13 +146,11 @@ visionModel:
     maxRetries: 3
     backoffMs: 500
     apiKey: ""
-  name: vision-model
+  modelName: vision-model
   systemPrompt: ""
   temp: 0.3
   contextSize: 32768
   maxTokens: 4096
-  reasoningBudget: 0
-  preserveThinking: false
   timeoutSecs: 60
 
 embedConfig:
@@ -161,7 +164,7 @@ embedConfig:
     maxRetries: 3
     backoffMs: 500
     apiKey: ""
-  name: nomic-embed-text
+  modelName: nomic-embed-text
   chunkSize: 512
   dimensions: 768
   nBatch: 512

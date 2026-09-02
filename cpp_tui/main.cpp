@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
     // Headless smoke mode: --frames N (or --smoke = --frames 30) renders
     // exactly N frames then exits 0, so CI can exercise the session panel
     // and the action queue without a human. Without the argument the loop
-    // below runs until the user quits (L5: interactive loop unchanged).
+    // below runs until the user quits.
     int maxFrames = -1;
     if (argc >= 3 && std::strcmp(argv[1], "--frames") == 0) {
         char* end = nullptr;
@@ -56,9 +56,26 @@ int main(int argc, char** argv) {
     tuiSetStatusText(state, makeStr("Context: 0/0 tokens | Model: none | Ready"));
     tuiSetIniFilename(state, makeStr("imgui2.ini"));
 
+    // Standalone max-width cap via LLMFUN_TUI_MAX_WIDTH (env var only, no
+    // CLI flag). Debugging aid: the user-facing config is the D YAML
+    // tui.maxWidth. Tolerant parse: unset, empty, non-numeric, or negative
+    // values are ignored (0 = unlimited); positive sub-40 caps are raised
+    // to 40 by the C API (the TUI's minimum render width).
+    if (const char* mwEnv = std::getenv("LLMFUN_TUI_MAX_WIDTH")) {
+        char* end = nullptr;
+        long mw = std::strtol(mwEnv, &end, 10);
+        if (end != mwEnv && *end == '\0' && mw >= 0) {
+            // Mirror validateConfig's upper bound so the int narrowing below
+            // is well-defined (the standalone path bypasses D validation).
+            if (mw > 10000)
+                mw = 10000;
+            tuiSetMaxWidth(state, static_cast<int>(mw));
+        }
+    }
+
     // Headless smoke seed: session sidebar snapshot so the panel renders
-    // rows and the action poll can be exercised (Task 6). Inbound strings
-    // are copied by tuiSetSessionList, so the literals may go out of scope.
+    // rows and the action poll can be exercised. Inbound strings are copied
+    // by tuiSetSessionList, so the literals may go out of scope.
     if (maxFrames >= 0) {
         SessionItem sessions[] = {
             {makeStr("20260815-100000-aaaa"), makeStr("Alpha session"),
@@ -72,8 +89,8 @@ int main(int argc, char** argv) {
 
     for (int i = 0; i < 300; ++i) {
         std::string summary{"hello"};
-        std::string text{
-            u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' \n\n'⚠️'\n✅\n\n***\n\n"};
+        std::string text{u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' "
+                         u8"\n\n'⚠️'\n✅\n\n***\n\n"};
         text.append(std::to_string(i));
 
         TuiChatMessageType type = TuiChatMessageType_Assistant;
@@ -200,8 +217,8 @@ int main(int argc, char** argv) {
             agentId.append(std::to_string(i));
 
             std::string content{"hello"};
-            std::string reasoning{
-                u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' \n'⚠️'\n✅\n \n***\n\n"};
+            std::string reasoning{u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' "
+                                  u8"'ö' \n'⚠️'\n✅\n \n***\n\n"};
             reasoning.append(std::to_string(i));
 
             std::string role{"assistant"};
@@ -223,7 +240,7 @@ int main(int argc, char** argv) {
     auto pipelineShowAt = std::chrono::system_clock::now() + std::chrono::seconds{1};
 
     // Frame-count exit for --frames N; the body is identical to the
-    // interactive loop (L5).
+    // interactive loop.
     int frame = 0;
     while (true) {
         if (maxFrames >= 0 && frame >= maxFrames)
