@@ -30,7 +30,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     auto llmConf = readConfig(uconf.config, false, uconf.noCwdConfig, uconf.trustedConfig)
         .userToLlmConfig(conf);
 
-    auto rag = createRag(llmConf);
+    auto rag = createRag(llmConf, openSecondary: false);
     if (rag is null)
         return 1;
 
