@@ -136,8 +136,7 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
         }
     }
 
-    for (int counter; counter < 100; ++counter) {
-        ++counter;
+    for (int counter; counter < 10; ++counter) {
         try {
             auto db = Miniorm(dbFile, readOnly ? SQLITE_OPEN_READONLY
                     : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE));
