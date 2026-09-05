@@ -57,6 +57,8 @@ class Agent : IBasicAgent {
         string taskDoneMessage_;
         long contextSize_;
 
+        bool compressNudgeSent;
+
         SysTime lastToolCallWarning;
         static immutable ToolCallWarnInterval = 15.dur!"minutes";
         int toolCallWarnCounter = -1;
@@ -160,7 +162,7 @@ class Agent : IBasicAgent {
     }
 
     /// Adds a harness control message that continues the current turn
-    /// (A3/H1): a user-role nudge with userQuery:false — never opens a turn
+    /// : a user-role nudge with userQuery:false — never opens a turn
     /// and appears in neither the dialogue nor the trace projection. Used by
     /// the pipeline retry loop instead of addUserQuery, which would fragment
     /// one logical turn into N turns and leak harness text into the Facts
@@ -175,22 +177,24 @@ class Agent : IBasicAgent {
         string msg;
         if (keepReasoningStrikes < MaxStrikes) {
             // STRIKE 1 or 2: Gentle diagnostic (but explicitly forbids plain‑text diagnosis)
-            msg = q"(**⚠️ SYSTEM NUDGE:** You stopped generating without calling a tool.
+            msg = "[SYSTEM NUDGE - NOT USER INPUT]
+You stopped generating without calling a tool.
 
 You have two possible states (choose ONLY ONE):
-1. BLOCKED – You asked a question or need user input.
-2. COMPLETE – You have fully solved the user's request.
+1. BLOCKED: You asked a question or need user input.
+2. COMPLETE: You have fully solved the user's request.
 
 EXECUTION RULES:
-- If BLOCKED → Call taskDone immediately with your question.
-- If COMPLETE → Call taskDone immediately with your final answer.
+- If BLOCKED: Call taskDone immediately with your question.
+- If COMPLETE: Call taskDone immediately with your final answer.
 
-IMPORTANT: Do NOT describe your state in plain text. Your very next output MUST be a tool call (taskDone) or your next reasoning step/tool call. If you need to continue working, just output the next tool call right now.)";
+IMPORTANT: Do NOT describe your state in plain text. Your very next output MUST be a tool call (taskDone) or your next reasoning step/tool call. If you need to continue working, just output the next tool call right now.";
         } else {
             // STRIKE 3+: Strict JSON force (breaks the loop)
-            msg = q"(**⚠️ SYSTEM OVERRIDE - FINAL WARNING:** You have repeatedly stopped without calling a tool.
+            msg = q"([SYSTEM OVERRIDE - NOT USER INPUT - FINAL WARNING]
+You have repeatedly stopped without calling a tool.
 
-Your state is BLOCKED. Do not re‑diagnose.
+Your state is BLOCKED. Do not re-diagnose.
 
 YOUR ENTIRE NEXT RESPONSE MUST BE EXACTLY THIS JSON (output ONLY this, no extra text):
 {"name": "taskDone", "arguments": {"answer": "<Put your exact question here>"}}
@@ -207,7 +211,7 @@ ABSOLUTELY NO OTHER TEXT. Do not explain, apologise, or write anything outside t
         string msg;
 
         if (continueStrikes < MaxStrikes) {
-            msg = q"([SYSTEM RECOVERY — NOT USER INPUT]
+            msg = "[SYSTEM RECOVERY - NOT USER INPUT]
 You stopped without calling a tool.
 
 This is a harness control message. Do not treat it as a user reply.
@@ -219,17 +223,33 @@ Otherwise call taskDone:
 - If you need user input: answer = the exact question you just asked.
 - If you are finished: answer = your final answer.
 
-Do not include anything else in taskDone.answer.)";
+Do not include anything else in taskDone.answer.";
         } else {
-            msg = q"([FINAL RECOVERY - NOT USER INPUT]
+            msg = "[FINAL RECOVERY - NOT USER INPUT]
 Call taskDone now.
 
 answer = your final answer, or the exact question you just asked if you need user input.
 
-Output only the taskDone tool call. No other text.)";
+Output only the taskDone tool call. No other text.";
         }
 
         chat.add(Message(Role.user, userQuery: false, thinking: null, content: msg));
+    }
+
+    void addCompressionNudge() @safe nothrow {
+        if (!nudgeAgentCompression || compressNudgeSent)
+            return;
+        compressNudgeSent = true;
+
+        try {
+            auto msg = format("[SYSTEM NUDGE - NOT USER INPUT]\n\nYour context is at %.1f%%. Forced compression will automatically trigger at 90%%, and it may discard information without your control.
+
+Call `requestCompression` now to compress on your own terms. Write a self-contained message to your future self covering: current goal, decisions, open questions, constraints, and next steps. (See parameter description for full details.)",
+                    cast(double) prevStat.context / cast(double) contextSize_ * 100.0);
+            chat.add(Message(Role.user, userQuery: false, thinking: null, content: msg));
+        } catch (Exception e) {
+            logger.trace(e.msg).collectException;
+        }
     }
 
     ProcessResult process(bool delegate() interrupt) @trusted nothrow {
@@ -324,20 +344,46 @@ Output only the taskDone tool call. No other text.)";
         return rval;
     }
 
-    bool needCompression(double threshold = 0.9) {
+    bool nudgeAgentCompression(double threshold = 0.8) @safe pure nothrow const @nogc {
+        return needCompression(threshold);
+    }
+
+    bool needCompression(double threshold = 0.9) @safe pure nothrow const @nogc {
         return prevStat.context > contextSize_ * threshold;
     }
 
     SummaryAgent.CompressResult compress(double threshold = 0.9, bool force = false,
             SummaryAgent.ProgressCallback callback = null) {
-        if (prevStat.context < contextSize_ * threshold && !force)
+        import llm.common.config : ApproxTokenSize;
+
+        if (!needCompression(threshold) && !force && !toolCtx.agentCompressionRequest)
             return typeof(return)(compressed: true);
+        scope (exit) {
+            toolCtx.clearAgentCompressionRequest;
+            compressNudgeSent = false;
+        }
         long oldContextSize = prevStat.context;
         auto result = summary.compress(chat, callback, null);
         prevStat.startContext = result.newContextSize;
         if (force) {
             logger.infof("Forced compression: context %s -> %s tokens (saved %s)",
                     oldContextSize, prevStat.context, oldContextSize - prevStat.context);
+        }
+        if (result.compressed && toolCtx.agentCompressionRequest
+                && !toolCtx.agentCompressionMessageToSelf.empty) {
+            auto msg = i"[SYSTEM MESSAGE - NOT USER INPUT]
+Context compression has been performed. The following is the summary you wrote for yourself before compression. Use it as your memory of the previous conversation.
+
+Summary:$(
+                    toolCtx.agentCompressionMessageToSelf)".text;
+            chat.add(Message(Role.user, userQuery: false, thinking: null, content: msg));
+            prevStat.startContext += msg.length / ApproxTokenSize;
+        }
+        if (result.compressed) {
+            auto msg = "[SYSTEM MESSAGE - NOT USER INPUT]
+Continue your work from where you left off.";
+            chat.add(Message(Role.user, userQuery: false, thinking: null, content: msg));
+            prevStat.startContext += msg.length / ApproxTokenSize;
         }
         return result;
     }
@@ -450,8 +496,12 @@ Output only the taskDone tool call. No other text.)";
                 consecutiveNoToolCallOk = 0;
             }
 
-            // compress at the end because it could be filled with junk
-            this.compress(callback: compressCallback);
+            if (needCompression || toolCtx.agentCompressionRequest) {
+                // compress at the end because it could be filled with junk
+                this.compress(callback: compressCallback);
+            } else if (nudgeAgentCompression) {
+                addCompressionNudge();
+            }
         }
         while (keepRunning);
         return result;

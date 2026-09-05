@@ -24,6 +24,7 @@ import llm.rag.rag : RAG;
 import llm.skill : SkillManager;
 import llm.tool_call : Context;
 import llm.tool_call.completion : CompletionContext;
+import llm.tool_call.context : ContextManagement;
 import llm.tool_call.io : FileContext;
 import llm.tool_call.memory : MemoryContext, MemoryTopic;
 import llm.tool_call.metrics : MetricsContext;
@@ -41,8 +42,8 @@ struct VisionImage {
     }
 }
 
-class AgentContext : Context, FileContext, RAGContext, MemoryContext, CompletionContext,
-    MetricsContext, PipelineControlContext, VisionContext, SkillContext, EnvironmentContext {
+class AgentContext : Context, FileContext, RAGContext, MemoryContext, CompletionContext, MetricsContext,
+    PipelineControlContext, VisionContext, SkillContext, EnvironmentContext, ContextManagement {
         import llm.vfs : FlatVfs;
 
         private {
@@ -62,6 +63,9 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext, Completion
             SkillManager skillManager;
 
             EnvironmentBackend[string] envLookup_;
+
+            bool agentRequstedCompression;
+            string agentMessageToSelf;
         }
 
         /// RAG is optional: when null, RAG-dependent tools degrade gracefully.
@@ -80,6 +84,24 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext, Completion
         /// Set the skill manager used by the skill tool.
         void setSkillManager(SkillManager mgr) {
             skillManager = mgr;
+        }
+
+        bool agentCompressionRequest() @safe nothrow {
+            return agentRequstedCompression;
+        }
+
+        string agentCompressionMessageToSelf() @safe nothrow {
+            return this.agentMessageToSelf;
+        }
+
+        void clearAgentCompressionRequest() @safe nothrow {
+            agentRequstedCompression = false;
+            agentMessageToSelf = null;
+        }
+
+        override void agentRequestCompression(string messageToSelf) @safe nothrow {
+            agentRequstedCompression = true;
+            this.agentMessageToSelf = messageToSelf;
         }
 
         /// Look up an environment by its tag using a pre-built AA.
