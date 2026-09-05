@@ -103,9 +103,9 @@ struct ExecuteCommandParams {
 /// empty command validation, and future sessionId placeholder.
 @Function("Execute a command in an execution environment. Returns JSON with exitCode, stdout, and stderr. Use environmentTag to select the environment (call listEnvironments() to see available options)")
 ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) nothrow {
-    mixin(baseContextToSpecific!EnvironmentContext);
+    import std.datetime.stopwatch : StopWatch, AutoStart;
 
-    // TODO: measure how long it takes to execute a command and add the result to the result
+    mixin(baseContextToSpecific!EnvironmentContext);
 
     try {
         if (params.command.empty) {
@@ -144,10 +144,13 @@ ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) n
         scope (exit)
             runner.dispose();
 
+        auto sw = StopWatch(AutoStart.yes);
         auto result = runner.execute(params.command);
+        const d = sw.peek;
 
         return ExecuteFuncResult(JSONValue([
             "exitCode": JSONValue(result.exitCode),
+            "time_seconds": JSONValue(d.total!"seconds"),
             "stdout": JSONValue(result.stdout),
             "stderr": JSONValue(result.stderr)
         ]).toString(JSONOptions.doNotEscapeSlashes), success: true);
@@ -347,9 +350,6 @@ unittest {
     assert(json.array[0]["description"].str == "Only environment");
     assert(json.array[0]["capabilities"].array.length == 0);
 }
-
-// Unit tests for executeCommand()
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Test: executeCommand with empty command returns error.
 unittest {
