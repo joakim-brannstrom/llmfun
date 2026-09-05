@@ -98,12 +98,6 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext, Completion
 
         /// Get the default environment tag.
         /// Returns: The default tag, or null if not configured.
-        override string getDefaultEnvironmentTag() @safe nothrow {
-            return conf.sandboxConfig.defaultEnvironmentTag;
-        }
-
-        /// Get the default environment tag.
-        /// Returns: The default tag, or null if not configured.
         override long getMaxOutputBytes() @safe nothrow {
             return conf.sandboxConfig.maxOutputBytes;
         }

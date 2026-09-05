@@ -82,10 +82,6 @@ struct SandboxConfig {
     /// Loading state of the execution environments config.
     ExecutionConfigState executionConfigState = ExecutionConfigState.notConfigured;
 
-    /// Default environment tag from the execution environments config.
-    /// Only set when the config loaded successfully.
-    string defaultEnvironmentTag;
-
     invariant {
         assert(maxOutputBytes > 0, i"maxOutputBytes must be positive, got $(maxOutputBytes)".text);
     }
@@ -708,13 +704,8 @@ private void loadExecutionEnvironments(ref LlmConfig conf,
 
             conf.sandboxConfig.executionEnvironments = merged.byValue.array;
             conf.sandboxConfig.executionConfigState = ExecutionConfigState.loaded;
-
-            // defaultEnvironment: user file takes priority, fall back to system
-            conf.sandboxConfig.defaultEnvironmentTag = !userDefaultTag.empty
-                ? userDefaultTag : systemDefaultTag;
         } else {
             conf.sandboxConfig.executionConfigState = ExecutionConfigState.loadFailed;
-            conf.sandboxConfig.defaultEnvironmentTag = null;
         }
 
         return;

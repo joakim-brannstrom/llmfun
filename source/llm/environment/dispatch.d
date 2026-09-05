@@ -34,10 +34,6 @@ interface EnvironmentContext : Context {
     /// Returns: The absolute path to the workarea directory.
     AbsolutePath workArea();
 
-    /// Get the default environment tag from configuration.
-    /// Returns: The default tag, or null if not configured.
-    string getDefaultEnvironmentTag();
-
     /// Returns: the max output to read from a command.
     long getMaxOutputBytes();
 }
@@ -88,8 +84,7 @@ ExecuteFuncResult listEnvironments(Context baseCtx, ListEnvironmentsParams param
 
 /// Parameters for the executeCommand tool.
 struct ExecuteCommandParams {
-    @ParamOptional @ParamDescription(
-            "Environment tag to use for execution. If empty, uses the configured default environment.")
+    @ParamDescription("Environment tag to use for execution")
     string environmentTag;
 
     @ParamDescription(
@@ -104,11 +99,13 @@ struct ExecuteCommandParams {
 /// Execute a command in the specified environment. Resolves the environment tag,
 /// instantiates the appropriate RunnerBackend (ContainerRunner or HostRunner),
 /// executes the command, and returns the result as JSON.
-/// Supports optional environmentTag (defaults to config's defaultEnvironment),
+/// Supports optional environmentTag,
 /// empty command validation, and future sessionId placeholder.
-@Function("Execute a command in an execution environment. Returns JSON with exitCode, stdout, and stderr. Use environmentTag to select the environment (call listEnvironments() to see available options). If environmentTag is empty, uses the configured default environment.")
+@Function("Execute a command in an execution environment. Returns JSON with exitCode, stdout, and stderr. Use environmentTag to select the environment (call listEnvironments() to see available options)")
 ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) nothrow {
     mixin(baseContextToSpecific!EnvironmentContext);
+
+    // TODO: measure how long it takes to execute a command and add the result to the result
 
     try {
         if (params.command.empty) {
@@ -117,12 +114,9 @@ ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) n
 
         string tag = params.environmentTag;
         if (tag.empty) {
-            tag = ctx.getDefaultEnvironmentTag();
-            if (tag.empty) {
-                return ExecuteFuncResult("error: No environment tag specified and no default environment "
-                        ~ "configured. Call listEnvironments() to see available options.",
-                        success: false);
-            }
+            return ExecuteFuncResult(
+                    "error: No environment tag specified. Call listEnvironments() to see available options.",
+                    success: false);
         }
 
         auto env = ctx.getEnvironment(tag);
@@ -167,7 +161,6 @@ version (unittest) {
     private class MockEnvironmentContext : EnvironmentContext {
         EnvironmentBackend[] envs;
         AbsolutePath workAreaPath;
-        string defaultTag;
 
         override EnvironmentBackend getEnvironment(string tag) {
             foreach (ref env; envs) {
@@ -184,10 +177,6 @@ version (unittest) {
 
         override AbsolutePath workArea() {
             return workAreaPath;
-        }
-
-        override string getDefaultEnvironmentTag() {
-            return defaultTag;
         }
 
         override long getMaxOutputBytes() {
@@ -397,7 +386,6 @@ unittest {
     string[][string] emptyOptions;
     auto ctx = new MockEnvironmentContext();
     ctx.workAreaPath = AbsolutePath("/workarea");
-    ctx.defaultTag = "sandbox";
     ctx.envs = [
         EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
                 capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
@@ -435,13 +423,11 @@ unittest {
 unittest {
     auto ctx = new MockEnvironmentContext();
     ctx.workAreaPath = AbsolutePath("/workarea");
-    // defaultTag is null by default (no default configured)
 
     auto result = executeCommand(ctx, ExecuteCommandParams(environmentTag: "",
             command: ["echo"], sessionId: ""));
 
     assert(!result.success);
-    assert(result.msg == "error: No environment tag specified and no default environment configured. Call listEnvironments() to see available options.");
 }
 
 /// Test: executeCommand with sessionId parameter (ignored).
@@ -452,7 +438,6 @@ unittest {
     string[][string] emptyOptions;
     auto ctx = new MockEnvironmentContext();
     ctx.workAreaPath = AbsolutePath("/workarea");
-    ctx.defaultTag = "sandbox";
     ctx.envs = [
         EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
                 capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
