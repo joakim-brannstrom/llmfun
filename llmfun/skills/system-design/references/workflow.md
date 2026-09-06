@@ -1,5 +1,8 @@
 # System Design Workflow — Detailed Steps
 
+Write each phase's results to `plan/design_notes.md` before moving to the
+next phase.
+
 ## Phase 1: Clarify Requirements
 
 - **Extract functional requirements**: List what the system must do, grouped by domain.
@@ -69,3 +72,35 @@
 ## Phase 8: Produce Output
 
 Report design tasks using the output format template in `output-format.md`.
+
+## Compression checkpoint (`requestCompression`)
+
+`requestCompression` is the design's active checkpoint: it compresses on
+your terms and re-injects your message-to-self afterwards — unlike forced
+compression at ~90%, which summarizes without your control.
+
+- Trigger points: when the harness injects the 80% `[SYSTEM NUDGE - NOT
+  USER INPUT]`, and at every phase boundary in a long design — even below
+  80%. Never mid-phase.
+- Write the message-to-self as a briefing for a new instance with no memory
+  of the session:
+
+```
+[Design handoff]
+- Goal: design <system> for <use case>; output <path>
+- Progress: phases done <list>; current phase
+- Decisions so far: <decision + rationale, one-liners>
+- Requirements captured: <Must/Should counts + key constraints>
+- Open questions: <list>
+- Task list so far: <count + key tasks>
+- User decisions/constraints: <any>
+- Next action: <first task of the current phase>
+```
+
+## Resume protocol (after a context compression)
+
+0. If you requested the compression yourself, the re-injected handoff
+   message is your first memory — read it, then continue below.
+1. Re-read `plan/design_notes.md` first — it says where you were and what
+   you decided.
+2. Continue from the first unfinished phase; keep updating the file.
