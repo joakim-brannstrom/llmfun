@@ -1,64 +1,63 @@
 ---
 name: code-review
 description: >-
-  Language-agnostic code review for bugs, security issues, style violations,
-  and logic errors. Use when the user asks for a code review, PR feedback,
-  quality check, or wants to verify code correctness.
-version: 1.0.0
+  Language-agnostic code review: bugs, security
+  issues, style violations, and logic errors — including reviewing an
+  implementation against its design/spec/plan. Use on code review, PR
+  feedback, or correctness checks. Triggers on: code review, PR feedback,
+  review, audit, check code, verify code, correctness.
+version: 1.1.0
 ---
 
 # Code Review
 
 ## When to Use
 
-Use this skill when the user:
-- Asks for a code review or PR feedback
-- Wants to check code quality, correctness, or security
-- Mentions "review", "audit", "check", or "verify" in context of code
-- Wants to find bugs, vulnerabilities, or style issues
+Use this skill when asked for a code review, PR feedback, or a
+correctness/security check — including reviewing an implementation against
+its design/spec/plan.
 
 ## Rules
 
 **Always check for:**
 - **Syntax errors**: Unclosed brackets, missing semicolons, invalid operators, type mismatches
 - **Security issues**: Hardcoded secrets, injection vectors (SQL, XSS, command), missing input validation
-- **Resource leaks**: Unclosed file handles, network connections, database cursors, unreleased memory
+- **Resource leaks**: Unclosed handles, connections, cursors, unreleased memory
 - **Logic errors**: Uncovered branches, uninitialized variables, off-by-one errors, race conditions
 - **Import issues**: Unused imports, missing dependencies, circular imports
-- **Naming consistency**: Variables, functions, classes follow project conventions
+- **Naming consistency**: Follows project conventions
 
 **Severity classification:**
-- **Critical**: Compilation failure, runtime crash, security vulnerability, data corruption
+- **Critical**: Build failure, crash, security vulnerability, data corruption
 - **Important**: Logic error, performance bottleneck, missing error handling, resource leak
 - **Minor**: Style violation, unused code, unclear naming, redundant logic
 
+**Externalize continuously**: After every workflow step, write its output to
+the state file `review_notes.md` (progress checklist, scope, evidence,
+findings, probe log) — never keep findings only in context. Checkpoint long
+reviews with `requestCompression` at natural boundaries (template:
+workflow.md); after compression, resume from the re-injected handoff +
+`review_notes.md` and the specs — if compression hit without your handoff,
+re-read `review_notes.md` to recover.
+
+**Mind the context budget**: baseline first — run the project's build/test
+once, output to a log (grep/head only, never inline). Branch/PR reviews:
+diff stat first, changed files first. Keep the raw-code working set
+~15-20% of the window (128k ≈ 1 large file; bigger windows may hold whole
+modules); summarize dropped files to the state file.
+
 ## Workflow
 
-1. **Context Acquisition**
-   - Read the entire file being reviewed
-   - Read related modules, interfaces, types, and configuration files
-   - Identify intent from naming, comments, docstrings, and call sites
-   - Note existing conventions (naming, error handling, imports, structure)
+Follow the review protocol. See `references/workflow.md` for detailed steps.
 
-2. **Static Analysis**
-   - Validate syntax and structure
-   - Audit imports for unused, missing, or circular dependencies
-   - Verify naming compliance with project conventions
-   - Check structural organization (public before private, helpers at bottom, grouped related code)
-
-3. **Logic & Security Analysis**
-   - Trace control flow: conditionals, loops, returns — ensure all branches covered
-   - Verify data flow: follow variables from declaration to usage
-   - Scan for security vulnerabilities (secrets, injection, missing validation)
-   - Check resource management (proper close/release of handles)
-   - Flag concurrency issues (race conditions, missing locks, improper async)
-
-4. **Issue Reporting**
-   - Classify each issue by severity (Critical / Important / Minor)
-   - Generate fix-ready corrections for each issue
-   - Provide exact replacement code with context (3-5 surrounding lines)
-   - Include dependency changes (new imports, helpers, type changes) when needed
-   - Add brief rationale for each fix
+1. **Scope & Criteria** — Confirm scope; record spec docs + requirement list to `review_notes.md`.
+2. **Context Acquisition** — Read files in anchored chunks; record anchors + facts per chunk to `review_notes.md`.
+3. **Spec Conformance** — Map each requirement/decision to code evidence (requirement → file:line); record the table to `review_notes.md`.
+4. **Static Analysis** — Validate syntax, imports, naming, structure; record findings as found.
+5. **Logic & Security Analysis** — Control/data flow, cross-event state, security, resources, concurrency; record findings as found.
+6. **Empirical Verification** — Probes: write, run, observe, revert; log each to `review_notes.md`.
+7. **Write the Review** — Assemble the final report from `review_notes.md`.
+8. **Cleanup** — Revert any probes, confirm the tree is clean, deliver the review.
 
 ## Output Format
 
@@ -78,10 +77,13 @@ Present findings organized by severity:
 ### Minor
 ```
 
+For spec-driven reviews, prepend a requirement → evidence table; keep
+findings individually acceptable/rejectable.
+
 ## References
 
-Language-specific checklists for deeper review guidance:
-
-- **D**: `references/d-lang.md` — imports, concurrency attributes, type system, path handling, error patterns
-- **Python**: `references/python.md` — type hints, error handling, resource management, concurrency, PEP 8
-- **C++**: `references/cpp.md` — memory management, const correctness, modern C++, exception safety, templates
+- **D**: `references/d-lang.md` — imports, concurrency, type system, paths, errors
+- **Python**: `references/python.md` — types, errors, resources, concurrency, PEP 8
+- **C++**: `references/cpp.md` — memory, const, modern C++, exceptions, templates
+- Spec-driven: `references/spec-review.md` — extraction, evidence mapping, probes, cross-event state, policy split
+- Detailed workflow: `references/workflow.md` — steps, state-file format, resume protocol
