@@ -1,6 +1,8 @@
 FROM ubuntu:resolute
 LABEL authors="Joakim Brännström <joakim.brannstrom@gmx.com>"
 
+RUN rm -rf /var/lib/apt/lists/*
+
 RUN apt update && \
     DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends install \
         ca-certificates
@@ -10,7 +12,7 @@ RUN apt upgrade -y
 RUN apt install -y --no-install-recommends \
         git \
         make cmake ninja-build \
-        gcc g++ \
+        gcc g++ gdb \
         curl \
         xz-utils \
         libncurses-dev
