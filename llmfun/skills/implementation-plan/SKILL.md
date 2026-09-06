@@ -6,7 +6,7 @@ description: >-
   writing code. Triggers on: implementation plan, plan implementation, break
   down, task breakdown, task plan, feature plan, design tasks, what to build,
   plan the work, task order.
-version: 1.4.0
+version: 1.5.0
 ---
 
 # Implementation Plan Skill
@@ -37,20 +37,19 @@ Use this skill when:
   (`file.d:123-145`). The executor reads `implementation_plan.md` first,
   then the task file — between the two, every constant, format, error
   string, call signature, and decision the task needs must appear.
-- **Budget the overview**: `implementation_plan.md` ≤ ~10 KB. The executor
+- **Budget the overview**: `implementation_plan.md` ≤ ~10 KB - the executor
   reads it before every task, so it carries the standing executor rules
-  (build/test commands, regression command, stop-and-re-plan guard, anchor
-  verification, decision letters); split other overflow into companion
-  files (e.g. `plan/anchors.md`).
+  (build/test, regression, stop-and-re-plan guard, anchor verification,
+  decision letters); overflow into companion files (e.g. `plan/anchors.md`).
 - **Dependency order**: Order tasks so foundations come before dependents.
-- **Externalize continuously**: Context may be compressed, losing details. Write notes to `plan/requirements_notes.md` and `plan/codebase_notes.md`, and draft tasks to `plan/task_NN.md` immediately. Do not rely on context.
+- **Externalize continuously**: Context may be compressed, losing details. Write notes to `plan/requirements_notes.md` + `plan/codebase_notes.md`, draft tasks to `plan/task_NN.md` immediately. On the 80% nudge or at phase boundaries, call `requestCompression` (handoff: workflow.md); resume from the re-injected handoff + `plan/` notes (no handoff → re-read).
 
 ## Workflow
 
 Follow the planning protocol. See `references/workflow.md` for detailed steps.
 
-1. **Understand Requirements** — Read design/use case, identify scope, constraints, dependencies. Write notes to `plan/requirements_notes.md` immediately; do not keep findings only in context.
-2. **Survey the Codebase** — Read code at integration points, identify patterns, note existing assets. Write notes to `plan/codebase_notes.md` immediately; do not keep findings only in context.
+1. **Understand Requirements** — Read design/use case, identify scope, constraints, dependencies. Write notes to `plan/requirements_notes.md` now.
+2. **Survey the Codebase** — Read code at integration points, identify patterns, note existing assets. Write notes to `plan/codebase_notes.md` now.
 3. **Decompose into Tasks** — Break feature into small, verifiable tasks. Draft each task to `plan/task_NN.md` as soon as scope is decided; do not sit on drafts in context.
 4. **Order by Dependency** — Arrange tasks so each builds on previously completed ones.
 5. **Write the Overview** — Finalize tasks and write overview to `plan/implementation_plan.md`: task order, executor rules, cross-cutting concerns, and non-task details.

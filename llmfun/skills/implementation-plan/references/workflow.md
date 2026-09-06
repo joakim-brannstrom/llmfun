@@ -208,3 +208,34 @@ hard gate, not a guideline):
 - **Present task summary**: Show the user the ordered task list.
 - **Explain dependencies**: Note why tasks are ordered as they are.
 - **Invite review**: Ask the user if the plan makes sense before execution.
+
+## Compression checkpoint (`requestCompression`)
+
+`requestCompression` is the plan's active checkpoint: it compresses on your
+terms and re-injects your message-to-self afterwards — unlike forced
+compression at ~90%, which summarizes without your control.
+
+- Trigger points: when the harness injects the 80% `[SYSTEM NUDGE - NOT
+  USER INPUT]`, and at any natural planning boundary (after each phase,
+  after each task draft) — even below 80%. Never mid-task-draft.
+- Write the message-to-self as a briefing for a new instance with no memory
+  of the session:
+
+```
+[Plan handoff]
+- Goal: plan <feature>; output `plan/implementation_plan.md` + task_NN.md
+- Progress: phases done <list>; current phase; tasks drafted <list>
+- Key decisions: <decision letters defined so far + one-liners>
+- Open unknowns: <list; add a spike task_00 if >1>
+- Notes files: `plan/requirements_notes.md`, `plan/codebase_notes.md`
+- User decisions/constraints: <any>
+- Next action: <first unchecked step or next task to draft>
+```
+
+## Resume protocol (after a context compression)
+
+0. If you requested the compression yourself, the re-injected handoff
+   message is your first memory — read it, then continue below.
+1. Re-read `plan/requirements_notes.md` and `plan/codebase_notes.md`, then
+   the task drafts you already wrote.
+2. Continue from the first unchecked phase; keep updating the files.
