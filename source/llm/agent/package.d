@@ -248,7 +248,10 @@ Call `requestCompression` now to compress on your own terms. Write a self-contai
                     cast(double) prevStat.context / cast(double) contextSize_ * 100.0);
             chat.add(Message(Role.user, userQuery: false, thinking: null, content: msg));
         } catch (Exception e) {
-            logger.trace(e.msg).collectException;
+            try {
+                logger.trace(e.msg);
+            } catch(Exception e) {
+            }
         }
     }
 
