@@ -225,7 +225,7 @@ class RAG {
                     databaseName: databases[a.dbIndex].name)).array;
         }
 
-        return embedder.embed(query).match!((float[] a) => runMatch(a), (EmbedError e) {
+        return embedder.embedQuery(query).match!((float[] a) => runMatch(a), (EmbedError e) {
             logger.warning(e.errorMsg);
             return null;
         });
@@ -257,7 +257,7 @@ class RAG {
                     added: a.added, databaseName: databases[a.dbIndex].name)).array;
         }
 
-        return embedder.embed(vectorQuery).match!((float[] embed) {
+        return embedder.embedQuery(vectorQuery).match!((float[] embed) {
             if (embed.empty) {
                 logger.trace("Unable to do a combined search because embedding is empty");
                 return queryTextSearch(textQuery, getTopK, database);
@@ -377,7 +377,7 @@ RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
             auto data = graphemes.byCodePoint.toUTF8;
 
             float[] emb;
-            embedder.embed(data).match!((float[] embed) { emb = embed; }, (EmbedError e) {
+            embedder.embedDocument(data).match!((float[] embed) { emb = embed; }, (EmbedError e) {
                 logger.tracef("Failed to generate embedding '%s' (len:%s): %s",
                     e.errorMsg, graphemes.length, data);
                 try {
@@ -486,8 +486,8 @@ RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
             const lines = countLines(textChunk);
 
             float[] emb;
-            embedder.embed(tokens).match!((float[] embed) { emb = embed; }, (EmbedError e) {
-                logger.tracef("Failed to generate embedding '%s' (toks:%s text:%s%s): %s",
+            embedder.embedDocument(tokens).match!((float[] embed) { emb = embed; }, (EmbedError e) {
+                logger.tracef("Failed to generate embedding '%s' (toks:%s text:%s): %s",
                     e.errorMsg, tokens.length, text.length, text);
             });
 
@@ -520,7 +520,6 @@ RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
             // assuming that no sane word is larger than 50 characters
             if (graphem[0].isWhite || currentWord.length > 50) {
                 auto wordTokens = embedder.tokenize(currentWord.byCodePoint.toUTF8);
-                // logger.tracef("%s %s %s %s", tokens.length, textChunk.length, currentWord.length, wordTokens.length);
                 if (tokens.length + wordTokens.length > nBatch) {
                     addChunk;
                 }
@@ -614,7 +613,7 @@ version (unittest) {
             return false;
         }
 
-        override EmbedResult embed(string text) {
+        EmbedResult embed(string text) {
             // FNV-1a 64-bit: deterministic, no imports needed
             immutable ulong prime = 0x00000100000001B3;
             ulong h = 0xCBF29CE484222325;
@@ -626,12 +625,28 @@ version (unittest) {
             return EmbedResult(vec);
         }
 
-        override EmbedResult embed(int[] tokens) {
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(int[] tokens) {
             // never called: supportsTokenization is false
             char[] text = new char[tokens.length];
             foreach (i, ref c; text)
                 c = cast(char)(tokens[i] & 0x7F);
             return embed(cast(string) text);
+        }
+
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
         }
 
         override int[] tokenize(string text) {

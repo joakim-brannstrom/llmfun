@@ -55,7 +55,7 @@ Embedder createLocalEmbedder(EmbedConfig config) {
             createEmbedder.unlock_nothrow();
 
         if (auto m = getModel(local.modelName)) {
-            return new LlamaEmbedder(local.modelName, new Model(m), destroyModel: true);
+            return new LlamaEmbedder(local, new Model(m), destroyModel: true);
         }
 
         auto params = contextEmbedding(LlamaParams.make(), ctxSize: cast(uint) local.chunkSize, nBatch: cast(
@@ -70,7 +70,7 @@ Embedder createLocalEmbedder(EmbedConfig config) {
         auto model = new Model(local.modelPath, params);
         addModel(local.modelName, model);
 
-        return new LlamaEmbedder(local.modelName, model, destroyModel: false);
+        return new LlamaEmbedder(local, model, destroyModel: false);
     });
 }
 

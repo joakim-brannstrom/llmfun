@@ -378,7 +378,7 @@ class DialogueIndex {
         bool embedFailed;
         string embedError;
         if (!vectorQuery.empty) {
-            qEmbedder.embed(vectorQuery).match!((float[] v) { embedded = v; }, (EmbedError e) {
+            qEmbedder.embedQuery(vectorQuery).match!((float[] v) { embedded = v; }, (EmbedError e) {
                 embedFailed = true;
                 embedError = e.errorMsg;
                 logger.tracef("DialogueIndex.query: embed failed: %s", e.errorMsg);
@@ -550,14 +550,30 @@ version (unittest) {
             return false;
         }
 
-        override EmbedResult embed(string text) {
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(string text) {
             auto v = new float[8];
             foreach (ref f; v)
                 f = 1.0f;
             return EmbedResult(v);
         }
 
-        override EmbedResult embed(int[] tokens) {
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
+        }
+
+        EmbedResult embed(int[] tokens) {
             return EmbedResult(EmbedError("no tokens"));
         }
 
@@ -1147,7 +1163,15 @@ version (unittest) {
             return false;
         }
 
-        override EmbedResult embed(string text) {
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(string text) {
             Thread.sleep(200.dur!"msecs");
             auto v = new float[8];
             foreach (ref f; v)
@@ -1155,7 +1179,15 @@ version (unittest) {
             return EmbedResult(v);
         }
 
-        override EmbedResult embed(int[] tokens) {
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
+        }
+
+        EmbedResult embed(int[] tokens) {
             return EmbedResult(EmbedError("no tokens"));
         }
 
@@ -1196,11 +1228,27 @@ version (unittest) {
             return false;
         }
 
-        override EmbedResult embed(string text) {
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(string text) {
             return EmbedResult(EmbedError("test embed failure"));
         }
 
-        override EmbedResult embed(int[] tokens) {
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
+        }
+
+        EmbedResult embed(int[] tokens) {
             return EmbedResult(EmbedError("test embed failure"));
         }
 

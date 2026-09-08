@@ -20,14 +20,16 @@
  */
 module llm.local.llama_embedder;
 
-import llm.llama.model;
+import logger = std.logger;
 import std.algorithm : max, min, among;
-import std.array : appender;
+import std.array : appender, empty;
 import std.conv : to;
 import std.sumtype : SumType;
 
-import llm.llama.util;
+import llm.common.config : LocalEmbedConfig;
 import llm.common.embedder : Embedder, EmbedResult, EmbedError;
+import llm.llama.model;
+import llm.llama.util;
 
 // llama_token, llama_tokenize, etc. are available via the transitive
 // public import of llama_imports in llm.llama.model.
@@ -46,7 +48,8 @@ import llm.common.embedder : Embedder, EmbedResult, EmbedError;
  */
 class LlamaEmbedder : Embedder {
     private {
-        string name;
+        LocalEmbedConfig cfg;
+
         Model _model;
         bool destroyModel;
         llama_token[] _smallTokens;
@@ -62,6 +65,9 @@ class LlamaEmbedder : Embedder {
         llama_batch _batch;
         bool _destroyed = false;
         char[] detokenizeBuf;
+
+        int[] cacheQueryPrefix;
+        int[] cacheDocumentPrefix;
     }
 
     /**
@@ -77,7 +83,7 @@ class LlamaEmbedder : Embedder {
      *   Exception if model is null, or if the underlying context, vocabulary,
      *   or embedding dimension are invalid, or if smallTokenSize is invalid.
      */
-    this(string name, Model model, bool destroyModel, int smallTokenSize = 0) {
+    this(LocalEmbedConfig cfg, Model model, bool destroyModel, int smallTokenSize = 0) {
         if (model is null)
             throw new Exception("LlamaEmbedder: model must not be null");
         if (model.model is null)
@@ -89,7 +95,7 @@ class LlamaEmbedder : Embedder {
         if (llama_model_n_embd(model.model) <= 0)
             throw new Exception("LlamaEmbedder: model must have an embedding dimension > 0");
 
-        this.name = name;
+        this.cfg = cfg;
         this._model = model;
         this.destroyModel = destroyModel;
 
@@ -138,15 +144,22 @@ class LlamaEmbedder : Embedder {
 
         this.detokenizeBuf = new char[256];
 
+        if (!cfg.queryPrefix.empty)
+            cacheQueryPrefix = tokenize(cfg.queryPrefix);
+        if (!cfg.documentPrefix.empty)
+            cacheDocumentPrefix = tokenize(cfg.documentPrefix);
+
         // see llama documentation for why the pooling is important. It affects
         // the return value of llama_get_embeddings_seq.
         const pooling = llama_pooling_type(_model.ctx);
-        assert(!pooling.among(LLAMA_POOLING_TYPE_UNSPECIFIED,
-                LLAMA_POOLING_TYPE_NONE, LLAMA_POOLING_TYPE_RANK));
+        if (pooling.among(LLAMA_POOLING_TYPE_NONE, LLAMA_POOLING_TYPE_RANK)) {
+            logger.warningf("Pooling is probably wrong in the gguf for the embed model: %s",
+                    pooling);
+        }
     }
 
     override string modelName() {
-        return name;
+        return cfg.modelName;
     }
 
     /**
@@ -176,7 +189,8 @@ class LlamaEmbedder : Embedder {
 
         if (_destroyed)
             return 0;
-        return cast(int) llama_n_batch(_model.ctx);
+        return cast(int) llama_n_batch(_model.ctx) - cast(int) max(cacheDocumentPrefix.length,
+                cacheQueryPrefix.length);
     }
 
     /**
@@ -311,7 +325,16 @@ class LlamaEmbedder : Embedder {
      *   EmbedResult containing either a float[] embedding vector on success,
      *   or a string error message on failure.
      */
-    override EmbedResult embed(string text) {
+
+    override EmbedResult embedQuery(string text) {
+        return embed(cfg.queryPrefix ~ text);
+    }
+
+    override EmbedResult embedDocument(string text) {
+        return embed(cfg.documentPrefix ~ text);
+    }
+
+    private EmbedResult embed(string text) {
         if (_destroyed)
             return EmbedResult(EmbedError("Embedder has been destroyed"));
 
@@ -324,7 +347,15 @@ class LlamaEmbedder : Embedder {
         return embed(tokens);
     }
 
-    override EmbedResult embed(int[] tokens) {
+    override EmbedResult embedQuery(int[] tokens) {
+        return embed(cacheQueryPrefix ~ tokens);
+    }
+
+    override EmbedResult embedDocument(int[] tokens) {
+        return embed(cacheDocumentPrefix ~ tokens);
+    }
+
+    private EmbedResult embed(int[] tokens) {
         if (_destroyed)
             return EmbedResult(EmbedError("Embedder has been destroyed"));
 

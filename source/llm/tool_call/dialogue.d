@@ -151,10 +151,6 @@ version (unittest) {
     /// A valid session id (YYYYMMDD-HHMMSS-4hex) shared by the tests.
     private immutable TestSessionId = "20240101-120000-abcd";
 
-    // ------------------------------------------------------------------
-    // TestEmbedder scaffold (shared by all unittest blocks in this module)
-    // ------------------------------------------------------------------
-
     /// Deterministic djb2 hash (this Phobos build has no std.hash): stable
     /// across runs so the same word always lands in the same bucket.
     private uint wordHash(string s) {
@@ -184,7 +180,15 @@ version (unittest) {
             return false;
         }
 
-        override EmbedResult embed(string text) {
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(string text) {
             auto v = new float[dimensions];
             v[] = 0;
             foreach (word; text.toLower.split)
@@ -200,7 +204,15 @@ version (unittest) {
             return EmbedResult(v);
         }
 
-        override EmbedResult embed(int[] tokens) {
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
+        }
+
+        EmbedResult embed(int[] tokens) {
             return EmbedResult(EmbedError("no tokens"));
         }
 

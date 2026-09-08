@@ -53,7 +53,15 @@ class RemoteEmbedder : Embedder {
         return cfg.dimensions;
     }
 
-    override EmbedResult embed(string text) {
+    override EmbedResult embedQuery(string text) {
+        return embed(cfg.queryPrefix ~ text);
+    }
+
+    override EmbedResult embedDocument(string text) {
+        return embed(cfg.documentPrefix ~ text);
+    }
+
+    private EmbedResult embed(string text) {
         import llm.utility : getValue;
 
         bool hasError = true;
@@ -113,9 +121,12 @@ class RemoteEmbedder : Embedder {
     }
 
     override int batchSize() {
+        import std.algorithm : max;
         import llm.common.config : ApproxTokenSize;
 
-        return cast(int) cfg.chunkSize * ApproxTokenSize;
+        return cast(int) cfg.chunkSize * ApproxTokenSize - cast(int) max(
+                cfg.documentPrefix.length / ApproxTokenSize + 1,
+                cfg.queryPrefix.length / ApproxTokenSize + 1);
     }
 
     override bool supportsTokenization() @safe {
@@ -130,7 +141,11 @@ class RemoteEmbedder : Embedder {
         return null;
     }
 
-    override EmbedResult embed(int[] tokens) @safe {
+    override EmbedResult embedQuery(int[] tokens) @safe {
+        return EmbedResult(EmbedError("Embedder do not support tokens"));
+    }
+
+    override EmbedResult embedDocument(int[] tokens) @safe {
         return EmbedResult(EmbedError("Embedder do not support tokens"));
     }
 }

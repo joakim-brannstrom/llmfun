@@ -524,7 +524,15 @@ version (unittest) {
             return 1;
         }
 
-        override EmbedResult embed(string text) {
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(string text) {
             ulong h = 14695981039346656037;
             foreach (byte b; text) {
                 h ^= b;
@@ -537,12 +545,20 @@ version (unittest) {
             return EmbedResult(vec);
         }
 
-        override EmbedResult embed(int[] tokens) {
+        EmbedResult embed(int[] tokens) {
             // never called: supportsTokenization is false
             char[] text = new char[tokens.length];
             foreach (i, ref c; text)
                 c = cast(char)(tokens[i] & 0x7F);
             return embed(cast(string) text);
+        }
+
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
         }
 
         override int[] tokenize(string text) {

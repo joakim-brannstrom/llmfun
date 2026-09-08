@@ -149,7 +149,6 @@ struct LlamaParams {
  *
  * Sets the context parameters for embedding extraction:
  *   - `embeddings`    = true
- *   - `pooling_type`  = `LLAMA_POOLING_TYPE_CLS`
  *   - `n_batch`       = the specified batch size
  *
  * Returns the modified `LlamaParams` so calls can be chained.
@@ -165,7 +164,8 @@ LlamaParams contextEmbedding(LlamaParams params, uint ctxSize, uint nBatch,
     params.ctxParams.embeddings = true;
     params.ctxParams.op_offload = true;
     params.ctxParams.offload_kqv = true;
-    params.ctxParams.pooling_type = LLAMA_POOLING_TYPE_CLS;
+    // llama.cpp will use the models default.
+    params.ctxParams.pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED;
     params.ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
 
     params.ctxParams.n_ctx = ctxSize;

@@ -303,7 +303,15 @@ version (unittest) {
             return false;
         }
 
-        override EmbedResult embed(string text) {
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(string text) {
             import core.thread : Thread;
             import core.time : dur;
             import std.algorithm : min;
@@ -318,7 +326,15 @@ version (unittest) {
             return EmbedResult(v);
         }
 
-        override EmbedResult embed(int[] tokens) {
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
+        }
+
+        EmbedResult embed(int[] tokens) {
             return EmbedResult(EmbedError("no tokens"));
         }
 
@@ -353,14 +369,30 @@ version (unittest) {
             return false;
         }
 
-        override EmbedResult embed(string text) {
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(string text) {
             auto v = new float[8];
             foreach (ref f; v)
                 f = 1.0f;
             return EmbedResult(v);
         }
 
-        override EmbedResult embed(int[] tokens) {
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
+        }
+
+        EmbedResult embed(int[] tokens) {
             return EmbedResult(EmbedError("no tokens"));
         }
 
@@ -398,7 +430,15 @@ version (unittest) {
             return false;
         }
 
-        override EmbedResult embed(string text) {
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(string text) {
             import std.string : indexOf;
 
             if (text.indexOf("POISON") >= 0)
@@ -409,7 +449,15 @@ version (unittest) {
             return EmbedResult(v);
         }
 
-        override EmbedResult embed(int[] tokens) {
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
+        }
+
+        EmbedResult embed(int[] tokens) {
             return EmbedResult(EmbedError("no tokens"));
         }
 
@@ -477,36 +525,36 @@ version (unittest) {
             return tmp;
         }
     }
-}
 
-/// Per-worker result of the isolation test (test 1). Carried back to the main
-/// thread; std.concurrency cannot send a local float[] result.
-private struct NtsDone {
-    int idx;
-    bool ok;
-}
-
-/// Test-1 worker (runs on its own thread via spawn). Creates its OWN embedder
-/// from the injected factory (the per-thread guarantee), embeds its text, and
-/// self-verifies the result matches the input -- a shared non-thread-safe
-/// instance would corrupt its scratch buffer under concurrent overlap and fail
-/// this check. Module-scope so spawn can take its address: a core.thread
-/// closure in a foreach captures the loop index by reference, so every thread
-/// would see the final value of i.
-private void ntsIsolationWorker(int idx, string text, EmbedConfig cfg,
-        EmbedderFactory factory, Tid doneTid) {
-    auto emb = factory(cfg);
-    if (emb is null) {
-        send(doneTid, NtsDone(idx, false));
-        return;
+    /// Per-worker result of the isolation test (test 1). Carried back to the main
+    /// thread; std.concurrency cannot send a local float[] result.
+    private struct NtsDone {
+        int idx;
+        bool ok;
     }
-    auto v = emb.embed(text).match!((float[] a) => a, (EmbedError e) => null);
-    bool ok = (v !is null && v.length == 16);
-    if (ok)
-        foreach (j; 0 .. 16)
-            if (v[j] != (j < text.length ? cast(float) text[j] : 0f))
-                ok = false;
-    send(doneTid, NtsDone(idx, ok));
+
+    /// Test-1 worker (runs on its own thread via spawn). Creates its OWN embedder
+    /// from the injected factory (the per-thread guarantee), embeds its text, and
+    /// self-verifies the result matches the input -- a shared non-thread-safe
+    /// instance would corrupt its scratch buffer under concurrent overlap and fail
+    /// this check. Module-scope so spawn can take its address: a core.thread
+    /// closure in a foreach captures the loop index by reference, so every thread
+    /// would see the final value of i.
+    private void ntsIsolationWorker(int idx, string text, EmbedConfig cfg,
+            EmbedderFactory factory, Tid doneTid) {
+        auto emb = factory(cfg);
+        if (emb is null) {
+            send(doneTid, NtsDone(idx, false));
+            return;
+        }
+        auto v = emb.embedQuery(text).match!((float[] a) => a, (EmbedError e) => null);
+        bool ok = (v !is null && v.length == 16);
+        if (ok)
+            foreach (j; 0 .. 16)
+                if (v[j] != (j < text.length ? cast(float) text[j] : 0f))
+                    ok = false;
+        send(doneTid, NtsDone(idx, ok));
+    }
 }
 
 /// A non-thread-safe embedder that mimics LlamaEmbedder: it writes the input

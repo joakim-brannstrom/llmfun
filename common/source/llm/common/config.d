@@ -82,6 +82,10 @@ struct LocalEmbedConfig {
     long cpuThreadsBatch; // 0: use as many as there are cores
     long uBatch = 512;
     long nBatch = 512;
+
+    // asymmetric models prefix
+    string documentPrefix;
+    string queryPrefix;
 }
 
 /// Configuration for a remote embedding backend (HTTP API).
@@ -90,6 +94,10 @@ struct RemoteEmbedConfig {
     string modelName;
     long chunkSize = 512;
     long dimensions;
+
+    // asymmetric models prefix
+    string documentPrefix;
+    string queryPrefix;
 }
 
 /// Union type for embedding backend configuration.

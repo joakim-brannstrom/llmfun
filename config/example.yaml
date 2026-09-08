@@ -171,3 +171,5 @@ embedConfig:
   uBatch: 512
   cpuThreads: 0 # as many as there are cores
   cpuThreadsBatch: 0 # as many as there are cores
+  queryPrefix: "search_query: "
+  documentPrefix: "search_document: "

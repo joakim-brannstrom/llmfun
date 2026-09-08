@@ -20,14 +20,21 @@ interface Embedder {
     /// Dimensions of the vectors created.
     long dimensions();
 
-    /// Produce an embedding vector for the given text.
-    EmbedResult embed(string text);
+    /// Returns: embedding vectors for a query
+    EmbedResult embedQuery(string text);
+
+    /// Returns: embedding vectors for a document
+    EmbedResult embedDocument(string text);
 
     bool supportsTokenization();
 
-    /// Produce an embedding vector for the given tokens.
+    /// Returns: embedding vector for tokens of a query.
     /// Only available if supportsTokenization is true.
-    EmbedResult embed(int[] tokens);
+    EmbedResult embedQuery(int[] tokens);
+
+    /// Returns: embedding vector for tokens of a document.
+    /// Only available if supportsTokenization is true.
+    EmbedResult embedDocument(int[] tokens);
 
     /// Only available if supportsTokenization is true.
     int[] tokenize(string text);
