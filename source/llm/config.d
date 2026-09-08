@@ -44,6 +44,7 @@ struct ToolLimits {
     long maxTopicLength = 100;
     long maxTopK = 20;
     long maxArgLength = 200;
+    long queryFtl5Mode = 0; // 0: full mode, 1: limited ftl5
 }
 
 struct RagConfig {
