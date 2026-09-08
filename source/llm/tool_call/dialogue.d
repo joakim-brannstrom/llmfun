@@ -56,6 +56,8 @@ struct QueryDialogueHistoryParams {
         ~ "vectorQuery (natural language), or both. Returns matching episodes "
         ~ "with the session id, turn ranges, timestamp, and the matched " ~ "verbatim text.")
 ExecuteFuncResult queryDialogueHistory(Context baseCtx, QueryDialogueHistoryParams params) {
+    import llm.rag.database : cleanFts5;
+
     mixin(baseContextToSpecific!DialogueContext);
 
     // Validate parameters before touching any state.
@@ -88,7 +90,7 @@ ExecuteFuncResult queryDialogueHistory(Context baseCtx, QueryDialogueHistoryPara
         return ExecuteFuncResult("error: RAG not available", false);
 
     auto result = di.query(ragCtx.getRAG().embedder, SessionId(sid),
-            params.textQuery, params.vectorQuery, params.topK, params.maxTurnAge);
+            params.textQuery.cleanFts5, params.vectorQuery, params.topK, params.maxTurnAge);
 
     if (!result.hasHistory) {
         // Distinguish engine errors (embed failure, missing embedder) from the
