@@ -78,8 +78,8 @@ private string toResult(Document[] docs) @safe {
  * Generic query helper that works with param structs.
  * Uses compile-time field detection to determine which RAG query method to call:
  * - Both textQuery and vectorQuery present → queryBestMatch
- * - Only textQuery present → queryTextSearch
- * - Only vectorQuery present → querySemantic
+ * - Only textQuery present - queryTextSearch
+ * - Only vectorQuery present - querySemantic
  */
 private ExecuteFuncResult queryFunc(P)(RAGContext ctx, P params) {
     if (ctx.getRAG() is null) {
@@ -92,7 +92,7 @@ private ExecuteFuncResult queryFunc(P)(RAGContext ctx, P params) {
 
     string textQuery;
     static if (__traits(hasMember, P, "textQuery")) {
-        textQuery = params.textQuery;
+        textQuery = cleanFts5(ctx.getToolLimits.queryFtl5Mode, params.textQuery);
         if (textQuery.strip.empty)
             return ExecuteFuncResult("error: textQuery must not be empty", success: false);
     }
@@ -165,29 +165,18 @@ struct QueryTextSearchParams {
     @ParamOptional string database = "*";
 }
 
-@Function("Search RAG using FTS5 full-text search for topK relevant results. The `textQuery` is passed directly to SQLite FTS5. Supported syntax:
-- Boolean: `AND`, `OR`, `NOT`. Precedence (highest to lowest): implicit AND (space) > explicit `NOT` > explicit `AND` > `OR`.
-- Grouping: `( )` for sub-expressions. **Note**: parenthesized groups cannot be combined with bare terms via implicit AND — `(a OR b) c` is a syntax error. Use `(a OR b) AND c` explicitly.
-- Phrases: `\"exact phrase\"` matches ordered tokens. Use `+` to concatenate phrases: `foo + bar`.
-- Prefix: `term*` matches terms starting with \"term\" (keep `*` outside quotes).
-- Start-of-column: `^phrase` only matches if phrase starts at first token.
-- Proximity: `NEAR(phrase1 phrase2, N)` matches phrases within N tokens (default 10).
-- Quoting: Strings with special characters must be double-quoted. Barewords are alphanumeric + underscore.
-Note: Column filters (`colname:` or `{col1 col2}:`) are NOT supported and will cause errors. Use listRAGDatabases to discover available database names.")
+@Function("Search RAG using FTS5 full-text search for topK relevant results. The `textQuery` is passed directly to SQLite FTS5.")
 ExecuteFuncResult queryTextSearch(Context baseCtx, QueryTextSearchParams params) {
-    import llm.rag.database : fts5Help;
-
     mixin(baseContextToSpecific!RAGContext);
     auto res = queryFunc(ctx, params);
     if (!res.success) {
-        res.msg ~= "\nDid you follow the syntax for an FTS5 query for the textQuery parameter? Here is the full specification:\n" ~ fts5Help;
+        res.msg ~= fts5Help(ctx.getToolLimits.queryFtl5Mode, params.textQuery);
     }
     return res;
 }
 
 struct QueryBestMatchParams {
-    @ParamDescription(
-            "FTS5 full-text search query. See `queryTextSearch` for the full specification")
+    @ParamDescription("FTS5 full-text search query")
     string textQuery;
 
     @ParamDescription("Natural language query for semantic similarity search")
@@ -203,7 +192,11 @@ struct QueryBestMatchParams {
 @Function("Search RAG using combined semantic and FTS5 full-text. Use `listRAGDatabases` to discover available database names.")
 ExecuteFuncResult queryBestMatch(Context baseCtx, QueryBestMatchParams params) {
     mixin(baseContextToSpecific!RAGContext);
-    return queryFunc(ctx, params);
+    auto res = queryFunc(ctx, params);
+    if (!res.success) {
+        res.msg ~= fts5Help(ctx.getToolLimits.queryFtl5Mode, params.textQuery);
+    }
+    return res;
 }
 
 struct ListRAGDatabasesParams {
@@ -429,4 +422,19 @@ ExecuteFuncResult queryReadFile(Context baseCtx, QueryReadFileParams params) {
         return ExecuteFuncResult(i"error: database error during query: $(e.msg)".text,
                 success: false);
     }
+}
+
+private:
+string cleanFts5(long mode, string query) {
+    import llm.rag.database : cleanFts5;
+
+    return mode == 0 ? query : cleanFts5(query);
+}
+
+string fts5Help(long mode, string query) {
+    import llm.rag.database : fts5Help, fts5SimpleHelp;
+
+    auto help = mode == 0 ? fts5Help : fts5SimpleHelp;
+    return i"\nFiltered textQuery: $(cleanFts5(mode, query))\n\ntextQuery must be according to the FTS5 syntax.\n$(
+            help)".text;
 }

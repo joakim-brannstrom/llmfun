@@ -490,7 +490,7 @@ struct Database {
 
         try {
             auto stmt = db.prepare(ftsSql);
-            stmt.get.bind(":query", query.cleanFts5);
+            stmt.get.bind(":query", query);
             stmt.get.bind(":limit", limit);
 
             auto results = appender!(Tuple!(long, "rowid", double, "rank")[])();
@@ -581,7 +581,7 @@ ORDER BY fusion_score DESC;
         try {
             auto stmt = db.prepare(sql);
             stmt.get.bind(":embedding", embedding.embed);
-            stmt.get.bind(":text_query", query.cleanFts5);
+            stmt.get.bind(":text_query", query);
             stmt.get.bind(":limit", limit);
 
             auto results = appender!(Tuple!(long, "id", double, "rank")[])();
@@ -647,23 +647,34 @@ ORDER BY fusion_score DESC;
     }
 }
 
-immutable string fts5Help = `Full-text query syntax for FTS5 sqlite manual
+immutable string fts5SimpleHelp = `Full-text query text search. Each word separated by a space is an implicit boolean AND`;
+
+immutable string fts5Help = `Full-text query syntax for FTS5 sqlite manual.
+Only search strings containing alphanumeric and _,(,),+,*,^ are accepted as is. Other are quoted.
+
+- Boolean: AND, OR, NOT. Precedence (highest to lowest): implicit AND (space) > explicit NOT > explicit AND > OR.
+- Grouping: ( ) for sub-expressions. **Note**: parenthesized groups cannot be combined with bare terms via implicit AND - (a OR b) c is a syntax error. Use (a OR b) AND c explicitly.
+- Phrases: "exact phrase" matches ordered tokens. Use + to concatenate phrases: foo + bar.
+- Prefix: term* matches terms starting with "term" (keep * outside quotes).
+- Start-of-column: ^phrase only matches if phrase starts at first token.
+- Proximity: NEAR(phrase1 phrase2, N) matches phrases within N tokens (default 10).
+- Quoting: Strings with special characters must be double-quoted. Barewords are alphanumeric + underscore.
+Note: Column filters (colname: or {col1 col2}:) are NOT supported and will cause errors. Use listRAGDatabases to discover available database names.
+
+Examples:
+  test AND code
+  (test OR "unit test") AND NOT python NEAR("code" "block", 3)
+
+
 The following block contains a summary of the FTS query syntax in BNF form. A detailed explanation follows.
 
-<phrase>    := string [*]
+<phrase>    := string[*]
 <phrase>    := <phrase> + <phrase>
 <neargroup> := NEAR ( <phrase> <phrase> ... [, N] )
-<query>     := [ [-] <colspec> :] [^] <phrase>
-<query>     := [ [-] <colspec> :] <neargroup>
-<query>     := [ [-] <colspec> :] ( <query> )
 <query>     := <query> AND <query>
 <query>     := <query> OR <query>
 <query>     := <query> NOT <query>
-<colspec>   := colname
-<colspec>   := { colname1 colname2 ... }
 `;
-
-private:
 
 string cleanFts5(string s) {
     import std.algorithm : among, splitter, count;
@@ -672,8 +683,11 @@ string cleanFts5(string s) {
     import std.uni : byCodePoint;
 
     static string quoteIfNeeded(string s) {
-        if (s.byCodePoint.filter!(a => !(a.isAlphaNum || a.among('_', '(', ')', '+'))).count == 0)
+        if (s.byCodePoint.filter!(a => !(a.isAlphaNum || a.among('_', '(', ')',
+                '+', '*', '^'))).count == 0)
             return s;
+        if (s == "*")
+            return null;
         return "\"" ~ s ~ "\"";
     }
 
