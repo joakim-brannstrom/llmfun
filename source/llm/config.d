@@ -157,18 +157,26 @@ struct LlmConfig {
             promptDir = promptDir.map!(a => replaceMagicWord(a, workArea.AbsolutePath).Path).array;
         }
 
+        bool skillsFromDataSearch;
         if (skillPathsSystem.empty) {
             if (cwdConfig)
                 skillPathsSystem ~= (ProgramName ~ "/skills").Path;
             dataSearch(ProgramName).resolve("skills".Path).match!((ResourceFile a) {
                 skillPathsSystem ~= a.get;
             }, (_) {});
+            skillsFromDataSearch = true;
         } else {
             skillPathsSystem = skillPathsSystem.map!(a => replaceMagicWord(a,
                     workArea.AbsolutePath).Path).array;
         }
-        skillPathsUser = skillPathsUser.map!(a => replaceMagicWord(a,
-                workArea.AbsolutePath).Path).array;
+        if (skillPathsUser.empty && !skillsFromDataSearch) {
+            dataSearch(ProgramName).resolve("skills".Path).match!((ResourceFile a) {
+                skillPathsUser ~= a.get;
+            }, (_) {});
+        } else {
+            skillPathsUser = skillPathsUser.map!(a => replaceMagicWord(a,
+                    workArea.AbsolutePath).Path).array;
+        }
 
         auto localChat = (ProgramName ~ "/data/chat").Path;
         if (localChat.exists && localChat.isDir) {
