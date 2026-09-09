@@ -99,37 +99,37 @@ class LlamaEmbedder : Embedder {
         this._model = model;
         this.destroyModel = destroyModel;
 
+        int ctxSize = cast(int) llama_n_batch(model.ctx);
+        if (ctxSize <= 0) {
+            throw new Exception("LlamaEmbedder: negative context " ~ ctxSize.to!string);
+        }
+
         if (smallTokenSize <= 0) {
-            smallTokenSize = max(128, cast(int)(llama_n_ctx(model.ctx) / 8));
+            smallTokenSize = max(128, ctxSize / 8);
         }
         if (smallTokenSize <= 0)
             throw new Exception("LlamaEmbedder: smallTokenSize must be > 0");
         this._smallTokenSize = smallTokenSize;
         this._smallTokens = new llama_token[smallTokenSize];
 
-        int nBatch = cast(int) llama_n_batch(model.ctx);
-        if (nBatch <= 0) {
-            nBatch = 512;
-        }
-
-        if (smallTokenSize > nBatch) {
+        if (smallTokenSize > ctxSize) {
             throw new Exception("LlamaEmbedder: smallTokenSize (" ~ to!string(
-                    smallTokenSize) ~ ") exceeds batch capacity (" ~ to!string(nBatch) ~ ")");
+                    smallTokenSize) ~ ") exceeds batch capacity (" ~ to!string(ctxSize) ~ ")");
         }
 
-        this._batchTokens = new llama_token[nBatch];
+        this._batchTokens = new llama_token[ctxSize];
 
-        this._batchPositions = new llama_pos[nBatch];
-        foreach (i; 0 .. nBatch)
+        this._batchPositions = new llama_pos[ctxSize];
+        foreach (i; 0 .. ctxSize)
             this._batchPositions[i] = cast(llama_pos) i;
 
-        this._nSeqIdValues = new int32_t[nBatch];
-        foreach (i; 0 .. nBatch)
+        this._nSeqIdValues = new int32_t[ctxSize];
+        foreach (i; 0 .. ctxSize)
             this._nSeqIdValues[i] = 1;
 
-        this._seqIdStorage = new llama_seq_id[nBatch];
-        this._seqIdPtrs = new llama_seq_id*[nBatch];
-        foreach (i; 0 .. nBatch) {
+        this._seqIdStorage = new llama_seq_id[ctxSize];
+        this._seqIdPtrs = new llama_seq_id*[ctxSize];
+        foreach (i; 0 .. ctxSize) {
             this._seqIdStorage[i] = 0;
             this._seqIdPtrs[i] = &this._seqIdStorage[i];
         }
@@ -185,11 +185,9 @@ class LlamaEmbedder : Embedder {
      *   Approximate batch, 0 if destroy() has been called.
      */
     override int batchSize() {
-        import llm.common.config : ApproxTokenSize;
-
         if (_destroyed)
             return 0;
-        return cast(int) llama_n_batch(_model.ctx) - cast(int) max(cacheDocumentPrefix.length,
+        return cast(int) cfg.chunkSize - cast(int) max(cacheDocumentPrefix.length,
                 cacheQueryPrefix.length);
     }
 
