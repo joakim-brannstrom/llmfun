@@ -2,7 +2,7 @@
  * LlamaEmbedder — wraps a llama.cpp Model for local embedding.
  *
  * This class provides the tokenization and embedding functionality
- * around a loaded Model instance. It uses a two-pass tokenization
+ * around a loaded Model instance. It uses a single-pass tokenization
  * strategy with a pre-allocated small buffer to avoid heap allocation
  * for short texts (configurable via constructor parameter, default
  * heuristic based on context size).
@@ -225,10 +225,12 @@ class LlamaEmbedder : Embedder {
     /**
      * Tokenize text using the model's vocabulary.
      *
-     * Uses a two-pass approach: first pass queries the required buffer
-     * size, then tokenizes into a pre-allocated small buffer if the
-     * result fits, or a newly allocated array otherwise. No special
-     * tokens are added (add_special=false).
+     * Uses a single-pass approach: llama_tokenize is called once
+     * directly into the pre-allocated small buffer. On a negative
+     * return (buffer too small) the exact required size is allocated
+     * and the call is retried once. An INT32_MIN return (overflow)
+     * is rejected explicitly. No special tokens are added
+     * (add_special=false).
      *
      * The returned slice is a copy if the internal small buffer was
      * used, guaranteeing that repeated calls do not silently corrupt
@@ -242,27 +244,31 @@ class LlamaEmbedder : Embedder {
      *   Never returns null — may return an empty array for empty input.
      *
      * Throws:
-     *   Exception if llama_tokenize fails (e.g. invalid UTF-8).
+     *   Exception if llama_tokenize fails (e.g. invalid UTF-8) or
+     *   overflows (INT32_MIN return).
      */
-    override int[] tokenize(string text) @trusted
-    in (text !is null) {
-        // query required buffer size
-        int needed = llama_tokenize(_model.vocab, text.ptr, cast(int) text.length,
-                null, 0, add_special: false, parse_special: true);
-        if (needed < 0)
-            needed = -needed;
+    override int[] tokenize(string text) @trusted {
+        import core.stdc.stdint : INT32_MIN;
 
-        llama_token[] buf = (needed <= _smallTokens.length) ? _smallTokens : new llama_token[needed];
+        if (text.empty)
+            return null;
 
-        // actual tokenization into the buffer
-        int actual = llama_tokenize(_model.vocab, text.ptr, cast(int) text.length,
-                buf.ptr, cast(int) buf.length, add_special: false, parse_special: true);
-        if (actual < 0)
-            throw new Exception(
-                    "LlamaEmbedder.tokenize: llama_tokenize failed (code: " ~ to!string(
-                    actual) ~ ")");
-
-        return (buf is _smallTokens) ? buf[0 .. actual].dup : buf[0 .. actual];
+        auto n = llama_tokenize(_model.vocab, text.ptr, cast(int) text.length,
+                _smallTokens.ptr, cast(int) _smallTokens.length, add_special: false,
+                parse_special: true);
+        if (n < 0) {
+            if (n == INT32_MIN)
+                throw new Exception(
+                        "LlamaEmbedder: tokenization requires INT32_MIN tokens (overflow)");
+            auto big = new int[cast(size_t)-n];
+            n = llama_tokenize(_model.vocab, text.ptr, cast(int) text.length,
+                    big.ptr, cast(int) big.length, add_special: false, parse_special: true);
+            if (n <= 0)
+                throw new Exception("LlamaEmbedder: tokenization failed for input of "
+                        ~ text.length.to!string ~ " bytes (llama_tokenize: " ~ n.to!string ~ ")");
+            return big[0 .. n]; // heap-allocated; caller owns it — no .dup
+        }
+        return _smallTokens[0 .. n].dup;
     }
 
     /**

@@ -474,6 +474,7 @@ RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
         size_t startCharPos;
         size_t startLine = 1;
         size_t halfIndex;
+        size_t pinTokenPos;
         int[] tokens;
 
         Grapheme[] textChunk;
@@ -482,6 +483,20 @@ RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
         void addChunk() {
             assert(tokens.length <= nBatch, "something is wrong");
 
+            // D2: unpinned flush steps the whole window. Unpinned happens at 0%
+            // overlap (advance >= nBatch, pin can never fire), for the final short
+            // window, or a pathological oversized word (R9).
+            if (halfIndex == 0) {
+                halfIndex = textChunk.length;
+                pinTokenPos = tokens.length;
+            }
+
+            // The overlapped prefix [0 .. pinTokenPos) is dead after the flush
+            // (embed returns an owned copy; the stored text is a fresh toUTF8
+            // buffer). The slice aliases the previous buffer's storage and
+            // `~=` appends grow within the original free capacity (or
+            // reallocate), never touching the dead prefix or the retained
+            // tail. Do not "fix" this with a per-chunk allocation.
             auto text = textChunk.byCodePoint.toUTF8;
             const lines = countLines(textChunk);
 
@@ -506,16 +521,17 @@ RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
 
             startCharPos += advStep.length;
             startLine += countLines(advStep);
+            // D3: the tail is the token suffix past the pin (O(1) slice, no
+            // re-tokenization). tokens is the per-word concatenation over
+            // textChunk's words (C3) and the pin is a word boundary in both
+            // coordinates, so the retained tail is exactly tokens[pinTokenPos .. $].
+            tokens = tokens[pinTokenPos .. $];
             halfIndex = 0;
-            tokens = embedder.tokenize(textChunk.byCodePoint.toUTF8);
+            pinTokenPos = 0;
         }
 
         foreach (graphem; doc.data.byGrapheme) {
             currentWord ~= graphem;
-
-            if (halfIndex == 0 && textChunk.length > advance) {
-                halfIndex = textChunk.length;
-            }
 
             // assuming that no sane word is larger than 50 characters
             if (graphem[0].isWhite || currentWord.length > 50) {
@@ -526,6 +542,14 @@ RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
                 textChunk ~= currentWord;
                 tokens ~= wordTokens;
                 currentWord = null;
+                // D1: token-based pin at the word boundary (replaces the old
+                // per-grapheme pin).
+                // Invariant (C3): the pin is a word edge in BOTH coordinates
+                // (halfIndex / pinTokenPos); they are reset together in addChunk.
+                if (halfIndex == 0 && tokens.length > advance) {
+                    halfIndex = textChunk.length;
+                    pinTokenPos = tokens.length;
+                }
             }
         }
 
@@ -536,6 +560,12 @@ RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
             }
             textChunk ~= currentWord;
             tokens ~= wordTokens;
+            // D1: token-based pin at the word boundary (replaces the old
+            // per-grapheme pin).
+            if (halfIndex == 0 && tokens.length > advance) {
+                halfIndex = textChunk.length;
+                pinTokenPos = tokens.length;
+            }
         }
         if (!textChunk.empty) {
             addChunk();
@@ -590,6 +620,7 @@ SourceMatch makeMatch(double rank) {
 
 version (unittest) {
     import std.file : mkdirRecurse, rmdirRecurse;
+    import std.uni : byCodePoint, isWhite;
 
     // Deterministic hash-based fake (supportsTokenization == false).
     // embed(x) returns a fixed-dim (8) vector derived from x's contents so
@@ -679,6 +710,104 @@ version (unittest) {
         foreach (i; 0 .. 50)
             text ~= cast(char)('a' + i % 26) ~ " ";
         return text;
+    }
+
+    // Test-only tokenizing embedder: exactly 1 token per
+    // whitespace-separated word (FNV-1a 64 folded to int), deterministic
+    // 8-dim vectors (derived from the token bytes). Makes the token-path
+    // chunk geometry hand-computable (Tests 9-11).
+    private class TokenizingTestEmbedder : Embedder {
+        private int batch;
+        long embedCalls; // embedDocument(int[]) call count
+        long embedTokens; // total embedded token count
+
+        this(int batchSize = 50) {
+            this.batch = batchSize;
+        }
+
+        override string modelName() {
+            return "tokenizing-test";
+        }
+
+        override long dimensions() {
+            return 8;
+        }
+
+        override bool supportsTokenization() {
+            return true;
+        }
+
+        override int[] tokenize(string text) {
+            int[] toks;
+            string word;
+            foreach (cp; text.byCodePoint) {
+                if (cp.isWhite) {
+                    if (!word.empty)
+                        toks ~= fnv(word);
+                    word = null;
+                } else
+                    word ~= cp;
+            }
+            if (!word.empty)
+                toks ~= fnv(word);
+            return toks;
+        }
+
+        private static int fnv(string s) {
+            immutable ulong prime = 0x00000100000001B3;
+            ulong h = 0xCBF29CE484222325;
+            foreach (b; s[])
+                h = (h ^ cast(ulong) b) * prime;
+            return cast(int)(h ^ (h >> 32));
+        }
+
+        EmbedResult embed(int[] tokens) {
+            immutable ulong prime = 0x00000100000001B3;
+            ulong h = 0xCBF29CE484222325;
+            foreach (t; tokens)
+                h = (h ^ cast(ulong) t) * prime;
+            auto v = new float[8];
+            foreach (i; 0 .. 8)
+                v[i] = cast(float)((h >> (8 * i)) & 0xFF) / 255.0;
+            return EmbedResult(v);
+        }
+
+        override EmbedResult embedQuery(string text) {
+            return embed(tokenize(text));
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(tokenize(text));
+        }
+
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            ++embedCalls;
+            embedTokens += tokens.length;
+            return embed(tokens);
+        }
+
+        override string detokenize(int[] tokens) {
+            return null;
+        }
+
+        override int batchSize() {
+            return batch;
+        }
+
+        override void destroy() {
+        }
+    }
+
+    // One-letter words `first..last` (1-based, inclusive), space-separated.
+    private string wordsRange(long first, long last) {
+        string s;
+        foreach (i; first .. last + 1)
+            s ~= cast(char)('a' + (i - 1) % 26) ~ " ";
+        return s;
     }
 }
 
@@ -966,4 +1095,126 @@ unittest {
         assert(hit.length > 0 && hit[0].rank == 1 && hit[0].text == m.text,
                 "chunk must self-locate: " ~ m.text);
     }
+}
+
+// Test 9: token path, 10% overlap — uniform token-based steps (F1).
+// 100 one-letter words (200 graphemes); 1 token/word; nBatch 50 →
+// advance 45. Expected windows (1-based word idx): [1..50], [47..96],
+// [93..100] → grapheme offsets (0,100), (92,192), (184,200).
+unittest {
+    import std.conv : to;
+    import llm.rag.database : openDatabase, Search;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    immutable text = wordsRange(1, 100);
+
+    auto emb = new TokenizingTestEmbedder(50);
+    auto dbOpt = openDatabase((dir ~ "t10.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+
+    auto doc = Document(origin: Origin(Topic("t10")), data: text);
+    size_t nBatchCache = 0;
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+    auto res = addToDatabase(db, emb, doc, cfg, nBatchCache);
+    assert(res.chunks == 3, "10% token overlap: expected 3 chunks, got " ~ res.chunks.to!string);
+    assert(emb.embedCalls == 3, "expected 3 embedDocument calls");
+    assert(emb.embedTokens == 108,
+            "expected 50+50+8 embedded tokens, got " ~ emb.embedTokens.to!string);
+
+    auto chunks = db.querySemantic(Search(emb.embedDocument(text)
+            .match!((float[] v) => v, (EmbedError e) {
+                assert(false, "TokenizingTestEmbedder failed: " ~ e.errorMsg);
+                return null;
+            })), 100).sort!((a, b) => a.offset.begin < b.offset.begin).array;
+    assert(chunks.length == 3);
+    assert(chunks[0].offset.begin == 0 && chunks[0].offset.end == 100, "chunk 0 offset");
+    assert(chunks[1].offset.begin == 92 && chunks[1].offset.end == 192, "chunk 1 offset");
+    assert(chunks[2].offset.begin == 184 && chunks[2].offset.end == 200, "chunk 2 offset");
+    assert(chunks[0].text == wordsRange(1, 50), "chunk 0 text");
+    assert(chunks[1].text == wordsRange(47, 96), "chunk 1 text");
+    assert(chunks[2].text == wordsRange(93, 100), "chunk 2 text");
+
+    // F1: every chunk-start advance in [advance, advance + W_max]
+    // words; here W_max == 1 (one token per word), advance == 45.
+    foreach (i; 0 .. 2) {
+        long stepWords = (cast(long) chunks[i + 1].offset.begin - cast(long) chunks[i].offset.begin) / 2;
+        assert(stepWords >= 45 && stepWords <= 46,
+                "step uniformity violated: " ~ stepWords.to!string);
+    }
+    db.destroy;
+}
+
+// Test 10: token path, 0% overlap — contiguous, non-overlapping (F3).
+// BEHAVIOR CHANGE: the old grapheme pin left ~47-49% effective overlap
+// here (3 chunks); advance == nBatch so the pin never fires and the D2
+// whole-window step yields exactly 2 contiguous chunks.
+unittest {
+    import std.conv : to;
+    import llm.rag.database : openDatabase, Search;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    immutable text = wordsRange(1, 100);
+
+    auto emb = new TokenizingTestEmbedder(50);
+    auto dbOpt = openDatabase((dir ~ "t0.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+
+    auto doc = Document(origin: Origin(Topic("t0")), data: text);
+    size_t nBatchCache = 0;
+    immutable cfg0 = RagConfig(windowOverlapPercent: 0);
+    auto res0 = addToDatabase(db, emb, doc, cfg0, nBatchCache);
+    assert(res0.chunks == 2, "0% token overlap: expected 2 chunks, got " ~ res0.chunks.to!string);
+    assert(emb.embedTokens == 100,
+            "expected 50+50 embedded tokens, got " ~ emb.embedTokens.to!string);
+
+    auto chunks0 = db.querySemantic(Search(emb.embedDocument(text)
+            .match!((float[] v) => v, (EmbedError e) {
+                assert(false, "TokenizingTestEmbedder failed: " ~ e.errorMsg);
+                return null;
+            })), 100).sort!((a, b) => a.offset.begin < b.offset.begin).array;
+    assert(chunks0.length == 2);
+    assert(chunks0[0].offset.begin == 0 && chunks0[0].offset.end == 100, "chunk 0 offset");
+    assert(chunks0[1].offset.begin == 100 && chunks0[1].offset.end == 200, "chunk 1 offset");
+    assert(chunks0[0].text == wordsRange(1, 50), "chunk 0 text");
+    assert(chunks0[1].text == wordsRange(51, 100), "chunk 1 text");
+    assert(chunks0[1].offset.begin >= chunks0[0].offset.end, "0% overlap must not overlap");
+    db.destroy;
+}
+
+// Test 11: token path dedup — re-adding the unchanged document is a
+// no-op (hasSource short-circuit; same behavior as runOnText Test 6).
+unittest {
+    import llm.rag.database : openDatabase;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TokenizingTestEmbedder(50);
+    auto dbOpt = openDatabase((dir ~ "td.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+
+    auto doc = Document(origin: Origin(Topic("td")), data: wordsRange(1, 100));
+    size_t nBatchCache = 0;
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+    auto res = addToDatabase(db, emb, doc, cfg, nBatchCache);
+    assert(res.chunks == 3);
+
+    size_t nBatchCache2 = 0;
+    auto res2 = addToDatabase(db, emb, doc, cfg, nBatchCache2);
+    assert(res2.chunks == 0, "re-add of unchanged source must be a no-op");
+    assert(db.getSources().length == 1);
+    db.destroy;
 }
