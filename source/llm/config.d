@@ -189,9 +189,11 @@ struct LlmConfig {
         }
 
         auto localDialogue = (ProgramName ~ "/data/dialogue").Path;
-        if (localDialogue.exists && localDialogue.isDir) {
-            dialogueDir = localDialogue;
-        } else if (dialogueDir.empty) {
+        if (dialogueDir.empty && cwdConfig) {
+            if (localDialogue.exists && localDialogue.isDir) {
+                dialogueDir = localDialogue;
+            }
+        } else if (!dialogueDir.exists) {
             dataSearch(ProgramName).resolve("dialogue".Path).match!((ResourceFile a) {
                 dialogueDir = a.get;
             }, (_) { dialogueDir = localDialogue; });
@@ -515,7 +517,8 @@ void makeDefaultFileStructure() {
     foreach (path; [
         (xdgDataHome ~ Path(ProgramName) ~ Path("memory")),
         (xdgDataHome ~ Path(ProgramName) ~ Path("skills")),
-        (xdgDataHome ~ Path(ProgramName) ~ Path("chat"))
+        (xdgDataHome ~ Path(ProgramName) ~ Path("chat")),
+        (xdgDataHome ~ Path(ProgramName) ~ Path("dialogue"))
     ].filter!(a => !a.exists)) {
         try {
             logger.trace("Creating directory ", path);
@@ -1535,7 +1538,8 @@ unittest {
 `;
     File(configFile, "w").write(yaml);
 
-    auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: true, trustedConfig: false);
+    auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: false,
+            trustedConfig: false);
     assert(!conf.dialogueDir.empty, "dialogueDir should be non-empty after defaulting");
     assert(conf.dialogueDir == (conf.dataDir ~ "dialogue"),
             "dialogueDir default mismatch: " ~ conf.dialogueDir.to!string);
