@@ -679,47 +679,128 @@ ORDER BY fusion_score DESC;
 
 immutable string fts5SimpleHelp = `Full-text query text search. Each word separated by a space is an implicit boolean AND`;
 
-immutable string fts5Help = `Full-text query syntax for FTS5 sqlite manual.
-Only search strings containing alphanumeric and _,(,),+,*,^ are accepted as is. Other are quoted.
+immutable string fts5Help = q"(Full-text query syntax for FTS5 sqlite manual.
 
-- Boolean: AND, OR, NOT. Precedence (highest to lowest): implicit AND (space) > explicit NOT > explicit AND > OR.
-- Grouping: ( ) for sub-expressions. **Note**: parenthesized groups cannot be combined with bare terms via implicit AND - (a OR b) c is a syntax error. Use (a OR b) AND c explicitly.
-- Phrases: "exact phrase" matches ordered tokens. Use + to concatenate phrases: foo + bar.
-- Prefix: term* matches terms starting with "term" (keep * outside quotes).
-- Start-of-column: ^phrase only matches if phrase starts at first token.
-- Proximity: NEAR(phrase1 phrase2, N) matches phrases within N tokens (default 10).
-- Quoting: Strings with special characters must be double-quoted. Barewords are alphanumeric + underscore.
-Note: Column filters (colname: or {col1 col2}:) are NOT supported and will cause errors. Use listRAGDatabases to discover available database names.
+Only alphanumerics, underscore, `(`, `)`, `*`, and `^` are accepted unquoted.
+Any other token is automatically wrapped in double quotes as a literal.
+
+- Boolean: AND, OR, NOT (uppercase). Precedence, highest to lowest:
+  implicit AND (whitespace) > NOT > AND > OR.
+- Grouping: `( )` for sub-expressions.
+  Note: `(a OR b) c` is a syntax error. Use `(a OR b) AND c` explicitly.
+- Terms: barewords are alphanumerics + underscore. Anything else is auto-quoted.
+- Prefix: `term*` matches terms starting with "term". Keep `*` outside any quotes.
+- Start-of-column: `^term` matches only if `term` is the first token of a column.
+- Proximity: `NEAR(term1 term2, N)` matches terms within N tokens (default 10).
+  The comma is required between the last term and the count.
+- Commas are reserved for `NEAR(...)`. Do not use them anywhere else.
+
+Column filters (`colname:` or `{col1 col2}:`) are NOT supported and will error.
+Use listRAGDatabases to discover available database names.
 
 Examples:
   test AND code
-  (test OR "unit test") AND NOT python NEAR("code" "block", 3)
+  (test OR unittest) AND NOT python
+  NEAR(code block, 3)
+  ^header AND body*
 
+BNF:
 
-The following block contains a summary of the FTS query syntax in BNF form. A detailed explanation follows.
-
-<phrase>    := string[*]
-<phrase>    := <phrase> + <phrase>
-<neargroup> := NEAR ( <phrase> <phrase> ... [, N] )
-<query>     := <query> AND <query>
-<query>     := <query> OR <query>
-<query>     := <query> NOT <query>
-`;
+  <term>      := [^] string[*]
+  <neargroup> := NEAR ( <term> <term> ... [, N] )
+  <query>     := <query> AND <query>
+  <query>     := <query> OR <query>
+  <query>     := <query> NOT <query>
+)";
 
 string cleanFts5(string s) {
-    import std.algorithm : among, splitter, count;
+    import std.algorithm : all, canFind, map, splitter;
     import std.ascii : isAlphaNum;
-    import std.string : join;
+    import std.range : enumerate;
+    import std.string : join, replace;
     import std.uni : byCodePoint;
 
-    static string quoteIfNeeded(string s) {
-        if (s.byCodePoint.filter!(a => !(a.isAlphaNum || a.among('_', '(', ')',
-                '+', '*', '^'))).count == 0)
-            return s;
-        if (s == "*")
-            return null;
-        return "\"" ~ s ~ "\"";
+    // Break parentheses into standalone tokens so they can be recognized.
+    // Commas are handled context-sensitively below, not padded here.
+    string padded = s.replace("(", " ( ").replace(")", " ) ");
+
+    // Bareword: optional '^', then alphanumerics + '_', then optional '*'.
+    static bool isBareword(string t) {
+        if (t.length == 0)
+            return false;
+        size_t end = t.length;
+        if (t[$ - 1] == '*')
+            end--;
+        if (end == 0)
+            return false;
+        size_t start = 0;
+        if (t[0] == '^')
+            start++;
+        if (start >= end)
+            return false;
+        return t[start .. end].byCodePoint.all!(c => c.isAlphaNum || c == '_');
     }
 
-    return s.splitter.map!(a => quoteIfNeeded(a)).join(" ");
+    static string quoteIfNeeded(string t) {
+        if (t == "(" || t == ")")
+            return t;
+        if (t.byCodePoint.all!(c => c == '*' || c == '^'))
+            return "";
+        if (isBareword(t))
+            return t;
+        return "\"" ~ t.replace(`"`, `""`) ~ "\"";
+    }
+
+    // Walk tokens, tracking NEAR-paren depth so commas are only syntax
+    // inside a NEAR(...) group.
+    string[] outTokens;
+    int nearDepth = 0;
+    bool nearPending = false;
+
+    foreach (tok; padded.splitter) {
+        if (tok == "NEAR") {
+            outTokens ~= "NEAR";
+            nearPending = true;
+            continue;
+        }
+        if (tok == "(") {
+            if (nearPending) {
+                nearDepth++;
+                nearPending = false;
+            }
+            outTokens ~= "(";
+            continue;
+        }
+        if (tok == ")") {
+            if (nearDepth > 0)
+                nearDepth--;
+            nearPending = false;
+            outTokens ~= ")";
+            continue;
+        }
+        nearPending = false;
+
+        if (nearDepth > 0 && tok.canFind(',')) {
+            // Inside NEAR(...): split on commas; emit each piece quoted
+            // normally and each comma as a standalone token.
+            foreach (part; tok.splitter(',').enumerate) {
+                if (part.index > 0)
+                    outTokens ~= ",";
+                if (part.value.length > 0)
+                    outTokens ~= quoteIfNeeded(part.value);
+            }
+            continue;
+        }
+
+        // Outside NEAR: a bare comma is dropped; an embedded comma stays
+        // glued to the token and gets quoted (tokenizer will strip it).
+        if (tok == ",")
+            continue;
+
+        auto q = quoteIfNeeded(tok);
+        if (q.length > 0)
+            outTokens ~= q;
+    }
+
+    return outTokens.join(" ");
 }
