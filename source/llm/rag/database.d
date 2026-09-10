@@ -804,3 +804,8 @@ string cleanFts5(string s) {
 
     return outTokens.join(" ");
 }
+
+@("test cleanFts5")
+unittest {
+    assert(cleanFts5("foo+bar") == "\"foo+bar\"");
+}

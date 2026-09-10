@@ -19,12 +19,13 @@ import std.process : execute;
 
 import my.path : Path, AbsolutePath;
 import miniorm : spinSql;
-import llm.test_util : retrySql;
 
-import llm.tool_call;
-import llm.rag.rag;
-import llm.tool_call.utility;
 import llm.config : ToolLimits, RagConfig;
+import llm.rag.database : cleanFts5;
+import llm.rag.rag;
+import llm.test_util : retrySql;
+import llm.tool_call.utility;
+import llm.tool_call;
 
 mixin RegisterLlmFunctions!();
 
@@ -93,7 +94,7 @@ private ExecuteFuncResult queryFunc(P)(RAGContext ctx, P params) {
 
     string textQuery;
     static if (__traits(hasMember, P, "textQuery")) {
-        textQuery = cleanFts5(ctx.getToolLimits.queryFtl5Mode, params.textQuery);
+        textQuery = cleanFts5(params.textQuery);
         if (textQuery.strip.empty)
             return ExecuteFuncResult("error: textQuery must not be empty", success: false);
     }
@@ -120,11 +121,11 @@ private ExecuteFuncResult queryFunc(P)(RAGContext ctx, P params) {
             auto queryDesc = () {
                 static if (__traits(hasMember, P, "textQuery")
                         && __traits(hasMember, P, "vectorQuery")) {
-                    return i"textQuery: '$(textQuery)' vectorQuery: '$(vectorQuery)'".text;
+                    return i"textQuery: $(textQuery) vectorQuery: $(vectorQuery)".text;
                 } else static if (__traits(hasMember, P, "textQuery")) {
-                    return i"textQuery: '$(textQuery)'".text;
+                    return i"textQuery: $(textQuery)".text;
                 } else {
-                    return i"vectorQuery: '$(vectorQuery)'".text;
+                    return i"vectorQuery: $(vectorQuery)".text;
                 }
             }();
             return ExecuteFuncResult(i"error: search completed but no results found for $(queryDesc)".text,
@@ -426,16 +427,10 @@ ExecuteFuncResult queryReadFile(Context baseCtx, QueryReadFileParams params) {
 }
 
 private:
-string cleanFts5(long mode, string query) {
-    import llm.rag.database : cleanFts5;
-
-    return mode == 0 ? query : cleanFts5(query);
-}
-
 string fts5Help(long mode, string query) {
     import llm.rag.database : fts5Help, fts5SimpleHelp;
 
     auto help = mode == 0 ? fts5Help : fts5SimpleHelp;
-    return i"\nFiltered textQuery: $(cleanFts5(mode, query))\n\ntextQuery must be according to the FTS5 syntax.\n$(
+    return i"\nFiltered textQuery: $(cleanFts5(query))\n\ntextQuery must be according to the FTS5 syntax.\n$(
             help)".text;
 }
