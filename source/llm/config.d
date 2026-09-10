@@ -179,21 +179,18 @@ struct LlmConfig {
         }
 
         auto localChat = (ProgramName ~ "/data/chat").Path;
-        if (localChat.exists && localChat.isDir) {
+        if (cwdConfig && chatDir.empty && localChat.exists && localChat.isDir) {
             chatDir = localChat;
-        } else if (chatDir.empty) {
-            // TODO: not using cwdConfig because chatDir must be set. What should the fallback be?
+        } else if (chatDir.empty || !chatDir.exists) {
             dataSearch(ProgramName).resolve("chat".Path).match!((ResourceFile a) {
                 chatDir = a.get;
             }, (_) { chatDir = localChat; });
         }
 
         auto localDialogue = (ProgramName ~ "/data/dialogue").Path;
-        if (dialogueDir.empty && cwdConfig) {
-            if (localDialogue.exists && localDialogue.isDir) {
-                dialogueDir = localDialogue;
-            }
-        } else if (!dialogueDir.exists) {
+        if (cwdConfig && dialogueDir.empty && localDialogue.exists && localDialogue.isDir) {
+            dialogueDir = localDialogue;
+        } else if (dialogueDir.empty || !dialogueDir.exists) {
             dataSearch(ProgramName).resolve("dialogue".Path).match!((ResourceFile a) {
                 dialogueDir = a.get;
             }, (_) { dialogueDir = localDialogue; });
