@@ -66,7 +66,7 @@ target_link_libraries(llmfun_tui PRIVATE
 )
 
 # Headless grid-invariant regression test for the imtui UTF-8 cell-width fix
-# (implementation plan Task 3). Links the REAL imtui + imgui-for-imtui
+# Links the REAL imtui + imgui-for-imtui
 # (IMTUI / IMGUI_USE_WCHAR32 come from those targets, exactly like llmfun_tui);
 # runs headless via ImTui_ImplText_* — no ncurses, no PTY. Built by the normal
 # `make` (build_test.py gate) and executed from the build dir.
@@ -75,31 +75,18 @@ add_executable(imtui_utf8_grid_test
 )
 target_link_libraries(imtui_utf8_grid_test PRIVATE imtui)
 
-# ncurses fold-row rewrite regression test (P3 Task 6 follow-up fix).
-# The binary drives the REAL ncurses backend (ImTui_ImplNcurses_DrawScreen)
-# with a folded VS16 pair row across four frames of content changes. It must
-# run on a PTY, so it is spawned and its raw output stream replayed by
-# ../vendor/imtui/test/test_ncurses_fold_redraw.py (wired into build_test.py);
-# the replayer models a VS16-clustering terminal and asserts the final row.
+# ncurses fold-row rewrite regression test. The binary drives the REAL ncurses backend (ImTui_ImplNcurses_DrawScreen) with a folded VS16 pair row across four frames of content changes. It must run on a PTY, so it is spawned and its raw output stream replayed by ../vendor/imtui/test/test_ncurses_fold_redraw.py (wired into build_test.py); the replayer models a VS16-clustering terminal and asserts the final row.
 add_executable(imtui_ncurses_fold_redraw_test
     ../vendor/imtui/test/test_ncurses_fold_redraw.cpp
 )
 target_link_libraries(imtui_ncurses_fold_redraw_test PRIVATE imtui-ncurses)
 
-# Standalone unit test for the session fuzzy matcher (Phase 4 item 2, Task 1).
-# Links ONLY the standard library (no imtui/ncurses/ImGui), which also
-# verifies that session_fuzzy.h compiles standalone (no TUI dependency).
-# Built by the normal `make -f tui.mak` and run headless from the build dir.
+# Standalone unit test for the session fuzzy matcher. Links ONLY the standard library (no imtui/ncurses/ImGui), which also verifies that session_fuzzy.h compiles standalone (no TUI dependency). Built by the normal `make -f tui.mak` and run headless from the build dir.
 add_executable(test_session_fuzzy
     test_session_fuzzy.cpp
 )
 
-# Panel-level headless smoke harness for the session filter (Phase 4, Task 8,
-# A29) and the filter nav-focus hardening (Phase 4, Task 11, A31). Drives the
-# real TuiState through the llmfun_tui frame loop (skipping only the terminal
-# write) and asserts on the C++ state and the TScreen cell grid (labels,
-# order, "no matches", UTF-8 validity, match highlight colors, nav/active id
-# stability, log lines). Runs headless from the build dir:
+# Panel-level headless smoke harness for the session filter and the filter nav-focus hardening. Drives the real TuiState through the llmfun_tui frame loop (skipping only the terminal write) and asserts on the C++ state and the TScreen cell grid (labels, order, "no matches", UTF-8 validity, match highlight colors, nav/active id stability, log lines). Runs headless from the build dir:
 #   ./test_session_filter_smoke < /dev/null
 add_executable(test_session_filter_smoke
     test_session_filter_smoke.cpp
@@ -116,9 +103,7 @@ target_link_libraries(test_session_filter_smoke PRIVATE
     ncursesw
 )
 
-# Headless clamp test for tuiSetMaxWidth / the tuiRender clamp (Task 1).
-# Text backend only (no ncurses, no PTY) — runs a real TuiState through
-# tuiRender and checks the grid width. Invoke: ./test_tui_maxwidth
+# Headless clamp test for tuiSetMaxWidth / the tuiRender clamp. Text backend only (no ncurses, no PTY) — runs a real TuiState through tuiRender and checks the grid width. Invoke: ./test_tui_maxwidth
 add_executable(test_tui_maxwidth
     test_tui_maxwidth.cpp
 )
@@ -128,6 +113,23 @@ add_dependencies(test_tui_maxwidth llmfun_tui_all_lib)
 # exactly that (their archives are already inside llmfun_tui_all_lib, so they
 # contribute no extra objects).
 target_link_libraries(test_tui_maxwidth PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    imgui_markdown
+    ncursesw
+)
+
+# Headless regression test for the widened clear contract: tuiClearOutput / C-API tuiClearChatMessages must reset ALL derived chat-display state — output lines, the open-group set (collapsed headers; stale positions suppressed header labels of replayed messages) and the in-flight stream message — not just outputLines. Pure state-level assertions; no terminal, no ImGui context, no rendering needed. Invoke:
+# ./test_clear_output_state
+add_executable(test_clear_output_state
+    test_clear_output_state.cpp
+)
+add_dependencies(test_clear_output_state llmfun_tui_all_lib)
+# tui.h (the C++ header) needs the imtui + imgui_markdown include paths and
+# the IMGUI_USE_WCHAR32 definition; link the interface-providing targets for
+# exactly that (their archives are already inside llmfun_tui_all_lib, so they
+# contribute no extra objects).
+target_link_libraries(test_clear_output_state PRIVATE
     llmfun_tui_all_lib
     imtui-ncurses
     imgui_markdown

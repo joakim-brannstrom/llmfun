@@ -326,7 +326,7 @@ void tuiInitQueryHistory(TuiState* state, const String* history, size_t count);
 
 /* Append a line to the scrollable output display area.
  *
- * The output area has a maximum capacity (10000 lines). When exceeded, the
+ * The output area has a maximum capacity (1000 lines). When exceeded, the
  * oldest lines are evicted first (FIFO). The `line` parameter is an inbound
  * String — its data is copied internally, so the caller's buffer can be
  * freed or reused immediately after this call returns.
@@ -337,7 +337,7 @@ void tuiAddLogMessage(TuiState* state, String summary, String text);
 
 /* Append a chat message to the scrollable output display area.
  *
- * The output area has a maximum capacity (10000 lines). When exceeded, the
+ * The output area has a maximum capacity (1000 lines). When exceeded, the
  * oldest lines are evicted first (FIFO). The `param` fields are inbound
  * Strings — their data is copied internally, so the caller's buffers can be
  * freed or reused immediately after this call returns.
@@ -348,8 +348,12 @@ void tuiAddChatMessage(TuiState* state, ChatMessageParam param);
 
 /* Clear all lines from the output display area.
  *
- * After this call the output area will be empty. The auto-scroll flag is
- * unaffected.
+ * After this call the output area will be empty and self-consistent: any
+ * open-group state (collapsed header groups) is reset too, so messages
+ * appended afterwards — e.g. replayed after a session switch — render with
+ * their header labels, and an in-flight stream message (see
+ * tuiUpdateStreamChatMessage / tuiStreamChatMessageClear) is cleared and
+ * stops being displayed. The auto-scroll flag is unaffected.
  *
  * Null-safe: no-op if state is NULL.
  */

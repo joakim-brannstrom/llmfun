@@ -212,6 +212,8 @@ The in-memory chat is persisted back to the active session file:
 - **After every query** — `processResult()` calls `commitActiveSession()`, which converts the chat with `toSaveJson()`, strips `role: "system"` entries from `messages` (the system prompt is re-set at startup, so it is never persisted), and calls `store.save(activeSession.id, activeSession, doc)`.
 - **At shutdown** — `dispose()` commits once more as a safety net for error/early-exit paths (a harmless rewrite that bumps `updatedAt` once more), then saves `state.json`.
 
+The write is gated on the `chatDirty` flag: every code path that appends persisted content to the chat must set `chatDirty`. The commit itself is no-op-gated in `commitActiveSession()` to protect sidebar `updatedAt` ordering.
+
 ### Slash Commands
 
 All session commands are handled by reusable private `AgentApp` methods, so a future TUI sidebar can share the same code path:

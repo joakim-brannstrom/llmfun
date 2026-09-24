@@ -62,7 +62,11 @@ void tuiAddLogMessage(TuiState& state, const LogMessage& msg) {
     }
 }
 
-void tuiClearOutput(TuiState& state) { state.chat.outputLines.clear(); }
+void tuiClearOutput(TuiState& state) {
+    state.chat.outputLines.clear();
+    state.chat.outputLineOpen.clear();
+    tuiStreamChatMessageClear(state);
+}
 
 void tuiUpdateStreamChatMessage(TuiState& state, const ChatMessage& msg) {
     state.chat.streamMsg = msg;

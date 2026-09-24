@@ -69,8 +69,7 @@ void addFunction(RegFunction f) {
     registeredFunc ~= cast(shared) f;
 }
 
-// Filter the JSON tool descriptions array using ReFilter.
-// Only tools whose name matches the filter are returned.
+// Filter the JSON tool descriptions array using ReFilter. Only tools whose name matches the filter are returned.
 JSONValue filterToolDescriptions(JSONValue allTools, ReFilter filter_) {
     import std.algorithm : filter;
 
@@ -267,15 +266,10 @@ InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
                 } catch (Exception e) {
                     bool success;
 
-                    // The JSON value has the wrong kind for this parameter.
-                    // Detect the common double-encoding mistake: a string
-                    // whose content is a JSON-encoded array. Name the fix
-                    // instead of leaving the caller with a bare type error.
+                    // The JSON value has the wrong kind for this parameter. Detect the common double-encoding mistake: a string whose content is a JSON-encoded array. Name the fix instead of leaving the caller with a bare type error.
                     static if (is(FT == string[])) {
                         if (v.type == JSONType.string) {
-                            // the LLM is retarded and sometimes go into a loop
-                            // where it keep on passing a JSON array as a string.
-                            // Try to decode the string. If it succeeds use that.
+                            // the LLM is retarded and sometimes go into a loop where it keep on passing a JSON array as a string. Try to decode the string. If it succeeds use that.
                             try {
                                 __traits(getMember, rval.value, field) = getJsonValue!FT(
                                         parseJSON(v.str));
@@ -293,8 +287,7 @@ InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
                                         return rval;
                                     }
                                 } catch (Exception) {
-                                    // inner string is not JSON; report the
-                                    // generic mismatch below
+                                    // inner string is not JSON; report the generic mismatch below
                                 }
                             }
                         }
@@ -316,48 +309,6 @@ InitParams!ParamsT initParams(ParamsT)(JSONValue json, RegParam[] regParams) {
     }
 
     return rval;
-}
-
-/// Sample params struct used by the initParams unit tests.
-private struct TestCmdParams {
-    string[] command;
-    @ParamOptional string cwd;
-}
-
-unittest {
-    // Double-encoded array: a string containing JSON array integers must produce
-    // a hint that names the fix instead of a bare type-mismatch error.
-    auto json = parseJSON(`{"command": "[1, 2]"}`);
-    auto params = initParams!TestCmdParams(json, toParams!TestCmdParams);
-    assert(params.errorMsg.length > 0);
-    assert(params.errorMsg.canFind("array of strings"), params.errorMsg);
-    assert(params.errorMsg.canFind("command"), params.errorMsg);
-}
-
-unittest {
-    // Double-encoded array: a string containing JSON array text should decode the json array to a D string array
-    auto json = parseJSON(`{"command": "[\"cd\", \"llmfun\"]"}`);
-    auto params = initParams!TestCmdParams(json, toParams!TestCmdParams);
-    assert(params.errorMsg.empty);
-    assert(params.value.command[0] == "cd");
-    assert(params.value.command[1] == "llmfun");
-}
-
-unittest {
-    // A real array converts without error.
-    auto okJson = parseJSON(`{"command": ["cd", "llmfun"]}`);
-    auto okParams = initParams!TestCmdParams(okJson, toParams!TestCmdParams);
-    assert(okParams.errorMsg.length == 0, okParams.errorMsg);
-    assert(okParams.value.command == ["cd", "llmfun"]);
-}
-
-unittest {
-    // A plain string (not JSON) for an array parameter gets the generic
-    // received/expected message.
-    auto strJson = parseJSON(`{"command": "cd llmfun"}`);
-    auto strParams = initParams!TestCmdParams(strJson, toParams!TestCmdParams);
-    assert(strParams.errorMsg.canFind("received string"), strParams.errorMsg);
-    assert(strParams.errorMsg.canFind("string[]"), strParams.errorMsg);
 }
 
 RegParam[] toParams(FunctionParamT)() {

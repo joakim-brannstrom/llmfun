@@ -1,5 +1,4 @@
-/// Core Agent orchestration: `Agent` drives the model request/tool-call loop and
-/// `StreamResponse` parses streaming model responses.
+/// Core Agent orchestration: `Agent` drives the model request/tool-call loop and `StreamResponse` parses streaming model responses.
 module llm.agent;
 
 import core.thread : Thread;
@@ -117,8 +116,7 @@ class Agent : IBasicAgent {
         return prevStat;
     }
 
-    /// Reset the agent's model to a new configuration.
-    /// Does NOT modify chat history or SummaryAgent.
+    /// Reset the agent's model to a new configuration. Does NOT modify chat history or SummaryAgent.
     void resetModel(CodeModelConfig modelConfig) {
         import llm.tool_call : descAllFunctions, filterToolDescriptions;
         import llm.endpoint : getContextSize;
@@ -156,18 +154,12 @@ class Agent : IBasicAgent {
         toolCtx.setPipelineContext(ctx);
     }
 
-    /// Adds a user query. Chat owns the turn policy: a user query always
-    /// opens a new turn inside Chat.add - call sites cannot violate it.
+    /// Adds a user query. Chat owns the turn policy: a user query always opens a new turn inside Chat.add - call sites cannot violate it.
     void addUserQuery(string query) nothrow {
         chat.addUserQuery(query);
     }
 
-    /// Adds a harness control message that continues the current turn
-    /// : a user-role nudge with userQuery:false — never opens a turn
-    /// and appears in neither the dialogue nor the trace projection. Used by
-    /// the pipeline retry loop instead of addUserQuery, which would fragment
-    /// one logical turn into N turns and leak harness text into the Facts
-    /// projection.
+    /// Adds a harness control message that continues the current turn: a user-role nudge with userQuery:false — never opens a turn and appears in neither the dialogue nor the trace projection. Used by the pipeline retry loop instead of addUserQuery, which would fragment one logical turn into N turns and leak harness text into the Facts projection.
     void addContinueMessage(string msg) @safe nothrow {
         chat.add(Message(Role.user, userQuery: false, content: msg, thinking: null));
     }
@@ -261,9 +253,7 @@ Call `requestCompression` now to compress on your own terms. Write a self-contai
         import llm.query : HttpResult, HttpError, canRetry;
 
         ProcessResult rval;
-        // Failure and interrupt paths report the previous stat (not a zero
-        // one): the discarded partial message did not grow the context, so
-        // the last known context size is still the best estimate.
+        // Failure and interrupt paths report the previous stat (not a zero one): the discarded partial message did not grow the context, so the last known context size is still the best estimate.
         rval.stat = prevStat;
 
         ServerStat useOrApproxStatistic(ServerStat stat) {
@@ -323,9 +313,7 @@ Call `requestCompression` now to compress on your own terms. Write a self-contai
                     logger.trace("unhandled error: ", sp.error);
                     rval.status = ProcessResult.Status.unknownFailure;
 
-                    // Recovery: the server rejected the request.
-                    // The history may contain invalid UTF-8 (typically binary command output).
-                    // Sanitize it in place (messages preserved).
+                    // Recovery: the server rejected the request. The history may contain invalid UTF-8 (typically binary command output). Sanitize it in place (messages preserved).
                     if (chat.sanitizeHistory > 0) {
                         logger.warning("Sanitized chat history (invalid UTF-8)");
                     }
@@ -340,13 +328,7 @@ Call `requestCompression` now to compress on your own terms. Write a self-contai
                     rval.hasToolCall = rval.chat[$ - 1].match!((ToolMessage _) => true,
                             (ToolResponse _) => true, (_) => false);
                 }
-                // Advance context bookkeeping only when the turn completed and
-                // its messages were committed to the chat. On interrupts
-                // (/stop) and request failures the partial message is thrown
-                // away, so the previous context size stays valid as-is.
-                // Re-estimating here (chars / ApproxTokenSize, a pessimistic
-                // value) would inflate prevStat and could trigger a spurious
-                // compression on the next query.
+                // Advance context bookkeeping only when the turn completed and its messages were committed to the chat. On interrupts (/stop) and request failures the partial message is thrown away, so the previous context size stays valid as-is. Re-estimating here (chars / ApproxTokenSize, a pessimistic value) would inflate prevStat and could trigger a spurious compression on the next query.
                 prevStat = useOrApproxStatistic(sp.stat).newTurn;
             }
         } catch (Exception e) {
@@ -401,25 +383,17 @@ Continue your work from where you left off.";
         return result;
     }
 
-    /// Register a listener for compression checkpoints. The seam is
-    /// multicast: interested subsystems (currently the dialogue indexer)
-    /// subscribe independently. A listener fires exactly once per
-    /// compression that actually evicts verbatim content, and a throwing
-    /// listener never breaks compression.
+    /// Register a listener for compression checkpoints. The seam is multicast: interested subsystems (currently the dialogue indexer) subscribe independently. A listener fires exactly once per compression that actually evicts verbatim content, and a throwing listener never breaks compression.
     void addCompressionCheckpointListener(SummaryAgent.CheckpointListener listener) {
         summary.addCheckpointListener(listener);
     }
 
-    /// Public accessor for the tool context (needed by app_agent to inject
-    /// the DialogueIndex after construction).
+    /// Public accessor for the tool context (needed by app_agent to inject the DialogueIndex after construction).
     AgentContext toolContext() {
         return toolCtx;
     }
 
-    /// Set the session id stamped into each checkpoint event. Call
-    /// sites that know the owning session (doCompress: activeSession.id) set
-    /// it before compressing; pool callbacks set their own or leave "".
-    /// The dialogue indexer refuses checkpoints with an empty or invalid sessionId.
+    /// Set the session id stamped into each checkpoint event. Call sites that know the owning session (doCompress: activeSession.id) set it before compressing; pool callbacks set their own or leave "". The dialogue indexer refuses checkpoints with an empty or invalid sessionId.
     void setCompressionCheckpointSessionId(string sessionId) {
         summary.setCheckpointSessionId(sessionId);
     }
@@ -568,8 +542,7 @@ Continue your work from where you left off.";
         syncContextFromChat();
     }
 
-    /// Sync prevStat.context from current chat context size.
-    /// Called after loading chat history so the agent knows the starting context.
+    /// Sync prevStat.context from current chat context size. Called after loading chat history so the agent knows the starting context.
     void syncContextFromChat() @safe {
         prevStat = ServerStat(startContext: chat.approxContextSize);
     }
@@ -880,10 +853,7 @@ struct StreamResponse {
 
     void parseStat(ref JSONValue json) @safe nothrow {
         void mergeTokenRatio(double newV) {
-            // smooth out "jitter" in the ratio. If the ratio is just set to
-            // the last value there will be a large "difference" that never
-            // "correct" itself when the LLM go between generating a lof of
-            // thinking and then go to generating code.
+            // smooth out "jitter" in the ratio. If the ratio is just set to the last value there will be a large "difference" that never "correct" itself when the LLM go between generating a lof of thinking and then go to generating code.
             if (stat.charTokenRatio < 1.0)
                 stat.charTokenRatio = newV;
             else
@@ -1014,11 +984,8 @@ struct StreamResponse {
 }
 
 version (unittest) {
-    /// Builds a minimal LlmConfig for a real Agent with no network, no skills
-    /// and no RAG. promptDir points at the temp dir holding the one prompt
-    /// file getPrompt reads (SUMMARY.md); the empty server type resolves to
-    /// EndpointType.unknown, so the requesters never dial out.
-    private LlmConfig makeAgentTestConfig(string promptDir) {
+    /// Builds a minimal LlmConfig for a real Agent with no network, no skills and no RAG. promptDir points at the temp dir holding the one prompt file getPrompt reads (SUMMARY.md); the empty server type resolves to EndpointType.unknown, so the requesters never dial out.
+    package LlmConfig makeAgentTestConfig(string promptDir) {
         LlmConfig llmConf;
         llmConf.disableSkills = true;
         llmConf.promptDir = [promptDir.Path];
@@ -1036,7 +1003,7 @@ version (unittest) {
     }
 
     /// Test hygiene: remove the temp prompt dir; failures only log.
-    private void cleanupAgentTestDir(string dir) {
+    package void cleanupAgentTestDir(string dir) {
         import std.exception : collectException;
         import std.file : rmdirRecurse;
 
@@ -1047,87 +1014,4 @@ version (unittest) {
             logger.tracef("agent turn-id test cleanup failed: %s", e.msg).collectException;
         }
     }
-}
-
-// Integration: a real Agent (no LLM calls) delegates addUserQuery to the
-// Chat, which owns the turn policy: the system prompt stamps 0, the first
-// query opens turn 1, harness nudges (incl. addContinueMessage, the
-// pipeline retry path) continue the current turn, and the next query
-// opens turn 2.
-unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
-
-    // stdTime (100ns resolution) keeps two runs in the same second from colliding on the temp dir.
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_turnid_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
-
-    auto llmConf = makeAgentTestConfig(tmpDir);
-    auto agent = new Agent("integration", llmConf, null, null);
-
-    agent.setSystemPrompt("sys");
-    agent.addUserQuery("first question"); // opens turn 1
-    agent.addContinue(); // nudge continues turn 1
-    agent.addUserQuery("second question"); // opens turn 2
-    agent.addKeepReasoning(); // nudge continues turn 2
-    agent.addContinueMessage("You stopped without calling 'pipelineOutput'."); // retry nudge continues turn 2
-
-    assert(agent.chat.nextTurnId() == 2);
-    auto msgs = agent.chat.getMessages;
-    assert(msgs.length == 6);
-    assert(turnIdOf(msgs[0]) == 0, "system prompt belongs to no turn");
-    assert(turnIdOf(msgs[1]) == 1);
-    assert(turnIdOf(msgs[2]) == 1);
-    assert(turnIdOf(msgs[3]) == 2);
-    assert(turnIdOf(msgs[4]) == 2);
-    assert(turnIdOf(msgs[5]) == 2, "retry nudge continues turn 2, never opens one");
-
-    // The retry nudge is harness traffic: it appears in neither projection and did not fragment the turn sequence.
-    auto dialogue = agent.chat.getDialogueHistory();
-    assert(dialogue.length == 2, "only the two real user queries are dialogue");
-    assert(turnIdOf(dialogue[0]) == 1 && turnIdOf(dialogue[1]) == 2);
-    assert(agent.chat.getReasoningTrace().length == 0, "harness nudges are not trace");
-}
-
-// The trigger rule lives in prompt data, not code, so in-tree removal of
-// the section would silently change the main agent's behavior. This guard
-// loads the real llmfun/config/prompt/AGENT.md through the production
-// getPrompt/getBasePrompt path (FlatVfs) and asserts the section heading
-// and the exact tool name are present. A missing file makes getBasePrompt
-// throw, which fails the test.
-unittest {
-    const agentPromptFile = "llmfun/config/prompt/AGENT.md";
-    assert(agentPromptFile.exists,
-            "in-tree AGENT.md missing; getBasePrompt would throw at startup (R12)");
-    auto llmConf = makeAgentTestConfig("llmfun/config/prompt");
-    auto prompt = llmConf.getPrompt(null, "AGENT.md");
-    assert(prompt.canFind("# Dialogue History Retrieval"),
-            "Task 8 trigger-rule section missing from the composed main-agent prompt (R12)");
-    assert(prompt.canFind("queryDialogueHistory"),
-            "Task 8 rule must name the queryDialogueHistory tool (R12)");
-}
-
-// The reasoning-history rule also lives in prompt data, not code, so
-// in-tree removal of the section would silently change the main agent's
-// behavior. Same guard shape as the dialogue test above: load the real
-// llmfun/config/prompt/AGENT.md through the production getPrompt path
-// and assert the section heading, the exact tool name, and the
-// anti-anchoring warning are present.
-unittest {
-    const agentPromptFile = "llmfun/config/prompt/AGENT.md";
-    assert(agentPromptFile.exists,
-            "in-tree AGENT.md missing; getBasePrompt would throw at startup (R12)");
-    auto llmConf = makeAgentTestConfig("llmfun/config/prompt");
-    auto prompt = llmConf.getPrompt(null, "AGENT.md");
-    assert(prompt.canFind("# Reasoning History Retrieval"),
-            "Reasoning History Retrieval section missing from the composed main-agent prompt");
-    assert(prompt.canFind("queryReasoningHistory"),
-            "Reasoning rule must name the queryReasoningHistory tool");
-    assert(prompt.canFind("PAST THOUGHTS, NOT ground truth"),
-            "Reasoning rule must state that results are past thoughts, not ground truth");
 }
