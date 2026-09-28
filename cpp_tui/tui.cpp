@@ -109,6 +109,24 @@ void applyTheme() {
     colors[ImGuiCol_FrameBgActive] = ImVec4(0.26f, 0.59f, 0.98f, 0.65f);
     colors[ImGuiCol_ScrollbarBg] = ImVec4(0.05f, 0.05f, 0.05f, 0.54f);
     colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.34f, 0.34f, 0.34f, 0.54f);
+    // ImGui draws the nav cursor (RenderNavCursor) on the focused widget using
+    // ImGuiCol_NavCursor; with the 1px font the InputText caret and the
+    // scrollbar grab both route through that slot, rendering as the blue
+    // default (0.26,0.59,0.98) instead of the themed Text/ScrollbarGrab
+    // colors. Route NavCursor to the scrollbar grab color so the grab is
+    // visible and the caret matches the text color.
+    colors[ImGuiCol_NavCursor] = colors[ImGuiCol_ScrollbarGrab];
+    // The ImGui default Button blue (0.26,0.59,0.98,0.40) alpha-multiplies to
+    // (26,60,100) which quantizes to ANSI 60 - the same index as the plain row
+    // background - so 1-row-tall buttons (title tabs, Send, Prev, Next) render
+    // invisible. Use the themed grab gray (quantizes to 236, distinct from the
+    // surrounding 60/102/235 backgrounds) for all three button states.
+    colors[ImGuiCol_Button] = colors[ImGuiCol_ScrollbarGrab];
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.42f, 0.42f, 0.42f, 0.60f);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.50f, 0.50f, 0.50f, 0.65f);
+    // fprintf(stderr, "[style] NavCursor=%08x ScrollbarGrab=%08x\n",
+    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_NavCursor]),
+    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_ScrollbarGrab]));
 }
 
 bool tuiInit(ImTui::TScreen** screen) {
@@ -116,7 +134,6 @@ bool tuiInit(ImTui::TScreen** screen) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    applyTheme();
 
     ImGui::GetIO().IniFilename = nullptr;
 
@@ -129,6 +146,12 @@ bool tuiInit(ImTui::TScreen** screen) {
     }
 
     ImTui_ImplText_Init();
+
+    // Apply the theme AFTER the backend inits: ImTui_ImplText_Init() resets
+    // several style colors (notably Colors[ImGuiCol_NavHighlight] = (0,0,0,0),
+    // which aliases ImGuiCol_NavCursor in ImGui 1.91.4+), so applying the
+    // theme before the backends lets the backend undo the NavCursor override.
+    applyTheme();
 
     ImGuiIO& io = ImGui::GetIO();
     io.GetClipboardTextFn = GetClipboardText;
@@ -148,6 +171,10 @@ void tuiShutdown(ImTui::TScreen* screen) {
 void tuiNewFrame() {
     ImTui_ImplNcurses_NewFrame();
     ImTui_ImplText_NewFrame();
+    // fprintf(stderr, "[style@draw] NavCursor=%08x ScrollbarGrab=%08x Button=%08x\n",
+    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_NavCursor]),
+    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_ScrollbarGrab]),
+    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_Button]));
     ImGui::NewFrame();
 }
 
@@ -185,7 +212,7 @@ bool tuiRender(TuiState& state) {
 
     ImGuiIO& io = ImGui::GetIO();
 
-    if (io.KeyCtrl && (ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_C)))) {
+    if (io.KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_C))) {
         return false;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_End)) {
@@ -203,6 +230,14 @@ bool tuiRender(TuiState& state) {
     ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
     ImGui::SetNextWindowSize(DisplaySize, ImGuiCond_Always);
     ImGui::Begin("##TuiRoot", &noClose, parentFlags);
+    // The root window is an absolute-positioned terminal grid; it must never
+    // scroll. On 1.92, content that ends exactly at the inner bottom edge
+    // leaves one row of scrollable range, and something during Begin/nav
+    // scrolls the window by that 1 row on every frame after the first
+    // (observed: GetScrollY() == 1 from frame 2 on), shifting every
+    // SetCursorPos-based position up one row. SetScrollY(0) below re-asserts
+    // each frame after Begin's scroll calc, so it wins.
+    ImGui::SetScrollY(0.0f);
 
     renderMainWindow(state, log);
 

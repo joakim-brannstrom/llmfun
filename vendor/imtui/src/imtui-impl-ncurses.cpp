@@ -120,29 +120,11 @@ ImTui::TScreen * ImTui_ImplNcurses_Init(bool mouseSupport, float fps_active, flo
         printf("\033[?1003h\n");
     }
 
-    ImGui::GetIO().KeyMap[ImGuiKey_Tab]         = 9;
-    ImGui::GetIO().KeyMap[ImGuiKey_LeftArrow]   = 260;
-    ImGui::GetIO().KeyMap[ImGuiKey_RightArrow]  = 261;
-    ImGui::GetIO().KeyMap[ImGuiKey_UpArrow]     = 259;
-    ImGui::GetIO().KeyMap[ImGuiKey_DownArrow]   = 258;
-    ImGui::GetIO().KeyMap[ImGuiKey_PageUp]      = 339;
-    ImGui::GetIO().KeyMap[ImGuiKey_PageDown]    = 338;
-    ImGui::GetIO().KeyMap[ImGuiKey_Home]        = 262;
-    ImGui::GetIO().KeyMap[ImGuiKey_End]         = 360;
-    ImGui::GetIO().KeyMap[ImGuiKey_Insert]      = 331;
-    ImGui::GetIO().KeyMap[ImGuiKey_Delete]      = 330;
-    ImGui::GetIO().KeyMap[ImGuiKey_Backspace]   = 263;
-    ImGui::GetIO().KeyMap[ImGuiKey_Space]       = 32;
-    ImGui::GetIO().KeyMap[ImGuiKey_Enter]       = 10;
-    ImGui::GetIO().KeyMap[ImGuiKey_Escape]      = 27;
-    ImGui::GetIO().KeyMap[ImGuiKey_KeyPadEnter] = 343;
-    ImGui::GetIO().KeyMap[ImGuiKey_A]           = 1;
-    ImGui::GetIO().KeyMap[ImGuiKey_C]           = 3;
-    ImGui::GetIO().KeyMap[ImGuiKey_V]           = 22;
-    ImGui::GetIO().KeyMap[ImGuiKey_X]           = 24;
-    ImGui::GetIO().KeyMap[ImGuiKey_Y]           = 25;
-    ImGui::GetIO().KeyMap[ImGuiKey_Z]           = 26;
-
+    // The backend owns its input contract: key/mouse state is delivered via
+    // the 1.87+ event queue (AddKeyEvent/AddMousePosEvent/AddMouseButtonEvent).
+    // Same-frame down+up pairs must trickle across frames or IsKeyPressed()
+    // never fires (see imgui.h ConfigInputTrickleEventQueue).
+    ImGui::GetIO().ConfigInputTrickleEventQueue = true;
     ImGui::GetIO().KeyRepeatDelay = 0.050;
     ImGui::GetIO().KeyRepeatRate = 0.050;
 
@@ -189,6 +171,34 @@ void code_point_to_utf8(wint_t cp, std::string& utf8) {
     }
 }
 
+// Map an ncurses key code (KEY_CODE_YES payload, or a control byte from the
+// text path) to its ImGuiKey. Returns ImGuiKey_None for codes with no ImGui
+// equivalent (function keys, unmapped control bytes, etc.); those are
+// ignored, as before.
+static ImGuiKey ncurses_keycode_to_imgui(int c) {
+    switch (c) {
+        case 8:   return ImGuiKey_Backspace;  // pdcurses KEY_BACKSPACE (_WIN32)
+        case 9:   return ImGuiKey_Tab;        // ^I / shift+tab (353)
+        case 10:  case 13: return ImGuiKey_Enter;
+        case 27:  return ImGuiKey_Escape;
+        case 127: return ImGuiKey_Backspace;  // raw DEL byte (Ctrl+Backspace; some terminals deliver 0x7F here)
+        case 258: case 336: return ImGuiKey_DownArrow;   // KEY_DOWN / shift+down
+        case 259: case 337: return ImGuiKey_UpArrow;     // KEY_UP   / shift+up
+        case 260: case 393: return ImGuiKey_LeftArrow;   // KEY_LEFT / shift+left
+        case 261: case 402: return ImGuiKey_RightArrow;  // KEY_RIGHT / shift+right
+        case 262: return ImGuiKey_Home;
+        case 263: return ImGuiKey_Backspace;  // KEY_BACKSPACE (ncurses)
+        case 330: return ImGuiKey_Delete;     // KEY_DC
+        case 331: return ImGuiKey_Insert;
+        case 338: return ImGuiKey_PageDown;
+        case 339: return ImGuiKey_PageUp;
+        case 343: return ImGuiKey_KeypadEnter;
+        case 353: return ImGuiKey_Tab;        // shift + tab
+        case 360: return ImGuiKey_End;
+        default:  return ImGuiKey_None;
+    }
+}
+
 bool ImTui_ImplNcurses_NewFrame() {
     bool hasInput = false;
 
@@ -204,12 +214,6 @@ bool ImTui_ImplNcurses_NewFrame() {
     static int rbut = 0;
     static unsigned long mstate = 0;
 
-    auto & keysDown = ImGui::GetIO().KeysDown;
-    std::fill(keysDown, keysDown + 512, 0);
-
-    ImGui::GetIO().KeyCtrl = false;
-    ImGui::GetIO().KeyShift = false;
-
     while (true) {
         wint_t wc;
         int ret = wget_wch(stdscr, &wc);
@@ -217,8 +221,13 @@ bool ImTui_ImplNcurses_NewFrame() {
         if (ret == ERR) {
             // mouse release handling
             if ((mstate & 0xf) == 0x1) {
+                const bool released = (lbut != 0) || (rbut != 0);
                 lbut = 0;
                 rbut = 0;
+                if (released) {
+                    ImGui::GetIO().AddMouseButtonEvent(0, false);
+                    ImGui::GetIO().AddMouseButtonEvent(1, false);
+                }
             }
             break;
         } else if (ret == KEY_CODE_YES) {
@@ -235,45 +244,39 @@ bool ImTui_ImplNcurses_NewFrame() {
                     if ((mstate & 0x000f) == 0x0001) lbut = 0;
                     if ((mstate & 0xf000) == 0x2000) rbut = 1;
                     if ((mstate & 0xf000) == 0x1000) rbut = 0;
+                    // Ctrl-modified mouse event: 1.81 forced io.KeyCtrl via
+                    // ((mstate & 0x0F000000) == 0x01000000) at this site;
+                    // emit the same predicate as a mod pair (ordering note
+                    // as in the Ctrl+letter path).
+                    if ((mstate & 0x0F000000) == 0x01000000) {
+                        ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
+                        ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, false);
+                    }
                     //printf("mstate = 0x%016lx\n", mstate);
-                    ImGui::GetIO().KeyCtrl |= ((mstate & 0x0F000000) == 0x01000000);
+                    ImGui::GetIO().AddMousePosEvent(mx, my);
+                    ImGui::GetIO().AddMouseButtonEvent(0, lbut != 0);
+                    ImGui::GetIO().AddMouseButtonEvent(1, rbut != 0);
                 }
                 hasInput = true;
                 continue;
             }
 
-            if (c == 330) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_Delete]] = true;
-            } else if (c == KEY_BACKSPACE || c == KEY_DC || c == 127) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_Backspace]] = true;
             // Shift + arrows (probably not portable :()
-            } else if (c == 393) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_LeftArrow]] = true;
-                ImGui::GetIO().KeyShift = true;
-            } else if (c == 402) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_RightArrow]] = true;
-                ImGui::GetIO().KeyShift = true;
-            } else if (c == 337) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_UpArrow]] = true;
-                ImGui::GetIO().KeyShift = true;
-            } else if (c == 336) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_DownArrow]] = true;
-                ImGui::GetIO().KeyShift = true;
-            } else if (c == KEY_BACKSPACE) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_Backspace]] = true;
-            } else if (c == KEY_LEFT) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_LeftArrow]] = true;
-            } else if (c == KEY_RIGHT) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_RightArrow]] = true;
-            } else if (c == KEY_UP) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_UpArrow]] = true;
-            } else if (c == KEY_DOWN) {
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_DownArrow]] = true;
-            } else if (c == 353) { // shift + tab
-                ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_Tab]] = true;
-                ImGui::GetIO().KeyShift = true;
-            } else {
-                keysDown[c] = true;
+            const ImGuiKey key = ncurses_keycode_to_imgui(c);
+            if (c == 393 || c == 402 || c == 337 || c == 336 || c == 353) {
+                // Interleave as [Shift down, key down, key up, Shift up]
+                // (same ordering as the Ctrl+letter path; fires same-frame).
+                ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift, true);
+                ImGui::GetIO().AddKeyEvent(key, true);
+                ImGui::GetIO().AddKeyEvent(key, false);
+                ImGui::GetIO().AddKeyEvent(ImGuiMod_Shift, false);
+            } else if (key != ImGuiKey_None) {
+                // down+up pair per reported ncurses event: preserves the 1.81
+                // per-frame-zeroed tap semantics and is immune to the event
+                // queue's de-duplication; a held key still arrives as repeated
+                // escape sequences -> repeated press events, same as before.
+                ImGui::GetIO().AddKeyEvent(key, true);
+                ImGui::GetIO().AddKeyEvent(key, false);
             }
             hasInput = true;
         } else if (ret == OK) {
@@ -281,18 +284,41 @@ bool ImTui_ImplNcurses_NewFrame() {
 
             // Handle control characters (Tab, Enter, Escape, Backspace, Ctrl+letter, etc.)
             if (c < 32 || c == 127) {
-                // Set the corresponding key in ImGui's key state
-                // KeysDown is an array of 512 bools, index by the key code
-                keysDown[c] = true;
-
-                // Special: Enter, Escape, Tab should not be passed as text input
-                // (they are navigation keys)
-                // For Ctrl+A etc., do not add as text either
-                // (ImGui uses the KeysDown flags to detect shortcuts)
+                // 9 (Tab) and 10 (Enter/\n, after the tty's \r translation) are
+                // byte-ambiguous with Ctrl+I/Ctrl+J and have their own mappings in
+                // ncurses_keycode_to_imgui below — they must not take this branch.
+                if (c >= 1 && c <= 26 && c != 9 && c != 10) {
+                    // Ctrl+letter: interleave the modifier and key events as
+                    // [Ctrl down, key down, key up, Ctrl up]. With the trickle
+                    // rule (imgui.cpp:10715) each frame applies at most one
+                    // state change per key, so the four events trickle as
+                    // Ctrl-down / key-down / key-up / Ctrl-up: imgui derives
+                    // io.KeyCtrl=true on the key-down frame, where a chord
+                    // consumer (io.KeyCtrl && IsKeyPressed(letter)) fires —
+                    // same frame as 1.81. (Verified by
+                    // plan/scratch_chord_trickle_test.cpp; the naive
+                    // [mod pair, key pair] ordering never fires: by the time
+                    // the letter goes down, the mod is already up.)
+                    const ImGuiKey key = (ImGuiKey)(ImGuiKey_A + (c - 1));
+                    ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, true);
+                    ImGui::GetIO().AddKeyEvent(key, true);
+                    ImGui::GetIO().AddKeyEvent(key, false);
+                    ImGui::GetIO().AddKeyEvent(ImGuiMod_Ctrl, false);
+                } else {
+                    // Navigation control bytes (Tab, Enter, Escape); other
+                    // control bytes were unmapped in 1.81 -> ignored.
+                    // None of these are passed as text input.
+                    const ImGuiKey key = ncurses_keycode_to_imgui(c);
+                    if (key != ImGuiKey_None) {
+                        ImGui::GetIO().AddKeyEvent(key, true);
+                        ImGui::GetIO().AddKeyEvent(key, false);
+                    }
+                }
             } else {
                 // space is both a printable character and a control
                 if (c == 32) {
-                    keysDown[32] = true;
+                    ImGui::GetIO().AddKeyEvent(ImGuiKey_Space, true);
+                    ImGui::GetIO().AddKeyEvent(ImGuiKey_Space, false);
                 }
 
                 // This is a printable wide character (e.g., 'A', '你', '❤')
@@ -303,18 +329,6 @@ bool ImTui_ImplNcurses_NewFrame() {
             hasInput = true;
         }
     }
-
-    if (ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_A]]) ImGui::GetIO().KeyCtrl = true;
-    if (ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_C]]) ImGui::GetIO().KeyCtrl = true;
-    if (ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_V]]) ImGui::GetIO().KeyCtrl = true;
-    if (ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_X]]) ImGui::GetIO().KeyCtrl = true;
-    if (ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_Y]]) ImGui::GetIO().KeyCtrl = true;
-    if (ImGui::GetIO().KeysDown[ImGui::GetIO().KeyMap[ImGuiKey_Z]]) ImGui::GetIO().KeyCtrl = true;
-
-    ImGui::GetIO().MousePos.x = mx;
-    ImGui::GetIO().MousePos.y = my;
-    ImGui::GetIO().MouseDown[0] = lbut;
-    ImGui::GetIO().MouseDown[1] = rbut;
 
     ImGui::GetIO().DeltaTime = g_vsync.delta_s();
 

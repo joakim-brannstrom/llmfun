@@ -106,9 +106,9 @@ void expect(bool cond, const std::string& what) {
         fail(what);
 }
 
-// Run exactly one frame on the text backend: the per-frame io reset mirrors
-// ImTui_ImplNcurses_NewFrame's input handling (imtui-impl-ncurses.cpp:208-317)
-// without a terminal (no keys, no modifiers, mouse at (0,0), 60fps delta —
+// Run exactly one frame on the text backend: the per-frame io setup mirrors
+// ImTui_ImplNcurses_NewFrame (imtui-impl-ncurses.cpp:202-333) — DeltaTime
+// only; key/mod/mouse state is delivered via the 1.87+ event queue (same as
 // same as test_session_filter_smoke's frame driver), then the same pipeline
 // as main.cpp minus the ncurses parts:
 //     ImTui_ImplText_NewFrame()
@@ -118,12 +118,6 @@ void expect(bool cond, const std::string& what) {
 //     ImTui_ImplText_RenderDrawData(drawData, screen)  // into the TScreen grid
 void frame(llmfun::tui::TuiState& state) {
     ImGuiIO& io = ImGui::GetIO();
-    std::fill(io.KeysDown, io.KeysDown + 512, 0);
-    io.KeyCtrl = false;
-    io.KeyShift = false;
-    io.MousePos = ImVec2(0.0f, 0.0f);
-    io.MouseDown[0] = false;
-    io.MouseDown[1] = false;
     io.DeltaTime = 1.0f / 60.0f;
 
     ImTui_ImplText_NewFrame();
@@ -145,8 +139,8 @@ void renderAt(llmfun::tui::TuiState& state, int maxWidth) {
 
 // Harness init/shutdown: mirror llmfun::tui::tuiInit/tuiShutdown minus the
 // ncurses terminal (no initscr/getmaxyx/DrawScreen) — same context + theme +
-// text backend setup as test_session_filter_smoke. KeyMap is not installed
-// because this test injects no keyboard input. DisplaySize is re-armed per
+// text backend setup as test_session_filter_smoke. No legacy key map in 1.92 — this
+// test injects no keyboard input. DisplaySize is re-armed per
 // case (the clamp under test overwrites it).
 void harnessInit() {
     std::setlocale(LC_ALL, "");
