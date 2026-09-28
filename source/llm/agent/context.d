@@ -24,7 +24,8 @@ import llm.rag.rag : RAG;
 import llm.rag.dialogue_index : DialogueIndex, DialogueContext;
 import llm.rag.reasoning_index : ReasoningIndex, ReasoningContext;
 import llm.skill : SkillManager;
-import llm.tool_call : Context;
+import llm.tool_call : Context, RegFunction;
+import llm.tool_call.broker : BrokerState;
 import llm.tool_call.completion : CompletionContext;
 import llm.tool_call.context : ContextManagement;
 import llm.tool_call.io : FileContext;
@@ -75,6 +76,32 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext,
             bool agentRequstedCompression;
             string agentMessageToSelf;
         }
+
+        // Tool broker state, set by the Agent ctor.
+        /// The visible tool pool: the global registry filtered by the per-agent
+        /// toolFilter with neverHide tools unioned back, in registry
+        /// order.
+        RegFunction[] pool;
+
+        /// Per-agent broker state: activated (non-alwaysOn) tool names in
+        /// activation order.
+        BrokerState broker;
+
+        /// Kill switch: false ⇒ the broker is inert and every tool is
+        /// treated as untagged (alwaysOn). Mirrors llmConf.toolBroker.enabled.
+        bool brokerEnabled;
+
+        /// Rebuild hook for the model-facing tools array: the Agent
+        /// installs a delegate that reassigns its owned `tools` from the pure
+        /// selectTools output; the discovery tool invokes it after activating a
+        /// tag — the activation change point. Null with the broker
+        /// disabled (kill switch): the tools array never changes.
+        void delegate() @safe rebuildTools;
+
+        /// The owning agent's name (set by the Agent ctor): the "agent"
+        /// identity of the broker JSONL events. Empty for bare
+        /// contexts (e.g. a directly constructed AgentContext).
+        string agentName;
 
         /// RAG is optional: when null, RAG-dependent tools degrade gracefully.
         this(LlmConfig conf, RAG rag, MetricMonitor monitor = null) {
@@ -178,6 +205,13 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext,
 
         override ToolLimits getToolLimits() {
             return conf.toolLimits;
+        }
+
+        /// The tool-broker tag descriptions (toolBroker.toolTagDescriptions):
+        /// tag → human-readable description for the discovery tool's tag list
+        /// and instructive errors. A missing entry renders as a bare tag name.
+        string[string] toolTagDescriptions() @safe nothrow {
+            return conf.toolBroker.toolTagDescriptions;
         }
 
         override bool hasVisionModel() {
@@ -284,6 +318,12 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext,
                 return monitor.getRecentEvents(count);
             }
             return null;
+        }
+
+        /// The metric monitor (may be null): the JSONL sink for tool-call and
+        /// broker events (record / recordEvent).
+        MetricMonitor getMetricMonitor() {
+            return monitor;
         }
 
         override void taskDone(string answer) {

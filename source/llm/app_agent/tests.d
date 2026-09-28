@@ -561,13 +561,13 @@ unittest {
     auto bad = SessionId("bad-id");
 
     app.doSidebarSelect(bad);
-    assert(app.pendingDeleteId == SessionId.init, "Select clears pending delete (A5)");
+    assert(app.pendingDeleteId == SessionId.init, "Select clears pending delete");
 
     app.doSidebarRename(bad, "x");
-    assert(app.pendingDeleteId == SessionId.init, "Rename clears pending delete (A5)");
+    assert(app.pendingDeleteId == SessionId.init, "Rename clears pending delete");
 
     app.doSidebarDelete(bad);
-    assert(app.pendingDeleteId == SessionId.init, "Delete clears pending delete (A5)");
+    assert(app.pendingDeleteId == SessionId.init, "Delete clears pending delete");
 }
 
 // sidebar rename input validation (empty title rejected, long non-empty title accepted - no length cap, matches /rename)
@@ -675,7 +675,7 @@ unittest {
     // The handler clears pendingDeleteId on entry even though the create() below throws; the exception is caught and logged as a chat message - the receive loop keeps running.
     app.doSidebarNew();
     assert(app.pendingDeleteId == SessionId.init,
-            "New handler must clear stale pending delete on entry (A5)");
+            "New handler must clear stale pending delete on entry");
 }
 
 // sidebar snapshot keeps store order (updatedAt descending) with the active marker; clicking must not reorder
@@ -931,7 +931,7 @@ unittest {
     app.dispose(); // must not throw
 
     assert(exists(buildPath(tmpDir, "chat", active.id.get ~ ".json")),
-            "active session must survive dispose() even when empty (W15)");
+            "active session must survive dispose() even when empty");
     assert(!exists(buildPath(tmpDir, "chat", emptyOther.id.get ~ ".json")),
             "empty non-active session must be swept on exit");
 }

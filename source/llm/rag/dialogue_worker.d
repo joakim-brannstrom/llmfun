@@ -364,7 +364,7 @@ void reasoningThread(Tid workerTid, SummaryModelConfig summaryCfg,
             raw = summarizerFn(reasoningPrompt, traceText);
             got = true;
         } else {
-            auto rc = summaryCfg.toRequestConfig; // server URLs/apiKey/ssl/verbosity
+            auto rc = summaryCfg.toRequestConfig;
             rc.timeoutS = ReasoningTimeoutS;
             rc.maxRetries = 1;
             rc.header["max_tokens"] = JSONValue(ReasoningMaxTokens);
@@ -372,7 +372,7 @@ void reasoningThread(Tid workerTid, SummaryModelConfig summaryCfg,
             chat.setSystemPrompt(reasoningPrompt);
             chat.add(Message(Role.user, userQuery: true, content: traceText, thinking: null));
             auto rq = LlmRequester(rc);
-            auto response = rq.request(chat); // SumType!(HttpResult, HttpError), nothrow
+            auto response = rq.request(chat, []);
             response.toJson.match!((JSONValue j) {
                 foreach (choice; j["choices"].array) {
                     raw = choice["message"]["content"].str.strip;

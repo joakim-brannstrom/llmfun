@@ -261,7 +261,9 @@ struct SummaryAgent {
     // runToCompletion mutates the same chat on the worker thread. Turn
     // stamping adds one more unsynchronized field (currentTurnId_) to this
     // already-shared history. Serializing chat mutation is explicitly
-    // out of scope.
+    // out of scope. The same accepted class applies on the tools array: the
+    // compression event rebuildTools hook reassigns agent.tools on the UI
+    // thread while a worker may read the old slice, dominated by the chat race.
     CompressResult compress(ref Chat chat, ProgressCallback callback = null,
             string[] excludedTools_ = null) {
         size_t purgedCount = 0;
@@ -1040,7 +1042,7 @@ string mergeSummary(SummaryChunkT[] summaries, MergeCallback merge = null) {
 }
 
 Tuple!(string, "response", bool, "gotResponse") request(ref LlmRequester rq, ref Chat chat) {
-    auto response = rq.request(chat);
+    auto response = rq.request(chat, []);
     string responseMsg;
     bool gotResponse;
     response.toJson.match!((JSONValue j) {
@@ -1607,7 +1609,7 @@ unittest {
 
     immutable OversizedReply = "x".replicate(9000); // 9000 chars / ApproxTokenSize = 4500 tokens
 
-    // Session phase 1: turns 1-8, the turn-5 reply oversized and turn 8
+    // First compression: turns 1-8, the turn-5 reply oversized and turn 8
     // query-only — the geometry evicts exactly turns 1-5.
     Chat chat;
     chat.setSystemPrompt("sys");
@@ -1634,7 +1636,7 @@ unittest {
     assert(records[0].evictedInPlace.empty);
     assert(records[0].summaryText.empty); // all summary chunks fail without an LLM
 
-    // Session phase 2: continue the SAME session — the counter must not have
+    // Second compression: continue the SAME session — the counter must not have
     // been reset by compression (q9 opens turn 9, not turn 1) — and compress
     // again. The same geometry now evicts exactly turns 6-10.
     chat.add(Message(Role.assistant, userQuery: false, content: "a8", thinking: null));

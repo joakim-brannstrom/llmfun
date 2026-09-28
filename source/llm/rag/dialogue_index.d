@@ -1610,9 +1610,9 @@ unittest {
 
     // One genuine user query and one genuine assistant answer,
     // same turn as the ToolResponse.
-    auto u1 = Message(Role.user, true, "F6 guard genuine question zebra", "");
+    auto u1 = Message(Role.user, true, "guard genuine question zebra", "");
     u1.turnId = 1;
-    auto a1 = Message(Role.assistant, false, "F6 guard genuine answer quokka", "");
+    auto a1 = Message(Role.assistant, false, "guard genuine answer quokka", "");
     a1.turnId = 1;
 
     // The evicted slice mixes the trace ToolResponse with the genuine
@@ -1648,8 +1648,8 @@ unittest {
     auto good = db.queryTextSearch("zebra", 100);
     bool foundGood = false;
     foreach (m; good) {
-        if (indexOf(m.text, "F6 guard genuine question zebra") != size_t.max
-                && indexOf(m.text, "F6 guard genuine answer quokka") != size_t.max)
+        if (indexOf(m.text, "guard genuine question zebra") != size_t.max
+                && indexOf(m.text, "guard genuine answer quokka") != size_t.max)
             foundGood = true;
     }
     assert(foundGood, "genuine dialogue must be indexed");
@@ -1726,9 +1726,9 @@ unittest {
 
     // (c) Genuine user query + assistant answer from the
     //     same checkpoint turn range (turn 5).
-    auto u5 = Message(Role.user, true, "F10 regression genuine question", "");
+    auto u5 = Message(Role.user, true, "regression genuine question", "");
     u5.turnId = 5;
-    auto a5 = Message(Role.assistant, false, "F10 regression genuine answer", "");
+    auto a5 = Message(Role.assistant, false, "regression genuine answer", "");
     a5.turnId = 5;
 
     // Checkpoint for the evicted range: turnRangeOf counts the unstamped
@@ -1808,8 +1808,8 @@ unittest {
     auto good = db.queryTextSearch("genuine", 100);
     bool foundGood = false;
     foreach (m; good) {
-        if (indexOf(m.text, "F10 regression genuine question") != size_t.max
-                && indexOf(m.text, "F10 regression genuine answer") != size_t.max)
+        if (indexOf(m.text, "regression genuine question") != size_t.max
+                && indexOf(m.text, "regression genuine answer") != size_t.max)
             foundGood = true;
     }
     assert(foundGood, "genuine dialogue must be indexed (positive control)");

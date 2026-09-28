@@ -587,7 +587,7 @@ unittest {
         foreach (i, m; chat.getMessages) {
             const id = turnIdOf(m);
             assert(id == expected[i], "stamps must follow the per-chat sequence");
-            assert(id >= prev, "per-chat TurnIDs must be monotonic (I1)");
+            assert(id >= prev, "per-chat TurnIDs must be monotonic");
             prev = id;
         }
         assert(chat.currentTurnId() == Turns);

@@ -275,6 +275,9 @@ struct LlmConfig {
     ToolFilter toolFilter;
     RagFilter ragFilter;
 
+    /// Broker kill switch + tuning-free config.
+    ToolBrokerConfig toolBroker;
+
     RagConfig ragConfig;
 
     /// Agent prompt filename searched for in promptDir.
@@ -652,6 +655,17 @@ struct RagFilter {
     ReFilter to() @safe {
         return ReFilter(include, exclude);
     }
+}
+
+struct ToolBrokerConfig {
+    /// Kill switch: false ⇒ all tools treated as untagged (alwaysOn) and
+    /// discovery inert.
+    bool enabled = true;
+    /// tag - human-readable description. Unknown keys warn at startup (typo protection).
+    string[string] toolTagDescriptions;
+    /// Tools never hidden regardless of LlmConfig.toolFilter. A neverHide tool missing
+    /// from the registry, or one that is tagged, warns at startup.
+    string[] neverHideTools = ["taskDone"];
 }
 
 struct CodeModelConfig {
@@ -1041,6 +1055,10 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
                                 }
                                 __traits(getMember, conf, llmMemberName)[key] = vals;
                             }
+                        } else static if (is(Type == string[string])) {
+                            foreach (key, ref JSONValue val; json[llmMemberName].object) {
+                                __traits(getMember, conf, llmMemberName)[key] = val.str;
+                            }
                         } else static if (is(Type : string[])) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(a => a.str)
                                 .array;
@@ -1237,6 +1255,86 @@ void validateConfig(LlmConfig conf) {
 
     // Emit warnings for missing API keys (after all hard validation)
     checkApiKeyWarnings(conf);
+}
+
+/// The discovery meta-tools (listToolTags, step 1; toolSearch,
+/// step 2). They must stay untagged (⇒ alwaysOn): tagged, they
+/// would be discovery-gated out of existence — the discovery loop would die
+/// with the very tools it is meant to reveal. The UDA-side test lives next to
+/// the tools (tool_call/discovery.d + search.d); this is the registry-side
+/// startup warning (warnings only).
+///
+/// Takes the whole registry snapshot as name → comma-joined tags (the caller
+/// owns the RegFunction import and builds it); the two meta-tool names live
+/// ONLY here, so a third discovery meta-tool means touching one line. The
+/// helper stays import-light and trivially testable. An absent name, or one
+/// with empty tags (⇒ alwaysOn), is silent here.
+string[] discoveryMetaToolTagWarnings(const(string[string]) metaTags) @safe {
+    string[] warnings;
+    foreach (name; ["listToolTags", "toolSearch"]) {
+        if (auto tags = name in metaTags) {
+            auto tagList = *tags;
+            if (!tagList.empty)
+                warnings ~= i"discovery meta-tool '$(name)' is tagged [$(tagList)] — it would be hidden until its tag is activated, disabling discovery; keep it untagged"
+                    .text;
+        }
+    }
+    return warnings;
+}
+
+/// Startup validation (neverHide + typo protection). Warnings only —
+/// never fatal. Not `pure`: reads the global tool registry. Returns the
+/// warnings; the caller (Agent ctor) logs them.
+/// Reads the tool registry (populated by shared static ctors, which run
+/// before main), so it is only meaningful after module construction.
+string[] validateToolBrokerConfig(const LlmConfig conf) @safe {
+    import llm.tool_call : RegFunction, getFunctions;
+    import llm.tool_call.tags : knownToolTagNames, unknownToolTags;
+
+    string[] warnings;
+
+    // Registry lookup: name -> tags (empty tags = alwaysOn).
+    RegFunction[string] registry;
+    foreach (func; getFunctions)
+        registry[func.name] = func;
+
+    // A neverHide tool is too important to hide silently — a name that is
+    // not in the registry cannot be protected, so warn.
+    // A tagged neverHide tool is NOT discovery-gated (selectTools exempts
+    // neverHide names from the tag filter), so tagging it has no hiding
+    // effect — the tag is pointless; warn.
+    foreach (name; conf.toolBroker.neverHideTools) {
+        auto func = name in registry;
+        if (func is null) {
+            warnings ~= i"neverHideTools: tool '$(name)' is not in the registry — it cannot be protected from hiding"
+                .text;
+        } else if (!func.tags.empty) {
+            auto tagList = func.tags.join(", ");
+            warnings ~= i"neverHideTools: tool '$(name)' is tagged [$(tagList)] — tagging it has no hiding effect: neverHide exempts it from tag gating, so it stays always-visible"
+                .text;
+        }
+    }
+
+    // Typo protection: a toolTagDescriptions key that is not
+    // a KnownToolTag member never reaches any tool — almost certainly a
+    // misspelling.
+    auto descTags = conf.toolBroker.toolTagDescriptions.byKey.array;
+    foreach (tag; unknownToolTags(descTags))
+        warnings ~= i"toolTagDescriptions: unknown tag '$(tag)' (known tags: $(knownToolTagNames()))"
+            .text;
+
+    // The discovery meta-tools must stay untagged — a
+    // tagged meta-tool would be discovery-gated out of existence. One
+    // name → comma-joined tags snapshot over the whole registry; the
+    // meta-tool names themselves live only inside the helper, so a
+    // third meta-tool is a one-line change there. An untagged (or absent)
+    // name joins as "" (empty) and is silent.
+    string[string] metaTags;
+    foreach (f; registry.values)
+        metaTags[f.name] = f.tags.join(", ");
+    warnings ~= discoveryMetaToolTagWarnings(metaTags);
+
+    return warnings;
 }
 
 alias applyLlmConfig = applyConfig!LlmConfig;
@@ -1529,6 +1627,16 @@ unittest {
     assert(opts["05_timeout"] == ["--stop-timeout", "60"]);
     assert(opts["06_network"] == ["--network", "none"]);
     assert(opts["entrypoint_shell"] == ["sh", "-c"]);
+
+    // The tool-broker keys shipped in the example: defaults kept
+    // and the tag-description map intact.
+    assert(conf.toolBroker.enabled, "toolBroker.enabled must default to true");
+    assert(conf.toolBroker.neverHideTools == ["taskDone"],
+            "neverHideTools must keep the taskDone default");
+    assert(conf.toolBroker.toolTagDescriptions.length == 1);
+    import std.algorithm : canFind;
+
+    assert(conf.toolBroker.toolTagDescriptions["workarea"].canFind("workarea"));
 }
 
 /// Test: tui.maxWidth parses from YAML into LlmConfig.tui.maxWidth.
@@ -2308,4 +2416,154 @@ codeModels:
         assert(!lines.canFind("nudges."),
                 "default nudge policy must validate silently, got: " ~ lines);
     }
+}
+
+/// Test: the Tool Broker config keys parse from YAML, nested under
+/// toolBroker: enabled (kill-switch, default true), toolTagDescriptions
+/// (string[string] tag -> description), neverHideTools (default ["taskDone"]).
+@("tool broker config keys parse from YAML") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "config_toolbroker_parse");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `toolBroker:
+  enabled: false
+  toolTagDescriptions:
+    workarea: "Files in the agent workarea: read, write, list, search."
+    rag: "RAG knowledge base tools."
+  neverHideTools:
+    - taskDone
+    - pipelineOutput
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(!conf.toolBroker.enabled, "toolBroker.enabled: false must parse");
+    assert(conf.toolBroker.toolTagDescriptions["workarea"].canFind("workarea"),
+            "toolTagDescriptions must parse: " ~ conf.toolBroker.toolTagDescriptions.to!string);
+    assert(conf.toolBroker.toolTagDescriptions["rag"] == "RAG knowledge base tools.");
+    assert(conf.toolBroker.neverHideTools == ["taskDone", "pipelineOutput"],
+            "explicit neverHideTools must parse: " ~ conf.toolBroker.neverHideTools.to!string);
+}
+
+/// Test: absent keys keep the struct defaults — toolBroker.enabled true,
+/// neverHideTools ["taskDone"], toolTagDescriptions empty.
+@("tool broker config defaults hold") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "config_toolbroker_defaults");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.toolBroker.enabled, "default toolBroker.enabled must be true");
+    assert(conf.toolBroker.neverHideTools == ["taskDone"],
+            "default neverHideTools must be [\"taskDone\"]");
+    assert(conf.toolBroker.toolTagDescriptions.empty, "no toolTagDescriptions by default");
+}
+
+/// Test: validateToolBrokerConfig — warnings only, never fatal.
+/// (1) A neverHide name missing from the registry warns (it cannot be
+///     protected from hiding).
+/// (2) A tagged neverHide tool warns (discovery gating runs before
+///     hiding, so it can still disappear from the tool list).
+/// (3) The shipped defaults (registered, untagged names) validate silently —
+///     including the discovery meta-tools (listToolTags + toolSearch, the
+///     Guard: untagged meta-tools emit no warning).
+/// (4) A toolTagDescriptions key outside KnownToolTag warns (typo guard);
+///     known keys are silent.
+@("tool broker startup validation") unittest {
+    import std.algorithm : canFind;
+
+    import llm.tool_call : Context, ExecuteFuncResult, RegFunction, addFunction, toParams;
+
+    // Fixture (mirrors llm.tool_call.tests.d): an empty params struct plus a
+    // (Context, JSONValue)-shaped callback matching RegFunction.callback;
+    // static nested so &cb is a function pointer. Registered via addFunction,
+    // which dedupes by name (order-proof). The registry entry is a deliberate,
+    // benign test leak (mirrors tool_call/tests.d:56-57) — the tagged-tool
+    // tests should know it exists.
+    struct BrokerValidateParams {
+    }
+
+    static ExecuteFuncResult brokerValidateCallback(Context ctx, JSONValue args) {
+        return ExecuteFuncResult("ok", true);
+    }
+
+    addFunction(RegFunction(name: "broker_validate_tagged_fixture", desc: "validateToolBrokerConfig fixture", params: toParams!BrokerValidateParams,
+            callback: &brokerValidateCallback, tags: ["workarea"]));
+
+    // (3) Shipped defaults validate silently: taskDone is registered and
+    // untagged (registered by tool_call's module ctor, which runs first).
+    auto conf = LlmConfig.init;
+    assert(validateToolBrokerConfig(conf).empty);
+
+    // (1) An unknown neverHide name cannot be protected — warn.
+    conf.toolBroker.neverHideTools = ["taskDone", "bogus_no_hide"];
+    auto warnings = validateToolBrokerConfig(conf);
+    assert(warnings.length == 1, warnings.to!string);
+    assert(warnings[0].canFind("bogus_no_hide"), warnings.to!string);
+
+    // (2) A tagged neverHide tool would still be discovery-gated — warn.
+    conf.toolBroker.neverHideTools = ["broker_validate_tagged_fixture"];
+    warnings = validateToolBrokerConfig(conf);
+    assert(warnings.length == 1, warnings.to!string);
+    assert(warnings[0].canFind("broker_validate_tagged_fixture"), warnings.to!string);
+    assert(warnings[0].canFind("tagged"), warnings.to!string);
+
+    // (4) Typo guard: an unknown toolTagDescriptions key warns, known keys silent.
+    conf = LlmConfig.init;
+    conf.toolBroker.toolTagDescriptions = [
+        "workarea": "Workarea tools.",
+        "bogusTag": "typo"
+    ];
+    warnings = validateToolBrokerConfig(conf);
+    assert(warnings.length == 1, warnings.to!string);
+    assert(warnings[0].canFind("bogusTag"), warnings.to!string);
+
+    conf.toolBroker.toolTagDescriptions = [
+        "workarea": "Workarea tools.",
+        "rag": "RAG tools."
+    ];
+    assert(validateToolBrokerConfig(conf).empty);
+}
+
+/// Test: discoveryMetaToolTagWarnings — the discovery-meta-tool guard
+/// A TAGGED meta-tool warns; untagged (empty joined tags) and
+/// registry-missing names are silent (the neverHide loop above owns
+/// registry-missing).
+@("discovery meta-tool tag guard") unittest {
+    import std.algorithm : canFind;
+
+    string[string] metaTags;
+    metaTags["listToolTags"] = "";
+    assert(discoveryMetaToolTagWarnings(metaTags).empty); // registered, untagged
+
+    metaTags["toolSearch"] = "workarea";
+    auto warnings = discoveryMetaToolTagWarnings(metaTags);
+    assert(warnings.length == 1, warnings.to!string);
+    assert(warnings[0].canFind("toolSearch"), warnings.to!string);
+    assert(warnings[0].canFind("workarea"), warnings.to!string);
+
+    // A name missing from the registry is silent here (the registry-missing
+    // warning is the neverHide loop's concern).
+    assert(discoveryMetaToolTagWarnings(["ghost": "rag"]).empty);
 }

@@ -10,7 +10,6 @@ import std.exception : collectException;
 import std.json : JSONValue, parseJSON, JSONType, JSONOptions;
 import std.net.curl;
 import std.sumtype : SumType, match;
-import std.typecons : Nullable;
 import std.utf : byUTF, validate, UTFException;
 
 import llm.chat;
@@ -52,19 +51,13 @@ struct LlamaRequestError {
 
 struct LlmRequester {
     RequestConfig cfg;
-    Nullable!JSONValue tools;
 
     private {
         LibRequestConfig rqCfg;
     }
 
     this(RequestConfig cfg) {
-        this(cfg, Nullable!JSONValue.init);
-    }
-
-    this(RequestConfig cfg, Nullable!JSONValue tools) {
         this.cfg = cfg;
-        this.tools = tools;
 
         auto headers = string[string].init;
         if (!cfg.apiKey.empty)
@@ -79,16 +72,21 @@ struct LlmRequester {
         rqCfg.interrupt = interrupt;
     }
 
-    SumType!(HttpResult, HttpError) request(Chat chat) nothrow {
+    /// The model-facing tools array, owned by the agent and passed per call
+    /// Serializes as the request's "tools" key, unconditionally —
+    /// the agent always passes a real (possibly empty) array. Note: this
+    /// clobbers a `tools` key supplied via `cfg.header`, and the three
+    /// non-agent callers pass `[]`, sending an empty array where they
+    /// previously sent no key at all — a wire-format change for those paths;
+    /// endpoints that reject empty `tools` arrays would regress there.
+    SumType!(HttpResult, HttpError) request(Chat chat, JSONValue[] tools) nothrow {
         import llm.utility : sanitizeUtf8;
 
         alias ReturnT = typeof(return);
 
         try {
             auto jsonReq = chat.toJson.merge(cfg.header);
-            if (!tools.isNull) {
-                jsonReq["tools"] = tools.get;
-            }
+            jsonReq["tools"] = tools;
             if (rqCfg.stream !is null) {
                 jsonReq["stream"] = true;
             }

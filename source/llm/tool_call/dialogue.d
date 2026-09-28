@@ -795,7 +795,7 @@ unittest {
     //     disjoint at the tool boundary.
     assert(rc.msg != rf.msg, "no-history and engine-error forms must be distinct");
     assert(!rc.msg.startsWith("error:") && rf.msg.startsWith("error:"),
-            "N3 boundary: no-history has no error prefix, engine error does");
+            "no-history has no error prefix, engine error does");
 
     // Dispose idempotency at the tool level: final double dispose.
     di.dispose();

@@ -141,7 +141,7 @@ int appMain(UserConfig uconf, UserConfig.ChatTestConfig conf) {
     chat.add(Message(Role.user, true, "who are you", ""));
 
     auto requester = LlmRequester(llmConf.codeModels[0].toRequestConfig);
-    auto resp = requester.request(chat);
+    auto resp = requester.request(chat, []);
     logger.info(resp);
     import std.json : parseJSON;
 
@@ -154,7 +154,7 @@ int appMain(UserConfig uconf, UserConfig.ChatTestConfig conf) {
     }, (HttpError e) { logger.warning(e); });
 
     chat.add(Message(Role.user, true, "what is your age", ""));
-    resp = requester.request(chat);
+    resp = requester.request(chat, []);
     logger.info(resp);
 
     return 0;

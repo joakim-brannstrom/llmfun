@@ -80,7 +80,7 @@ unittest {
         thrown = true;
         assert(e.msg == "Prompt file not found: NO_SUCH_NUDGE.md", e.msg);
     }
-    assert(thrown, "construction must fail on a missing configured nudge file (M5)");
+    assert(thrown, "construction must fail on a missing configured nudge file");
 }
 
 // Wholesale override + eager load at model switch: resetModel swaps the
@@ -136,21 +136,19 @@ unittest {
 // The trigger rule lives in prompt data, not code, so in-tree removal of the section would silently change the main agent's behavior. This guard loads the real llmfun/config/prompt/AGENT.md through the production getPrompt/getBasePrompt path (FlatVfs) and asserts the section heading and the exact tool name are present. A missing file makes getBasePrompt throw, which fails the test.
 unittest {
     const agentPromptFile = "llmfun/config/prompt/AGENT.md";
-    assert(agentPromptFile.exists,
-            "in-tree AGENT.md missing; getBasePrompt would throw at startup (R12)");
+    assert(agentPromptFile.exists, "in-tree AGENT.md missing; getBasePrompt would throw at startup");
     auto llmConf = makeAgentTestConfig("llmfun/config/prompt");
     auto prompt = llmConf.getPrompt(null, "AGENT.md");
     assert(prompt.canFind("# Dialogue History Retrieval"),
-            "Task 8 trigger-rule section missing from the composed main-agent prompt (R12)");
+            "trigger-rule section missing from the composed main-agent prompt");
     assert(prompt.canFind("queryDialogueHistory"),
-            "Task 8 rule must name the queryDialogueHistory tool (R12)");
+            "The trigger rule must name the queryDialogueHistory tool");
 }
 
 // The reasoning-history rule also lives in prompt data, not code, so in-tree removal of the section would silently change the main agent's behavior. Same guard shape as the dialogue test above: load the real llmfun/config/prompt/AGENT.md through the production getPrompt path and assert the section heading, the exact tool name, and the anti-anchoring warning are present.
 unittest {
     const agentPromptFile = "llmfun/config/prompt/AGENT.md";
-    assert(agentPromptFile.exists,
-            "in-tree AGENT.md missing; getBasePrompt would throw at startup (R12)");
+    assert(agentPromptFile.exists, "in-tree AGENT.md missing; getBasePrompt would throw at startup");
     auto llmConf = makeAgentTestConfig("llmfun/config/prompt");
     auto prompt = llmConf.getPrompt(null, "AGENT.md");
     assert(prompt.canFind("# Reasoning History Retrieval"),
@@ -166,7 +164,7 @@ unittest {
 // would silently strip the nudge ladder of its functional traffic or let a
 // nudge leak into the dialogue/trace projections. These guards load each real
 // llmfun/config/prompt/NUDGE_*.md through the production readPromptFile path
-// (FlatVfs) and assert exactly what S5 requires. A missing file makes
+// (FlatVfs) and assert exactly what the nudge files require. A missing file makes
 // readPromptFile throw, which fails the test.
 unittest {
     foreach (name; [
@@ -174,35 +172,34 @@ unittest {
         "NUDGE_RECOVERY_SOFT.md", "NUDGE_RECOVERY_HARD.md", "NUDGE_COMPRESSION.md"
     ]) {
         const nudgeFile = "llmfun/config/prompt/" ~ name;
-        assert(nudgeFile.exists, "in-tree nudge file " ~ name ~ " missing (S5)");
+        assert(nudgeFile.exists, "in-tree nudge file " ~ name ~ " missing");
     }
 
     auto llmConf = makeAgentTestConfig("llmfun/config/prompt");
 
     // Hard nudges must name the exact tool the ladder demands.
     auto keepHard = llmConf.readPromptFile("NUDGE_KEEP_REASONING_HARD.md");
-    assert(keepHard.canFind("taskDone"),
-            "keep-reasoning hard nudge must name the taskDone tool (S5)");
+    assert(keepHard.canFind("taskDone"), "keep-reasoning hard nudge must name the taskDone tool");
     auto recoveryHard = llmConf.readPromptFile("NUDGE_RECOVERY_HARD.md");
     assert(recoveryHard.canFind("Call taskDone now."),
-            "recovery hard nudge must tell the agent to call taskDone (S5)");
+            "recovery hard nudge must tell the agent to call taskDone");
 
     // The compression nudge must name the requestCompression tool and carry
     // the harness marker, like the soft nudges.
     auto compression = llmConf.readPromptFile("NUDGE_COMPRESSION.md");
     assert(compression.canFind("requestCompression"),
-            "compression nudge must name the requestCompression tool (S5)");
+            "compression nudge must name the requestCompression tool");
     assert(compression.canFind("[SYSTEM NUDGE - NOT USER INPUT]"),
-            "compression nudge must carry the SYSTEM NUDGE marker (S5)");
+            "compression nudge must carry the SYSTEM NUDGE marker");
 
     // Soft nudges must carry the harness markers that keep them out of the
     // dialogue/trace projections.
     auto keepSoft = llmConf.readPromptFile("NUDGE_KEEP_REASONING_SOFT.md");
     assert(keepSoft.canFind("[SYSTEM NUDGE - NOT USER INPUT]"),
-            "keep-reasoning soft nudge must carry the SYSTEM NUDGE marker (S5)");
+            "keep-reasoning soft nudge must carry the SYSTEM NUDGE marker");
     auto recoverySoft = llmConf.readPromptFile("NUDGE_RECOVERY_SOFT.md");
     assert(recoverySoft.canFind("[SYSTEM RECOVERY - NOT USER INPUT]"),
-            "recovery soft nudge must carry the SYSTEM RECOVERY marker (S5)");
+            "recovery soft nudge must carry the SYSTEM RECOVERY marker");
 }
 
 version (unittest) {
@@ -749,4 +746,866 @@ unittest {
     auto off = new CannedProcessAgent("integration", llmConfOff, monitor);
     off.handleToolCalls(null, calls);
     assert(feedbackWarnings(off) == 0, "enabled: false — no warnings at all");
+}
+
+// The Agent ctor builds the broker tool pool at the agent seam.
+
+@("broker pool wiring: the per-agent filter builds the pool - include '.*' "
+        ~ "- pool == registry in registry order, convenience ctor - unfiltered "
+        ~ "pool, kill switch on and off")
+unittest {
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.range : empty;
+
+    import llm.tool_call : getFunctions;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_broker_pool_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolFilter.include = [".*"]; // match every tool name
+
+    // Production shape: the filter is passed explicitly (app_agent does), so
+    // the pool follows the filter the agent was actually given.
+    auto agent = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
+
+    auto reg = getFunctions();
+    assert(agent.toolCtx.pool.length == reg.length,
+            "include '.*' ⇒ the pool is the whole registry");
+    foreach (i, f; agent.toolCtx.pool)
+        assert(f.name == reg[i].name, "pool order must match registry order");
+    assert(agent.toolCtx.brokerEnabled, "kill switch defaults to on");
+    assert(agent.toolCtx.broker.activated.empty, "fresh broker: no activations");
+
+    // Convenience-ctor agents get an unfiltered member filter (ReFilter.init),
+    // so their pool is unfiltered too — the pool can never disagree with the
+    // request path.
+    auto unfiltered = new Agent("integration", llmConf, null, null);
+    assert(unfiltered.toolCtx.pool.length == reg.length);
+
+    // Kill switch off: the flag reaches the context.
+    llmConf.toolBroker.enabled = false;
+    auto off = new Agent("integration", llmConf, null, null);
+    assert(!off.toolCtx.brokerEnabled);
+}
+
+@("broker pool wiring: a neverHide tool excluded by toolFilter is unioned back with a ctor warning")
+unittest {
+    import core.sync.mutex : Mutex;
+    import logger = std.logger;
+    import std.algorithm : canFind;
+    import std.array : Appender;
+    import std.conv : to;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+
+    import llm.agent.nudges : sharedLogSwapMutex;
+    import llm.tool_call : getFunctions;
+
+    final class AgentLogCapture : logger.Logger {
+        private {
+            Appender!(string[]) lines;
+            Mutex mtx;
+        }
+
+        this(const logger.LogLevel lvl = logger.LogLevel.all) {
+            super(lvl);
+            this.mtx = new Mutex;
+        }
+
+        override void writeLogMsg(ref LogEntry payload) @trusted {
+            mtx.lock_nothrow();
+            scope (exit)
+                mtx.unlock_nothrow();
+            lines.put(payload.msg);
+        }
+
+        string[] takeLines() {
+            mtx.lock_nothrow();
+            scope (exit)
+                mtx.unlock_nothrow();
+            auto tmp = lines[];
+            lines.clear();
+            return tmp;
+        }
+    }
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_broker_neverhide_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    // A filter that matches nothing hides the WHOLE registry — except the
+    // default neverHideTools (["taskDone"]), which is unioned back.
+    llmConf.toolFilter.include = ["^no_such_tool_pattern$"];
+
+    synchronized (sharedLogSwapMutex) {
+        auto prevLog = logger.sharedLog;
+        auto cap = cast(shared) new AgentLogCapture();
+        logger.sharedLog = cap;
+        scope (exit)
+            logger.sharedLog = prevLog;
+
+        auto agent = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
+
+        auto pool = agent.toolCtx.pool;
+        assert(pool.length == 1 && pool[0].name == "taskDone",
+                "neverHide tools are unioned back: " ~ pool.length.to!string);
+        assert(agent.toolCtx.brokerEnabled);
+
+        assert(canFind((cast() cap).takeLines(), "neverHide tool 'taskDone' excluded by toolFilter; fix the config"),
+                "the ctor must warn about the excluded neverHide tool");
+    }
+}
+
+@("agent owns the tools array: day-one content is the filtered untagged registry")
+unittest {
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue;
+    import std.range : empty;
+    import llm.tool_call : descAllFunctions, filterToolDescriptions, getFunctions;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t7_dayone_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    auto agent = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
+
+    string[] namesOf(JSONValue[] ts) {
+        string[] n;
+        foreach (t; ts)
+            n ~= t["function"]["name"].str;
+        return n;
+    }
+
+    // Other modules' unittests leak tagged fixture tools into the process-wide
+    // registry; the expectation derives from the SAME live snapshot, so the
+    // assertion holds regardless of registration order (leak-aware).
+    bool[string] tagged;
+    foreach (f; getFunctions())
+        if (!f.tags.empty)
+            tagged[f.name] = true;
+
+    string[] expected;
+    foreach (e; filterToolDescriptions(descAllFunctions(), llmConf.toolFilter.to()).array)
+        if (e["function"]["name"].str !in tagged)
+            expected ~= e["function"]["name"].str;
+
+    auto got = namesOf(agent.tools);
+    assert(got == expected, "day-one agent.tools must be the filtered untagged registry");
+
+    // Kill switch: identical array when the broker is off — only checkable
+    // when no tagged fixtures are registered (they are not alwaysOn). Other
+    // modules' tests leak tagged fixtures into the shared registry, so in the
+    // common suite run this equivalence is NOT asserted; a registry-isolation
+    // effort could close the gap.
+    if (tagged.empty) {
+        llmConf.toolBroker.enabled = false;
+        auto legacy = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
+        assert(namesOf(legacy.tools) == got, "kill switch must reproduce the same array");
+    }
+}
+
+@("agent owns the tools array: the listToolTags entry carries the composed description")
+unittest {
+    import std.algorithm : canFind, countUntil;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.string : indexOf;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t7_composed_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.toolTagDescriptions = [
+        "workarea": "Workarea tools.",
+        "rag": "RAG knowledge base tools.",
+    ];
+    auto agent = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
+
+    auto idx = agent.tools.countUntil!(e => e["function"]["name"].str == "listToolTags");
+    assert(idx >= 0, "the discovery tool is in the day-one array");
+
+    auto desc = agent.tools[idx]["function"]["description"].str;
+    assert(canFind(desc, "List available tool tags"),
+            "the UDA base text must survive the composition:\n" ~ desc);
+    assert(canFind(desc, "workarea (Workarea tools.)"),
+            "configured workarea description missing:\n" ~ desc);
+    assert(canFind(desc, "rag (RAG knowledge base tools.)"),
+            "configured rag description missing:\n" ~ desc);
+    assert(desc.indexOf("rag") < desc.indexOf("workarea"),
+            "zero activation counts: alphabetical tag order expected:\n" ~ desc);
+
+    // Rebuild-at-activation (the change point): the raw selectTools output
+    // carries the bare UDA text, so the delegate must recompose — otherwise the
+    // configured vocabulary disappears from the model's view after the first
+    // activation.
+    agent.toolCtx.rebuildTools();
+    desc = agent.tools[idx]["function"]["description"].str;
+    assert(canFind(desc, "workarea (Workarea tools.)"),
+            "the composed description must survive a rebuild:\n" ~ desc);
+    assert(canFind(desc, "rag (RAG knowledge base tools.)"),
+            "the composed description must survive a rebuild:\n" ~ desc);
+}
+
+@("agent owns the tools array: a configured-but-empty tag description warns once")
+unittest {
+    import core.sync.mutex : Mutex;
+    import logger = std.logger;
+    import std.algorithm : canFind;
+    import std.array : Appender, join;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+
+    import llm.agent.nudges : sharedLogSwapMutex;
+
+    final class AgentLogCapture : logger.Logger {
+        private {
+            Appender!(string[]) lines;
+            Mutex mtx;
+        }
+
+        this(const logger.LogLevel lvl = logger.LogLevel.all) {
+            super(lvl);
+            this.mtx = new Mutex;
+        }
+
+        override void writeLogMsg(ref LogEntry payload) @trusted {
+            mtx.lock_nothrow();
+            scope (exit)
+                mtx.unlock_nothrow();
+            lines.put(payload.msg);
+        }
+
+        string[] takeLines() {
+            mtx.lock_nothrow();
+            scope (exit)
+                mtx.unlock_nothrow();
+            auto tmp = lines[];
+            lines.clear();
+            return tmp;
+        }
+    }
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t7_emptydesc_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.toolTagDescriptions = ["agent_t7_empty_desc_probe": ""];
+
+    synchronized (sharedLogSwapMutex) {
+        auto prevLog = logger.sharedLog;
+        auto cap = cast(shared) new AgentLogCapture();
+        logger.sharedLog = cap;
+        scope (exit)
+            logger.sharedLog = prevLog;
+
+        auto agent = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
+
+        auto captured = (cast() cap).takeLines();
+        assert(captured.canFind!(l => canFind(l, "has an empty configured description")),
+                "the empty tag description must warn:\n" ~ captured.join("\n"));
+        assert(captured.canFind!(l => canFind(l, "agent_t7_empty_desc_probe")),
+                "the warning must name the offending tag:\n" ~ captured.join("\n"));
+    }
+}
+
+// The instructive refusal at the dispatch site — the three
+// refusal paths and the visible-dispatch control. Registry-absent and
+// config-excluded (⇒ not in the pool) messages stay unchanged; the
+// hidden-but-pooled case (tagged, never activated) names the recovery path, and the
+// refusal flows through the normal tool-result recording path (ToolMessage +
+// ToolResponse land in the chat, like a real result).
+version (unittest) {
+    import std.json : JSONValue;
+
+    import llm.tool_call : Context, ExecuteFuncResult;
+
+    /// Empty params struct for the refusal fixture (nothing to decode).
+    private struct T8FixtureParams {
+    }
+
+    /// (Context, JSONValue)-shaped callback matching the RegFunction.callback type.
+    private ExecuteFuncResult t8FixtureCallback(Context ctx, JSONValue args) {
+        return ExecuteFuncResult("ok", true);
+    }
+}
+
+@("tool dispatch refusals: tier-1 unknown, tier-2 config-excluded, tier-3 in-pool-not-visible is instructive, visible tool dispatches")
+unittest {
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.sumtype : match;
+
+    import llm.chat : ToolResponse;
+    import llm.tool_call : RegFunction, addFunction, toParams;
+    import llm.tool_call.broker : activateTag;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t8_refusals_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    // Tier-3 fixture: a tagged tool registered before agent construction, so it
+    // is in the pool (the default test filter matches every name) but not in
+    // the day-one tools array (tagged, never activated).
+    addFunction(RegFunction(name: "agent_t8_tier3_fixture", desc: "tier3 fixture tool", params: toParams!T8FixtureParams, callback: &t8FixtureCallback,
+            tags: ["workarea"]));
+
+    // Runs one tool call through the dispatch site and returns the ToolResponse
+    // it recorded (the last one; every call records exactly one).
+    ToolResponse dispatch(Agent agent, string name) {
+        StreamResponse.ToolCall[long] calls;
+        calls[0] = StreamResponse.ToolCall(id: "1", name: name, arguments: "{}");
+        agent.handleToolCalls(null, calls);
+        ToolResponse rval;
+        foreach (msg; agent.chat.getMessages)
+            msg.match!((ToolResponse r) { rval = r; }, (_) {});
+        return rval;
+    }
+
+    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+
+    // Tier-1: the tool is absent from the registry entirely (⇒ absent from the
+    // pool) — the opaque unknown-tool refusal, unchanged.
+    auto unknown = dispatch(agent, "agent_t8_no_such_tool");
+    assert(unknown.content == "error: unknown tool agent_t8_no_such_tool", unknown.content);
+    assert(!unknown.success());
+    assert(unknown.toolName == "agent_t8_no_such_tool");
+
+    // Tier-2: the tool exists but the config filter excludes it (⇒ not in the
+    // pool either) — the not-available refusal, unchanged.
+    auto llmConf2 = makeAgentTestConfig(tmpDir);
+    llmConf2.toolFilter.include = ["^no_such_tool_pattern$"];
+    auto excluded = new Agent("integration", llmConf2, null, null, null, llmConf2.toolFilter.to());
+    auto unavailable = dispatch(excluded, "writeFile");
+    assert(unavailable.content == "error: tool 'writeFile' is not available to this agent",
+            unavailable.content);
+    assert(!unavailable.success());
+    assert(unavailable.toolName == "writeFile");
+
+    // Tier-3: the tool is in the pool but hidden from this agent (tagged, never
+    // activated) — the instructive refusal names the recovery path.
+    auto hidden = dispatch(agent, "agent_t8_tier3_fixture");
+    assert(hidden.content == "error: tool 'agent_t8_tier3_fixture' is not visible to this agent"
+            ~ "; discover tools with `listToolTags`", hidden.content);
+    assert(!hidden.success());
+    assert(hidden.toolName == "agent_t8_tier3_fixture");
+    // The refusal took the recording path: the tool-call message and the tool
+    // response both landed in the chat (a broken-call continue adds neither).
+    // Two dispatches ran on this agent (tier-1 above + this refusal), each
+    // recording one ToolMessage + one ToolResponse.
+    assert(agent.chat.getMessages.length == 4);
+
+    // A visible tool still dispatches normally: activate the tag at the
+    // activation change point, rebuild the tools array, dispatch again.
+    activateTag(agent.toolCtx.broker, agent.toolCtx.pool, "workarea");
+    agent.toolCtx.rebuildTools();
+    auto ok = dispatch(agent, "agent_t8_tier3_fixture");
+    assert(ok.content == "ok", ok.content);
+    assert(ok.success());
+}
+
+// Compression-point pruning — the scan/apply split inside Agent.compress
+// The scan reads the intact pre-compression chat; the
+// apply (broker state + tools-array rebuild) runs only when the compression
+// actually rewrote history (originalLength != newLength || purgedCount > 0).
+
+version (unittest) {
+    import std.json : JSONValue;
+
+    import llm.tool_call : Context, ExecuteFuncResult;
+
+    /// Empty params struct for the prune fixtures (nothing to decode).
+    private struct T9FixtureParams {
+    }
+
+    /// (Context, JSONValue)-shaped callback matching the RegFunction.callback type.
+    private ExecuteFuncResult t9FixtureCallback(Context ctx, JSONValue args) {
+        return ExecuteFuncResult("ok", true);
+    }
+}
+
+@("compression-point pruning: an unused activated tool is pruned at a rewriting compression, a used one survives, alwaysOn/neverHide are never pruned")
+unittest {
+    import std.array : replicate;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue;
+    import std.range : empty;
+
+    import llm.tool_call : RegFunction, addFunction, toParams;
+    import llm.tool_call.broker : activateTag;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t9_prune_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    // Two workarea-tagged fixtures registered BEFORE agent construction, so both
+    // are in the pool (the pool is built at ctor time from the live registry).
+    addFunction(RegFunction(name: "agent_t9_used_fixture", desc: "t9 used fixture", params: toParams!T9FixtureParams,
+            callback: &t9FixtureCallback, tags: ["workarea"]));
+    addFunction(RegFunction(name: "agent_t9_unused_fixture", desc: "t9 unused fixture", params: toParams!T9FixtureParams, callback: &t9FixtureCallback,
+            tags: ["workarea"]));
+
+    string[] namesOf(JSONValue[] ts) {
+        string[] n;
+        foreach (t; ts)
+            n ~= t["function"]["name"].str;
+        return n;
+    }
+
+    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+
+    // Day one: tagged fixtures are hidden (never activated).
+    assert(!namesOf(agent.tools).canFind("agent_t9_used_fixture"));
+    assert(!namesOf(agent.tools).canFind("agent_t9_unused_fixture"));
+
+    // Activation change point: activate the tag, rebuild the tools array.
+    activateTag(agent.toolCtx.broker, agent.toolCtx.pool, "workarea");
+    agent.toolCtx.rebuildTools();
+    assert(namesOf(agent.tools).canFind("agent_t9_used_fixture"));
+    assert(namesOf(agent.tools).canFind("agent_t9_unused_fixture"));
+    assert(namesOf(agent.tools).canFind("taskDone"), "neverHide stays in the head");
+
+    // Usage: a real tool CALL through the dispatch site — the only thing
+    // that counts. The unused fixture never gets a call.
+    StreamResponse.ToolCall[long] calls;
+    calls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t9_used_fixture", arguments: "{}");
+    // The system prompt must be set BEFORE the tool traffic: Chat.setSystemPrompt
+    // replaces history[0], and in a chat whose only message is the tool call
+    // that would wipe the ToolMessage (and the scan would prune the used tool).
+    agent.setSystemPrompt("sys");
+    agent.handleToolCalls(null, calls);
+
+    // A chat long enough to compress with a REWRITE even though the (offline,
+    // always-failing) summary produces nothing: system + an oversized newest
+    // candidate (it alone exceeds the X token budget, so the
+    // newest-first X-fill stops with X empty and the whole candidate pool, the
+    // tool-call pair and the oversized message, goes to the failed summary) +
+    // five small kept messages. 9 -> 6 keeps the apply gate true
+    // (originalLength != newLength).
+    agent.addUserQuery("x".replicate(9000)); // ~4500 tokens > TokenBudget (4096)
+    agent.addUserQuery("s1");
+    agent.addContinue();
+    agent.addUserQuery("s2");
+    agent.addContinue();
+    agent.addUserQuery("s3");
+
+    auto res = agent.compress(0.9, true);
+    assert(res.compressed, "the chat must actually compress (rewrite) for the D39 gate");
+    assert(res.originalLength > res.newLength,
+            "the failed summary rewrites the history: the oversized candidate is dropped (D39 gate input)");
+
+    // The prune applied: the unused activated fixture is gone from the next
+    // tools array, the used one survives (its call sits in the verbatim epoch),
+    // alwaysOn (untagged) tools and the neverHide taskDone are untouched.
+    auto names = namesOf(agent.tools);
+    assert(!names.canFind("agent_t9_unused_fixture"), "unused activated tool must be pruned");
+    assert(names.canFind("agent_t9_used_fixture"), "a used tool survives the prune");
+    assert(names.canFind("taskDone"), "neverHide tools are never pruned");
+    foreach (f; agent.toolCtx.pool)
+        if (f.tags.empty)
+            assert(names.canFind(f.name), "alwaysOn tools are never pruned");
+    assert(!agent.toolCtx.broker.activated.canFind("agent_t9_unused_fixture"),
+            "the activation list loses the pruned name");
+    assert(agent.toolCtx.broker.activated.canFind("agent_t9_used_fixture"),
+            "the used tool stays activated");
+}
+
+@("compression-point pruning: a no-op compression (history not rewritten) leaves the broker state and the tools array untouched")
+unittest {
+    import std.algorithm : canFind;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue;
+
+    import llm.tool_call : RegFunction, addFunction, toParams;
+    import llm.tool_call.broker : activateTag;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t9_noop_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    addFunction(RegFunction(name: "agent_t9_noop_fixture", desc: "t9 noop fixture", params: toParams!T9FixtureParams,
+            callback: &t9FixtureCallback, tags: ["workarea"]));
+    addFunction(RegFunction(name: "agent_t9_noop_unused", desc: "t9 noop unused fixture", params: toParams!T9FixtureParams,
+            callback: &t9FixtureCallback, tags: ["workarea"]));
+
+    string[] namesOf(JSONValue[] ts) {
+        string[] n;
+        foreach (t; ts)
+            n ~= t["function"]["name"].str;
+        return n;
+    }
+
+    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+
+    activateTag(agent.toolCtx.broker, agent.toolCtx.pool, "workarea");
+    agent.toolCtx.rebuildTools();
+    assert(namesOf(agent.tools).canFind("agent_t9_noop_fixture"));
+
+    // A used tool: a no-op compression must not prune it either — nothing is
+    // pruned at all when the history is not rewritten.
+    StreamResponse.ToolCall[long] calls;
+    calls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t9_noop_fixture", arguments: "{}");
+    agent.handleToolCalls(null, calls);
+
+    // 3 messages: below the summary.compress floor (1 + KeepLast), so the
+    // forced compression no-ops: originalLength/newLength stay .init and the
+    // The rule (0 != 0 || 0 > 0) is false.
+    agent.setSystemPrompt("sys");
+    agent.addUserQuery("q1");
+    agent.addUserQuery("q2");
+
+    auto before = JSONValue(agent.tools).toString;
+    auto res = agent.compress(0.9, true);
+    assert(!res.compressed, "the chat is too short: summary.compress no-ops");
+    assert(res.originalLength == 0 && res.newLength == 0 && res.purgedCount == 0,
+            "no-rewrite fields stay .init, so the D39 gate is false");
+    auto after = JSONValue(agent.tools).toString;
+    assert(before == after, "a no-op compression must not touch the tools array");
+    assert(agent.toolCtx.broker.activated.canFind("agent_t9_noop_fixture"),
+            "no prune: the used tool stays activated");
+    assert(namesOf(agent.tools).canFind("agent_t9_noop_fixture"));
+    assert(namesOf(agent.tools).canFind("agent_t9_noop_unused"),
+            "the D39 gate skipped the apply: an unused activated tool survives a no-op");
+    assert(agent.toolCtx.broker.activated.canFind("agent_t9_noop_unused"),
+            "the activation list keeps the unused tool when history is not rewritten");
+}
+
+version (unittest) {
+    import std.json : JSONValue;
+
+    import llm.tool_call : Context, ExecuteFuncResult;
+
+    /// Empty params struct for the broker-event fixtures (nothing to decode).
+    private struct T10FixtureParams {
+    }
+
+    /// (Context, JSONValue)-shaped callback matching the RegFunction.callback type.
+    private ExecuteFuncResult t10FixtureCallback(Context ctx, JSONValue args) {
+        return ExecuteFuncResult("ok", true);
+    }
+}
+
+@("broker metrics: the tools_request estimate, the tier-3 refusal, the discovery miss+hit pair with activation, and the prune count all land in the agent's MetricMonitor JSONL")
+unittest {
+    import std.algorithm : canFind, count, filter, map;
+    import std.array : array, replicate;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, readText, write;
+    import std.format : format;
+    import std.json : JSONOptions, JSONValue, parseJSON;
+    import std.path : buildPath;
+    import std.range : empty;
+    import std.string : splitLines;
+
+    import my.path : Path;
+
+    import llm.common.config : ApproxTokenSize;
+    import llm.metric.monitor : MetricMonitor;
+    import llm.tool_call : RegFunction, addFunction, toParams;
+    import llm.tool_call.discovery : ListToolTagsParams, listToolTags;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t10_metrics_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    // Three workarea-tagged fixtures registered BEFORE agent construction, so
+    // all are in the pool (the pool is built at ctor time from the live
+    // registry): the tier-3 refusal target plus the used/unused prune pair.
+    addFunction(RegFunction(name: "agent_t10_tier3_fixture", desc: "t10 tier3 fixture", params: toParams!T10FixtureParams,
+            callback: &t10FixtureCallback, tags: ["workarea"]));
+    addFunction(RegFunction(name: "agent_t10_used_fixture", desc: "t10 used fixture", params: toParams!T10FixtureParams, callback: &t10FixtureCallback,
+            tags: ["workarea"]));
+    addFunction(RegFunction(name: "agent_t10_unused_fixture", desc: "t10 unused fixture", params: toParams!T10FixtureParams,
+            callback: &t10FixtureCallback, tags: ["workarea"]));
+
+    // The agent's own JSONL sink: a real MetricMonitor on a fresh file (the
+    // feedback gating tolerates null monitors, but the metrics sites need a
+    // real sink). A real Agent (not CannedProcessAgent) so process() runs the
+    // real request site; the empty server type never dials out.
+    auto dataFile = buildPath(tmpDir, "monitor.jsonl").Path;
+    auto monitor = new MetricMonitor(dataFile);
+    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), monitor, null);
+
+    string[] namesOf(JSONValue[] ts) {
+        string[] n;
+        foreach (t; ts)
+            n ~= t["function"]["name"].str;
+        return n;
+    }
+
+    // Per-kind JSONL reader over the agent's monitor file (re-read per call:
+    // events accumulate as the test runs).
+    JSONValue[] byKind(string kind) {
+        return readText(dataFile).splitLines
+            .map!(a => parseJSON(a))
+            .filter!(j => "kind" in j && j["kind"].str == kind)
+            .array;
+    }
+
+    // 1. tools_request: the per-request tools size + schema token estimate.
+    // The event fires BEFORE the requester dials (the request itself fails
+    // offline with an unknown endpoint, which process() reports as
+    // unknownFailure).
+    agent.process(null);
+    auto reqs = byKind("tools_request");
+    assert(reqs.length == 1);
+    assert(reqs[0]["agent"].str == "integration");
+    assert(reqs[0]["toolsCount"].integer == cast(long) agent.tools.length);
+    long schemaTokens;
+    foreach (t; agent.tools)
+        schemaTokens += t.toString(JSONOptions.doNotEscapeSlashes).length;
+    assert(reqs[0]["schemaTokens"].integer == schemaTokens / ApproxTokenSize,
+            "schemaTokens uses the ApproxTokenSize heuristic");
+
+    // 2. tool_refusal: the tier-3 instructive refusal (the fixture is in the
+    // pool but not yet activated, so it is not in agent.tools).
+    StreamResponse.ToolCall[long] calls;
+    calls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t10_tier3_fixture", arguments: "{}");
+    agent.handleToolCalls(null, calls);
+    auto refusals = byKind("tool_refusal");
+    assert(refusals.length == 1);
+    assert(refusals[0]["tool"].str == "agent_t10_tier3_fixture");
+    assert(refusals[0]["tier"].integer == 3);
+    assert(refusals[0]["agent"].str == "integration");
+
+    // 3. tag_discovery / tag_activation: the miss records known=false and
+    // nothing else; the hit activates the tag's visible tools (the fixtures)
+    // and records the activated count (the tag's pool size).
+    auto miss = listToolTags(agent.toolCtx, ListToolTagsParams(tag: "nope"));
+    assert(!miss.success);
+    auto discoveries = byKind("tag_discovery");
+    assert(discoveries.length == 1);
+    assert(discoveries[0]["tag"].str == "nope");
+    assert(!discoveries[0]["known"].boolean);
+
+    auto hit = listToolTags(agent.toolCtx, ListToolTagsParams(tag: "workarea"));
+    assert(hit.success);
+    auto activations = byKind("tag_activation");
+    assert(activations.length == 1);
+    assert(activations[0]["tag"].str == "workarea");
+    assert(activations[0]["toolsActivated"].integer == cast(
+            long) agent.toolCtx.pool.count!(f => f.tags.canFind("workarea")));
+    assert(byKind("tag_discovery").length == 2, "the miss and the hit both record");
+
+    // 4. broker_prune: a rewriting compression prunes the unused activated
+    // fixture; the used one survives (the same recipe as the prune
+    // test). The system prompt must be set BEFORE the tool traffic.
+    StreamResponse.ToolCall[long] usedCalls;
+    usedCalls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t10_used_fixture", arguments: "{}");
+    agent.setSystemPrompt("sys");
+    agent.handleToolCalls(null, usedCalls);
+
+    agent.addUserQuery("x".replicate(9000)); // ~4500 tokens > TokenBudget (4096)
+    agent.addUserQuery("s1");
+    agent.addContinue();
+    agent.addUserQuery("s2");
+    agent.addContinue();
+    agent.addUserQuery("s3");
+
+    auto res = agent.compress(0.9, true);
+    assert(res.compressed, "the chat must actually compress (rewrite) for the D39 gate");
+    assert(res.originalLength > res.newLength);
+
+    auto prunes = byKind("broker_prune");
+    assert(prunes.length == 1);
+
+    // The prune count is registry-state-dependent: other modules' tests leak
+    // workarea-tagged fixtures that my workarea hit activates, so the scan
+    // prunes them too. The invariant: the unused fixture is among the pruned;
+    // the used one and the refusal fixture (whose refusal is delivered as a
+    // tool result, which counts as a use) survive.
+    assert(prunes[0]["pruned"].integer >= 1, "the unused activated fixture is pruned");
+
+    // The used fixture and the tier-3-refused fixture survive; the unused
+    // one is gone.
+    auto names = namesOf(agent.tools);
+    assert(names.canFind("agent_t10_used_fixture"), "a used tool survives the prune");
+    assert(names.canFind("agent_t10_tier3_fixture"),
+            "the tier-3 refusal is a use: the fixture survives");
+    assert(!names.canFind("agent_t10_unused_fixture"), "the unused fixture is pruned");
+}
+
+// --- MCP tools route through the broker: connect change point ---
+
+@("An MCP tool registered at runtime enters the pool at the connect change point, the discovery description includes its tag after the recompose, and activation makes it visible")
+unittest {
+    import logger = std.logger;
+    import core.sync.mutex : Mutex;
+    import std.algorithm : canFind, filter;
+    import std.array : Appender, array;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : parseJSON;
+
+    import llm.agent.nudges : sharedLogSwapMutex;
+    import llm.mcp_server.registration : registerMcpTool;
+    import llm.tool_call.discovery : ListToolTagsParams, listToolTags;
+
+    final class AgentLogCapture : logger.Logger {
+        private {
+            Appender!(string[]) lines;
+            Mutex mtx;
+        }
+
+        this(const logger.LogLevel lvl = logger.LogLevel.all) {
+            super(lvl);
+            this.mtx = new Mutex;
+        }
+
+        override void writeLogMsg(ref LogEntry payload) @trusted {
+            mtx.lock_nothrow();
+            scope (exit)
+                mtx.unlock_nothrow();
+            lines.put(payload.msg);
+        }
+
+        string[] takeLines() {
+            mtx.lock_nothrow();
+            scope (exit)
+                mtx.unlock_nothrow();
+            auto tmp = lines[];
+            lines.clear();
+            return tmp;
+        }
+    }
+
+    enum tag = "mcp_ext_server_t12";
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_mcp_connect_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.enabled = true;
+
+    llmConf.toolBroker.toolTagDescriptions = [
+        tag: "tags inherited from a connected MCP server"
+    ];
+
+    auto agent = new Agent("integration", llmConf, null, null);
+    assert(!agent.toolCtx.pool.canFind!(f => f.name == "mcp_ext_t12_e2e"),
+            "not registered yet — the ctor pools the registry as it is");
+
+    // Runtime registration (the MCP client would call this when a server
+    // connects), then the connect change point: the pool is recomputed from
+    // the live registry and the array + discovery description rebuilt through
+    // toolCtx.rebuildTools (the MCP connect hook). The tag vocabulary is config-side and read
+    // at rebuild time; it is preset before construction, so the recomposed
+    // description carries the tag — if the hook did not recompose, the raw
+    // selectTools output would carry the bare UDA text and the tag would
+    // vanish.
+    registerMcpTool("mcp_ext_t12_e2e", "ext tool for the e2e recompose test",
+            [], (ctx, args) => ExecuteFuncResult("ok", true), [tag]);
+    agent.onMcpServerConnected();
+
+    assert(agent.toolCtx.pool.canFind!(f => f.name == "mcp_ext_t12_e2e" && f.tags == [
+        tag
+    ]), "the connect hook must recompute the pool from the live registry");
+    assert(!agent.tools.canFind!(e => e["function"]["name"].str == "mcp_ext_t12_e2e"),
+            "a tagged tool is hidden until activation");
+
+    auto listDesc = agent.tools.filter!(e => e["function"]["name"].str == "listToolTags")
+        .array[0]["function"]["description"].str;
+    assert(listDesc.canFind("\n\nTags: " ~ tag), listDesc);
+
+    // Discovery loop: list the tag (activates it), then the harness-side
+    // rebuild — the MCP tool becomes visible in the array.
+    auto resp = listToolTags(agent.toolCtx, ListToolTagsParams(tag));
+    assert(resp.success, resp.msg);
+    agent.toolCtx.rebuildTools();
+    assert(agent.tools.canFind!(e => e["function"]["name"].str == "mcp_ext_t12_e2e"),
+            "the MCP tool becomes visible after its tag is activated");
+}
+
+@("Kill switch off: the MCP connect hook rebuilds the legacy tools array, so an MCP tool becomes visible without activation")
+unittest {
+    import std.algorithm : canFind;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+
+    import llm.mcp_server.registration : registerMcpTool;
+
+    enum tag = "mcp_ext_server_t12_legacy";
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_mcp_killswitch_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.enabled = false;
+
+    auto agent = new Agent("integration", llmConf, null, null);
+    assert(!agent.toolCtx.brokerEnabled);
+    assert(!agent.tools.canFind!(e => e["function"]["name"].str == "mcp_ext_t12_legacy"),
+            "not registered yet");
+
+    registerMcpTool("mcp_ext_t12_legacy", "ext tool, kill switch off", [],
+            (ctx, args) => ExecuteFuncResult("ok", true), [tag]);
+    agent.onMcpServerConnected();
+
+    assert(agent.tools.canFind!(e => e["function"]["name"].str == "mcp_ext_t12_legacy"),
+            "the legacy path emits registry ∩ toolFilter regardless of tags");
 }
