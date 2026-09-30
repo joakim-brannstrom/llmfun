@@ -125,10 +125,18 @@ your terms and re-injects your message-to-self afterwards — unlike the
 forced compression at ~90%, which summarizes without your control and can
 garble in-context evidence.
 
-- Trigger points: when the harness injects the 80% `[SYSTEM NUDGE - NOT
-  USER INPUT]`, and at any natural review boundary in a long review (after
-  a step, after each file) — even below 80%. Never mid-file or
-  mid-analysis.
+- Trigger points:
+  - **80% `[SYSTEM NUDGE - NOT USER INPUT]`**: act NOW — do not finish the
+    current step or file first. Write down what you have NOW (`review_notes.md`
+    up to here + current-step findings) and call `requestCompression`
+    immediately — a self-requested compression mid-analysis is always
+    better than the forced one at ~90%, which summarizes without your
+    control.
+  - At any natural review boundary in a long review (after a step, after
+    each file) — even below 80%: update the state file and checkpoint, so
+    the nudge-time write stays small.
+- Never call `requestCompression` with unsaved state — write
+  `review_notes.md` first; the handoff carries only the summary.
 - Write the message-to-self as a briefing for a new instance with no memory
   of the session:
 

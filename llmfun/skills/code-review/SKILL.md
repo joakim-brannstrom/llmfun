@@ -6,7 +6,7 @@ description: >-
   implementation against its design/spec/plan. Use on code review, PR
   feedback, or correctness checks. Triggers on: code review, PR feedback,
   review, audit, check code, verify code, correctness.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Code Review
@@ -33,12 +33,12 @@ its design/spec/plan.
 - **Minor**: Style violation, unused code, unclear naming, redundant logic
 
 **Externalize continuously**: After every workflow step, write its output to
-the state file `review_notes.md` (progress checklist, scope, evidence,
-findings, probe log) — never keep findings only in context. Checkpoint long
-reviews with `requestCompression` at natural boundaries (template:
-workflow.md); after compression, resume from the re-injected handoff +
-`review_notes.md` and the specs — if compression hit without your handoff,
-re-read `review_notes.md` to recover.
+the state file `review_notes.md` — never keep findings only in context. On the
+80% nudge do not finish the step first: write down what you have NOW and call
+`requestCompression` immediately (template: workflow.md) — self-requested
+mid-review beats forced ~90%. Also at boundaries. After compression, resume
+from the re-injected handoff + `review_notes.md` and the specs — if
+compression hit without your handoff, re-read `review_notes.md` to recover.
 
 **Mind the context budget**: baseline first — run the project's build/test
 once, output to a log (grep/head only, never inline). Branch/PR reviews:

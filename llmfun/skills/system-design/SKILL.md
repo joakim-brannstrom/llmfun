@@ -6,7 +6,7 @@ description: >-
   or system architectures. Triggers on: system design, design system,
   architecture, architectural decisions, plan component, plan service,
   system architecture, design tasks, break down requirements.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # System Design Skill
@@ -46,10 +46,11 @@ code. Pseudocode is acceptable if it clarifies the design or specification.
 
 - **Write the plan to a file**: Always save the task list and inform the user.
 - **Externalize + checkpoint**: Write each phase's output to
-  `plan/design_notes.md`. On the 80% nudge or at phase boundaries, call
-  `requestCompression` (handoff template: workflow.md); resume after
-  compression from the re-injected handoff + `plan/design_notes.md` (no
-  handoff → re-read it).
+  `plan/design_notes.md`. On the 80% nudge, do not finish the phase first:
+  write down what you have NOW and call `requestCompression` immediately
+  (handoff template: workflow.md) — self-requested mid-task beats forced
+  ~90%. Resume from the handoff + `plan/design_notes.md` (no handoff →
+  re-read it).
 - **No implementation code**: Tasks describe design decisions and specifications. The `implementation-plan` skill breaks these into code tasks.
 - **Pseudocode is OK**: If pseudocode clarifies the design or specification, include it. Full implementation code is not.
 - **Dependency order**: Order tasks so foundations come before dependents.

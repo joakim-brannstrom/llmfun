@@ -215,9 +215,17 @@ hard gate, not a guideline):
 terms and re-injects your message-to-self afterwards — unlike forced
 compression at ~90%, which summarizes without your control.
 
-- Trigger points: when the harness injects the 80% `[SYSTEM NUDGE - NOT
-  USER INPUT]`, and at any natural planning boundary (after each phase,
-  after each task draft) — even below 80%. Never mid-task-draft.
+- Trigger points:
+  - **80% `[SYSTEM NUDGE - NOT USER INPUT]`**: act NOW — do not finish the
+    current phase or task draft first. Write down what you have NOW (notes
+    files + current-task state) and call `requestCompression` immediately —
+    a self-requested compression mid-task is always better than the forced
+    one at ~90%, which summarizes without your control.
+  - At any natural planning boundary (after each phase, after each task
+    draft) — even below 80%: update the files and checkpoint, so the
+    nudge-time write stays small.
+- Never call `requestCompression` with unsaved state — write the notes
+  files first; the handoff carries only the summary.
 - Write the message-to-self as a briefing for a new instance with no memory
   of the session:
 
