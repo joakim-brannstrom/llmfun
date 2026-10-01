@@ -75,7 +75,7 @@ All three take a `database` scope (`"*"` = all) and run across the matched datab
 
 ### 3.4 The small-corpus double-dip property
 
-Because the vector pool is 10×topK, on a corpus smaller than that pool **every** chunk gets a vector rank, and any chunk that *also* matches FTS earns score from both engines while a content-miss-only vector hit earns from one. With topK=5 on a 14-chunk corpus: the best single-engine score is `1/11 = 0.091`, while the *worst* possible double score (`1/15 + 1/24`) is `0.108` — so **any FTS match outranks the rank-1 vector-only hit**. This is not a bug; it self-heals on large corpora where few FTS hits land in the vector pool. It does mean that on small, densely cross-referencing corpora, `queryBestMatch` systematically prefers "mentioning" documents over the named document itself — the direct motivation for the name-resolution tools in §5 (Lesson L1 has the full arithmetic and the `f`-family evidence).
+Because the vector pool is 10×topK, on a corpus smaller than that pool **every** chunk gets a vector rank, and any chunk that *also* matches FTS earns score from both engines while a content-miss-only vector hit earns from one. With topK=5 on a 14-chunk corpus: the best single-engine score is `1/11 = 0.091`, while the *worst* possible double score (`1/15 + 1/24`) is `0.108` — so **any FTS match outranks the rank-1 vector-only hit**. This is not a bug; it self-heals on large corpora where few FTS hits land in the vector pool. It does mean that on small, densely cross-referencing corpora, `queryBestMatch` systematically prefers "mentioning" documents over the named document itself — the direct motivation for the name-resolution tools in section 5 (Lesson L1 has the full arithmetic and the `f`-family evidence).
 
 ---
 

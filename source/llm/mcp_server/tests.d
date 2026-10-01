@@ -451,3 +451,159 @@ unittest {
     auto notifResp = server.handleMessage(`{"jsonrpc":"2.0","method":"notifications/initialized"}`);
     assert(notifResp is null);
 }
+
+import core.sync.mutex : Mutex;
+import logger = std.logger;
+import std.array : Appender;
+import std.json : JSONValue;
+
+import llm.mcp_server.registration : registerMcpTool;
+import llm.tool_call : Context, ExecuteFuncResult;
+
+/// (Context, JSONValue)-shaped callback fixture matching RegFunction.callback;
+/// never invoked by these tests.
+private ExecuteFuncResult mcpRegFixtureCallback(Context ctx, JSONValue args) {
+    return ExecuteFuncResult("ok", true);
+}
+
+version (unittest) {
+
+    /// Log capture for the no-warning assertions (mirrors AgentLogCapture in
+    /// llm.agent.tests, which is version(unittest)-private to that module).
+    final class McpLogCapture : logger.Logger {
+        private {
+            Appender!(string[]) lines;
+            Mutex mtx;
+        }
+
+        this(const logger.LogLevel lvl = logger.LogLevel.all) {
+            super(lvl);
+            this.mtx = new Mutex;
+        }
+
+        override void writeLogMsg(ref LogEntry payload) @trusted {
+            mtx.lock_nothrow();
+            scope (exit)
+                mtx.unlock_nothrow();
+            lines.put(payload.msg);
+        }
+
+        string[] takeLines() {
+            mtx.lock_nothrow();
+            scope (exit)
+                mtx.unlock_nothrow();
+            auto tmp = lines[];
+            lines.clear();
+            return tmp;
+        }
+    }
+
+}
+
+@("An MCP tool passes filterRegFunctions with the server's config tags")
+unittest {
+    import std.algorithm : canFind;
+    import std.conv : text;
+
+    import llm.tool_call : getFunctions;
+    import llm.tool_call.broker : filterRegFunctions;
+    import my.filter : ReFilter;
+
+    enum tag = "mcp_ext_server_t12";
+    registerMcpTool("mcp_ext_t12_pool", "ext tool with a server tag", [],
+            &mcpRegFixtureCallback, [tag]);
+
+    auto all = getFunctions;
+    assert(all.canFind!(f => f.name == "mcp_ext_t12_pool" && f.tags == [tag]), text(all.length));
+
+    // The pool (registry ∩ toolFilter) carries it: the runtime path inherits
+    // the per-server config tags.
+    auto pool = filterRegFunctions(all, ReFilter.init, []);
+    assert(pool.canFind!(f => f.name == "mcp_ext_t12_pool"));
+}
+
+@("MCP registration is append-only: a duplicate name warns and is ignored, first registration wins")
+unittest {
+    import std.algorithm : filter;
+    import std.array : array;
+    import std.conv : text;
+
+    import llm.tool_call : getFunctions;
+
+    registerMcpTool("mcp_ext_t12_dup", "first desc", [],
+            &mcpRegFixtureCallback, ["mcp_ext_server_t12"]);
+    registerMcpTool("mcp_ext_t12_dup", "second desc", [], &mcpRegFixtureCallback, [
+        "second_tag"
+    ]);
+
+    auto hits = getFunctions.filter!(f => f.name == "mcp_ext_t12_dup").array;
+    assert(hits.length == 1, text(hits.length));
+    assert(hits[0].desc == "first desc", text(hits[0].desc));
+    assert(hits[0].tags == ["mcp_ext_server_t12"], text(hits[0].tags));
+}
+
+@("MCP runtime registration skips the known-tag enum check: a free-form server tag warns nothing and registers silently")
+unittest {
+    import std.algorithm : canFind;
+
+    import llm.agent.nudges : sharedLogSwapMutex;
+    import llm.tool_call : getFunctions;
+    import llm.tool_call.tags : knownToolTagNames;
+
+    enum tag = "mcp_ext_server_t12";
+    assert(!knownToolTagNames.canFind(tag), "the tag must not be a KnownToolTag member");
+
+    synchronized (sharedLogSwapMutex) {
+        auto prevLog = logger.sharedLog;
+        auto cap = cast(shared) new McpLogCapture();
+        logger.sharedLog = cap;
+        scope (exit)
+            logger.sharedLog = prevLog;
+
+        registerMcpTool("mcp_ext_t12_uda_skip",
+                "ext tool with a free-form tag", [], &mcpRegFixtureCallback, [
+                    tag
+        ]);
+
+        foreach (line; (cast() cap).takeLines())
+            assert(!line.canFind("unknown"), line);
+    }
+    assert(getFunctions.canFind!(f => f.name == "mcp_ext_t12_uda_skip"),
+            "the tool must be registered");
+}
+
+@(
+        "MCP runtime registration is thread-safe: concurrent registerMcpTool calls all land in the registry")
+unittest {
+    import std.algorithm : filter, startsWith;
+    import std.array : array;
+    import std.conv : text;
+    import std.format : format;
+
+    import core.atomic : atomicFetchAdd;
+    import core.thread : Thread;
+
+    import llm.tool_call : getFunctions;
+
+    __gshared shared(int) stressNextIdx;
+
+    auto threads = new Thread[8];
+    foreach (k; 0 .. 8) {
+        threads[k] = new Thread(() {
+            // No loop-variable capture: the D closure capture aliases the
+            // same storage across iterations for an escaping delegate (all
+            // threads observed the last iteration's index), so the index
+            // comes from an atomic counter instead.
+            auto idx = atomicFetchAdd(stressNextIdx, 1);
+            foreach (j; 0 .. 50)
+                registerMcpTool(format("mcp_stress_t12_%d_%d", idx, j),
+                    "stress tool", [], &mcpRegFixtureCallback, ["stress_t12"]);
+        });
+        threads[k].start();
+    }
+    foreach (t; threads)
+        t.join();
+
+    auto hits = getFunctions.filter!(f => f.name.startsWith("mcp_stress_t12_")).array;
+    assert(hits.length == 400, text(hits.length));
+}

@@ -304,7 +304,7 @@ unittest {
     assert(mockAgent._runCount == maxRetries,
             "Wrapped agent should have been called exactly maxRetries times");
     assert(mockAgent._addContinueMessageCount == maxRetries - 1,
-            "Retry nudge should have been sent maxRetries-1 times (continuing the turn, H1)");
+            "Retry nudge should have been sent maxRetries-1 times (continuing the turn)");
     assert(node.output.empty, "Node output should still be empty");
 }
 
@@ -319,6 +319,6 @@ unittest {
     assert(result.status == ProcessResult.Status.ok, "Result should be ok");
     assert(mockAgent._runCount == 2, "Wrapped agent should have been called exactly twice");
     assert(mockAgent._addContinueMessageCount == 1,
-            "Retry nudge should have been sent exactly once (continuing the turn, H1)");
+            "Retry nudge should have been sent exactly once (continuing the turn)");
     assert(!node.output.empty, "Node output should be set after second attempt");
 }

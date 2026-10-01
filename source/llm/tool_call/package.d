@@ -19,6 +19,7 @@ interface Context {
 // UDA use to mark a function as a tool to be used by llm.
 struct Function {
     string desc;
+    string[] tags; // empty: alwaysOn (never flip this default)
 }
 
 // UDA to mark a parameter as optional
@@ -49,6 +50,7 @@ struct RegFunction {
     string desc;
     RegParam[] params;
     ExecuteFuncResult function(Context, JSONValue) callback;
+    string[] tags; // mirrored from the UDA at registration
 }
 
 struct FunctionCall {
@@ -56,17 +58,38 @@ struct FunctionCall {
     JSONValue args;
 }
 
+/// Snapshot of the registered functions (the registry read side):
+/// the slice header is copied under the registry mutation lock — a
+/// concurrent append can reallocate the array, and a reader racing it would
+/// tear the (ptr, len) header. The returned buffer itself needs no lock: the
+/// registry is append-only, so an existing buffer is never mutated and stays
+/// GC-alive. Inline acquire/release (no delegate literal) to stay @nogc.
 RegFunction[] getFunctions() @trusted nothrow @nogc {
+    import llm.tool_call.registry_lock : registrySpinAcquire, registrySpinRelease;
+
+    registrySpinAcquire();
+    scope (exit)
+        registrySpinRelease();
     return cast(RegFunction[]) registeredFunc;
 }
 
-// should only be called called at program start single threaded.
+/// Register a tool function. Program start calls this single threaded via
+/// the RegisterLlmFunctions mixin; the MCP runtime registration path
+/// may call it from other threads — the registry mutation is
+/// lock-serialized through withRegistryLock (llm/tool_call/registry_lock.d) —
+/// a spin lock, no module constructor (which would not run reliably for the
+/// dub test runner and sits inside the llm.tool_call import cycle).
+/// Append-only: a duplicate name warns and is ignored, first registration wins.
 void addFunction(RegFunction f) {
-    if (registeredFunc.canFind!(fd => fd.name == f.name)) {
-        logger.warningf("Duplicate tool function '%s' registered, ignoring", f.name);
-        return;
-    }
-    registeredFunc ~= cast(shared) f;
+    import llm.tool_call.registry_lock : withRegistryLock;
+
+    withRegistryLock(() {
+        if (registeredFunc.canFind!(fd => fd.name == f.name)) {
+            logger.warningf("Duplicate tool function '%s' registered, ignoring", f.name);
+            return;
+        }
+        registeredFunc ~= cast(shared) f;
+    });
 }
 
 // Filter the JSON tool descriptions array using ReFilter. Only tools whose name matches the filter are returned.
@@ -149,9 +172,11 @@ JSONValue descAllFunctions() @safe {
 // Register all functions marked by @Function in the module.
 mixin template RegisterLlmFunctions() {
     shared static this() {
+        import llm.tool_call.tags : knownToolTagNames, unknownToolTags;
         import llm.tool_call : addFunction, RegFunction, Function, toParams, initParams;
         import std.array : empty;
         import std.json : JSONValue;
+        import std.logger;
         import std.traits : hasUDA, getUDAs, Parameters, isAggregateType;
 
         mixin("alias TheModule = " ~ __MODULE__ ~ ";");
@@ -163,6 +188,7 @@ mixin template RegisterLlmFunctions() {
                     static if (is(typeof(moduleMember) == function)
                             && hasUDA!(moduleMember, Function)) {
                         enum funcDesc = getUDAs!(moduleMember, Function)[0].desc;
+                        enum funcTags = getUDAs!(moduleMember, Function)[0].tags;
                         alias FuncParamTypes = Parameters!moduleMember;
                         static assert(FuncParamTypes.length == 2,
                                 "Function " ~ __MODULE__ ~ "." ~ moduleMemberName
@@ -181,8 +207,12 @@ mixin template RegisterLlmFunctions() {
                             return ExecuteFuncResult(msg: params.errorMsg, success: false);
                         }
 
-                        addFunction(RegFunction(name: moduleMemberName, desc: funcDesc,
-                                params: toParams!ParamsT, callback: &funcCallback));
+                        foreach (t; unknownToolTags(funcTags)) {
+                            std.logger.warningf("Tool '%s' registered with unknown tag '%s' (known: %s)",
+                                    moduleMemberName, t, knownToolTagNames());
+                        }
+                        addFunction(RegFunction(name: moduleMemberName, desc: funcDesc, params: toParams!ParamsT,
+                                callback: &funcCallback, tags: funcTags));
                     }
                 }
             }

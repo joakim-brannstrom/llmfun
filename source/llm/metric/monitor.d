@@ -52,6 +52,19 @@ class MetricMonitor {
         saveEvent(events[$ - 1]);
     }
 
+    /// Append a pre-built JSON event (a broker event) to the
+    /// JSONL sink. Write-only: the in-memory tool-call buffer and the
+    /// feedback engine are not touched — broker events are not
+    /// ToolCallEvents.
+    void recordEvent(JSONValue ev) @safe {
+        try {
+            File(dataFile.toString, "a").writeln(ev.toString(JSONOptions.doNotEscapeSlashes));
+            trimLogFile;
+        } catch (Exception e) {
+            logger.tracef("monitor event save failed: %s", e.msg);
+        }
+    }
+
     ToolCallEvent[] getRecentEvents(size_t count) {
         if (count >= events.length) {
             return events;
@@ -80,7 +93,14 @@ private:
         try {
             foreach (line; File(dataFile).byLine.filter!(a => !a.empty)) {
                 try {
-                    events ~= jsonToEvent(parseJSON(line));
+                    auto j = parseJSON(line);
+                    // Broker events carry a "kind" and no toolName —
+                    // skip them: they are not ToolCallEvents, and feedback
+                    // does not consume them (they would load as empty-tool
+                    // events into the in-memory buffer).
+                    if ("kind" in j)
+                        continue;
+                    events ~= jsonToEvent(j);
                 } catch (Exception e) {
                     logger.tracef("monitor load failed for line: %s", e.msg);
                 }
@@ -114,14 +134,18 @@ private:
     }
 }
 
-private:
+public:
 
-long currentTimestamp() {
+/// Milliseconds since the clock's init baseline (Clock.currTime -
+/// SysTime(DateTime.init)): the "ts" field of every JSONL event. Public:
+/// the broker event emitters stamp their envelopes with it.
+long currentTimestamp() @safe {
     import std.datetime : SysTime, DateTime;
 
     return (Clock.currTime - SysTime(DateTime.init)).total!"msecs";
 }
 
+private:
 ToolCallEvent jsonToEvent(JSONValue j) @safe {
     import llm.utility : getValue;
 
@@ -147,4 +171,76 @@ JSONValue eventToJSON(ToolCallEvent event) @safe {
     j["result"] = event.result;
     j["responseTimeMs"] = event.responseTimeMs;
     return j;
+}
+
+public:
+
+/// Builds a broker JSONL event envelope: "kind" + "ts" +
+/// "agent", plus the caller's per-event fields. ts = currentTimestamp().
+/// All five broker event kinds go through this.
+JSONValue brokerEvent(string kind, string agentName, JSONValue[string] fields) @safe {
+    JSONValue ev;
+    ev["kind"] = kind;
+    ev["ts"] = currentTimestamp();
+    ev["agent"] = agentName;
+    foreach (k, v; fields)
+        ev[k] = v;
+    return ev;
+}
+
+@("recordEvent appends a broker event line to the JSONL sink")
+unittest {
+    import std.algorithm : filter;
+    import std.array : array;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, rmdirRecurse;
+    import std.format : format;
+    import std.path : buildPath;
+    import std.string : splitLines;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/monitor_t10_record_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto dataFile = buildPath(tmpDir, "monitor.jsonl").Path;
+
+    auto mon = new MetricMonitor(dataFile);
+    mon.recordEvent(brokerEvent("broker_prune", "test_agent", [
+        "pruned": JSONValue(2L)
+    ]));
+
+    const lines = readText(dataFile).splitLines.filter!(a => !a.empty).array;
+    assert(lines.length == 1);
+    const back = parseJSON(lines[0]);
+    assert(back["kind"].str == "broker_prune");
+    assert(back["agent"].str == "test_agent");
+    assert(back["pruned"].integer == 2);
+    assert("toolName" !in back, "broker events carry no toolName");
+}
+
+@("loadEvents loads only the ToolCallEvent lines from a mixed JSONL (broker lines are skipped)")
+unittest {
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, rmdirRecurse, write;
+    import std.format : format;
+    import std.path : buildPath;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/monitor_t10_mixed_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto dataFile = buildPath(tmpDir, "monitor.jsonl").Path;
+    write(dataFile, "{\"agentName\":\"a\",\"toolName\":\"writeFile\",\"arguments\":{},"
+            ~ "\"timestamp\":1,\"success\":true,\"result\":\"ok\",\"responseTimeMs\":2}\n"
+            ~ "{\"kind\":\"broker_prune\",\"ts\":5,\"agent\":\"a\",\"pruned\":2}\n"
+            ~ "{\"kind\":\"tools_request\",\"ts\":6,\"agent\":\"a\",\"toolsCount\":3,\"schemaTokens\":50}\n");
+
+    auto mon = new MetricMonitor(dataFile);
+    auto events = mon.getRecentEvents(10);
+    assert(events.length == 1, "only the ToolCallEvent line loads");
+    assert(events[0].toolName == "writeFile");
+    assert(events[0].agentName == "a");
+    assert(events[0].success);
 }

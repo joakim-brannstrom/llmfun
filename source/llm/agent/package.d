@@ -26,14 +26,14 @@ import llm.agent.nudges : NudgeTexts, loadNudgeTexts, nudgeFor,
 import llm.chat;
 import llm.config;
 import llm.metric.feedback : FeedbackEngine;
-import llm.metric.monitor : MetricMonitor, ToolCallEvent;
+import llm.metric.monitor : MetricMonitor, ToolCallEvent, brokerEvent;
 import llm.query : LlmRequester;
 import llm.rag.rag : RAG;
 import llm.skill : SkillManager, makeSkillManager;
 import llm.summary_agent;
 import llm.tool_call : FunctionCall, Context;
 import llm.tool_call.pipeline : PipelineControlContext;
-import llm.tool_call.reasoning;
+import llm.tool_call.broker : BrokerState;
 import llm.utility : getValue;
 
 import llm.environment.config : EnvironmentBackend;
@@ -47,10 +47,20 @@ class Agent : IBasicAgent {
     Chat chat;
     MetricMonitor monitor;
 
+    /// The model-facing tools array: owned by the Agent, built once
+    /// per instance (pool + selectTools with empty activation, plus the
+    /// composed listToolTags description), reassigned from pure selectTools
+    /// output ONLY at change points — activation/discovery (the
+    /// toolCtx.rebuildTools hook) and compression — and passed per
+    /// request. The registry is immutable at runtime except the MCP
+    /// connect change point: onMcpServerConnected recomputes the
+    /// pool from the live registry and rebuilds this array through
+    /// toolCtx.rebuildTools; resetModel leaves it untouched.
+    JSONValue[] tools;
+
     private {
         LlmRequester rq;
         string modelName_;
-        AgentContext toolCtx;
         RAG rag;
         SummaryAgent summary;
         FeedbackEngine feedbackEngine;
@@ -85,7 +95,15 @@ class Agent : IBasicAgent {
             int continueStrikes;
         }
 
+        // Package (not private): llm.agent.tests (and the pool-wiring
+        // tests) construct an Agent and assert on the broker pool/state.
+        package AgentContext toolCtx;
         ReFilter toolFilter;
+
+        // Mirror of llmConf.toolBroker.neverHideTools, captured at construction:
+        // the MCP connect change point refilters the live registry
+        // with it after startup.
+        string[] neverHideTools_;
         bool waitingForVisionResponse;
         ServerStat prevStat;
     }
@@ -100,7 +118,8 @@ class Agent : IBasicAgent {
 
     this(string name, LlmConfig llmConf, SkillManager mgr, MetricMonitor monitor,
             RAG rag, ReFilter filter) {
-        import llm.tool_call : descAllFunctions, filterToolDescriptions;
+        import llm.tool_call : getFunctions;
+        import llm.tool_call.broker : BrokerState, filterRegFunctions, hiddenNeverHideTools;
 
         this.name = name;
         this.monitor = monitor;
@@ -109,6 +128,53 @@ class Agent : IBasicAgent {
         this.toolCtx = new AgentContext(llmConf, rag, monitor);
         toolCtx.setSkillManager(mgr);
         toolCtx.setTaskDoneHandler(&this.taskDone);
+        toolCtx.agentName = name;
+
+        // Startup validation: warnings only, never fatal. All three
+        // ctors funnel into this one, so every entry point is covered.
+        foreach (w; validateToolBrokerConfig(llmConf))
+            logger.warningf("%s", w);
+        auto reg = getFunctions();
+        toolCtx.pool = filterRegFunctions(reg, filter, llmConf.toolBroker.neverHideTools);
+        foreach (n; hiddenNeverHideTools(reg, filter, llmConf.toolBroker.neverHideTools))
+            logger.warningf("neverHide tool '%s' excluded by toolFilter; fix the config", n);
+        toolCtx.broker = BrokerState.init;
+        toolCtx.brokerEnabled = llmConf.toolBroker.enabled;
+        neverHideTools_ = llmConf.toolBroker.neverHideTools;
+
+        // Tools array: built once per instance here, owned by the
+        // Agent, passed per request; reassigned from pure selectTools output at
+        // change points only — activation/discovery (the toolCtx.rebuildTools
+        // hook below) and compression.
+        import llm.tool_call : descAllFunctions, filterToolDescriptions;
+        import llm.tool_call.broker : selectTools;
+        import llm.tool_call.discovery : composeDiscoveryDesc;
+
+        if (llmConf.toolBroker.enabled) {
+            tools = selectTools(toolCtx.pool, toolCtx.broker.activated,
+                    llmConf.toolBroker.neverHideTools);
+            // Composed discovery description: swap the listToolTags
+            // entry's description for base text + the configured tag vocabulary.
+            composeDiscoveryDescription(tools,
+                    llmConf.toolBroker.toolTagDescriptions, toolCtx.broker);
+            // Activation change point: the discovery tool rebuilds
+            // the array through this hook after activating a tag, and the
+            // recomposed listToolTags description must be re-applied:
+            // the raw selectTools output carries the bare UDA text.
+            toolCtx.rebuildTools = delegate() @safe {
+                tools = selectTools(toolCtx.pool, toolCtx.broker.activated,
+                        llmConf.toolBroker.neverHideTools);
+                composeDiscoveryDescription(tools,
+                        llmConf.toolBroker.toolTagDescriptions, toolCtx.broker);
+            };
+        } else {
+            // Kill switch: the pre-broker tools array — registry ∩
+            // toolFilter (no neverHide union-back), so tools ⊆ pool, the only
+            // possible difference being a neverHide tool excluded by toolFilter
+            // (in the pool only; warned at construction). Gate inert regardless:
+            // brokerEnabled=false is its first conjunct.
+            tools = filterToolDescriptions(descAllFunctions(), filter).array;
+        }
 
         // Nudge policy: the global default and prompt dir must be stored BEFORE
         // resetModel resolves the active model's policy and eagerly loads its
@@ -141,7 +207,6 @@ class Agent : IBasicAgent {
 
     /// Reset the agent's model to a new configuration. Does NOT modify chat history or SummaryAgent.
     void resetModel(CodeModelConfig modelConfig) {
-        import llm.tool_call : descAllFunctions, filterToolDescriptions;
         import llm.endpoint : getContextSize;
 
         if (modelConfig.modelName.empty) {
@@ -150,8 +215,11 @@ class Agent : IBasicAgent {
 
         auto oldModel = modelName_;
 
-        auto tools = filterToolDescriptions(descAllFunctions(), toolFilter);
-        this.rq = LlmRequester(modelConfig.toRequestConfig, tools.nullable);
+        // The pool cannot change on a model switch: nothing here touches the
+        // registry, so the tools array stays valid — no rebuild.
+        // The registry does change at the MCP connect point; that
+        // path rebuilds the array through toolCtx.rebuildTools.
+        this.rq = LlmRequester(modelConfig.toRequestConfig);
 
         this.contextSize_ = modelConfig.getContextSize;
 
@@ -165,6 +233,25 @@ class Agent : IBasicAgent {
         // switch here.
         nudges_ = modelConfig.nudges.get(defaultNudges_);
         nudgeTexts_ = loadNudgeTexts(promptDir_, nudges_);
+    }
+
+    /// MCP connect change point: an MCP server has just registered
+    /// its tools into the global registry (llm.mcp_server.registration), so
+    /// the pool is recomputed from the live registry — the registry is no
+    /// longer immutable at runtime — and the model-facing tools array +
+    /// listToolTags description are rebuilt through toolCtx.rebuildTools. An
+    /// allowed change point (activation/discovery boundary): call ONLY
+    /// between requests, never while a request is in flight.
+
+    void onMcpServerConnected() {
+        import llm.tool_call : descAllFunctions, filterToolDescriptions, getFunctions;
+        import llm.tool_call.broker : filterRegFunctions;
+
+        toolCtx.pool = filterRegFunctions(getFunctions(), toolFilter, neverHideTools_);
+        if (toolCtx.rebuildTools !is null)
+            toolCtx.rebuildTools();
+        else
+            tools = filterToolDescriptions(descAllFunctions(), toolFilter).array;
     }
 
     Message[] getUserQueries() @safe nothrow {
@@ -329,7 +416,23 @@ class Agent : IBasicAgent {
                 }
             };
 
-            auto res = rq.request(chat);
+            // Metrics: the tools array size + approximate
+            // schema token cost (the chat.d ApproxTokenSize heuristic) per
+            // request. The record path is guarded (recordBrokerEvent); the
+            // token estimate itself cannot throw (plain tool cards).
+            {
+                import llm.common.config : ApproxTokenSize;
+
+                long schemaTokens;
+                foreach (t; tools)
+                    schemaTokens += t.toString(JSONOptions.doNotEscapeSlashes).length;
+                schemaTokens /= ApproxTokenSize;
+                recordBrokerEvent(this, "tools_request", [
+                    "toolsCount": JSONValue(cast(long) tools.length),
+                    "schemaTokens": JSONValue(schemaTokens),
+                ]);
+            }
+            auto res = rq.request(chat, tools);
 
             bool hasHttpError;
             bool httpRetryOnError;
@@ -392,6 +495,7 @@ class Agent : IBasicAgent {
     SummaryAgent.CompressResult compress(double threshold = 0.9, bool force = false,
             SummaryAgent.ProgressCallback callback = null) {
         import llm.common.config : ApproxTokenSize;
+        import llm.tool_call.broker : applyPrune, scanInactiveTools;
 
         if (!needCompression(threshold) && !force && !toolCtx.agentCompressionRequest)
             return typeof(return)(compressed: true);
@@ -399,6 +503,10 @@ class Agent : IBasicAgent {
             toolCtx.clearAgentCompressionRequest;
             compressNudgeSent = false;
         }
+        // Prune scan: the intact pre-compression chat is the
+        // usage corpus. Runs after the early-return gate, before summary.compress
+        // rewrites the chat; summary text and assistant prose never count as usage.
+        string[] inactive = scanInactiveTools(toolCtx.broker, chat);
         long oldContextSize = prevStat.context;
         auto result = summary.compress(chat, callback, null);
         prevStat.startContext = result.newContextSize;
@@ -421,6 +529,21 @@ Summary:$(
 Continue your work from where you left off.";
             chat.add(Message(Role.user, userQuery: false, thinking: null, content: msg));
             prevStat.startContext += msg.length / ApproxTokenSize;
+        }
+        // Prune apply: only when the compression actually
+        // rewrote history. The tools-array rebuild goes through the toolCtx.rebuildTools hook
+        // (selectTools + the composed listToolTags description), so both change
+        // points produce byte-identical arrays for the same broker state and
+        // the discovery entry keeps the composed description. Null (kill
+        // switch) means the tools array never changes.
+        if (result.originalLength != result.newLength || result.purgedCount > 0) {
+            applyPrune(toolCtx.broker, inactive);
+            // Metrics: one event per applied prune; the scan
+            // epoch counted the same list applyPrune just consumed.
+            recordBrokerEvent(this, "broker_prune",
+                    ["pruned": JSONValue(cast(long) inactive.length)]);
+            if (toolCtx.rebuildTools !is null)
+                toolCtx.rebuildTools();
         }
         return result;
     }
@@ -709,9 +832,36 @@ private:
             bool success;
             string result;
             try {
-                auto res = executeFunc(toolCtx, call.name, parseJSON(call.arguments), toolFilter);
-                result = res.msg.sanitizeUtf8;
-                success = res.success;
+                // A tool in the pool but hidden from this
+                // agent (tagged, never activated) refuses instructively — the
+                // model recovers with one listToolTags call. Config-excluded
+                // tools are not in the pool (tier-2, unchanged) and
+                // registry-absent tools are not in the pool either (tier-1,
+                // unchanged): both fall through to executeFunc's refusals.
+                if (toolCtx.brokerEnabled
+                        && toolCtx.pool.canFind!(f => f.name == call.name)
+                        && !tools.canFind!(t => t["function"]["name"].str == call.name)) {
+                    result = (
+                            "error: tool '" ~ call.name
+                            ~ "' is not visible to this agent; discover tools with `listToolTags`")
+                        .sanitizeUtf8;
+                    success = false;
+
+                    // Metrics: the instructive refusal —
+                    // a confusion proxy. Other refusals are not
+                    // instrumented (executeFunc lacks monitor access; the
+                    // accepted hole).
+                    recordBrokerEvent(this, "tool_refusal",
+                            [
+                                "tool": JSONValue(call.name),
+                                "tier": JSONValue(3L)
+                    ]);
+                } else {
+                    auto res = executeFunc(toolCtx, call.name,
+                            parseJSON(call.arguments), toolFilter);
+                    result = res.msg.sanitizeUtf8;
+                    success = res.success;
+                }
             } catch (Exception e) {
                 logger.tracef("Broken tool call. Incoming json: %s", e.msg);
                 continue;
@@ -1044,6 +1194,53 @@ struct StreamResponse {
         } catch (Exception e) {
             logger.tracef("invalid error structure '%s': %s", json, e.msg);
         }
+    }
+}
+
+/// Swaps the `listToolTags` discovery entry's description in the tools array
+/// for the composed one: the UDA base text plus the configured tag
+/// vocabulary, ordered by activation frequency then name (composeDiscoveryDesc).
+/// A no-op when toolFilter excluded the discovery tool from the array. Warns
+/// once per tag (per process) on a configured-but-empty tag description — it
+/// renders as a bare tag name in the discovery tool's description.
+private void composeDiscoveryDescription(ref JSONValue[] tools,
+        string[string] tagDescriptions, BrokerState st) @safe {
+    import std.algorithm : countUntil;
+
+    import llm.tool_call.discovery : composeDiscoveryDesc;
+
+    auto idx = tools.countUntil!(e => e["function"]["name"].str == "listToolTags");
+    if (idx < 0)
+        return; // listToolTags filtered out by toolFilter — nothing to compose
+
+    // Per-process warn-once scope (documented intent); single-threaded Agent
+    // construction today — an AA insert would race if construction ever moves
+    // onto worker threads; guard it before that happens.
+    static bool[string] warned;
+    foreach (t; tagDescriptions.byKey) {
+        if (tagDescriptions[t].empty && t !in warned) {
+            warned[t] = true;
+            logger.warningf("listToolTags discovery description: tag '%s' has an "
+                    ~ "empty configured description (toolBroker.toolTagDescriptions) — it " ~ "renders as a bare tag name",
+                    t);
+        }
+    }
+
+    tools[idx]["function"]["description"] = composeDiscoveryDesc(
+            tools[idx]["function"]["description"].str, tagDescriptions, st);
+}
+
+/// Emits one broker event to the agent's monitor: the
+/// envelope (kind + ts + agent) comes from brokerEvent, the sink is
+/// agent.monitor. Metrics failures never break the caller: null monitor
+/// skipped, exceptions traced only.
+private void recordBrokerEvent(Agent agent, string kind, JSONValue[string] fields) @safe {
+    if (agent.monitor is null)
+        return;
+    try {
+        agent.monitor.recordEvent(brokerEvent(kind, agent.name, fields));
+    } catch (Exception e) {
+        logger.tracef("broker metric failed: %s", e.msg);
     }
 }
 

@@ -78,7 +78,7 @@ dub build --config=llmfun_util              # Build test utility (manual testing
 ./build/llmfun rag add <path>               # Add file to RAG index
 ./build/llmfun rag --dialogue               # Report per-session dialogue history databases (read-only)
 ./build/llmfun rag query "question"         # Query RAG knowledge base
-./build/llmfun tool_metrics --data llmfun/data/monitor.jsonl   # View tool metrics
+./build/llmfun tool_metrics   # View tool metrics
 ./build/llmfun mcp --stdio                                              # Run MCP server over stdio
 ./build/llmfun mcp --list-tools                                         # List available MCP tools
 ```
@@ -298,6 +298,12 @@ dub build --config=llmfun_util              # Build test utility (manual testing
 
 - Tools are registered via `@Function` attribute and `RegisterLlmFunctions!()` mixin in `tool_call/package.d`.
 - Each tool module implements functions that take a `Context` and a params struct.
+- Tools carry optional tags (`@Function(..., tags: ["workarea"])`): untagged tools
+  are always visible (alwaysOn); tagged tools are hidden until the model activates
+  their tag via `listToolTags` / `toolSearch` (the tool broker; sticky activation,
+  pruned only at compression points). The tag vocabulary is the `KnownToolTag`
+  enum (`tool_call/tags.d`) plus config `toolBroker.toolTagDescriptions`; kill
+  switch `toolBroker.enabled`. Full guide: `doc/tool_authoring.md`.
 - `tool_call/io.d` is the largest module — file system operations with advanced editing (searchAndReplace, applyDiff, editFileByMarker).
 
 ### Pipeline System
@@ -488,6 +494,7 @@ nTokens = 0;
 ## References
 
 - `doc/database.md` — Database schema and RAG details
+- `doc/tool_authoring.md` — Tool authoring and the tool broker (tagging guide)
 - `doc/sessions.md` — Chat session storage and agent integration
 - `doc/skills.md` — Skills system documentation
 - `doc/tui_design.md` — TUI architecture

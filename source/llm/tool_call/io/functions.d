@@ -55,8 +55,9 @@ struct WriteFileParams {
     string content;
 }
 
-@Function("Write content to a file, creating it (including parent directories) if it does not exist. Returns OK or error message")
-ExecuteFuncResult writeFile(Context baseCtx, WriteFileParams params) {
+@Function("Write content to a file, creating it (including parent directories) if it does not exist. Returns OK or error message",
+    tags:
+        ["workarea"]) ExecuteFuncResult writeFile(Context baseCtx, WriteFileParams params) {
     mixin(baseContextToSpecific!FileContext);
 
     auto path_ = pathToWorkarea(ctx, params.path);
@@ -93,8 +94,8 @@ struct ReadFileParams {
     @ParamOptional bool appendLoc = true;
 }
 
-@Function("Read the contents of a file.")
-ExecuteFuncResult readFile(Context baseCtx, ReadFileParams params) {
+@Function("Read the contents of a file.", tags:
+        ["workarea"]) ExecuteFuncResult readFile(Context baseCtx, ReadFileParams params) {
 
     mixin(baseContextToSpecific!FileContext);
 
@@ -148,8 +149,8 @@ struct ListDirectoryParams {
     @ParamOptional bool recursive;
 }
 
-@Function("List directory contents")
-ExecuteFuncResult listDirectory(Context baseCtx, ListDirectoryParams params) {
+@Function("List directory contents", tags:
+        ["workarea"]) ExecuteFuncResult listDirectory(Context baseCtx, ListDirectoryParams params) {
     mixin(baseContextToSpecific!FileContext);
 
     auto maxDirEntries = ctx.getToolLimits().maxDirEntries;
@@ -193,9 +194,9 @@ struct GrepFilesParams {
     @ParamOptional long maxResults = 20;
 }
 
-@Function(
-        "Search for a pattern in files at path. Returns up to maxResults matching lines with file and line number")
-ExecuteFuncResult grepFiles(Context baseCtx, GrepFilesParams params) {
+@Function("Search for a pattern in files at path. Returns up to maxResults matching lines with file and line number",
+    tags:
+        ["workarea"]) ExecuteFuncResult grepFiles(Context baseCtx, GrepFilesParams params) {
     mixin(baseContextToSpecific!FileContext);
 
     auto grepMaxResults = ctx.getToolLimits().grepMaxResults;

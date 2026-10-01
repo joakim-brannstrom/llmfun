@@ -289,7 +289,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
 
         Set!string syncedOrigins;
 
-        // Phase 1: Scan and add
+        // First pass: Scan and add
         logger.warningf(invalidPaths > 0, "Skipped %s invalid path(s)", invalidPaths);
         // Circuit-break: once the database has proven unrecoverable (SpinSqlTimeout
         // after the retry budget), skip the remaining files instead of paying the
@@ -327,7 +327,7 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
             }
         }
 
-        // Phase 2: Remove stale sources
+        // Second pass: Remove stale sources
         logger.info("Phase 2: Checking for deleted sources");
         long removed = 0;
         long removeFailed = 0;

@@ -184,7 +184,7 @@ class DedicatedVisionAgent : IAgent {
         ProcessResult result = Error("No response from vision model");
         try {
             // Make synchronous LLM request
-            auto jsonResult = requester.request(chat).toJson;
+            auto jsonResult = requester.request(chat, []).toJson;
 
             jsonResult.match!((JSONValue j) {
                 auto choices = getValue(j, (v) => v["choices"].array, null);

@@ -130,6 +130,15 @@ struct UserConfig {
 
         @(NamedArgument("port").Description("Port for HTTP transport (future)"))
         int port = 8787;
+
+        /// Tags inherited by every tool registered through the MCP runtime
+        /// registration path: each configured MCP server
+        /// carries optional tags and its tools inherit them (the future MCP
+        /// client passes this field into registerMcpTool). Free-form:
+        /// the runtime registration path calls addFunction directly, so the
+        /// known-tag enum check of the @Function UDA path does not apply;
+        /// per-tool override later.
+        string[] tags;
     }
 }
 

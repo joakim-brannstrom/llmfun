@@ -74,6 +74,19 @@ toolFilter:
   include:
     - '.*'
   exclude: []
+toolBroker:
+  # Kill switch (default true): false treats every registered tool as
+  # untagged (alwaysOn) and makes discovery inert.
+  # enabled: true
+  # Tools never hidden regardless of toolFilter (default: ["taskDone"]).
+  # A tool that is neverHide AND carries tags warns at startup
+  # (validateToolBrokerConfig)
+  # since tagging it has no hiding effect anyway.
+  # neverHideTools: [taskDone]
+  # tag - human-readable description shown by listToolTags (unknown keys
+  # warn at startup).
+  toolTagDescriptions:
+    workarea: "Files in the agent workarea: read/write/list/search."
 
 ragFilter:
   include:
