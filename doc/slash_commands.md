@@ -93,7 +93,7 @@ struct SlashCommand {
 
 `helpText()` renders the header plus every command's help lines, sorted stably by `(order asc, registration index asc)`. Registration order is the tiebreak, so two commands with the same `order` keep their registration order.
 
-`formatHelpLine(usage, description)` is the W4 padding formula:
+`formatHelpLine(usage, description)` is the padding formula:
 
 ```d
 "   " ~ usage.leftJustify(19) ~ (usage.length > 19 ? "  " : "") ~ description
@@ -137,7 +137,7 @@ Code that holds an `AgentApp` instance may call `app.registerSlashCommand(cmd)` 
 // The module must be linked in (imported somewhere or part of the build).
 import llm.app_agent;
 import llm.app_agent.slash;
-import llmfun_tui; // TuiChatMessageType / TuiChatMessageType_Assistant (W12)
+import llmfun_tui; // TuiChatMessageType / TuiChatMessageType_Assistant
 
 static this() { // module constructor: runs before main, before AgentApp exists
     addStartupSlashCommand(SlashCommand(
@@ -153,7 +153,7 @@ static this() { // module constructor: runs before main, before AgentApp exists
 
 `TuiChatMessageType_*` constants come from `llmfun_tui` (the C++ binding via
 ImportC of `source/llmfun_tui.c`); plugins that build messages must
-`import llmfun_tui;` (W12). `llm.tui` is the D-side TUI module and does NOT
+`import llmfun_tui;`. `llm.tui` is the D-side TUI module and does NOT
 re-export these constants — importing it alone leaves
 `TuiChatMessageType` undefined.
 
@@ -198,7 +198,7 @@ Slash-command plugins are trusted in-process code; the API surface, not the regi
 
 ### Golden Help Test
 
-`tests.d` embeds the pre-refactor `/help` output as a literal block and asserts `registry.helpText()` is byte-for-byte equal. **Maintenance rule (W11): any change to a command's help line, order, name, or aliases must update the golden block in the same change.** The golden test uses a bare registry (built-ins only) so global startup-hook commands cannot pollute it.
+`tests.d` embeds the pre-refactor `/help` output as a literal block and asserts `registry.helpText()` is byte-for-byte equal. **Maintenance rule: any change to a command's help line, order, name, or aliases must update the golden block in the same change.** The golden test uses a bare registry (built-ins only) so global startup-hook commands cannot pollute it.
 
 ### External-Registration Test
 

@@ -63,7 +63,7 @@ Every chunk is embedded with its source prepended as a prefix — `Topic: <name>
 The retrieval strategy is engineered to mitigate the specific cognitive weaknesses of LLMs—particularly poor keyword extraction, suboptimal query planning, and a tendency toward "random walk" behavior—while exploiting their strengths in contextual synthesis and iterative reasoning.
 
 ### A. Parallel Discovery Over Sequential Guessing
-The skill instructs the LLM to execute `queryBestMatch` and `listRAGDatabases` simultaneously on the first turn (Phase 0).
+The skill instructs the LLM to execute `queryBestMatch` and `listRAGDatabases` simultaneously on the first turn.
 
 - **Rationale:** In a sequential system, the LLM would guess a database scope, receive results (or none), guess another scope, and waste calls. By resolving the "search space" (`listRAGDatabases`) and the "content" (`queryBestMatch`) in parallel, the LLM eliminates two variables in a single turn. This immediately reduces the `"*"` wildcard noise problem (by providing concrete database names) without sacrificing broad recall.
 
@@ -103,7 +103,7 @@ The safety mechanisms operate at two levels: **prompt engineering constraints** 
 ### A. The 10-Call Budget (Prompt Engineering Constraint)
 The skill (`knowledge-retrieval`) instructs the LLM to use a maximum of **10 tool calls** per distinct knowledge-seeking objective. This includes `listRAGDatabases`, `listRAGSources`, `queryTextSearch`, `querySemantic`, `queryBestMatch`, `queryReadFile`, and `readRAGSource`.
 
-- **Implementation:** This is a soft limit enforced by prompt instructions, not by code. The LLM is told to "STOP" after call 10 and synthesize its answer. The skill divides the budget into phases: Phase 0 (Call 1: discovery), Phase 1 (Calls 2-4: pivot), Phase 2 (Calls 5-8: dig/read), Phase 3 (Calls 9-10: verify).
+- **Implementation:** This is a soft limit enforced by prompt instructions, not by code. The LLM is told to "STOP" after call 10 and synthesize its answer. The skill divides the budget into stages: stage 0 (Call 1: discovery), stage 1 (Calls 2-4: pivot), stage 2 (Calls 5-8: dig/read), stage 3 (Calls 9-10: verify).
 - **Rationale (The Calculus):** Internal telemetry indicates that approximately 50% of all FTS5-based searches return zero results due to the implicit `AND` issue. A budget of 5 would leave the LLM with only 2 to 3 successful reads—insufficient for complex coding queries. A budget of 20 would push latency beyond acceptable thresholds (often exceeding 45-60 seconds) and bloat the context window with failed searches, confusing the model.
 - **The Sweet Spot (10):** With 10 calls, the LLM can afford 2 discovery probes, 3 to 4 targeted searches (absorbing the 50% failure rate), 2 to 3 individual line reads (`queryReadFile`), and 2 verification calls. This keeps total execution time under approximately 25-30 seconds while providing enough runway to dig through fragmented documentation.
 
@@ -137,7 +137,7 @@ If the knowledge base is incomplete, the LLM is instructed to explicitly state w
 The LLM operates on its **Current Objective**, not the user's literal original utterance.
 
 - **Scenario:** User says, *"Read plan.md and execute task 1-4."*
-- **Internal Switch:** The LLM reads the plan and sees Task 3 is *"Refactor auth to use JWT."*
+- **Internal Switch:** The LLM reads the plan and sees the third task is *"Refactor auth to use JWT."*
 - **RAG Trigger:** When the LLM searches, it searches for *"How to implement JWT in this framework"*—**not** the original *"Read plan.md"* string.
 - **Implementation:** The protocol explicitly replaces "user question" with "current active objective" in the system instructions to ensure searches remain semantically relevant to the subtask at hand.
 
@@ -148,7 +148,7 @@ The LLM operates on its **Current Objective**, not the user's literal original u
 To optimize token usage and avoid "Lost-in-the-Middle" syndrome, we use a layered prompt approach:
 
 1. **System Prompt (Base Layer):** Contains only the tool definitions and the mandatory trigger (`loadSkill`).
-2. **Skill (Dynamic Layer):** Contains the 10-call budget strategy, phase breakdown (Phase 0-3), FTS5 syntax warnings, and failure diagnosis scenarios. This is loaded *only* when the RAG system is about to be used, keeping the initial context window lean.
+2. **Skill (Dynamic Layer):** Contains the 10-call budget strategy, stage breakdown (stages 0-3), FTS5 syntax warnings, and failure diagnosis scenarios. This is loaded *only* when the RAG system is about to be used, keeping the initial context window lean.
 
 ---
 

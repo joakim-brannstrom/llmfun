@@ -129,7 +129,7 @@ The goals, in priority order:
 | Component | Module | Responsibility |
 |-----------|--------|----------------|
 | `Chat` | `llm.chat` | Turn-stamped message history. The reasoning projection `traceOf` is a free `@safe nothrow`, Chat-free function here (mirrors `dialogueOf`; extracted from `getReasoningTrace`) |
-| `SummaryAgent` | `llm.summary_agent` | Compression. Emits one `CompressionCheckpoint` per compression that evicts content — the Phase 1 seam, unchanged except that `stripFences` was made public for the worker |
+| `SummaryAgent` | `llm.summary_agent` | Compression. Emits one `CompressionCheckpoint` per compression that evicts content — the dialogue-index seam, unchanged except that `stripFences` was made public for the worker |
 | `ReasoningIndex` | `llm.rag.reasoning_index` | Agent-thread coordinator: checkpoint listener (project, filter, cap, budget, dispatch), read-only `r_`-only query dispatch with post-filtering, effective context cached at startup. Stateless — no dispose |
 | dialogue worker | `llm.rag.dialogue_worker` | Shared actor thread: `RiJob` handler, per-job spawned summarizer thread (LLM call off the mailbox), `RiRecord`/`RiDone` completion handling, bounded-join drain |
 | `queryReasoningHistory` | `llm.tool_call.reasoning` | Tool surface: parameter validation, session resolution, result rendering with the anti-anchoring annotation |
@@ -152,11 +152,11 @@ lifetime), and **per-job summarizer threads** (short-lived, one per `RiJob`,
 spawned by the worker).
 
 - All cross-thread communication is `std.concurrency` **value messages**:
-  the Phase 1 set (`DiJob`, `DiDrain`/`DiDrained`, `DiDegraded`) plus
+  the dialogue-index set (`DiJob`, `DiDrain`/`DiDrained`, `DiDegraded`) plus
   `RiJob` (a pre-formatted, pre-budgeted trace), and the `RiRecord`/`RiDone`
   completions. There is no shared mutable state and no lock.
 - The **checkpoint listener runs synchronously on the thread that is
-  compressing** (the agent thread), per the Phase 1 listener contract. It
+  compressing** (the agent thread), per the dialogue-index listener contract. It
   does pure CPU work only — projection, filters, per-entry caps, budget — and
   ends with one `send` of an `RiJob`. No I/O, no LLM call; O(n) string work
   with hard per-entry caps.
@@ -241,11 +241,11 @@ checkpoint that evicted reasoning.
 
 Two topic kinds share the topic namespace:
 
-- `d_` — a Phase 1 dialogue episode (verbatim evicted dialogue).
-- `r_` — a Phase 2 reasoning record (this feature).
+- `d_` — a dialogue episode (verbatim evicted dialogue).
+- `r_` — a reasoning record (this feature).
 
 `encodeTopicName(sessionId, turnStart, turnEnd, epochMillis, kind)` emits
-`d_` by default (byte-identical to Phase 1) and `r_` for
+`d_` by default (byte-identical to the dialogue encoder) and `r_` for
 `Kind.reasoning`; `decodeTopicName` recovers session id, turn range, epoch,
 and kind, and returns "none" for anything with an unknown prefix (such
 topics are dropped by every post-filter) — see `rag/dialogue_index.d:110-169`.
@@ -261,9 +261,9 @@ Two mechanisms keep the kinds apart at query time:
   dialogue episodes reports "no reasoning history" (and vice versa) even
   though the file is shared.
 
-The single-database choice was an open Phase 1 question ("is one DB per
-session enough for two kinds?"). It is **closed as adequate at Phase 2
-scale**: the cross-kind drop is exercised in both query paths (full-text and
+The single-database choice was an open question from the dialogue feature ("is one DB per
+session enough for two kinds?"). It is **closed as adequate for the reasoning
+feature**: the cross-kind drop is exercised in both query paths (full-text and
 semantic) by the integration suite, and sharing the DB also shares the WAL
 discipline, the single writer, and the drain. A separate reasoning DB would
 add a second writer/lifecycle for no measured benefit; escalate only if
@@ -299,11 +299,11 @@ order (`app_agent/package.d:818-850`):
    happen **before** step 2: the `DialogueIndex` constructor spawns the
    worker, and the worker needs the prompt as a spawn argument.
 2. **Create the `DialogueIndex`** with the extended constructor
-   (dialogue dir, `embedConfig`, the Phase 1 dialogue RAG config, a null
+   (dialogue dir, `embedConfig`, the dialogue RAG config, a null
    embedder factory, `llmConf.summaryModel`, the reasoning prompt, and a
    null summarizer). The constructor spawns the **shared worker** — now
-   Phase 2-aware — and exposes `workerTid` for the reasoning index. Register
-   the dialogue checkpoint listener (Phase 1) and expose the index to tools
+   reasoning-aware — and exposes `workerTid` for the reasoning index. Register
+   the dialogue checkpoint listener and expose the index to tools
    (`agent.toolContext().setDialogueIndex(...)`).
 3. **Create the `ReasoningIndex`** with the dialogue dir, the summary model
    config, and `dialogueIndex.workerTid`. The constructor resolves and
@@ -328,7 +328,7 @@ without a UI thread; only the UI sends are skipped.
 
 ### Indexing at a Compression Checkpoint
 
-**Triggers.** Compression triggers are unchanged from Phase 1 — context
+**Triggers.** Compression triggers are unchanged from the dialogue index — context
 usage over 90% (checked before each LLM request and inside the agent loop),
 an agent-initiated `requestCompression`, or the user's `/compact` (with the
 80% nudge encouraging proactive compression). The reasoning listener rides
@@ -483,7 +483,7 @@ in which the index could grow by re-summarizing its own output:
   `ToolResponse`s from `queryDialogueHistory` and `queryReasoningHistory` by
   exact tool name, so a record that was retrieved (and the dialogue quotes
   retrieved beside it) can never become input to a future reasoning record.
-  This is the Phase 2 analogue of the dialogue index's no-feedback-loop
+  This is the reasoning analogue of the dialogue index's no-feedback-loop
   exclusion.
 - **Summaries are markers, not content.** A merged compression summary
   carries the summary-marker save data and is excluded by the trace filter,
@@ -715,7 +715,7 @@ the table above.
   guarantee of insight.
 - **No sub-agent records.** Checkpoints without a session stamp are refused;
   sub-agent compressions carry none, so their reasoning is not indexed
-  (same as Phase 1's dialogue side).
+  (same as the dialogue index's side).
 - **No TTL in storage.** Records are never deleted; the `maxTurnAge`
   retrieval window bounds staleness at query time instead.
 - **Cross-kind combined queries stay out.** The two tools and the two
@@ -728,11 +728,11 @@ the table above.
   payloads during a compression burst. Both are bounded in practice by the
   compression cadence — revisit only if a burst is ever observed.
 - **Timestamp precision.** The epoch millis in an `r_` topic name is the
-  worker's clock at job receipt (the Phase 1 codec convention — the worker
+  worker's clock at job receipt (the dialogue codec convention — the worker
   clock, deliberately not the eviction timestamp); for records the
   difference is the mailbox latency.
 - **Unbounded mailbox.** The worker has no backpressure against the agent;
-  a long outage lets jobs pile up in memory (Phase 1 property, unchanged).
+  a long outage lets jobs pile up in memory (dialogue-index property, unchanged).
 
 **Evaluation.** Recall quality is covered by two layers. A scripted
 tool-level recall suite asserts that (a) a "why did you…" query retrieves
@@ -744,6 +744,6 @@ control). On top of that, a manual evaluation protocol is run at phase
 evaluation: a contradiction case (after a contradicting post-compression
 instruction, a retrieved past thought must not override it — the annotation
 plus the prompt rule) and a turns-to-solve delta on decision-heavy tasks
-versus the Phase 1 baseline (~30% drop target — reported, never asserted).
+versus the dialogue-only baseline (~30% drop target — reported, never asserted).
 A "violated" contradiction verdict is a quality regression to escalate, not
 a test failure.

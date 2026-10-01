@@ -5,7 +5,7 @@
 - add trace logging support to file
 - Max timeout when using -p
 - deep research
-- add a specific /code analyze mode to update a plan/code_analysis.md
+- add a specific /code analyze mode to update the code analysis document
 - move choosing a model to the menu
 - look at what claude code is doing with .claude/rules and CLAUDE.md
 - change the behavior of loading a .llmfun.yaml from the current directory if it exist to only doing it if the project is trusted
@@ -51,12 +51,12 @@
 
 - need a mode when I update the system design and/or implementation_plan. It should then use another type of prompt.
 
-- need to be restructured. First it should analyze the source code to understand the project. This should be written to a file in plan/. Then that is used by the system design step.
+- need to be restructured. First it should analyze the source code to understand the project. This should be written to a file in the run's workarea. Then that is used by the system design step.
 - there should be a plan execute
-- each implementation task should be written to its own file with enough information for the task to be finished. The current design force the LLM to read the whole `implementation_plan.md` before it can start on a task.
+- each implementation task should be written to its own file with enough information for the task to be finished. The current design force the LLM to read the whole implementation plan before it can start on a task.
 - there should be a mode where the pipeline execute all tasks and then optionally ask the user for input
 - there should be something like /plan update, which goes through the pipeline but with other steering prompt such that the LLM understand that it should fix things in the system design and implementation plan.
-- use the memory system for transporting "code/implementation.md" between agents. It should be a checksum of the implementation_plan.md
+- use the memory system for transporting the implementation document between agents. It should be a checksum of the implementation plan
 
 # rag
 - Add a warning when the DB is wiped. Need to add migration in the future.
@@ -69,10 +69,10 @@
 - add builtin image -> text -> rag. This should probably be stored as "image path", "description".
 
 # skills
-- Consider adding a `skill.load` metric event (tracked by `MetricMonitor`) to identify most-used skills. Deferred to P2 — requires designing the metric schema.
+- Consider adding a `skill.load` metric event (tracked by `MetricMonitor`) to identify most-used skills. Deferred — requires designing the metric schema.
 - If a skill-related bug prevents agent startup, users can set `disableSkills: true` in their YAML config to bypass all skill logic. This is the primary rollback mechanism.
-- Glob-Triggered Skill Activation (P2)
-- `allowed-tools` Permission Bypass (P2)
+- Glob-Triggered Skill Activation
+- `allowed-tools` Permission Bypass
 - skills should be part of the metrics that are collected. How often they are loaded etc
 - it should be possible to mark a skill, in the frontmatter, that it should not be shown in the system prompt (xml manifest). Only available for load on demand. But there need to be a way for the model to know there are "hidden tools" that it somehow can request the "frontmatter" for. If possible avoid creating a new tool for this but maybe that is required. Consider different design alternatives.
 - all skills should be added to the primary rag upon startup. Removed skills should be removed. But only if the RAG is not in-memory because otherwise it slows down startup. This is because the LLM do not always find the relevant information when it uses knowledge-retrieval because it is inside e.g. a skill's reference.
