@@ -8,6 +8,9 @@
 
 #include "imtui/imtui.h"
 #include "imtui/imtui-impl-text.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cwchar>
 
 #include <cmath>
 #include <algorithm>
@@ -15,8 +18,9 @@
 
 #define ABS(x) ((x >= 0) ? x : -x)
 
-void ScanLine(int x1, int y1, int x2, int y2, int ymax, std::vector<int> & xrange) {
-    int sx, sy, dx1, dy1, dx2, dy2, x, y, m, n, k, cnt;
+void ScanLine(float x1, int y1, float x2, int y2, int ymax, std::vector<float> & xrange) {
+    float sx, x;
+    int sy, dx1, dy1, dx2, dy2, y, m, n, k, cnt;
 
     sx = x2 - x1;
     sy = y2 - y1;
@@ -64,31 +68,70 @@ void ScanLine(int x1, int y1, int x2, int y2, int ymax, std::vector<int> & xrang
     }
 }
 
-static std::vector<int> g_xrange;
-
 void drawTriangle(ImVec2 p0, ImVec2 p1, ImVec2 p2, unsigned char col, ImTui::TScreen * screen) {
+    // LLMFUN PATCH: rasterize on the integer cell grid and count rows with the
+    // half-open interval [ymin, ymax). Previously (a) fractional vertex ys
+    // (e.g. the InputText caret/selection rects) set xrange at non-integer
+    // indices via xrange[2*y] with fractional y, and (b) ydelta =
+    // ymax-ymin+1 painted one extra row below widgets whose bottom edge lands
+    // exactly on a cell boundary: a 1-unit-tall rect covering row r painted
+    // rows r and r+1, so the InputText caret, the InputText field frame and
+    // CollapsingHeader were rendered 2 terminal rows tall instead of 1.
+    p0.y = std::floor(p0.y);
+    p1.y = std::floor(p1.y);
+    p2.y = std::floor(p2.y);
+
     int ymin = std::min(std::min(std::min((float) screen->size(), p0.y), p1.y), p2.y);
-    int ymax = std::max(std::max(std::max(0.0f, p0.y), p1.y), p2.y);
+    float ymax = std::max(std::max(std::max(0.0f, p0.y), p1.y), p2.y);
 
-    int ydelta = ymax - ymin + 1;
+    // LLMFUN PATCH: ceil the fractional ymax so the bottom row of a widget
+    // whose bottom edge lands inside a cell (e.g. the scrollbar track's
+    // bottom edge at y = 19.5 covering the top half of cell 19) is painted.
+    // Truncation dropped that row: ydelta = (int)19.5 - 1 = 18 painted rows
+    // 1..18 instead of 1..19.
+    int ydelta = (int) std::ceil(ymax) - ymin;
+    // LLMFUN PATCH: a triangle whose three vertices share one y after
+    // flooring (e.g. the horizontal scrollbar grab / edge lines, which have
+    // zero height in the ImGui coordinate space) got ydelta == 0:
+    // ScanLine stored no spans and the paint loop painted no rows, so every
+    // degenerate-height rect rendered invisibly in the text backend while
+    // the vertical scrollbar worked. Paint one row covering the triangle
+    // full x-extent.
+    if (ydelta == 0) ydelta = 1;
 
-    if ((int) g_xrange.size() < 2*ydelta) {
-        g_xrange.resize(2*ydelta);
+    // LLMFUN PATCH: per-triangle span buffer. Each triangle rasterizes into
+    // its own xrange sized [0, ydelta) and paints only its own spans, so
+    // overlapping triangles keep painter's order (the last triangle to touch
+    // a cell wins). A frame-wide static that accumulated all triangles'
+    // spans made every triangle paint the union of all previous triangles'
+    // extents, so e.g. the scrollbar track (rows 19-20) was repainted by
+    // the later full-width window-background triangles with the window
+    // color and vanished.
+    std::vector<float> xrange(2*ydelta, 0.0f);
+    for (int y = 0; y < ydelta; y++) {
+        xrange[2*y+0] = 999999;
+        xrange[2*y+1] = -999999;
     }
 
-    for (int y = 0; y < ydelta; y++) {
-        g_xrange[2*y+0] = 999999;
-        g_xrange[2*y+1] = -999999;
-    }
-
-    ScanLine(p0.x, p0.y - ymin, p1.x, p1.y - ymin, ydelta, g_xrange);
-    ScanLine(p1.x, p1.y - ymin, p2.x, p2.y - ymin, ydelta, g_xrange);
-    ScanLine(p2.x, p2.y - ymin, p0.x, p0.y - ymin, ydelta, g_xrange);
+    ScanLine(p0.x, p0.y - ymin, p1.x, p1.y - ymin, ydelta, xrange);
+    ScanLine(p1.x, p1.y - ymin, p2.x, p2.y - ymin, ydelta, xrange);
+    ScanLine(p2.x, p2.y - ymin, p0.x, p0.y - ymin, ydelta, xrange);
 
     for (int y = 0; y < ydelta; y++) {
-        if (g_xrange[2*y+1] >= g_xrange[2*y+0]) {
-            int x = g_xrange[2*y+0];
-            int len = 1 + g_xrange[2*y+1] - g_xrange[2*y+0];
+        if (xrange[2*y+1] >= xrange[2*y+0]) {
+            // nearbyint(xmax)) on the float per-row span, with banker's
+            // rounding (ties to even) for fractional edges. ScanLine now
+            // stores per-row [xmin, xmax] as floats: a 0.5-unit-wide
+            // scrollbar track at x [78.5, 79.0) maps to cells [78, 79) =
+            // cell 78 only, and its degenerate right-edge line [79.0, 79.0]
+            // maps to zero cells (invisible). Ties (x.5) round to even, so
+            // the 6-px scrollbar grab [31.5, 37.5) stays 6 cells (32..37)
+            // and the horizontal scrollbar [30.0, 78.5) stays 48 cells
+            // (30..77).
+            int xs = (int) std::nearbyint(xrange[2*y+0]);
+            int xe = (int) std::nearbyint(xrange[2*y+1]);
+            int len = xe - xs;
+            int x = xs;
 
             while (len--) {
                 if (x >= 0 && x < screen->nx && y + ymin >= 0 && y + ymin < screen->ny) {
@@ -154,6 +197,10 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
     // Will project scissor/clipping rectangles into framebuffer space
     ImVec2 clip_off = drawData->DisplayPos;         // (0,0) unless using multi-viewports
     ImVec2 clip_scale = drawData->FramebufferScale; // (1,1) unless using retina display which are often (2,2)
+
+    // LLMFUN PATCH: clear the per-row triangle spans once per frame so all
+    // triangles accumulate into the same buffer (drawTriangle only
+    // initializes rows newly added by its resize).
 
     // Render command lists
     for (int n = 0; n < drawData->CmdListsCount; n++)
@@ -289,6 +336,12 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
 }
 
 bool ImTui_ImplText_Init() {
+    // LLMFUN PATCH (imtui): opt this imgui build into the imtui text-backend
+    // behavior (UTF-8 vertex-color encoding, unit-cell glyph quads, caret and
+    // arrow tuning). A GPU backend (e.g. OpenGL) sharing this imgui build never
+    // sets the flag and gets unmodified upstream behavior — see the declaration
+    // in imgui.h.
+    ImTui_TextEncodingActive = true;
     ImGui::GetStyle().Alpha                   = 1.0f;
     ImGui::GetStyle().WindowPadding           = ImVec2(0.5f, 0.0f);
     ImGui::GetStyle().WindowRounding          = 0.0f;
@@ -333,8 +386,11 @@ bool ImTui_ImplText_Init() {
 
     ImFontConfig fontConfig;
     fontConfig.GlyphMinAdvanceX = 1.0f;
-    fontConfig.SizePixels = 1.00;
-    ImGui::GetIO().Fonts->AddFontDefault(&fontConfig);
+    fontConfig.SizePixels = 1.00f;
+    // 1.92's AddFontDefault() dispatches to the scalable vector font at normal
+    // context font sizes; imtui needs the 1px ProggyClean bitmap and the legacy
+    // atlas path (RendererHasTextures unset, GetTexDataAsRGBA32 below).
+    ImGui::GetIO().Fonts->AddFontDefaultBitmap(&fontConfig);
 
     // Build atlas
     unsigned char* tex_pixels = NULL;

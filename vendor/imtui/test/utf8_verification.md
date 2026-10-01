@@ -246,3 +246,80 @@ Conclusion (documented limitation of the P3 opt-in):
   inherent terminal-capability mismatch, so the gate remains opt-in. The
   default (unset) remains the guaranteed-aligned P0 behavior on every
   terminal.
+
+## Task 9 (P1): behavior-delta audit 1.81 → 1.92 — dispositions
+
+Audit of the silent behavior changes the D6 test suite cannot pin (upgrade-plan
+Task 9). Everything this document describes (scrollbar-column alignment, VS16
+folding, mark merge, ncurses fold-row redraw) is produced by the **1.92-based
+patch**: the vendored tree is now ImGui 1.92.9b with the llmfun patches
+re-applied (upgrade-plan Tasks 2–3, commits 32edd41/421cd80), superseding the
+1.81-era patch. Trees compared: 1.81 patched
+(`git show ee53c46^:vendor/imtui/third-party/imgui/imgui/imgui_draw.cpp`),
+1.92 patched (`vendor/imtui/third-party/imgui/imgui/imgui_draw.cpp`), 1.92
+stock (`/imgui/` staged tree).
+
+1. **Pixel-snap delta — ACCEPTED (no fix needed).** Stock 1.92 is NEW here:
+   both `ImFont::RenderText` (imgui_draw.cpp 6088–6092) and
+   `ImFont::RenderChar` (6046–6050) truncate the text *origin*
+   (`x = IM_TRUNC(x); y = IM_TRUNC(y);`) unless the draw-list sets
+   `ImDrawListFlags_TextNoPixelSnap` (imgui.h:3315); the 1.81 tree has no
+   origin snapping at all (zero `IM_TRUNC` in its imgui_draw.cpp). The llmfun
+   patch touches neither snap site and never sets the flag, so stock-1.92
+   origin snapping is active in the TUI. Benign: the patch emits per-glyph
+   quads at exact pen positions (vtx_write[0..3] written directly; 1.92 snaps
+   only the AddText origin, never per-glyph positions), so only the line START
+   can move — and pen origins are integral on every real path (x advances by
+   `cw*scale` with cw integral; y advances by `line_height = size` with the
+   SizePixels=1.00 default font; window/clip origins integer), making IM_TRUNC
+   a no-op; a hypothetical fractional origin would be truncated onto the cell
+   grid, which agrees with the text backend's integer cell decode — it cannot
+   misalign cells. Task 7/8 gates ran green with snapping active.
+
+2. **Glyph-quad geometry / cell-mapping defaults — FIXED by the re-port.**
+   Stock 1.92 builds the per-glyph quad from the glyph box (`x1 = x +
+   glyph->X0*scale … y2 = y + glyph->Y1*scale`, stock imgui_draw.cpp
+   5934–5937): for cell-sized bitmap glyphs the 6-vertex average is
+   (x+0.5, y+0.5), and the text backend's 6-vertex-average + (+1, +0.5) decode
+   lands every text cell at (pen+1, pen+1) — the +1 row shift. The 1.81 patch
+   replaced that with the flat unit-cell contract (`x1 = x; x2 = x + 1.0f;
+   y1 = y2 = y - 0.5f`, 1.81 patched tree 3863–3866); the 1.92 re-port
+   (vendored 6337–6340) is identical, so Y-avg = y−0.5 cancels the backend's
+   +0.5 → cell = (pen x, pen y), X-avg = x+0.5 → cell = pen+1 (col 0 = window
+   margin). Cell mapping unchanged from 1.81, verified against both trees; no
+   ImGuiStyle default feeds the glyph quad (offsets come from glyph metrics in
+   RenderText/RenderChar — the only geometry-relevant default delta is item 1).
+
+3. **R3 (wrap measures a folded VS16 pair as 1 cell while the pen advances 2)
+   — carried over UNCHANGED (verified).** The wrap helper is stock in both
+   eras (1.81 `CalcWordWrapPositionA`, imgui_draw.cpp:3394; 1.92
+   `ImFontCalcWordWrapPositionEx`, vendored 5818 — no IMTUI hooks) and measures
+   per-codepoint glyph advances (IndexAdvanceX/fallback, 5869–5871), never the
+   IMTUI cell-width table; patched RenderText advances the pen by the table
+   width (1.81:3570 / 1.92:6221–6222) and a P3-folded pair by 2 cells (6311).
+   The 1.81 patch header carries the same caveat verbatim (1.81 line 80, under
+   the 1.81 names CalcTextSizeA/CalcWordWrapPositionA). Bounded consequence:
+   per-row terminal alignment stays correct (ncurses chwidth cursor compensation
+   plus the fold rule's extra pen advance); only text-size-derived layout of a
+   folding row (word-wrap position / CalcTextSize) can come up 1 col short per
+   promoted pair, and a word-wrapped folding row can overflow its wrap width
+   by 1 per promoted pair.
+
+4. **R4 (`RenderChar` ellipsis path unencoded) — carried over UNCHANGED
+   (verified).** `ImFont::RenderChar` (1.92: 6035–6076) has no IMTUI markers —
+   it emits stock per-glyph geometry via `PrimRectUV` with no vertex-color
+   encoding, same as 1.81 (~3453). A dropped-in ellipsis would decode as
+   color→cell character (U+2026 is table width 1, so the skip rule does not
+   catch it) — known limitation, documented in the patch itself (vendored
+   6407–6412); not exercised by llmfun_tui's llm_output child.
+
+No imgui_draw.cpp change was warranted: item 2 is already fixed by the
+re-port; items 1, 3, 4 are accepted-by-design with the rationale above.
+
+Regression (2026-09-29, no code changed by this task): `make -f tui.mak`
+exit 0 (binaries current); the 4 cpp_tui harness binaries exit 0;
+`imtui_utf8_grid_test` exit 0 in default AND
+`LLMFUN_IMTUI_EMOJI_PRESENTATION=1` modes (0 failures);
+`imtui_ncurses_fold_redraw_test` bare exit 1 (expected without a PTY),
+`perl /workarea/scratch_fold_replay.pl` PASS (3 and 4 frames) exit 0;
+`dub test` 606 passed, 0 failed.

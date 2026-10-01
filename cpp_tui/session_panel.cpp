@@ -435,7 +435,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
     // keeps C10's filterSeq bump firing on the Esc frame (S18).
     const bool filterRevertedEmpty = panel.filterNonEmptyLastFrame && isWhitespaceOnly(filterQuery);
     if (!panel.renameActive && (!isWhitespaceOnly(filterQuery) || filterRevertedEmpty) &&
-        ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape))) {
+        ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         clearFilter(panel);
         log("session panel: filter cleared (Escape)\n");
     }
@@ -585,7 +585,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
                 // the query input); acceptable, because Escape has no other
                 // TUI binding - the filter clear (A23) is gated on
                 // !renameActive - and canceling the rename is the safe action.
-                const bool esc = ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape));
+                const bool esc = ImGui::IsKeyPressed(ImGuiKey_Escape);
                 if (esc) {
                     panel.renameActive = false;
                     panel.renameFocus = false;

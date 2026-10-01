@@ -388,15 +388,9 @@ void initMarkdownConfig(TuiState& state) {
     mdConfig.linkCallback = &markdownLinkCallback;
 
     // TODO: This must be a runtime parameter because it is different depending on backend
-#ifdef IMGUI_HAS_TEXTURES // used to detect dynamic font capability
-    mdConfig.headingFormats[0] = {nullptr, true, fontSize * 1.1f};
-    mdConfig.headingFormats[1] = {nullptr, true, fontSize};
-    mdConfig.headingFormats[2] = {nullptr, false, fontSize};
-#else
     mdConfig.headingFormats[0] = {nullptr, true};
     mdConfig.headingFormats[1] = {nullptr, true};
     mdConfig.headingFormats[2] = {nullptr, false};
-#endif
     mdConfig.userData = &state;
     mdConfig.formatCallback = &markdownFormatCallback;
 }
@@ -570,7 +564,7 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
 
         if (!state.readyStatus) {
-            ImGui::Text("%s%ds", "Thinking ",
+            ImGui::Text("%s%lds", "Thinking ",
                         (std::chrono::system_clock::now() - state.startProcesssingTime).count() /
                             1000000000);
             ImGui::TextUnformatted("");
@@ -674,7 +668,7 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         // activation (e.g. after a Prev-button history recall). Override here,
         // AFTER the widget call so this clear wins over the cancel_edit
         // restore: clear the field and leave history navigation.
-        if (inputActive && ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape), false)) {
+        if (inputActive && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             state.userQuery.inputBuf.clear();
             state.userQuery.historyPos = -1;
             state.userQuery.draftBuf.clear();
@@ -719,6 +713,14 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
     auto statusLine = [&state, &DisplaySize]() {
         static constexpr std::string_view defaultStatus =
             "Context: 0/0 tokens | Model: none | Ready";
+
+        // Pin to the bottom-left cell. The Send/Prev/Next group is opened
+        // after a SameLine() call; on 1.92 EndGroup restores the same-line
+        // bookkeeping (window->DC.IsSameLine) along with the cursor, so the
+        // status text that follows the group is placed at the group's right
+        // edge and clipped off the terminal. Whatever cursor state the group
+        // leaves behind, the status must sit at the bottom-left cell.
+        ImGui::SetCursorPos(ImVec2(0.0f, DisplaySize.y - 1.0f));
 
         if (state.statusText.empty()) {
             ImGui::TextUnformatted(defaultStatus.data());

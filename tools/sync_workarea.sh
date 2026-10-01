@@ -1,4 +1,4 @@
-#!/bin/bash -ex
+#!/bin/bash -x
 
 rsync --delete -a .git/ llmfun/workarea/llmfun/.git/
 pushd llmfun/workarea/llmfun/

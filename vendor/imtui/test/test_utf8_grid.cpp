@@ -379,6 +379,11 @@ static const int kChildHeight = 8;
 static const int kScreenW = 80;
 static const int kScreenH = 24;
 
+// (g2) wrap-probe: 40 'a's + a trailing combining mark; PushTextWrapPos(10)
+// wraps after every 10 cells, so the mark always follows a word-wrap break.
+static const char kWrapProbe[] =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u0301";
+
 // ---------------------------------------------------------------------------
 // Check framework
 // ---------------------------------------------------------------------------
@@ -675,6 +680,109 @@ int main()
         }
     }
 
+
+    // --- (g) line-break fold barrier (review regression case) ---------------
+    // RenderText("ab\n<U+0301>") as ONE call: the '\n' must clear lastQuad so
+    // a following combining mark cannot fold into row 0's 'b' cell (folding
+    // mode). Fails pre-fix: the mark folds into the previous line's last
+    // quad ('b' + accent on the wrong row). '\r' and word-wrap breaks get the
+    // same clears; the wrap case is asserted by (g2) below.
+    {
+        const ImGuiWindowFlags rootFlagsG = ImGuiWindowFlags_NoResize |
+                                            ImGuiWindowFlags_NoTitleBar |
+                                            ImGuiWindowFlags_NoMove |
+                                            ImGuiWindowFlags_NoScrollbar |
+                                            ImGuiWindowFlags_NoScrollWithMouse |
+                                            ImGuiWindowFlags_NoBackground;
+        // (g) renders into a CLEAN grid: the TScreen is shared across all
+        // test blocks and nothing wipes it between them, so the fixture
+        // block's kRows[1] cells ("e" + combining mark / ZWJ) would linger
+        // in row 1 and fail the row-1-empty assert below for reasons
+        // unrelated to the '\n' fold barrier under test. (g2) is wiped below
+        // too: its own renders cover only its wrapped text cells (rows 0-3,
+        // cols 0-9; the backend writes no blanks), while its fold-leak scan
+        // reads all 8 rows x 80 cols, so without the wipes it would be
+        // silently order-dependent on prior blocks' residue.
+        screen.clear();
+        for (int frame = 0; frame < 2; ++frame)
+        {
+            ImTui_ImplText_NewFrame();
+            ImGui::NewFrame();
+            ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2((float)kScreenW, (float)kScreenH),
+                                     ImGuiCond_Always);
+            ImGui::Begin("##TuiRootG", nullptr, rootFlagsG);
+            ImGui::SetCursorPos(ImVec2(0, 0));
+            ImGui::BeginChild("llm_output_g", ImVec2((float)kChildWidth,
+                              (float)kChildHeight),
+                              false, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::TextUnformatted("ab\n\u0301");
+            ImGui::EndChild();
+            ImGui::End();
+            ImGui::Render();
+            ImTui_ImplText_RenderDrawData(ImGui::GetDrawData(), &screen);
+        }
+
+        // Row 0 is exactly "ab": the mark must NOT fold into the row-0 'b'
+        // cell (ch2 stays 0 even in folding mode) and must not create a cell.
+        {
+            const int row = 0;
+            const int b_col = rowLastTextCol(screen, row);
+            check(b_col >= 0 && screen.data[row * screen.nx + b_col].ch == 'b' &&
+                  screen.data[row * screen.nx + b_col].ch2 == 0,
+                  "(g) 'ab\\n<U+0301>': row-0 'b' cell keeps ch2 == 0 (fails "
+                  "pre-fix in folding mode: mark folded into it)");
+            bool row1_text = false;
+            for (int x = 0; x < screen.nx; ++x)
+                if (isTextCell(screen.data[1 * screen.nx + x])) // row 1 (the `row` above is the row-0 assert's variable, 0)
+                    row1_text = true;
+            check(!row1_text,
+                  "(g) 'ab\\n<U+0301>': the mark does not move/create rows (row 1 empty)");
+        }
+
+        // (g2) word-wrap break fold barrier: the long row wraps at 10 cells
+        // and the trailing combining mark follows the wrap break — it must
+        // not fold into the last 'a' cell of the final wrapped row.
+        // (g2) also starts from a CLEAN grid (screen.clear() below): its own
+        // renders cover only its wrapped text cells (rows 0-3, cols 0-9; the
+        // backend writes no blanks), while its fold-leak scan reads all 8
+        // rows x 80 cols — without the wipe it would be silently
+        // order-dependent on prior blocks' residue.
+        screen.clear();
+        for (int frame = 0; frame < 2; ++frame)
+        {
+            ImTui_ImplText_NewFrame();
+            ImGui::NewFrame();
+            ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2((float)kScreenW, (float)kScreenH),
+                                     ImGuiCond_Always);
+            ImGui::Begin("##TuiRootG2", nullptr, rootFlagsG);
+            ImGui::SetCursorPos(ImVec2(0, 0));
+            ImGui::BeginChild("llm_output_g2", ImVec2((float)kChildWidth,
+                              (float)kChildHeight),
+                              false, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::PushTextWrapPos(10.0f);
+            ImGui::TextUnformatted(kWrapProbe);
+            ImGui::PopTextWrapPos();
+            ImGui::EndChild();
+            ImGui::End();
+            ImGui::Render();
+            ImTui_ImplText_RenderDrawData(ImGui::GetDrawData(), &screen);
+        }
+        {
+            bool fold_leak = false;
+            for (int y = 0; y < kChildHeight; ++y)
+                for (int x = 0; x < screen.nx; ++x)
+                {
+                    const ImTui::TCell& c = screen.data[y * screen.nx + x];
+                    if (c.ch == 0x0301 || c.ch2 == 0x0301)
+                        fold_leak = true;
+                }
+            check(!fold_leak,
+                  "(g2) wrap-break fold barrier: trailing U+0301 never folds "
+                  "(fails pre-fix: folded into the last wrapped row's 'a')");
+        }
+    }
     printf("\n%s (%d failure%s)\n",
            g_failures == 0 ? "ALL CHECKS PASSED" : "CHECKS FAILED",
            g_failures, g_failures == 1 ? "" : "s");

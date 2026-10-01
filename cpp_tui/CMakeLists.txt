@@ -76,6 +76,11 @@ add_executable(imtui_utf8_grid_test
 target_link_libraries(imtui_utf8_grid_test PRIVATE imtui)
 
 # ncurses fold-row rewrite regression test. The binary drives the REAL ncurses backend (ImTui_ImplNcurses_DrawScreen) with a folded VS16 pair row across four frames of content changes. It must run on a PTY, so it is spawned and its raw output stream replayed by ../vendor/imtui/test/test_ncurses_fold_redraw.py (wired into build_test.py); the replayer models a VS16-clustering terminal and asserts the final row.
+add_executable(imtui_arrow_text_channel_test
+    ../vendor/imtui/test/test_arrow_text_channel.cpp
+)
+target_link_libraries(imtui_arrow_text_channel_test PRIVATE imtui)
+
 add_executable(imtui_ncurses_fold_redraw_test
     ../vendor/imtui/test/test_ncurses_fold_redraw.cpp
 )

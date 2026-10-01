@@ -4,11 +4,11 @@
 // A29) and the filter nav-focus hardening (Phase 4, Task 11, A31).
 //
 // It drives the REAL TuiState through the same frame pipeline as main.cpp,
-// with the ncurses backend replaced by an equivalent per-frame io reset
-// (mirror of ImTui_ImplNcurses_NewFrame's input handling, imtui-impl-
-// ncurses.cpp:208-317, without a terminal):
+// with the ncurses backend replaced by an equivalent injector (mirror of
+// ImTui_ImplNcurses_NewFrame's input handling, imtui-impl-ncurses.cpp:202-
+// 333, without a terminal): keys/mods go through the 1.87+ event queue —
 //
-//     [io reset: KeysDown / KeyCtrl / KeyShift / mouse / DeltaTime]
+//     [io: DeltaTime; keys & mods via the 1.87+ event queue]
 //     [inject: keys / chars / mouse]
 //     ImTui_ImplText_NewFrame()
 //     ImGui::NewFrame()
@@ -17,8 +17,8 @@
 //     ImTui_ImplText_RenderDrawData(drawData, screen)  // into TScreen grid
 //
 // Same pattern as plan/task10/render_check.cpp (text backend only, no PTY).
-// The KeyMap table copied from ImTui_ImplNcurses_Init keeps pressKey()
-// semantics identical to the real app. Fixed 80x24 DisplaySize = the PTY
+// pressKey() emits the same down+up AddKeyEvent pair per reported event
+// that the real ncurses backend produces. Fixed 80x24 DisplaySize = the PTY
 // winsize the real app gets in an 80x24 terminal.
 //
 // A click is two frames: MouseDown on frame N, MouseUp on frame N+1 at the
@@ -41,6 +41,13 @@
 #include "imtui/imtui.h"
 
 #include "imgui/imgui_internal.h"
+
+// 1.92 moved ImStbTexteditState into the private imstb_textedit.h (imgui_internal.h
+// only forward-declares it) — needed for the S10 white-box pre-selection assert.
+// imgui_widgets.cpp includes it inside namespace ImStb; mirror that exactly.
+namespace ImStb {
+#include "imgui/imstb_textedit.h"
+}
 
 #include "tui.h"
 
@@ -141,13 +148,27 @@ int findRow(const Grid& g, const std::string& needle, int x0 = 0, int x1 = -1) {
     return -1;
 }
 
+// firstNonSpace: despite the name, this skips *blank* cells (NUL or space) and
+// returns the first drawn cell; a rendered space still counts as content.
 int firstNonSpace(const Grid& g, int y, int x0 = 0) {
     for (int x = x0; x < g.nx; ++x) {
         int c = g.ch[y * g.nx + x];
-        if (c != 0)
+        if (c != 0 && c != ' ')
             return x;
     }
     return -1;
+}
+
+// A session row renders as "<id> [<n>]"; the filter's "[c]" button must not
+// trip this check, so require a digit inside the brackets.
+bool hasSessionStyleBracket(const Grid& g) {
+    for (int y = 0; y < g.ny; ++y) {
+        const int* row = &g.ch[y * g.nx];
+        for (int x = 0; x + 2 < g.nx; ++x)
+            if (row[x] == '[' && row[x + 1] >= '0' && row[x + 1] <= '9' && row[x + 2] == ']')
+                return true;
+    }
+    return false;
 }
 
 unsigned char fgAt(const Grid& g, int x, int y) { return g.fg[y * g.nx + x]; }
@@ -190,15 +211,10 @@ bool allRowsValidUtf8(const Grid& g, const char* tag) {
 void frame(const std::function<void(ImGuiIO&)>& inject = nullptr) {
     g_phase = "frame driver";
     // Per-frame input state: mirror ImTui_ImplNcurses_NewFrame (imtui-impl-
-    // ncurses.cpp:208-317) without a terminal — clear the 512-key state,
-    // drop modifiers, mouse at (0,0) with no buttons, 60fps active delta.
+    // ncurses.cpp:202-333) without a terminal — DeltaTime only; key/mod/
+    // mouse state is delivered via the 1.87+ event queue (AddKeyEvent/
+    // AddMousePosEvent/AddMouseButtonEvent), nothing is reset per frame.
     ImGuiIO& io = ImGui::GetIO();
-    std::fill(io.KeysDown, io.KeysDown + 512, 0);
-    io.KeyCtrl = false;
-    io.KeyShift = false;
-    io.MousePos = ImVec2(0.0f, 0.0f);
-    io.MouseDown[0] = false;
-    io.MouseDown[1] = false;
     io.DeltaTime = 1.0f / 60.0f;
     if (inject)
         inject(io);
@@ -217,15 +233,15 @@ void idle(int n = 1) {
 }
 
 void pressKey(ImGuiKey k) {
-    frame([&](ImGuiIO& io) { io.KeysDown[io.KeyMap[k]] = true; });
-    // Release frame: a physical key press is down for ~1 frame, then up.
-    // Without the up frame, io.KeysDownDuration keeps accumulating across
-    // consecutive presses (NewFrame only resets it to -1 when it observes
-    // the key up), so IsKeyPressed's press-edge (duration == 0) would fire
-    // for the first press only — the real ncurses backend naturally
-    // produces the down->up sequence (getch sees the key absent on the
-    // following frame, imtui-impl-ncurses.cpp:208-317).
-    frame();
+    // Down frame: the event queue receives the down event; trickle
+    // (ConfigInputTrickleEventQueue) applies it during NewFrame, and
+    // IsKeyPressed's press-edge fires on this frame.
+    frame([&](ImGuiIO& io) { io.AddKeyEvent(k, true); });
+    // Release frame: a physical key press is down for ~1 frame, then up
+    // (same semantics the real ncurses backend produces: a down+up pair per
+    // reported event, imtui-impl-ncurses.cpp:278-279, trickled across two
+    // frames).
+    frame([&](ImGuiIO& io) { io.AddKeyEvent(k, false); });
 }
 
 void typeUtf8(const std::string& s) {
@@ -238,10 +254,13 @@ void typeAll(const std::string& s) {
         if (c < 0x80) {
             unsigned short uc = c;
             frame([&](ImGuiIO& io) {
-                // Mirror the ncurses backend: space also sets KeysDown[32]
-                // (imtui-impl-ncurses.cpp:294-301) alongside the character.
-                if (uc == 32)
-                    io.KeysDown[32] = true;
+                // Mirror the ncurses backend: space is also a key press — a
+                // down+up pair (imtui-impl-ncurses.cpp:316-318) alongside the
+                // character. Trickle lands down on this frame, up on the next.
+                if (uc == 32) {
+                    io.AddKeyEvent(ImGuiKey_Space, true);
+                    io.AddKeyEvent(ImGuiKey_Space, false);
+                }
                 io.AddInputCharacter(uc);
             });
             ++i;
@@ -912,11 +931,11 @@ void scenario10_esc_priority() {
     }
     {
         ImGuiContext& g = *ImGui::GetCurrentContext();
-        if (g.InputTextState.Stb.select_start != 0 || g.InputTextState.Stb.select_end != 14)
+        if (g.InputTextState.Stb->select_start != 0 || g.InputTextState.Stb->select_end != 14)
             fail("S10: code-focused rename input is not pre-selected "
                  "(select " +
-                 std::to_string(g.InputTextState.Stb.select_start) + ".." +
-                 std::to_string(g.InputTextState.Stb.select_end) + ")");
+                 std::to_string(g.InputTextState.Stb->select_start) + ".." +
+                 std::to_string(g.InputTextState.Stb->select_end) + ")");
     }
     frame([](ImGuiIO& io) { io.AddInputCharacter('!'); });
     idle(1);
@@ -1300,11 +1319,16 @@ void scenario22_empty_snapshot() {
         Grid g = grid();
         if (findRow(g, "no matches") >= 0)
             fail("S22: 'no matches' shown for an empty snapshot");
-        if (findRow(g, " [") >= 0)
+        if (findRow(g, " [") >= 0 && hasSessionStyleBracket(g))
             fail("S22: a session row rendered from an empty snapshot");
         if (sepRowY() < 0)
             fail("S22: panel header missing for an empty snapshot");
         allRowsValidUtf8(g, "S22");
+        int sy = findRow(g, "Context: 0/0 tokens");
+        if (sy < 0)
+            fail("S22: status line not rendered");
+        if (sy != g.ny - 1)
+            fail("S22: status line not on the last row (row " + std::to_string(sy) + ")");
     }
     resetClean();
 }
@@ -1335,10 +1359,10 @@ void scenario23_log_lines() {
 // ------------------------------------------------------------------ harness
 // init/shutdown: mirror llmfun::tui::tuiInit/tuiShutdown minus the ncurses
 // terminal (no initscr/getmaxyx/DrawScreen). Same context + theme + text
-// backend setup, and the exact KeyMap table ImTui_ImplNcurses_Init installs
-// (imtui-impl-ncurses.cpp:123-147) so pressKey() maps to the same
-// io.KeysDown indices as the real app. DisplaySize is fixed at 80x24 — the
-// PTY winsize the real app receives in an 80x24 terminal.
+// backend setup as the real app. No legacy key map: it is gone in 1.92 — pressKey()
+// passes ImGuiKey_* values directly via io.AddKeyEvent, emitting the same
+// down+up pairs the real backend produces. DisplaySize is fixed at 80x24 —
+// the PTY winsize the real app receives in an 80x24 terminal.
 
 void harnessInit() {
     std::setlocale(LC_ALL, "");
@@ -1347,28 +1371,6 @@ void harnessInit() {
     llmfun::tui::applyTheme();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
-    io.KeyMap[ImGuiKey_Tab] = 9;
-    io.KeyMap[ImGuiKey_LeftArrow] = 260;
-    io.KeyMap[ImGuiKey_RightArrow] = 261;
-    io.KeyMap[ImGuiKey_UpArrow] = 259;
-    io.KeyMap[ImGuiKey_DownArrow] = 258;
-    io.KeyMap[ImGuiKey_PageUp] = 339;
-    io.KeyMap[ImGuiKey_PageDown] = 338;
-    io.KeyMap[ImGuiKey_Home] = 262;
-    io.KeyMap[ImGuiKey_End] = 360;
-    io.KeyMap[ImGuiKey_Insert] = 331;
-    io.KeyMap[ImGuiKey_Delete] = 330;
-    io.KeyMap[ImGuiKey_Backspace] = 263;
-    io.KeyMap[ImGuiKey_Space] = 32;
-    io.KeyMap[ImGuiKey_Enter] = 10;
-    io.KeyMap[ImGuiKey_Escape] = 27;
-    io.KeyMap[ImGuiKey_KeyPadEnter] = 343;
-    io.KeyMap[ImGuiKey_A] = 1;
-    io.KeyMap[ImGuiKey_C] = 3;
-    io.KeyMap[ImGuiKey_V] = 22;
-    io.KeyMap[ImGuiKey_X] = 24;
-    io.KeyMap[ImGuiKey_Y] = 25;
-    io.KeyMap[ImGuiKey_Z] = 26;
     io.KeyRepeatDelay = 0.050f;
     io.KeyRepeatRate = 0.050f;
     ImTui_ImplText_Init();

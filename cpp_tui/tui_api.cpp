@@ -156,6 +156,10 @@ void tuiBackendNewFrame(void) {
     }
     ImTui_ImplNcurses_NewFrame();
     ImTui_ImplText_NewFrame();
+    // fprintf(stderr, "[style@draw] NavCursor=%08x ScrollbarGrab=%08x Button=%08x\n",
+    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_NavCursor]),
+    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_ScrollbarGrab]),
+    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_Button]));
     ImGui::NewFrame();
 }
 
