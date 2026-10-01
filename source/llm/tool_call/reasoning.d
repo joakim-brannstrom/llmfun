@@ -49,8 +49,9 @@ struct QueryReasoningHistoryParams {
         ~ "decisions from compressed context. Use ONLY when the user asks "
         ~ "why a past decision was made, or when you have tried multiple "
         ~ "approaches and suspect you are stuck repeating one. Not for "
-        ~ "verbatim quotes — use queryDialogueHistory.")
-ExecuteFuncResult queryReasoningHistory(Context baseCtx, QueryReasoningHistoryParams params) {
+        ~ "verbatim quotes - use queryDialogueHistory", tags:
+        ["reasoning"]) ExecuteFuncResult queryReasoningHistory(Context baseCtx,
+        QueryReasoningHistoryParams params) {
     import llm.rag.database : cleanFts5;
 
     mixin(baseContextToSpecific!ReasoningContext);

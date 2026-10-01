@@ -100,8 +100,8 @@ DO NOT store:
 - Common knowledge that doesn't require lookup
 - Temporary session-specific state
 - Information already in the RAG index
-- Speculative ideas that haven't been verified`)
-ExecuteFuncResult writeMemory(Context baseCtx, WriteMemoryParams params) {
+- Speculative ideas that haven't been verified`, tags:
+        ["memory"]) ExecuteFuncResult writeMemory(Context baseCtx, WriteMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 
     if (auto e = checkTopic(ctx, params.topic))
@@ -123,8 +123,8 @@ struct ReadMemoryParams {
     string topic;
 }
 
-@Function("Retrieve stored memory from past self about a topic")
-ExecuteFuncResult readMemory(Context baseCtx, ReadMemoryParams params) {
+@Function("Retrieve stored memory from past self about a topic", tags:
+        ["memory"]) ExecuteFuncResult readMemory(Context baseCtx, ReadMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 
     if (auto e = checkTopic(ctx, params.topic))
@@ -146,8 +146,9 @@ struct RemoveMemoryParams {
     string topic;
 }
 
-@Function("Remove a memory that is no longer useful such as temporary notes about a topic")
-ExecuteFuncResult removeMemory(Context baseCtx, RemoveMemoryParams params) {
+@Function("Remove a memory that is no longer useful such as temporary notes about a topic",
+    tags:
+        ["memory"]) ExecuteFuncResult removeMemory(Context baseCtx, RemoveMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 
     if (auto e = checkTopic(ctx, params.topic))
@@ -167,8 +168,8 @@ ExecuteFuncResult removeMemory(Context baseCtx, RemoveMemoryParams params) {
 struct GetMemoryTopicsParams {
 }
 
-@Function("Retrieve all memory topics with summaries for each topic")
-ExecuteFuncResult getMemoryTopics(Context baseCtx, GetMemoryTopicsParams params) {
+@Function("Retrieve all memory topics with summaries for each topic", tags:
+        ["memory"]) ExecuteFuncResult getMemoryTopics(Context baseCtx, GetMemoryTopicsParams params) {
     mixin(baseContextToSpecific!MemoryContext);
     auto topics = ctx.getMemoryFileTopics;
     if (topics.empty)

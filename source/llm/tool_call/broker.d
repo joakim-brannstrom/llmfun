@@ -75,8 +75,7 @@ JSONValue toolDescription(const RegFunction f) @safe pure {
 /// tool that is both alwaysOn and activated appears once, in the head. The
 /// pool is never sorted or reshuffled: identical state emits byte-identical
 /// arrays (pinned by the unittest below).
-JSONValue[] selectTools(const(RegFunction[]) pool, const(string[]) activated,
-        const(string[]) neverHide) @safe pure {
+JSONValue[] selectTools(RegFunction[] pool, string[] activated, string[] neverHide) @safe pure {
     JSONValue[] rval;
     string[] seen;
 

@@ -22,7 +22,7 @@ module llm.tool_call.discovery;
 import logger = std.logger;
 import std.algorithm : canFind, countUntil, filter, map, min, sort;
 import std.array : array, empty, join;
-import std.conv : to;
+import std.conv : to, text;
 import std.format : format;
 import std.json : JSONValue;
 import std.traits : EnumMembers;
@@ -177,9 +177,9 @@ ExecuteFuncResult listToolTags(Context baseCtx, ListToolTagsParams params) {
     // Kill switch: with the broker disabled every registered tool
     // is always visible, so discovery would only add confusion.
     if (!ctx.brokerEnabled) {
-        return ExecuteFuncResult(
-                "error: the tool broker is disabled " ~ "(toolBroker.enabled: false) — every registered tool is "
-                ~ "always visible (alwaysOn); discovery is inert", false);
+        return ExecuteFuncResult("error: the tool broker is disabled "
+                ~ "(toolBroker.enabled: false) - every registered tool is " ~ "always visible (alwaysOn); discovery is inert",
+                false);
     }
 
     if (params.tag.empty) {
@@ -200,12 +200,8 @@ ExecuteFuncResult listToolTags(Context baseCtx, ListToolTagsParams params) {
     if (tagged.empty) {
         if (isKnownTag(params.tag, ctx.toolTagDescriptions())) {
             emitDiscoveryEvents(ctx.getMetricMonitor(), ctx.agentName, params.tag, true, -1);
-            // One string is pinned for both zero-visible subcases ("all excluded
-            // by toolFilter" or none registered) — the text overstates exclusion
-            // when the tag is simply not carried by any pool tool; kept verbatim.
-            return ExecuteFuncResult(
-                    format!"error: tag '%s' has no visible tools — all excluded by toolFilter"(
-                    params.tag), false);
+            return ExecuteFuncResult(i"error: tag '$(params.tag)' has no visible tools - all excluded by toolFilter"
+                    .text, false);
         }
         emitDiscoveryEvents(ctx.getMetricMonitor(), ctx.agentName, params.tag, false, -1);
         return ExecuteFuncResult(unknownTagMsg(params.tag, ctx.pool,
@@ -223,10 +219,8 @@ ExecuteFuncResult listToolTags(Context baseCtx, ListToolTagsParams params) {
     if (ctx.rebuildTools !is null)
         ctx.rebuildTools();
 
-    JSONValue[] cards;
-    foreach (f; tagged)
-        cards ~= toolDescription(f);
-    return ExecuteFuncResult(JSONValue(cards).toPrettyString, true);
+    return ExecuteFuncResult(i"Loaded tools for tag $(params.tag): $(tagged.map!(a => a.name))".text,
+            true);
 }
 
 version (unittest) {

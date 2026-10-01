@@ -144,7 +144,7 @@ class Agent : IBasicAgent {
 
         // Tools array: built once per instance here, owned by the
         // Agent, passed per request; reassigned from pure selectTools output at
-        // change points only — activation/discovery (the toolCtx.rebuildTools
+        // change points only - activation/discovery (the toolCtx.rebuildTools
         // hook below) and compression.
         import llm.tool_call : descAllFunctions, filterToolDescriptions;
         import llm.tool_call.broker : selectTools;

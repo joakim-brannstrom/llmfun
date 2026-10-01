@@ -18,7 +18,7 @@ struct TaskDoneParams {
     string answer;
 }
 
-@Function("Call `taskDone` **only** when you have fully completed the user's request.")
+@Function("Call `taskDone` **only** when you have fully completed the user's request")
 ExecuteFuncResult taskDone(Context baseCtx, TaskDoneParams params) nothrow {
     mixin(baseContextToSpecific!CompletionContext);
 

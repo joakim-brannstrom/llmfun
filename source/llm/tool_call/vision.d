@@ -231,8 +231,9 @@ struct LoadImageApiParams {
 }
 
 // TODO: update supported formats by checking what stb_image supports.
-@Function("Load and analyze an image. Returns a text description of the image content. Supported formats: jpg, png, bmp, gif. Use the query to specify what to look for in the image.")
-ExecuteFuncResult loadImageApi(Context baseCtx, LoadImageApiParams params) nothrow {
+@Function("Load and analyze an image. Returns a text description of the image content. Supported formats: jpg, png, bmp, gif. Use the query to specify what to look for in the image.",
+    tags:
+        ["vision"]) ExecuteFuncResult loadImageApi(Context baseCtx, LoadImageApiParams params) nothrow {
     mixin(baseContextToSpecific!VisionContext);
 
     try {

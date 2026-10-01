@@ -86,7 +86,15 @@ toolBroker:
   # tag - human-readable description shown by listToolTags (unknown keys
   # warn at startup).
   toolTagDescriptions:
-    workarea: "Files in the agent workarea: read/write/list/search."
+    workarea: "Files in the agent workarea: read/write/list/search"
+    rag: "RAG tools: search/add/remove/list"
+    memory: "Persistent agent memory tools: list/add/edit/remove"
+    dialogue: "Agent chat history tools: search"
+    reasoning: "Agent chat reasoning history tools: search"
+    metrics: "Read agent metrics over tool use"
+    encoding: "Base64 and md5 encoding"
+    vision: "Vision model tools for imagesfor"
+    env: "Environment tools: execute/list"
 
 ragFilter:
   include:
@@ -169,6 +177,7 @@ nudges:
 #       nudges:
 #         keepReasoning:
 #           softStrikes: 1   # this model gets the hard nudge immediately
+
 summaryModel:
   server:
     url: http://127.0.0.1:1234

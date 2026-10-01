@@ -17,6 +17,9 @@ enum KnownToolTag {
     reasoning,
     metrics,
     mcp,
+    encoding,
+    vision,
+    env
 }
 
 /// Tags in `tags` that are not members of KnownToolTag (registration-time

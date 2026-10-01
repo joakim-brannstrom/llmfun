@@ -58,8 +58,9 @@ struct ApplyDiffParams {
     @ParamOptional bool fuzzy = true;
 }
 
-@Function("Apply a unified diff patch to a file. " ~ "Diff: each hunk starts with `@@ -oldStart[,oldCount] +newStart[,newCount] @@`, followed by lines starting " ~ "with ' ' (context), '-' (remove) or '+' (add). Context lines must match the current content of the file; use `readFile` first to obtain it. Context matching is fuzzy by default (leading/trailing whitespace differences are ignored); pass fuzzy=false for exact matching. Hunk header counts are advisory: the actual body lines determine what is applied; mismatches produce warnings, not errors. " ~ "Returns a JSON object with fields: ok (bool), linesChanged (int), hunksApplied (int), warnings (array of strings). When dryRun is true, also includes: preview (string).")
-ExecuteFuncResult applyDiff(Context baseCtx, ApplyDiffParams params) {
+@Function("Apply a unified diff patch to a file. " ~ "Diff: each hunk starts with `@@ -oldStart[,oldCount] +newStart[,newCount] @@`, followed by lines starting " ~ "with ' ' (context), '-' (remove) or '+' (add). Context lines must match the current content of the file; use `readFile` first to obtain it. Context matching is fuzzy by default (leading/trailing whitespace differences are ignored); pass fuzzy=false for exact matching. Hunk header counts are advisory: the actual body lines determine what is applied; mismatches produce warnings, not errors. " ~ "Returns a JSON object with fields: ok (bool), linesChanged (int), hunksApplied (int), warnings (array of strings). When dryRun is true, also includes: preview (string).",
+    tags:
+        ["workarea"]) ExecuteFuncResult applyDiff(Context baseCtx, ApplyDiffParams params) {
     mixin(baseContextToSpecific!FileContext);
 
     const logPath = sanitizeLogPath(params.path);

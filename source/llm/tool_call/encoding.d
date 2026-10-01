@@ -16,8 +16,8 @@ struct Base64EncodeParams {
     string data;
 }
 
-@Function("Encode text as Base64. Return encoded or error")
-ExecuteFuncResult base64Encode(Context baseCtx, Base64EncodeParams params) @safe {
+@Function("Encode text as Base64. Return encoded or error", tags:
+        ["encoding"]) ExecuteFuncResult base64Encode(Context baseCtx, Base64EncodeParams params) @safe {
     try {
         return ExecuteFuncResult(Base64.encode(cast(const(ubyte)[]) params.data), success: true);
     } catch (Exception e) {
@@ -30,8 +30,8 @@ struct Base64DecodeParams {
     string data;
 }
 
-@Function("Decode Base64 to data. Return decoded or error")
-ExecuteFuncResult base64Decode(Context baseCtx, Base64DecodeParams params) @safe {
+@Function("Decode Base64 to data. Return decoded or error", tags:
+        ["encoding"]) ExecuteFuncResult base64Decode(Context baseCtx, Base64DecodeParams params) @safe {
     try {
         return ExecuteFuncResult(cast(string) Base64.decode(params.data).idup, success: true);
     } catch (Exception e) {
@@ -44,8 +44,8 @@ struct Md5HashParams {
     string data;
 }
 
-@Function("Calculate the MD5 hash of data. Returns a hexadecimal string.")
-ExecuteFuncResult md5Hash(Context baseCtx, Md5HashParams params) @safe {
+@Function("Calculate the MD5 hash of data. Returns a hexadecimal string", tags:
+        ["encoding"]) ExecuteFuncResult md5Hash(Context baseCtx, Md5HashParams params) @safe {
     try {
         return ExecuteFuncResult(params.data.representation.md5Of.toHexString.idup, success: true);
     } catch (Exception e) {

@@ -32,8 +32,8 @@ struct RemoveFileParams {
     string path;
 }
 
-@Function("Remove file")
-ExecuteFuncResult removeFile(Context baseCtx, RemoveFileParams params) {
+@Function("Remove file", tags:
+        ["workarea"]) ExecuteFuncResult removeFile(Context baseCtx, RemoveFileParams params) {
     mixin(baseContextToSpecific!FileContext);
 
     auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
@@ -241,8 +241,9 @@ struct CountLinesInFileParams {
     string path;
 }
 
-@Function("Count number of lines in file. Return number or error message")
-ExecuteFuncResult countLinesInFile(Context baseCtx, CountLinesInFileParams params) {
+@Function("Count number of lines in file. Return number or error message", tags:
+        ["workarea"]) ExecuteFuncResult countLinesInFile(Context baseCtx,
+        CountLinesInFileParams params) {
     mixin(baseContextToSpecific!FileContext);
 
     auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
@@ -262,8 +263,8 @@ struct Md5HashFileParams {
     string path;
 }
 
-@Function("Calculate the MD5 hash of a file. Returns a hexadecimal string.")
-ExecuteFuncResult md5HashFile(Context baseCtx, Md5HashFileParams params) {
+@Function("Calculate the MD5 hash of a file. Returns a hexadecimal string.", tags:
+        ["workarea"]) ExecuteFuncResult md5HashFile(Context baseCtx, Md5HashFileParams params) {
     import std.base64 : Base64;
     import std.digest : toHexString;
     import std.digest.md : md5Of;

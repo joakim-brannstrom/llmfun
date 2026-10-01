@@ -22,8 +22,8 @@ interface MetricsContext : Context {
 struct GetMetricsParams {
 }
 
-@Function("Get current system metrics as a markdown report")
-ExecuteFuncResult getMetrics(Context baseCtx, GetMetricsParams params) {
+@Function("Get current system metrics as a markdown report", tags:
+        ["metrics"]) ExecuteFuncResult getMetrics(Context baseCtx, GetMetricsParams params) {
     mixin(baseContextToSpecific!MetricsContext);
 
     try {
@@ -42,8 +42,8 @@ struct GetToolHistoryParams {
     @ParamOptional long maxLength = 100;
 }
 
-@Function("Get recent tool call history")
-ExecuteFuncResult getToolHistory(Context baseCtx, GetToolHistoryParams params) {
+@Function("Get recent tool call history", tags:
+        ["metrics"]) ExecuteFuncResult getToolHistory(Context baseCtx, GetToolHistoryParams params) {
     mixin(baseContextToSpecific!MetricsContext);
 
     auto maxArgLen = ctx.getToolLimits().maxArgLength;
