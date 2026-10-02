@@ -42,7 +42,7 @@ interface TuiSink {
 }
 
 /// Production sink: each call is one checked message on the TUI actor's
-/// Channel (task 5/6 spawn the actor and hand its address in here).
+/// Channel (the app spawns the actor and hands its address in here).
 class TuiChannelSink : TuiSink {
     private Channel!TUICommands ch;
 
@@ -198,7 +198,7 @@ class TuiBlockedSink : TuiSink {
 }
 
 /// Test sink: records every call so tests can assert what the agent sent to
-/// the TUI without a live UI thread (task 7/9).
+/// the TUI without a live UI thread.
 class TuiRecordingSink : TuiSink {
     struct Call {
         string kind; // method name, e.g. "chatMessage"

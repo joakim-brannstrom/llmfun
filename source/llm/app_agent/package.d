@@ -4,7 +4,6 @@ module llm.app_agent;
 import logger = std.logger;
 import std.algorithm;
 import std.array : empty, array, appender;
-import std.concurrency;
 import std.conv : to, text;
 import std.exception : collectException;
 import std.datetime : Clock, SysTime, DateTime, UTC, dur;
@@ -25,7 +24,7 @@ import llm.memory;
 import llm.metric.monitor : MetricMonitor;
 import llm.query;
 import llm.rag.dialogue_index : DialogueIndex;
-import llm.rag.dialogue_worker : DiDegraded;
+import llm.rag.dialogue_worker : CompletionGate, DiDrained, ReasoningDrainBudget;
 import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
 import llm.rag.rag : RAG;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
@@ -35,8 +34,9 @@ import llm.types : ServerStat, IStreamCallback;
 import llm.utility;
 import llmfun_tui;
 
-import my.path : Path, AbsolutePath;
+import my.actor : WeakAddress, scopedActor;
 import my.optional : Optional, hasValue, orElse;
+import my.path : Path, AbsolutePath;
 
 private immutable SysTime UnixEpoch = SysTime(DateTime(1970, 1, 1), UTC());
 
@@ -102,16 +102,26 @@ struct AgentApp {
         return slashCommands_;
     }
 
-    package void dispose() {
-        // CRITICAL ORDER: drain the dialogue worker BEFORE rag.destroy
-        // so no embedding runs against weights being destroyed. The shared
-        // worker also drains queued RiJobs and bounds-joins in-flight
-        // summarization threads; ReasoningIndex itself has nothing to
-        // dispose.
-        if (dialogueIndex) {
-            dialogueIndex.dispose();
-            dialogueIndex = null;
-        }
+    /// Phase 1 of the two-phase exit: enqueue the dialogue
+    /// worker's drain and return true. Returns false when there is no
+    /// dialogue index — nothing was enqueued and the caller must NOT wait
+    /// for a DiDrained that will never come.
+    package bool beginDispose(WeakAddress replyTo, CompletionGate gate) {
+        if (dialogueIndex is null)
+            return false;
+        dialogueIndex.beginDispose(replyTo, gate);
+        return true;
+    }
+
+    /// Phase 2 of the two-phase exit: the dispose body minus the drain.
+    /// The drain is already done by the time this runs (the caller went
+    /// beginDispose -> DiDrained / drainTimeout), so the CRITICAL ORDER of
+    /// the dispose holds: no embedding runs against weights being
+    /// destroyed. The shared worker also drained queued RiJobs and bounded
+    /// the in-flight summarization jobs at drain; ReasoningIndex
+    /// itself has nothing to dispose.
+    package void finishDispose() {
+        dialogueIndex = null;
         if (rag) {
             rag.destroy;
             rag = null;
@@ -125,7 +135,7 @@ struct AgentApp {
                 commitActiveSession();
             }
             // Empty-session cleanup on clean exit, after the final commit.
-            // The store guard is REQUIRED: dispose() runs on the actor
+            // The store guard is REQUIRED: dispose runs on the actor
             // failure paths (start() catch / hooks) and a failed
             // setupSession leaves the store null while agent_ is already
             // set. The active session is exempted even when empty.
@@ -145,6 +155,23 @@ struct AgentApp {
             llmConf.saveState();
             agent_ = null;
         }
+    }
+
+    /// Compatibility dispose for tests: both phases inline. A scoped
+    /// supervisor actor pumps the drain reply (the pattern
+    /// DialogueIndex.dispose itself uses); the wait is
+    /// skipped entirely when there is nothing to drain.
+    package void dispose() {
+        auto sup = scopedActor;
+        auto gate = new CompletionGate;
+        if (beginDispose(sup.address(), gate))
+            sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+            });
+        // Close the gate before the scoped address is torn down at scope
+        // exit: a late reply is skipped under the gate, never sent to a
+        // torn-down address.
+        gate.close();
+        finishDispose();
     }
 
     // TODO: If help text ever needs externalization (config file, i18n),
@@ -751,7 +778,6 @@ struct AgentApp {
         sessionStore = new SessionStore(llmConf.chatDir);
         auto sessions = sessionStore.list();
 
-        // Resolve active session: saved id -> most recent -> create fresh
         if (llmConf.activeChatSessionId.length > 0) {
             auto found = sessions.filter!(s => s.id.get == llmConf.activeChatSessionId).array;
             if (found.length > 0) {
@@ -806,15 +832,25 @@ class AppAgentActor {
         AgentApp app;
         UserConfig uconf;
         System* sys;
-        Tid mainTid;
+        WeakAddress supervisor;
         TypedAddress!TextUserInterfaceActor tui_;
+
+        // two-phase exit state (startExit -> diDrained/drainTimeout ->
+        // finishExit); exiting_ latches forever: one exit per actor.
+        bool exiting_;
+        bool drainDone_;
+        int exitCode_;
+        ExitReason exitReason_;
+        CompletionGate drainGate_;
     }
 
-    // runs on the MAIN thread inside sys.spawn (ctor-on-calling-thread)
-    this(UserConfig uconf, UserConfig.AgentChatConfig conf, System* sys, Tid mainTid) {
+    // runs on the MAIN thread inside sys.spawn (ctor-on-calling-thread).
+    // supervisor is a WeakAddress: agent sends are safe even if the
+    // supervisor thread already finished (drop, no crash).
+    this(UserConfig uconf, UserConfig.AgentChatConfig conf, System* sys, WeakAddress supervisor) {
         this.uconf = uconf;
         this.sys = sys;
-        this.mainTid = mainTid;
+        this.supervisor = supervisor;
         this.app = AgentApp(conf); // slash registration happens here
     }
 
@@ -836,9 +872,7 @@ class AppAgentActor {
             // failure into a logged, clean exit.
             logger.errorf("AppAgentActor start failed (%s): %s",
                     cast(Exception) e !is null ? "Exception" : "Error", e.msg);
-            safeDispose();
-            agentDone(1);
-            sendExit(self_.address(), ExitReason.unhandledException);
+            startExit(1, ExitReason.unhandledException);
         }
     }
 
@@ -852,9 +886,7 @@ class AppAgentActor {
         auto reasoningPrompt = loadReasoningPrompt(app.llmConf);
         app.rag = createRag(app.llmConf);
         if (app.rag is null) {
-            app.dispose();
-            agentDone(1);
-            sendExit(self_.address(), ExitReason.userShutdown);
+            startExit(1, ExitReason.userShutdown);
             return;
         }
         app.skillManager_ = makeSkillManager(app.llmConf);
@@ -866,15 +898,20 @@ class AppAgentActor {
                 app.monitor, app.rag, app.llmConf.toolFilter.to());
         auto dialogueRagCfg = RagConfig(windowOverlapPercent: 10, nBatch: 1,
                 maxChunksPerTopic: 512);
-        // ownerTid = MAIN thread: DiDegraded reaches the
-        // supervisor, not this actor's worker.
+        // owner = this actor: the worker's one-shot DiDegraded lands
+        // directly on the agent's diDegraded handler (no supervisor
+        // forward). The actor ctor spawns the worker on sys and leaves
+        // the live handle in `worker`, so the RiJob dispatch below is
+        // wired from here on.
         app.dialogueIndex = new DialogueIndex(app.llmConf.dialogueDir.AbsolutePath,
-                app.llmConf.embedConfig, dialogueRagCfg, null,
-                app.llmConf.summaryModel, reasoningPrompt, null, mainTid);
+                app.llmConf.embedConfig, dialogueRagCfg, sys, null,
+                app.llmConf.summaryModel, reasoningPrompt, null, self_.address);
         app.agent_.addCompressionCheckpointListener(&app.dialogueIndex.onCheckpoint);
         app.agent_.toolContext().setDialogueIndex(app.dialogueIndex);
+        // Live handle to the shared dialogue worker (spawned by the
+        // actor ctor above); the RI dispatches RiJobs to it.
         app.reasoningIndex = new ReasoningIndex(app.llmConf.dialogueDir.AbsolutePath,
-                app.llmConf.summaryModel, app.dialogueIndex.workerTid);
+                app.llmConf.summaryModel, app.dialogueIndex.worker.weakRef);
         app.agent_.addCompressionCheckpointListener(&app.reasoningIndex.onCheckpoint);
         app.agent_.toolContext().setReasoningIndex(app.reasoningIndex);
 
@@ -882,9 +919,8 @@ class AppAgentActor {
         app.oneShotQuery = !app.conf_.prompt.empty;
         if (app.oneShotQuery) {
             app.runAgent(app.conf_.prompt);
-            app.dispose(); // explicit, before AgentDone
-            agentDone(0);
-            sendExit(self_.address(), ExitReason.userShutdown);
+            // explicit, before AgentDone (startExit -> finishExit)
+            startExit(0, ExitReason.userShutdown);
             return;
         }
 
@@ -926,7 +962,6 @@ class AppAgentActor {
         app.setStatusText(true);
     }
 
-    // === TUIListener handlers ===
     void userQuery(string s) {
         auto query = s.strip;
         if (!query.empty) {
@@ -968,12 +1003,12 @@ class AppAgentActor {
     }
 
     void uiTerminated() {
-        app.dispose();
-        agentDone(0);
-        sendExit(self_.address(), ExitReason.userShutdown);
+        startExit(0, ExitReason.userShutdown);
     }
 
-    // supervisor forwards DiDegraded here
+    // The dialogue worker sends this directly to its owner (this actor —
+    // wired as `self_` in the DI ctor in startSetup): no supervisor
+    // forward.
     void diDegraded(string reason) {
         // The dialogue worker sends this exactly once (its embedder is
         // unavailable for the process lifetime). The worker already logged
@@ -982,43 +1017,89 @@ class AppAgentActor {
                 reason);
     }
 
-    // === failure paths ===
     void onDownMessage(DownMsg d) {
         logger.warningf("TUI actor terminated unexpectedly: %s", d.reason.to!string);
-        safeDispose();
-        agentDone(1);
-        sendExit(self_.address(), ExitReason.userShutdown);
+        startExit(1, ExitReason.kill);
     }
 
     void onException(Exception e) {
         logger.warning("AppAgentActor exception: ", e.msg);
-        safeDispose();
-        agentDone(1);
-        sendExit(self_.address(), ExitReason.unhandledException);
+        startExit(1, ExitReason.kill);
     }
 
     void onError(ErrorMsg e) {
         logger.warning("AppAgentActor error: ", e.reason.to!string);
-        safeDispose();
-        agentDone(1); // best-effort: mailbox send cannot throw here
-        sendExit(self_.address(), ExitReason.unhandledException);
+        startExit(1, ExitReason.kill);
     }
 
-    // Review: dispose() does file I/O (commitActiveSession/saveState)
-    // and CAN throw. On a failure path a second throw would escape the
-    // hook as a nothrow violation and silently kill the scheduler worker
-    // (TaskPool.doJob swallows the Throwable) — the exact hang class the
-    // start() guard protects against.
-    private void safeDispose() {
-        try {
-            app.dispose();
-        } catch (Exception de) {
-            logger.errorf("dispose during failure path failed: %s", de.msg);
+    // Single exit funnel. Phase 1 (here): enqueue the dialogue worker's
+    // drain and arm the bounded deadline. Phase 2 (diDrained /
+    // drainTimeout): finishExit. Idempotent: every exit path funnels into
+    // this, and a second call is a no-op. An exit without a dialogue
+    // index finishes immediately — there is no drain to wait for.
+    // Unannotated (inferred @system): the no-drain path calls finishExit,
+    // which must catch Throwable below.
+    void startExit(int code, ExitReason reason) {
+        if (exiting_)
+            return;
+        exiting_ = true;
+        exitCode_ = code;
+        exitReason_ = reason;
+        drainGate_ = new CompletionGate;
+        if (app.beginDispose(self_.address, drainGate_)) {
+            // Arm the deadline AFTER the drain is enqueued (send order):
+            // the worker answers well before this fires; the deadline
+            // only covers a worker that never answers.
+            dynDelayedSend(self_.address,
+                    Clock.currTime + ReasoningDrainBudget + 10.dur!"seconds", "drainTimeout");
+        } else {
+            drainGate_.close();
+            drainDone_ = true;
+            finishExit();
         }
     }
 
+    // Phase-2 trigger: the worker's drain reply, delivered to self_
+    // (the replyTo passed to beginDispose).
+    void diDrained(DiDrained d) {
+        if (!exiting_ || drainDone_)
+            return;
+        drainDone_ = true;
+        if (drainGate_ !is null)
+            drainGate_.close();
+        finishExit();
+    }
+
+    // Phase-2 trigger: the bounded deadline fires before the drain reply.
+    // Not exercised in the unittest suite: arming it needs a drain that
+    // never answers, and the worker only stops answering past its own 330 s
+    // drain deadline (this actor safety timer: 340 s) -- both too long to
+    // wait in-suite. The one-line body converges on the same finishExit as
+    // the DiDrained reply, which the exit integration test in
+    // llm.app_agent.tests pins on the real worker; this deadline stays a
+    // documented, code-reviewed hole.
+    void drainTimeout() {
+        diDrained(DiDrained());
+    }
+
+    // Phase 2: cleanup, then die. finishDispose does file I/O
+    // (commitActiveSession/saveState) and CAN throw; a second throw here
+    // would escape the hook as a nothrow violation and silently kill the
+    // scheduler worker (TaskPool.doJob swallows the Throwable) — the
+    // exact hang class the start() guard protects against. sendExit runs
+    // ONLY here, after the cleanup.
+    private void finishExit() {
+        try {
+            app.finishDispose();
+        } catch (Throwable t) {
+            logger.errorf("finishDispose during exit failed: %s", t.msg);
+        }
+        agentDone(exitCode_);
+        sendExit(self_.address, exitReason_);
+    }
+
     private void agentDone(int code) {
-        send(mainTid, AgentDone(code));
+        dynSend(supervisor, "agentDone", AgentDone(code));
     }
 }
 
@@ -1031,49 +1112,57 @@ int appMain(UserConfig uconf, UserConfig.AgentChatConfig conf) {
     scope (exit)
         deinitLlmfunLocalModel();
 
-    // Explicit 2-worker pool — a run occupies one worker for its
-    // full duration; the TUI actor needs the other. Never default pool.
+    // The supervisor is a scoped actor pumped by this main thread (not a
+    // pool worker). Declared before the scope guards so LIFO teardown
+    // destroys it LAST — after sys.shutdown + pool.finish — which keeps
+    // its mailbox alive for the agent's final AgentDone.
+    auto sup = scopedActor;
+
+    // Explicit 3-worker pool — the sys actors (AppAgentActor,
+    // TextUserInterfaceActor, and the dialogue worker spawned by the
+    // DialogueIndex actor ctor) each occupy one pool worker for their
+    // full duration; the agents and workers ARE actors, the pool serves
+    // those workloads. Never default pool.
     // Pool-size policy (a convention — the library does not check it —
     // documented in the mylib actor README, "Bounded mailbox"):
-    // pool >= actor count + 1 — the two actors
-    // (AppAgentActor, TextUserInterfaceActor) take the two pool workers and
-    // this main thread (the supervisor loop below) is the +1: it holds no
-    // worker, so it is the only thread allowed to block on the TUI's
-    // bounded mailbox; pool workers never block (they drop instead).
+    // pool >= actor count + 1 — the three actors take the three pool
+    // workers and this main thread (the supervisor wait below) is the
+    // +1: it holds no worker, so it is the only thread allowed to block
+    // on a bounded mailbox; pool workers never block (they drop instead).
     // makeSystem(pool) does not own the pool, so sys.shutdown() never
     // finishes it. Daemon the pool so its idle worker threads do not block
     // the runtime's exit join by themselves, and finish it explicitly in
     // the shutdown scope below -- the daemon flag only exempts the threads
     // from that join, it does not terminate them.
-    auto pool = new TaskPool(2);
+    auto pool = new TaskPool(3);
     pool.isDaemon = true;
     auto sys = makeSystem(pool);
     scope (exit) {
-        // Stop the scheduler, then stop and join the external pool.
-        // Without finish(true) the pool worker threads outlive shutdown,
-        // so a std.concurrency worker spawned from an actor handler (the
-        // dialogue index worker) never receives OwnerTerminated: that
-        // notification is delivered only when its owning pool worker
-        // exits. The worker is not a daemon thread, so process exit then
-        // hangs in the runtime's thread_joinAll even though sys.shutdown()
-        // returned. finish(true) makes the owner threads exit, which
-        // releases such workers.
+        // Two-phase exit + join-all: the agent actor drains the dialogue
+        // worker (bounded deadline) and finishes its cleanup before its
+        // sendExit, so by the time the wait below returns no actor owns
+        // state a later phase needs. Stop the scheduler, then stop and
+        // join the external pool: without finish(true) the pool worker
+        // threads outlive shutdown and process exit hangs in the
+        // runtime's thread_joinAll (the daemon flag only exempts them
+        // from that join, it does not terminate them). finish(true)
+        // makes the worker threads exit.
         sys.shutdown();
         pool.finish(true);
     }
     try {
-        auto agent = sys.spawn!AppAgentActor(uconf, conf, &sys, thisTid);
+        auto agent = sys.spawn!AppAgentActor(uconf, conf, &sys, sup.address());
         dynSend(agent, "start");
-        int code = 1;
-        bool done = false;
-        while (!done) {
-            // This stdlib (DMD 2.112) has no value-returning receive!T, so
-            // the contract's `if (receive!T) { ... $1 ... }` form stands
-            // in as the legacy delegate idiom (one message per iteration —
-            // forward DiDegraded, capture AgentDone's code).
-            receive((DiDegraded d) {
-                dynSend(agent, "diDegraded", d.reason); // forward
-            }, (AgentDone ad) { code = ad.code; done = true; });
+        int code = 0;
+        bool done_ = false;
+        while (!done_) {
+            // The 30s re-wait only handles spurious wakeups; the agent's
+            // AgentDone (delivered to sup by the agent itself) ends the
+            // loop.
+            sup.receiveTimeout(30.dur!"seconds", (AgentDone ad) {
+                code = ad.code;
+                done_ = true;
+            });
         }
         return code;
     } catch (Exception e) {

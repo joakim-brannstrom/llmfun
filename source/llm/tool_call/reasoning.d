@@ -127,12 +127,12 @@ private string formatTimestamp(long epochMillis) {
 
 version (unittest) {
     import std.algorithm : canFind;
-    import std.concurrency : thisTid;
     import std.file : mkdirRecurse;
     import std.math : sqrt;
     import std.string : count, split, toLower;
     import std.sumtype : match;
 
+    import my.actor : WeakAddress;
     import my.optional;
     import my.path : AbsolutePath, Path;
 
@@ -241,7 +241,6 @@ version (unittest) {
     }
 
     /// An AgentContext with a TestEmbedder-backed RAG and (optionally) a
-    /// An AgentContext with a TestEmbedder-backed RAG and (optionally) a
     /// ReasoningIndex, working under <testDir>/ctx. The RAG is registered in
     /// `testDir` so cleanup() destroys it before the dir is removed. `emb`
     /// overrides the RAG embedder.
@@ -266,12 +265,12 @@ version (unittest) {
 
     /// A ReasoningIndex over the test's area: the area is where this test's
     /// session DBs live, so seedSessionDb and the query's read-only opens
-    /// target one dir. workerTid = thisTid() is safe: the tool query path
-    /// never sends an RiJob (only onCheckpoint does, and it is not called
-    /// from the tool).
-    private ReasoningIndex makeRi(TestArea testDir) {
-        return new ReasoningIndex(testDir.workArea,
-                SummaryModelConfig(contextSize: 16384), thisTid());
+    /// target one dir. The worker handle defaults to empty: the tool query
+    /// path never sends an RiJob (only onCheckpoint does, and it is not
+    /// called from the tool), so an empty handle is a safe no-op; production
+    /// passes the shared dialogue worker's actor handle instead.
+    private ReasoningIndex makeRi(TestArea testDir, WeakAddress worker = WeakAddress.init) {
+        return new ReasoningIndex(testDir.workArea, SummaryModelConfig(contextSize: 16384), worker);
     }
 
     /// Seed a session's DB directly with records of the given kind
@@ -523,48 +522,40 @@ unittest {
 // semantic + FTS retrieval, cited turn range, the static annotation
 // verbatim, session scoping.
 //
-// Documented deviations from the original task (each forced by the
-// implemented API/runtime):
+// Forced deviations, each dictated by the implemented API/runtime:
 //
 //  1. Session ids must be valid `YYYYMMDD-HHMMSS-4hex` (IdPattern regex,
-//      llm/session/types.d); the original's `...-reca/-recl/-reco/
-//      -reco2` suffixes contain non-hex letters, so isValidId rejects
-//      them and EVERY original query would return "error: invalid
-//      sessionId". Hex-valid siblings are used instead:
-//      4eca / 4ec1 / 4ec0 / 4ec2.
+//      llm/session/types.d): the suite's sibling ids were originally
+//      `...-reca/-recl/-reco/-reco2`, but those suffixes contain
+//      non-hex letters, so isValidId would reject them and every query
+//      would return "error: invalid sessionId". Hex-valid siblings are
+//      used instead: 4eca / 4ec1 / 4ec0 / 4ec2.
 //  2. `encodeTopicName` is (sessionId, turnStart, turnEnd, epochMillis,
-//      kind): kind LAST (the design-time kind-first form would break the
-//      dialogue indexer's call sites). The original called the kind-first
-//      form; adapted to the implemented signature.
-//  3. The original's `makeRi(TestArea)` helper is a redefinition of the
-//      module's existing makeRi (same name and signature); the existing
-//      helper is reused. Equivalent for the query path — a seeded-record
-//      test never sends an RiJob, so the worker Tid is never touched.
-//      (The reuse also removes the original helper's only ServerConfig /
-//      SummaryModelConfig-server use.)
+//      kind): kind LAST (a kind-first form would break the dialogue
+//      indexer's call sites).
+//  3. The suite reuses the module's existing `makeRi(TestArea)` helper
+//      rather than redefining it. Equivalent for the query path — a
+//      seeded-record test never sends an RiJob, so the worker handle is
+//      never touched.
 //  4. Session scoping: the queried sibling session is seeded as well
 //      (mirroring the dialogue session-scoping test in dialogue.d): a
 //      session with no DB yields the graceful no-history notice (pinned
 //      by the no-history tests above) — "No matches found" requires an
-//      existing r_ history. Seeding the sibling keeps the original's
-//      exact assertion while the raw !canFind(REASONTOKEN) check makes
-//      the no-leak assertion non-vacuous, and an active-session positive
-//      control closes the loop (the record IS retrievable in its own
-//      session).
-//  5. The original's import block is omitted: no import line is needed —
-//      every name the adapted code uses resolves via existing imports
-//      (the block's `Tid` / `ServerConfig` names are not resolvable here
-//      at all, but they are unused once the helper is reused). A SECOND
-//      selective import of `std.algorithm : canFind` makes the full
-//      unittest build fail with "canFind matches conflicting symbols" in
-//      agent/package.d's guard unittests (agent/package.d imports this
-//      module and std.algorithm; isolated both ways: reverting only this
-//      file → green control, re-adding only this one import → the
-//      conflict returns).
+//      existing r_ history. Seeding the sibling keeps the exact assertion
+//      while the raw !canFind(REASONTOKEN) check makes the no-leak
+//      assertion non-vacuous, and an active-session positive control
+//      closes the loop (the record IS retrievable in its own session).
+//  5. The second `version (unittest)` block below is import-free: every
+//      name it uses is already available to this file, including
+//      `my.actor : WeakAddress` for makeRi's empty default worker handle.
+//      A selective import of `std.algorithm : canFind` in that block
+//      makes the full unittest build fail with "canFind matches
+//      conflicting symbols" in agent/package.d's guard unittests
+//      (agent/package.d imports this module and std.algorithm).
 
 version (unittest) {
-    // (No imports here — every name the adapted code uses resolves
-    // through existing imports; see note 5 above.)
+    // (No imports here — every name below is already available to this
+    // file; see item 5 above.)
 
     // All-ones 8-dim embedder; modelName/dimensions MUST match the seeded DB
     // header ("test", 8) for read-only opens. Uniform ranks — recall is
@@ -617,16 +608,16 @@ version (unittest) {
         }
 
         override int batchSize() {
-            // Original value, probe-verified end-to-end: each record below
-            // indexes as 8-9 chunks at this window and the tool's default
-            // topK=5 still returns the record's stated-reason token
-            // (probe: chunks=8/9, tokenInTop5=true).
+            // Value verified end-to-end: each record below indexes as 8-9
+            // chunks at this window and the tool's default topK=5 still
+            // returns the record's stated-reason token (chunks=8/9,
+            // tokenInTop5=true).
             return 64;
         }
     }
 
     // Seed one r_ record directly (mirrors seedSessionDb in dialogue.d,
-    // with the reasoning kind; note 2: kind-last signature).
+    // with the reasoning kind and the kind-last encodeTopicName signature).
     private void seedReasoningDb(string sid, long ts, long te, string recordText, TestArea testDir) {
         auto dbPath = (testDir.workArea ~ (sid ~ ".db")).AbsolutePath;
         auto dbOpt = openDatabase(dbPath, "test", 8);
@@ -644,9 +635,9 @@ version (unittest) {
     }
 
     // AgentContext with a RAG (RiTestEmbedder) + wired ReasoningIndex under
-    // <testDir>/ctx (mirrors makeContext, dialogue.d:257-274). Worker unused
+    // <testDir>/ctx (mirrors makeContext in dialogue.d). Worker unused
     // (records are seeded; the query path never sends an RiJob): the shared
-    // makeRi above supplies thisTid() as the worker Tid and is safe here.
+    // makeRi above defaults the worker handle to empty and is safe here.
     private AgentContext makeRiCtx(ref TestArea testDir, string sid, ReasoningIndex ri) {
         auto workDir = testDir ~ "ctx";
         mkdirRecurse(workDir.toString);

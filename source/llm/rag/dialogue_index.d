@@ -1,7 +1,7 @@
 /// DialogueIndex: per-session dialogue database manager and async indexing coordinator.
 ///
 /// The agent thread owns a single DialogueIndex instance for the process lifetime.
-/// It spawns the dialogue worker on its own thread and coordinates:
+/// It spawns the dialogue worker actor on the app's System and coordinates:
 ///   - onCheckpoint: the CheckpointListener that fires on every compression
 ///     checkpoint, filtering evicted dialogue and enqueuing it for indexing.
 ///   - query: opens the session DB read-only, dispatches the appropriate search,
@@ -9,13 +9,12 @@
 ///   - maxTurn / hasHistory: cold-start queries that open the DB read-only.
 ///   - dispose: best-effort drain of the worker mailbox (idempotent, never throws).
 ///
-/// There is no shared state between the agent thread and the worker thread.
-/// All communication is via value messages (DiJob / DiDrain / DiDiDrained / DiDegraded).
+/// There is no shared state between the agent thread and the worker.
+/// All communication is via value messages (DiJob / DiDrain / DiDrained / DiDegraded).
 module llm.rag.dialogue_index;
 
 import core.time : dur, Duration;
 import std.algorithm : max;
-import std.concurrency : Tid, spawn, send, receiveTimeout, thisTid, OwnerTerminated;
 import std.conv : to;
 import std.datetime : SysTime, Clock, DateTime;
 import std.exception : collectException;
@@ -28,6 +27,7 @@ import std.sumtype : match;
 
 import logger = std.logger;
 
+import my.actor;
 import my.path : AbsolutePath;
 import my.optional;
 
@@ -36,8 +36,8 @@ import llm.common.config : EmbedConfig, RemoteEmbedConfig;
 import llm.common.embedder : Embedder, EmbedError, EmbedderFactory;
 import llm.config : RagConfig, ToolLimits, SummaryModelConfig;
 import llm.rag.database : Database, openDatabase, SourceMatch, Search;
-import llm.rag.dialogue_worker : DiJob, DiEpisode, DiDrain, DiDrained,
-    DiDegraded, dialogueWorker, SummarizerFn, ReasoningDrainBudget;
+import llm.rag.dialogue_worker : DiJob, DiEpisode, DiDrained, DiDrain, DiDegraded, SummarizerFn,
+    ReasoningDrainBudget, CompletionGate, DialogueWorkerActor, DialogueWorkerAPI;
 import llm.rag.rag : Origin, Topic;
 import llm.session.types : SessionId, isValidId;
 import llm.summary_agent : SummaryAgent;
@@ -53,7 +53,6 @@ interface DialogueContext : Context {
     ToolLimits getToolLimits() @safe;
 }
 
-// Convenience aliases for the nested types
 alias CompressionCheckpoint = SummaryAgent.CompressionCheckpoint;
 alias CheckpointListener = SummaryAgent.CheckpointListener;
 
@@ -214,33 +213,35 @@ private string episodePiece(const Chat.MessageT entry) @safe {
 /// Per-session dialogue database manager and async indexing coordinator.
 ///
 /// The agent thread owns one instance for the process lifetime. It spawns the
-/// dialogue worker on its own thread and coordinates checkpoint-driven
-/// indexing and read-only queries. There is no shared state between threads.
+/// dialogue worker actor on the app's System and coordinates checkpoint-driven
+/// indexing and read-only queries. There is no shared state with the worker.
 class DialogueIndex {
     /// Public: the shared dialogue worker; ReasoningIndex sends RiJob here too.
-    Tid workerTid;
+    TypedAddress!DialogueWorkerActor worker;
     private {
         AbsolutePath dialogueDir;
         EmbedConfig embedConfig;
         RagConfig dialogueRagCfg;
         bool disposed;
+        Channel!DialogueWorkerAPI actorChannel_;
     }
 
-    /// Create a DialogueIndex, ensuring the directory exists and spawning the worker.
-    /// `embedderFactory` (default null) is passed to the worker thread, which uses
-    /// it to create its own embedder instead of consulting the process-global
-    /// factory registry; null means the worker resolves the embedder from the
-    /// registry (createEmbedder) as before.
-    /// Three params configure the worker's reasoning path:
-    /// the summary model config, the reasoning prompt, and an optional
-    /// summarizer DI override. `ownerTid` (default: the calling thread) is
-    /// the Tid the worker sends its one-shot DiDegraded notice to when its
-    /// embedder is unavailable; the default preserves the pre-existing behavior.
-    /// All params defaultable, so existing call sites are unchanged.
-    this(AbsolutePath dialogueDir, EmbedConfig embedConfig,
-            RagConfig dialogueRagCfg, EmbedderFactory embedderFactory = null,
-            SummaryModelConfig summaryCfg = SummaryModelConfig.init,
-            string reasoningPrompt = "", SummarizerFn summarizerFn = null, Tid ownerTid = thisTid()) {
+    /// Create a DialogueIndex, ensuring the directory exists and spawning a
+    /// DialogueWorkerActor on the app's System (Config.pool, via sys.spawn);
+    /// onCheckpoint then dispatches DiJob through the channel and dispose
+    /// drains via the gate-carrying protocol. `embedderFactory` (default null)
+    /// is passed to the worker, which uses it to create its own embedder
+    /// instead of consulting the process-global factory registry; null means
+    /// the worker resolves the embedder from the registry (createEmbedder) as
+    /// before. Three params configure the worker's reasoning path: the
+    /// summary model config, the reasoning prompt, and an optional summarizer
+    /// DI override. `owner` is the WeakAddress that receives the worker's
+    /// one-shot DiDegraded notice when its embedder is unavailable (an empty
+    /// owner skips the notice).
+    this(AbsolutePath dialogueDir, EmbedConfig embedConfig, RagConfig dialogueRagCfg,
+            System* sys, EmbedderFactory embedderFactory = null,
+            SummaryModelConfig summaryCfg = SummaryModelConfig.init, string reasoningPrompt = "",
+            SummarizerFn summarizerFn = null, WeakAddress owner = WeakAddress.init) {
         import std.file : exists;
 
         if (!dialogueDir.toString.exists) {
@@ -253,8 +254,9 @@ class DialogueIndex {
         this.dialogueDir = dialogueDir;
         this.embedConfig = embedConfig;
         this.dialogueRagCfg = dialogueRagCfg;
-        this.workerTid = spawn(&dialogueWorker, ownerTid, dialogueDir, embedConfig,
+        this.worker = sys.spawn!DialogueWorkerActor(sys, owner, dialogueDir, embedConfig,
                 dialogueRagCfg, embedderFactory, summaryCfg, reasoningPrompt, summarizerFn);
+        this.actorChannel_ = Channel!DialogueWorkerAPI(worker, null);
         logger.tracef("DialogueIndex: spawned worker for dir '%s'", dialogueDir);
     }
 
@@ -302,8 +304,7 @@ class DialogueIndex {
             // Epoch milliseconds (second precision is fine for metadata).
             // NOTE: epochMillis uses Clock.currTime (checkpoint-handling time) rather than
             // cp.timestamp (the stamped eviction time). The two differ by microseconds at
-            // most. Known deviation; intentionally not worth fixing (user decision,
-            // 2026-09-06 review).
+            // most. Known deviation; intentionally not worth fixing (user decision).
             long epochMillis = Clock.currTime.toUnixTime * 1000;
             long[] turnOrder;
             size_t[long] turnIndex; // turnId -> index in turnOrder
@@ -332,7 +333,11 @@ class DialogueIndex {
 
             // Send to worker (fire-and-forget, non-blocking).
             immutable(DiEpisode[]) immEps = cast(immutable(DiEpisode[])) episodes;
-            send(workerTid, DiJob(sid, immEps));
+            try {
+                actorChannel_.diJob(DiJob(sid, immEps));
+            } catch (Throwable t) {
+                logger.tracef("DialogueIndex: actor diJob send failed: %s", t.msg).collectException;
+            }
             logger.tracef("DialogueIndex: sent %s episodes for session '%s'", episodes.length, sid);
         } catch (Exception e) {
             logger.errorf("checkpoint failure: %s", e.msg).collectException;
@@ -519,33 +524,40 @@ class DialogueIndex {
         }
     }
 
-    /// Best-effort drain of the worker mailbox. Idempotent (guarded by a flag).
-    /// Never throws (catches OwnerTerminated). Returns without waiting if the
-    /// worker is already gone. Waits for the worker's bounded drain-join
-    /// queued jobs are flushed and in-flight reasoning
-    /// summarization threads are joined before the worker replies, so the
-    /// wait window is the join budget plus slack rather than a fixed short
-    /// timeout that would let those threads outlive a normal exit and lose
-    /// their records. After the wait, consumes any DiDrained that may have
-    /// arrived late (e.g. after a timeout) so it cannot be mistaken for a
-    /// future drain's reply by a later consumer of this thread's mailbox.
+    /// Enqueue a non-blocking drain of the worker actor and return
+    /// immediately. The caller supplies its reply address and a gate; the
+    /// worker delivers DiDrained to the address once its mailbox and
+    /// in-flight work are done (gate-guarded per waiter). Waiting is caller
+    /// policy: a blocking caller pairs this with a scoped address and
+    /// receiveTimeout.
+    void beginDispose(WeakAddress replyTo, CompletionGate gate) {
+        actorChannel_.diDrain(DiDrain(replyTo, gate, Duration.zero));
+    }
+
+    /// Best-effort drain of the worker mailbox. Idempotent (guarded by a
+    /// flag). Never throws. Waits for the worker's bounded drain: queued
+    /// jobs are flushed and in-flight reasoning summarizers are bounded
+    /// before the worker replies, so the wait window is the drain deadline
+    /// plus slack rather than a fixed short timeout that would let those
+    /// jobs outlive a normal exit and lose their records. A late reply is
+    /// skipped under the closed gate, never sent to a torn-down address. If
+    /// the worker handle is dead (worker already gone), the drain message is
+    /// dropped silently and the wait runs out its full budget.
     void dispose() {
         if (disposed)
             return;
         disposed = true;
-        try {
-            // The explicit budget travels with the drain so
-            // the wait below is guaranteed to cover the worker's bounded join.
-            send(workerTid, DiDrain(thisTid, ReasoningDrainBudget));
-            receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
-            });
-            // Consume a possible late/duplicate DiDrained (zero-time poll).
-            receiveTimeout(Duration.zero, (DiDrained _) {});
-        } catch (OwnerTerminated) {
-            logger.trace("DialogueIndex.dispose: worker already terminated");
-        } catch (Exception e) {
-            logger.warningf("DialogueIndex.dispose: error: %s", e.msg);
-        }
+        // Blocking contract for non-actor callers: a fresh scoped
+        // address per call, so no stale-reply consume is needed.
+        auto sup = scopedActor;
+        auto gate = new CompletionGate;
+        beginDispose(sup.address(), gate);
+        sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        });
+        // Close the gate before the scoped address is torn down at
+        // scope exit: a late reply is skipped under the gate, never
+        // sent to a torn-down address.
+        gate.close();
     }
 
     /// Compute the max turnEnd from a database's sources. Never throws:
@@ -643,13 +655,12 @@ version (unittest) {
         }
     }
 
-    /// Factory that injects the test embedder into the worker thread (instead
+    /// Factory that injects the test embedder into the worker actor (instead
     /// of the process-global factory registry, which parallel tests race on).
     private Embedder diTestFactory(EmbedConfig config) {
         return new DiTestEmbedder();
     }
 
-    /// Helper: create a temp dir and return config.
     private struct TestSetup {
         TestArea tmpDir;
         EmbedConfig cfg;
@@ -671,7 +682,7 @@ version (unittest) {
     }
 
     /// Query-path embedder: modelName/dimensions must match the worker's
-    /// DiTestEmbedder so read-only DB opens succeed (Issue 2 review fix).
+    /// DiTestEmbedder so read-only DB opens succeed.
     private DiTestEmbedder qEmb() {
         return new DiTestEmbedder();
     }
@@ -698,7 +709,6 @@ version (unittest) {
     }
 }
 
-// Codec tests
 unittest {
     // Round-trip: encode then decode
     auto encoded = encodeTopicName("20240101-120000-abcd", 5, 5, 1700000000000);
@@ -741,7 +751,7 @@ unittest {
     }
 }
 
-// codec: r_ round-trip, kind decode, cross-prefix, unknown prefix
+@("codec: r_ round-trip, kind decode, cross-prefix, unknown prefix")
 unittest {
     // the existing d_ tests above stay UNMODIFIED and green
     auto r = encodeTopicName("20240101-120000-abcd", 5, 5, 1700000000000, Kind.reasoning);
@@ -762,16 +772,19 @@ unittest {
     assert(dd.match!((EpisodeMeta m) => m.kind == Kind.dialogue, (_) => false));
 }
 
-// onCheckpoint rejection tests
+@("onCheckpoint rejection tests")
 unittest {
     auto s = setupTest("on_checkpoint_rejection_test");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs"); // let worker start
 
     // Empty session ID → refused
     auto cp1 = CompressionCheckpoint(timestamp: Clock.currTime, sessionId: "",
@@ -803,7 +816,7 @@ unittest {
     assert(!(s.tmpDir ~ "invalid.db").toString.exists, "refused session must not create a DB file");
 }
 
-// Summary-marker filter test (synchronous: verify grouping logic)
+@("Summary-marker filter test (synchronous: verify grouping logic)")
 unittest {
     // Summary marker: assistant message with summary_turn_start in saveData
     JSONValue sd1;
@@ -828,20 +841,22 @@ unittest {
             "tool message with summary marker should be detected");
 }
 
-// End-to-end: onCheckpoint → worker indexes → query returns results
+@("End-to-end: onCheckpoint → worker indexes → query returns results")
 unittest {
     auto s = setupTest("on_checkpoint_end_to_end_with_worker_indexes");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs"); // let worker start
 
     string sid = "20240101-120000-abcd";
 
-    // Build a checkpoint with one turn of dialogue
     auto userMsg = Message(Role.user, true, "What is the capital of France?", "");
     userMsg.turnId = 1;
     auto asstMsg = Message(Role.assistant, false, "The capital of France is Paris.", "");
@@ -856,18 +871,17 @@ unittest {
     di.onCheckpoint(cp);
 
     // Drain the worker to ensure the job is processed
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 
-    // Verify hasHistory
     assert(di.hasHistory(qEmb(), SessionId(sid)), "session should have history after indexing");
 
-    // Verify maxTurn
     assert(di.maxTurn(qEmb(), SessionId(sid)) == 1, "maxTurn should be 1");
 
-    // Query with text search
     auto result = di.query(qEmb(), SessionId(sid), "capital France", "");
     assert(result.hasHistory, "query should find history");
     assert(result.matches.length > 0, "query should return matches");
@@ -875,20 +889,22 @@ unittest {
     assert(result.matches[0].text.length > 0, "match should have text");
 }
 
-// maxTurnAge window test
+@("maxTurnAge window test")
 unittest {
     auto s = setupTest("max_turn_age_window");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240101-120000-beef";
 
-    // Index turn 1
     auto u1 = Message(Role.user, true, "First question alpha", "");
     u1.turnId = 1;
     auto a1 = Message(Role.assistant, false, "First answer beta", "");
@@ -900,7 +916,6 @@ unittest {
             summaryText: "", originalLength: 2, newLength: 0, newContextSize: 0);
     di.onCheckpoint(cp1);
 
-    // Index turn 10
     auto u10 = Message(Role.user, true, "Second question gamma", "");
     u10.turnId = 10;
     auto a10 = Message(Role.assistant, false, "Second answer delta", "");
@@ -913,12 +928,13 @@ unittest {
     di.onCheckpoint(cp10);
 
     // Drain
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 
-    // maxTurn should be 10
     assert(di.maxTurn(qEmb(), SessionId(sid)) == 10,
             "maxTurn should be 10, got " ~ di.maxTurn(qEmb(), SessionId(sid)).to!string);
 
@@ -943,42 +959,45 @@ unittest {
     assert(foundTurn10, "should find turn 10");
 }
 
-// No-history: query on a never-indexed session
+@("No-history: query on a never-indexed session")
 unittest {
     auto s = setupTest("no_history");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240615-083000-1234"; // valid format, never indexed
 
-    // hasHistory should be false
     assert(!di.hasHistory(qEmb(), SessionId(sid)), "never-indexed session should have no history");
 
-    // maxTurn should be 0
     assert(di.maxTurn(qEmb(), SessionId(sid)) == 0, "never-indexed session should have maxTurn 0");
 
-    // query should return no-history gracefully (no exception)
     auto result = di.query(qEmb(), SessionId(sid), "anything", "");
     assert(!result.hasHistory, "query on empty session should report no history");
     assert(result.message.length > 0, "should have an explanatory message");
     assert(result.matches.length == 0, "should have no matches");
 }
 
-// onCheckpoint with evictedInPlace (combined with evictedSummarized)
+@("onCheckpoint with evictedInPlace (combined with evictedSummarized)")
 unittest {
     auto s = setupTest("on_checkpoint_eviced_in_place");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240301-090000-cafe";
 
@@ -1002,30 +1021,34 @@ unittest {
     di.onCheckpoint(cp);
 
     // Drain
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 
     // Both turns should be indexed
     assert(di.maxTurn(qEmb(), SessionId(sid)) == 2, "maxTurn should be 2");
 
-    // Query should find both
     auto result = di.query(qEmb(), SessionId(sid), "question", "", topK: 10);
     assert(result.hasHistory);
     assert(result.matches.length >= 1, "should find at least one match");
 }
 
-// onCheckpoint excludes harness traffic (non-userQuery user messages)
+@("onCheckpoint excludes harness traffic (non-userQuery user messages)")
 unittest {
     auto s = setupTest("on_checkpoint_excludes_harness_traffic");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240401-100000-dead";
 
@@ -1037,7 +1060,6 @@ unittest {
     auto uq = Message(Role.user, true, "Real question here", "");
     uq.turnId = 1;
 
-    // Assistant response
     auto ar = Message(Role.assistant, false, "Real answer here", "");
     ar.turnId = 1;
 
@@ -1050,10 +1072,12 @@ unittest {
     di.onCheckpoint(cp);
 
     // Drain
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained);
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }));
+    gate.close();
 
     // The nudge text should NOT appear in the indexed content
     auto result = di.query(qEmb(), SessionId(sid), "nudge", "");
@@ -1073,10 +1097,13 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240501-110000-face";
 
@@ -1107,10 +1134,12 @@ unittest {
             summaryText: "", originalLength: 6, newLength: 0, newContextSize: 0);
     di.onCheckpoint(cp);
 
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 
     // Turn 1's episode carries user query + assistant answer + taskDone
     // final answer in one verbatim chunk.
@@ -1146,10 +1175,13 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240502-120000-beef";
 
@@ -1180,10 +1212,12 @@ unittest {
             summaryText: "", originalLength: 4, newLength: 0, newContextSize: 0);
     di.onCheckpoint(cp);
 
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 
     // The summary marker text must not be queryable.
     auto sm = di.query(qEmb(), SessionId(sid), "zebra", "");
@@ -1265,14 +1299,14 @@ version (unittest) {
         }
     }
 
-    /// Factory that injects the slow embedder into the worker thread (instead
+    /// Factory that injects the slow embedder into the worker actor (instead
     /// of the process-global factory registry).
     private Embedder slowDiFactory(EmbedConfig config) {
         return new SlowDiEmbedder();
     }
 
     /// Embedder whose embed(string) always fails; used to verify the graceful
-    /// embed-error path and the text-only fallback (review Issue 2).
+    /// embed-error path and the text-only fallback.
     private class FailEmbedder : Embedder {
         override void destroy() {
         }
@@ -1337,10 +1371,13 @@ unittest {
     auto cfg = EmbedConfig(RemoteEmbedConfig(server: ServerConfig(url: "http://127.0.0.1:0"),
             modelName: "di-test", dimensions: 8));
     auto ragCfg = RagConfig(windowOverlapPercent: 10);
-    auto di = new DialogueIndex(tmpDir, cfg, ragCfg, &slowDiFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(tmpDir, cfg, ragCfg, &sys, &slowDiFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240503-130000-dead";
     auto u = Message(Role.user, true, "Slow embedder async question", "");
@@ -1359,10 +1396,12 @@ unittest {
             "onCheckpoint must enqueue and return, not embed inline (took %s ms)".format(elapsed));
 
     // The job is still processed asynchronously: drain and verify.
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
     auto res = di.query(qEmb(), SessionId(sid), "async", "");
     assert(res.hasHistory && res.matches.length > 0,
             "async-enqueued episode must be indexed after drain");
@@ -1374,14 +1413,17 @@ unittest {
     scope (exit)
         teardownTest(s);
 
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
     string sid = "20240504-140000-1234";
 
     // Instance A: index turns 1 and 2, then drain and dispose.
     {
-        auto diA = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+        auto diA = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
         scope (exit)
             diA.dispose;
-        Thread.sleep(100.dur!"msecs");
 
         auto u1 = Message(Role.user, true, "Cold question one", "");
         u1.turnId = 1;
@@ -1393,17 +1435,18 @@ unittest {
                 summaryText: "", originalLength: 2, newLength: 0, newContextSize: 0);
         diA.onCheckpoint(cp);
 
-        send(diA.workerTid, DiDrain(thisTid));
-        bool drained = false;
-        receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-        assert(drained, "worker A did not drain");
+        auto sup = scopedActor;
+        auto gate = new CompletionGate;
+        diA.beginDispose(sup.address(), gate);
+        assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+            }), "worker A did not drain");
+        gate.close();
     }
 
     // Instance B on the same dir: simulated restart.
-    auto diB = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto diB = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         diB.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     assert(diB.maxTurn(qEmb(), SessionId(sid)) == 2,
             "cold-start maxTurn must be DB-derived (got %s)".format(diB.maxTurn(qEmb(),
@@ -1419,10 +1462,13 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240505-150000-7777";
     auto u = Message(Role.user, true, "The quick brown fox jumps over the lazy dog", "");
@@ -1433,10 +1479,12 @@ unittest {
         summaryText: "", originalLength: 1, newLength: 0, newContextSize: 0);
     di.onCheckpoint(cp);
 
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 
     // Vector-only dispatch (querySemantic): the component embeds the
     // vectorQuery with the caller-supplied query-path embedder.
@@ -1451,16 +1499,19 @@ unittest {
     assert(c.matches[0].episode.turnEnd == 1, "combined match must carry turnEnd 1");
 }
 
-@("Robustness: topK clamp, embed-failure fallback (review Issues 1/2)")
+@("Robustness: topK clamp, embed-failure fallback")
 unittest {
     auto s = setupTest("robustness_topk_clamp");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240506-160000-0001";
     auto u = Message(Role.user, true, "Clamp test unique phrase", "");
@@ -1471,10 +1522,12 @@ unittest {
         summaryText: "", originalLength: 1, newLength: 0, newContextSize: 0);
     di.onCheckpoint(cp);
 
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 
     // topK <= 0 must never crash the query (clamped to 1).
     auto r0 = di.query(qEmb(), SessionId(sid), "clamp", "", topK: 0);
@@ -1496,14 +1549,17 @@ unittest {
             "text+vector with embed failure must fall back to text search");
 }
 
-@("dispose(): idempotent and safe before any checkpoint (item 2)")
+@("dispose(): idempotent and safe before any checkpoint")
 unittest {
     auto s = setupTest("dispose_idempotent");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
-    Thread.sleep(100.dur!"msecs"); // let the worker start
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
 
     // Dispose before any checkpoint: must not throw or hang.
     di.dispose();
@@ -1512,7 +1568,7 @@ unittest {
     di.dispose();
 }
 
-@("Corrupted session DB: the query path degrades to no-history (item 3)")
+@("Corrupted session DB: the query path degrades to no-history")
 unittest {
     import std.stdio : File;
 
@@ -1520,10 +1576,13 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose();
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240101-120000-cafe"; // valid id, never indexed
     // A file that exists but is not a valid SQLite database.
@@ -1540,16 +1599,19 @@ unittest {
             "corrupt DB must degrade to no-history, not an engine error: " ~ res.message);
 }
 
-@("boundary: no-history and engine-error messages are disjoint (item 4)")
+@("boundary: no-history and engine-error messages are disjoint")
 unittest {
     auto s = setupTest("no_history_and_engine_error");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose();
-    Thread.sleep(100.dur!"msecs");
 
     // (a) Never-indexed session: graceful no-history, NO "error:" prefix.
     string noHistSid = "20240101-120000-b001";
@@ -1567,10 +1629,12 @@ unittest {
     ], evictedPurged: null, evictedInPlace: null, turnStart: 1, turnEnd: 1,
         summaryText: "", originalLength: 1, newLength: 0, newContextSize: 0);
     di.onCheckpoint(cp);
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
     assert(di.hasHistory(qEmb(), SessionId(histSid)), "session must have history");
 
     // (b) Embed failure on a session WITH history: "error:"-prefixed.
@@ -1595,10 +1659,13 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs");
 
     string sid = "20240601-010203-f6a1";
 
@@ -1624,10 +1691,12 @@ unittest {
             summaryText: "", originalLength: 3, newLength: 0, newContextSize: 0);
     di.onCheckpoint(cp);
 
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 
     // Open the session DB read-only (model/dimensions from the query-path
     // embedder, which matches the values the worker wrote).
@@ -1699,10 +1768,13 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs"); // let worker start
 
     string sid = "20240615-090807-f105";
 
@@ -1741,9 +1813,9 @@ unittest {
             summaryText: "", originalLength: 4, newLength: 0, newContextSize: 0);
     di.onCheckpoint(cp);
 
-    // Dispose drains the worker mailbox (DiDrain -> DiDrained); the
-    // drain handler checkpoints + closes the WAL write connection,
-    // leaving a clean DB for the read-only open below.
+    // Dispose drains the worker mailbox (DiDrain -> DiDrained via the gate
+    // protocol); the drain handler checkpoints + closes the WAL write
+    // connection, leaving a clean DB for the read-only open below.
     di.dispose();
 
     // Open the session DB read-only (model/dimensions from the
@@ -1838,10 +1910,13 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs"); // let worker start
 
     string sid = "20240101-120000-aaaa";
 
@@ -1874,10 +1949,13 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &diTestFactory);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs"); // let worker start
 
     string sid = "20240101-120000-bbbb";
 
@@ -1891,10 +1969,12 @@ unittest {
             evictedPurged: null, evictedInPlace: null, turnStart: 1, turnEnd: 1,
             summaryText: "", originalLength: 2, newLength: 0, newContextSize: 0);
     di.onCheckpoint(cp);
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 
     // (2) Directly seed an r_ (reasoning) episode for turn 5, with a
     //     distinctive sentinel word the d_ text does not contain.
@@ -1931,4 +2011,39 @@ unittest {
         assert(indexOf(m.text, R_SENTINEL) == size_t.max,
                 "no match may contain the reasoning sentinel");
     }
+}
+
+// Actor path: the new constructor spawns the worker actor, onCheckpoint
+// routes DiJob through the channel, and dispose drains via the
+// gate-carrying protocol (scoped wait). A round trip proves the whole
+// actor path works end to end.
+@("DialogueIndex: actor path round-trip + dispose")
+unittest {
+    auto s = setupTest("actor_path_round_trip");
+    scope (exit)
+        teardownTest(s);
+
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &diTestFactory);
+
+    // One exchange, turn 1 (valid session id).
+    string sid = "20240101-120000-abcd";
+    auto u1 = Message(Role.user, true, "Actor path smoke question", "");
+    u1.turnId = 1;
+    auto a1 = Message(Role.assistant, false, "Actor path smoke answer", "");
+    a1.turnId = 1;
+    auto cp = CompressionCheckpoint(timestamp: Clock.currTime, sessionId: sid,
+            evictedSummarized: [Chat.MessageT(u1), Chat.MessageT(a1)],
+            evictedPurged: null, evictedInPlace: null, turnStart: 1, turnEnd: 1,
+            summaryText: "", originalLength: 2, newLength: 0, newContextSize: 0);
+    di.onCheckpoint(cp); // nothrow; sends DiJob through the channel
+
+    // Dispose drains the actor (scoped wait); the gate is closed on return.
+    di.dispose();
+
+    // The worker handle is still held (production reads worker.weakRef).
+    assert(!di.worker.empty, "actor path must hold the worker handle");
 }

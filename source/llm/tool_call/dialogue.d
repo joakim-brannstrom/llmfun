@@ -138,6 +138,7 @@ version (unittest) {
     import std.string : count, indexOf, split, startsWith, strip, toLower;
     import std.sumtype : match;
 
+    import my.actor : System, makeSystem;
     import my.optional;
     import my.path : AbsolutePath, Path;
 
@@ -276,12 +277,15 @@ version (unittest) {
     }
 
     /// A DialogueIndex over the test's area (same embedder config as before:
-    /// unreachable 127.0.0.1:0 remote, 8 dims). The area is where this test's
-    /// session DBs live, so worker writes and seedSessionDb land in one dir.
-    private DialogueIndex makeDi(TestArea testDir) {
+    /// unreachable 127.0.0.1:0 remote, 8 dims), backed by the actor worker on
+    /// the test's system. The area is where this test's session DBs live, so
+    /// worker writes and seedSessionDb land in one dir. The test owns `sys`
+    /// (makeSystem + scope(exit) shutdown); makeDi never creates one.
+    private DialogueIndex makeDi(TestArea testDir, System* sys) {
+        // TODO: it should not take a System as argument, probably. If it do it should be a reference at most.
         return new DialogueIndex(testDir.workArea, EmbedConfig(RemoteEmbedConfig(server: ServerConfig(url: "http://127.0.0.1:0"),
                 modelName: "test", dimensions: 8)),
-                RagConfig(windowOverlapPercent: 10), &testEmbFactory);
+                RagConfig(windowOverlapPercent: 10), sys, &testEmbFactory);
     }
 
     /// Seed a session's dialogue DB directly (bypassing the worker: fast and
@@ -322,7 +326,10 @@ unittest {
     auto testDir = testArea("param_validation");
     scope (exit)
         testDir.cleanup();
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     auto ctx = makeContext(testDir, TestSessionId, di);
@@ -359,7 +366,10 @@ unittest {
     auto testDir = testArea("graceful_no_history");
     scope (exit)
         testDir.cleanup();
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
 
@@ -393,7 +403,10 @@ unittest {
     scope (exit)
         testDir.cleanup();
     seedSessionDb(TestSessionId, [1], ["PostgreSQL default port is 5432."], testDir);
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     auto ctx = makeContext(testDir, TestSessionId, di, true, new FailEmbedder());
@@ -418,7 +431,10 @@ unittest {
     scope (exit)
         testDir.cleanup();
     seedSessionDb(TestSessionId, [1], ["PostgreSQL default port is 5432."], testDir);
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     auto ctx = makeContext(testDir, TestSessionId, di);
@@ -440,7 +456,10 @@ unittest {
         "PostgreSQL default port is 5432.",
         "Restart nginx with systemctl restart nginx."
     ], testDir);
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     auto ctx = makeContext(testDir, TestSessionId, di);
@@ -479,7 +498,10 @@ unittest {
         "record one alpha value", "record two beta value",
         "record ten gamma value"
     ], testDir);
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     auto ctx = makeContext(testDir, TestSessionId, di);
@@ -528,7 +550,10 @@ unittest {
                 "We moved the PostgreSQL data and the nginx site config, then systemctl daemon-reload.",
                 "PostgreSQL default port is 5432."
     ], testDir);
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     auto ctx = makeContext(testDir, TestSessionId, di);
@@ -563,7 +588,10 @@ unittest {
         "zebra checkpoint gamma", "zebra checkpoint delta",
         "zebra checkpoint epsilon", "zebra checkpoint zeta"
     ], testDir);
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     auto ctx = makeContext(testDir, TestSessionId, di);
@@ -602,7 +630,10 @@ unittest {
                 "window checkpoint nine", "window checkpoint ten",
                 "window checkpoint eleven", "window checkpoint twelve"
     ], testDir);
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     auto ctx = makeContext(testDir, TestSessionId, di);
@@ -638,7 +669,10 @@ unittest {
     scope (exit)
         testDir.cleanup();
     seedSessionDb(TestSessionId, [1], ["PostgreSQL default port is 5432."], testDir);
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     auto ctx = makeContext(testDir, TestSessionId, di);
@@ -663,7 +697,10 @@ unittest {
     // The worker gets the test embedder injected by makeDi (no global
     // factory registry involved).
 
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
 
@@ -729,7 +766,10 @@ unittest {
     // The worker gets the test embedder injected by makeDi (no global
     // factory registry involved).
 
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
 
     // Drive the REAL compression path.
     auto agent = SummaryAgent(SummaryModelConfig(modelName: "test",
@@ -905,7 +945,10 @@ unittest {
     assert(exists(testDir ~ (TestSessionId ~ ".db")), "session A db missing under test area");
     assert(exists(testDir ~ (SessionB ~ ".db")), "session B db missing under test area");
 
-    auto di = makeDi(testDir);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = makeDi(testDir, &sys);
     scope (exit)
         di.dispose();
     // Active session is A; the tool defaults to it when sessionId is empty.

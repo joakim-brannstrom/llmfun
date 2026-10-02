@@ -4,20 +4,20 @@
 /// the evicted reasoning (thinking + tool calls/responses) into a compact
 /// per-turn trace, filters retrieval artifacts and unstamped/summary entries,
 /// budgets the trace to the summary model's own effective context, and
-/// sends exactly ONE RiJob to the shared dialogue worker. The worker
-/// summarizes it off the mailbox and indexes the record under an `r_` topic
-/// name; this module never writes the DB itself.
+/// sends exactly ONE RiJob to the shared dialogue worker (a WeakAddress
+/// actor handle; an empty or dead handle drops the job silently). The
+/// worker summarizes it off the mailbox (detached summarizer) and indexes
+/// the record under an `r_` topic name; this module never writes the DB itself.
 ///
 /// query() mirrors DialogueIndex.query with r_-only semantics.
 ///
 /// There is no dispose(): the class is stateless and rides the shared
-/// worker's DiDrain + bounded join.
+/// worker's drain (bounded drain deadline).
 module llm.rag.reasoning_index;
 
 import std.algorithm : canFind, map, max, min;
 import std.algorithm.searching : endsWith, startsWith;
 import std.array : join, split;
-import std.concurrency : Tid, send;
 import std.conv : to, text;
 import std.exception : collectException;
 import std.format : format;
@@ -28,6 +28,7 @@ import std.sumtype : match;
 
 import logger = std.logger;
 
+import my.actor;
 import my.path : AbsolutePath;
 import my.optional;
 
@@ -114,12 +115,15 @@ class ReasoningIndex {
         SummaryModelConfig summaryCfg;
         int effectiveContext; // resolved ONCE at startup, cached
     }
-    Tid workerTid; // public: shared dialogue worker
+    WeakAddress worker; // public: shared dialogue worker (actor handle)
 
-    this(AbsolutePath dir, SummaryModelConfig cfg, Tid worker) {
+    /// `worker`: the shared dialogue worker's actor handle. May be empty —
+    /// an empty (or dead) handle drops the RiJob silently; jobs are
+    /// dispatched by name ("riJob").
+    this(AbsolutePath dir, SummaryModelConfig cfg, WeakAddress worker) {
         this.dialogueDir = dir;
         this.summaryCfg = cfg;
-        this.workerTid = worker;
+        this.worker = worker;
         // EXACTLY SummaryAgent's effective context;
         // resolved ONCE at startup — never per-checkpoint.
         this.effectiveContext = cast(int) min(getContextSize(cfg), cfg.contextChunkSize);
@@ -190,7 +194,10 @@ class ReasoningIndex {
                     turnEnd = l.turnId;
             }
             string traceText = map!(l => l.text)(lines).join("\n");
-            send(workerTid, RiJob(sid.idup, traceText.idup, turnStart, turnEnd));
+            // Dispatch by name to the shared dialogue worker's actor; an
+            // empty or dead handle drops the RiJob silently.
+            if (!worker.empty)
+                dynSend(worker, "riJob", RiJob(sid.idup, traceText.idup, turnStart, turnEnd));
             // Counts and ids only — NEVER trace content.
             logger.tracef(
                     "ReasoningIndex: sent reasoning trace for session '%s' turns %s-%s: %s lines, %s chars, %s omitted",
@@ -389,14 +396,12 @@ class ReasoningIndex {
 
 version (unittest) {
     import core.time : dur;
-    import core.thread : Thread;
-    import std.concurrency : spawn, thisTid, receiveTimeout, Tid, send;
     import std.datetime : Clock;
     import std.json : JSONValue;
     import llm.common.config : ServerConfig, EmbedConfig, RemoteEmbedConfig;
     import llm.common.embedder : Embedder, EmbedResult, EmbedError;
     import llm.config : RagConfig;
-    import llm.rag.dialogue_worker : DiDrain, DiDrained;
+    import llm.rag.dialogue_worker : CompletionGate, DiDrained, ReasoningDrainBudget;
     import llm.rag.rag : Origin, addToDatabase, Document;
     import llm.test_util : TestArea, testArea;
     import my.path : Path;
@@ -462,7 +467,7 @@ version (unittest) {
         }
     }
 
-    /// Factory that injects the test embedder into the worker thread (instead
+    /// Factory that injects the test embedder into the worker actor (instead
     /// of the process-global factory registry, which parallel tests race on).
     private Embedder riTestFactory(EmbedConfig config) {
         return new RiTestEmbedder();
@@ -521,20 +526,34 @@ version (unittest) {
         db.destroy();
     }
 
-    /// RiJob capture mailbox. The capture thread acts as the "worker" for
-    /// the ReasoningIndex under test (its Tid is passed to the ctor); after
-    /// receiving an RiJob — or timing out — it acks its creator so the test
-    /// can synchronize before reading the mailbox.
+    /// RiJob capture store. The capture actor acts as the "worker" for the
+    /// ReasoningIndex under test (its address is passed to the ctor); on
+    /// receiving an RiJob it acks its supervisor so the test can
+    /// synchronize before reading the store.
     struct RiJobCapture {
         RiJob job;
         bool got;
     }
 
-    // Non-private: spawn requires an externally linked function pointer.
-    // shared pointer: spawn rejects mutable thread-local aliasing.
-    void riJobCaptureThread(shared(RiJobCapture)* cap, Tid creator) {
-        receiveTimeout(2.dur!"seconds", (RiJob j) { cap.job = j; cap.got = true; });
-        send(creator, "cap-ack");
+    /// Stand-in worker for the capture tests: stores the RiJob it receives
+    /// (dispatched by name, like the real dialogue worker) and acks the
+    /// supervisor. The ack orders the store write before the test reads it.
+    final class RiJobCaptureActor {
+        private {
+            shared(RiJobCapture)* cap_;
+            WeakAddress out_;
+        }
+
+        this(shared(RiJobCapture)* cap, WeakAddress outAddr) {
+            this.cap_ = cap;
+            this.out_ = outAddr;
+        }
+
+        void riJob(RiJob j) {
+            (*cap_).job = j;
+            (*cap_).got = true;
+            dynSend(out_, "capCk", "cap-ack");
+        }
     }
 
     /// Test seam: a Logger that captures formatted messages so the
@@ -658,10 +677,7 @@ unittest {
             ~ tl[0].text[tl[0].text.length - 30 .. $]);
 }
 
-// ------------------------------------------------------------------
-// Budget tests (capture Tid receiving RiJob)
-// ------------------------------------------------------------------
-
+@("Budget tests (capture actor receiving RiJob")
 unittest {
     // effectiveContext 16384 → budget (16384-8192)*2 = 16384 chars. Nine
     // single-digit-tid thinking lines of 2024 chars each total 18224, so
@@ -670,10 +686,14 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    RiJobCapture cap;
-    auto tid = spawn(&riJobCaptureThread, cast(shared(RiJobCapture)*)&cap, thisTid);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto sup = scopedActor;
+    RiJobCapture capStore;
+    auto cap = sys.spawn!RiJobCaptureActor(cast(shared(RiJobCapture)*)&capStore, sup.address());
 
-    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), tid);
+    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), cap.weakRef);
     string sid = "20240101-120000-bad1";
     Chat.MessageT[] evicted;
     foreach (i; 1 .. 10) { // tids 1..9
@@ -689,17 +709,17 @@ unittest {
             summaryText: "", originalLength: 9, newLength: 0, newContextSize: 0);
     ri.onCheckpoint(cp);
 
-    // Wait for the capture thread's ack (sent after receiving the RiJob or
-    // after its 2s timeout) before reading the mailbox.
-    bool acked = false;
-    receiveTimeout(10.dur!"seconds", (string _) { acked = true; });
-    assert(acked, "capture thread must ack");
-    assert(cap.got, "RiJob must be sent for a budgeted trace");
-    assert(cap.job.sessionId == sid, "sessionId mismatch: " ~ cap.job.sessionId);
-    assert(cap.job.turnStart == 2 && cap.job.turnEnd == 9,
-            "range must be min..max of INCLUDED lines, got %s-%s".format(cap.job.turnStart,
-                cap.job.turnEnd));
-    auto textLines = cap.job.traceText.split("\n");
+    // Wait for the capture actor's ack (sent after receiving the RiJob)
+    // before reading the store.
+    assert(sup.receiveTimeout(2.dur!"seconds", (string s) {
+            assert(s == "cap-ack");
+        }), "capture actor must ack");
+    assert(capStore.got, "RiJob must be sent for a budgeted trace");
+    assert(capStore.job.sessionId == sid, "sessionId mismatch: " ~ capStore.job.sessionId);
+    assert(capStore.job.turnStart == 2 && capStore.job.turnEnd == 9,
+            "range must be min..max of INCLUDED lines, got %s-%s".format(
+                capStore.job.turnStart, capStore.job.turnEnd));
+    auto textLines = capStore.job.traceText.split("\n");
     assert(textLines.length == 9, "expected 1 marker + 8 lines, got %s".format(textLines.length));
     assert(textLines[0] == "[1 older trace entries omitted for size]",
             "marker must carry the omitted count: " ~ textLines[0]);
@@ -714,10 +734,14 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    RiJobCapture cap;
-    auto tid = spawn(&riJobCaptureThread, cast(shared(RiJobCapture)*)&cap, thisTid);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto sup = scopedActor;
+    RiJobCapture capStore;
+    auto cap = sys.spawn!RiJobCaptureActor(cast(shared(RiJobCapture)*)&capStore, sup.address());
 
-    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 9000), tid);
+    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 9000), cap.weakRef);
     string longThinking;
     foreach (i; 0 .. 2000)
         longThinking ~= "x";
@@ -729,16 +753,16 @@ unittest {
         summaryText: "", originalLength: 1, newLength: 0, newContextSize: 0);
     ri.onCheckpoint(cp);
 
-    bool acked = false;
-    receiveTimeout(10.dur!"seconds", (string _) { acked = true; });
-    assert(acked, "capture thread must ack");
-    assert(cap.got, "RiJob must be sent even for a hard-capped singleton");
-    assert(cap.job.turnStart == 3 && cap.job.turnEnd == 3);
+    assert(sup.receiveTimeout(2.dur!"seconds", (string s) {
+            assert(s == "cap-ack");
+        }), "capture actor must ack");
+    assert(capStore.got, "RiJob must be sent even for a hard-capped singleton");
+    assert(capStore.job.turnStart == 3 && capStore.job.turnEnd == 3);
     size_t budget = (9000 - AnswerReserve) * ApproxTokenSize;
-    assert(cap.job.traceText.length == budget,
+    assert(capStore.job.traceText.length == budget,
             "singleton must be hard-capped to the budget, got %s (budget %s)".format(
-                cap.job.traceText.length, budget));
-    assert(cap.job.traceText.startsWith("[t3 assistant thinking] "),
+                capStore.job.traceText.length, budget));
+    assert(capStore.job.traceText.startsWith("[t3 assistant thinking] "),
             "cap must keep the shape prefix");
 }
 
@@ -751,10 +775,14 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    RiJobCapture cap;
-    auto tid = spawn(&riJobCaptureThread, cast(shared(RiJobCapture)*)&cap, thisTid);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto sup = scopedActor;
+    RiJobCapture capStore;
+    auto cap = sys.spawn!RiJobCaptureActor(cast(shared(RiJobCapture)*)&capStore, sup.address());
 
-    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), tid);
+    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), cap.weakRef);
     string sid = "20240101-120000-ab01";
 
     auto good1 = Message(Role.assistant, false, "", "first thinking");
@@ -784,21 +812,22 @@ unittest {
             summaryText: "", originalLength: 5, newLength: 0, newContextSize: 0);
     ri.onCheckpoint(cp);
 
-    bool acked = false;
-    receiveTimeout(10.dur!"seconds", (string _) { acked = true; });
-    assert(acked, "capture thread must ack");
-    assert(cap.got, "RiJob must be sent for the surviving entries");
-    assert(cap.job.sessionId == sid);
-    assert(cap.job.turnStart == 2 && cap.job.turnEnd == 7,
-            "range must cover included lines only, got %s-%s".format(cap.job.turnStart,
-                cap.job.turnEnd));
+    assert(sup.receiveTimeout(2.dur!"seconds", (string s) {
+            assert(s == "cap-ack");
+        }), "capture actor must ack");
+    assert(capStore.got, "RiJob must be sent for the surviving entries");
+    assert(capStore.job.sessionId == sid);
+    assert(capStore.job.turnStart == 2 && capStore.job.turnEnd == 7,
+            "range must cover included lines only, got %s-%s".format(capStore.job.turnStart,
+                capStore.job.turnEnd));
     // idup'd payload: the captured strings must not alias this test's locals
-    // (onCheckpoint's stack strings are gone by the time the thread reads).
-    assert(cap.job.sessionId.cmp(sid) == 0);
+    // (onCheckpoint's stack strings are gone by the time the actor reads).
+    assert(capStore.job.sessionId.cmp(sid) == 0);
     string expected = "[t2 assistant thinking] first thinking\n[t7 assistant thinking] seventh thinking";
-    assert(cap.job.traceText.ptr != expected.ptr, "traceText must be an idup'd copy, not an alias");
-    assert(cap.job.traceText == expected,
-            "traceText must carry exactly the included lines, got: " ~ cap.job.traceText);
+    assert(capStore.job.traceText.ptr != expected.ptr,
+            "traceText must be an idup'd copy, not an alias");
+    assert(capStore.job.traceText == expected,
+            "traceText must carry exactly the included lines, got: " ~ capStore.job.traceText);
 }
 
 unittest {
@@ -808,10 +837,14 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    RiJobCapture cap;
-    auto tid = spawn(&riJobCaptureThread, cast(shared(RiJobCapture)*)&cap, thisTid);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto sup = scopedActor;
+    RiJobCapture capStore;
+    auto cap = sys.spawn!RiJobCaptureActor(cast(shared(RiJobCapture)*)&capStore, sup.address());
 
-    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), tid);
+    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), cap.weakRef);
 
     // Invalid sid.
     auto bad = Message(Role.assistant, false, "", "thinking");
@@ -829,12 +862,12 @@ unittest {
             evictedInPlace: null, turnStart: 2, turnEnd: 2, summaryText: "",
             originalLength: 1, newLength: 0, newContextSize: 0));
 
-    // Neither checkpoint sent an RiJob: the capture thread only acks after
-    // its 2s timeout.
+    // Neither checkpoint sent an RiJob: the capture actor acks only on
+    // receiving one, so no ack may arrive within the window.
     bool acked = false;
-    receiveTimeout(10.dur!"seconds", (string _) { acked = true; });
-    assert(acked, "capture thread must ack");
-    assert(!cap.got, "invalid session and all-filtered checkpoints must not send an RiJob");
+    sup.receiveTimeout(2.dur!"seconds", (string _) { acked = true; });
+    assert(!acked, "no RiJob was sent; a cap-ack implies one arrived");
+    assert(!capStore.got, "invalid session and all-filtered checkpoints must not send an RiJob");
 }
 
 unittest {
@@ -860,18 +893,24 @@ unittest {
     long[] smallContexts = [4096, 8192];
     foreach (idx; 0 .. smallContexts.length) {
         long ctx = smallContexts[idx];
-        RiJobCapture cap;
-        auto tid = spawn(&riJobCaptureThread, cast(shared(RiJobCapture)*)&cap, thisTid);
-        auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: ctx), tid);
+        auto sys = makeSystem;
+        scope (exit)
+            sys.shutdown();
+        auto sup = scopedActor;
+        RiJobCapture capStore;
+        auto cap = sys.spawn!RiJobCaptureActor(cast(shared(RiJobCapture)*)&capStore,
+                sup.address());
+        auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: ctx), cap.weakRef);
         ri.onCheckpoint(CompressionCheckpoint(timestamp: Clock.currTime,
                 sessionId: "20240101-120000-dea" ~ idx.to!string,
                 evictedSummarized: evicted, evictedPurged: null, evictedInPlace: null, turnStart: 1, turnEnd: 2,
                 summaryText: "", originalLength: 2, newLength: 0, newContextSize: 0));
-        // No RiJob was sent: the capture thread only acks after its 2s timeout.
+        // No RiJob was sent: the capture actor acks only on receiving one,
+        // so no ack may arrive within the window.
         bool acked = false;
-        receiveTimeout(10.dur!"seconds", (string _) { acked = true; });
-        assert(acked, "capture thread must ack (ctx %s)".format(ctx));
-        assert(!cap.got,
+        sup.receiveTimeout(2.dur!"seconds", (string _) { acked = true; });
+        assert(!acked, "no RiJob was sent (ctx %s); a cap-ack implies one arrived".format(ctx));
+        assert(!capStore.got,
                 "ctx %s <= AnswerReserve must not send an RiJob (budget would wrap)".format(ctx));
     }
 }
@@ -884,7 +923,7 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), Tid.init);
+    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), WeakAddress.init);
     string sid = "20240101-120000-cafe";
     seedTopicDb(s, sid, encodeTopicName(sid, 5, 5, 1700000000001, Kind.reasoning),
             "REASONING_TOKEN abandoned hypothesis binding decision record");
@@ -912,7 +951,7 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), Tid.init);
+    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), WeakAddress.init);
     string sid = "20240101-120000-feed";
     seedTopicDb(s, sid, encodeTopicName(sid, 5, 5, 1700000000003),
             "DIALOGUE_TOKEN only dialogue here");
@@ -930,7 +969,7 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), Tid.init);
+    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), WeakAddress.init);
     string sid = "20240101-120000-f00d";
     seedTopicDb(s, sid, encodeTopicName(sid, 5, 5, 1700000000004,
             Kind.reasoning), "AGE_TOKEN old record");
@@ -955,7 +994,7 @@ unittest {
     scope (exit)
         teardownTest(s);
 
-    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), Tid.init);
+    auto ri = new ReasoningIndex(s.tmpDir, SummaryModelConfig(contextSize: 16384), WeakAddress.init);
 
     Embedder nullEmb;
     auto noEmb = ri.query(nullEmb, SessionId("20240101-120000-cafe2"), "anything", "");
@@ -974,41 +1013,49 @@ unittest {
 
 // DialogueIndex ctor forwarding (worker contract, dialogue_index.d)
 unittest {
-    // 3-arg ctor compiles and behaves (all new params default to the
-    // neutral values): the worker starts and drains cleanly.
+    // Actor ctor with defaults (sys + factory only): every optional param
+    // defaults to its neutral value — the worker starts and drains cleanly.
     auto s = setupTest("dialogue_ctor_defaults_test");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &riTestFactory);
     scope (exit)
         di.dispose();
-    Thread.sleep(100.dur!"msecs"); // let the worker start
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(10.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "default-ctor worker must drain");
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain");
+    gate.close();
 }
 
 unittest {
-    // 6-arg ctor: a caller-supplied SummarizerFn must reach the spawned
-    // worker (RiJob → fake record indexed under an r_ topic verbatim).
+    // Actor ctor: a caller-supplied SummarizerFn must reach the worker
+    // (RiJob → fake record indexed under an r_ topic verbatim).
     auto s = setupTest("dialogue_ctor_forwarding_test");
     scope (exit)
         teardownTest(s);
 
-    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &riTestFactory,
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = new DialogueIndex(s.tmpDir, s.cfg, s.ragCfg, &sys, &riTestFactory,
             SummaryModelConfig(contextSize: 16384), "fake reasoning prompt", &riFakeSummarizer);
     scope (exit)
         di.dispose();
-    Thread.sleep(100.dur!"msecs"); // let the worker start
 
     string sid = "20240101-120000-ab99";
-    send(di.workerTid, RiJob(sid, "trace text for the t4 ctor forwarding test", 4, 8));
-    send(di.workerTid, DiDrain(thisTid));
-    bool drained = false;
-    receiveTimeout(30.dur!"seconds", (DiDrained _) { drained = true; });
-    assert(drained, "worker did not drain after RiJob");
+    dynSend(di.worker, "riJob", RiJob(sid, "trace text for the t4 ctor forwarding test", 4, 8));
+    auto sup = scopedActor;
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
+        }), "worker did not drain after RiJob");
+    gate.close();
 
     auto dbOpt = openDatabase((s.tmpDir ~ (sid ~ ".db")).AbsolutePath, "ri-test", 8, readOnly: true);
     assert(dbOpt.hasValue, "session DB missing after drain");
@@ -1157,10 +1204,9 @@ unittest {
 version (unittest) {
     // E2E helpers.
     //
-    // Deviations from the original e2e contract, each forced and
-    // independently verified:
-    //  1. The contract's nested `e2eFactory`/`fakeSummarizer` are nested
-    //     functions: even without captures they produce delegates, and
+    // Forced deviations, each independently verified:
+    //  1. Nested `e2eFactory`/`fakeSummarizer` are not viable: nested
+    //     functions produce delegates even without captures, and
     //     `EmbedderFactory`/`SummarizerFn` are plain function pointers
     //     (spawn-legal; the DI seam note in dialogue_worker.d), so both
     //     helpers are module-scope like the other worker fakes.
@@ -1172,14 +1218,14 @@ version (unittest) {
     //     worker is spawned (thread creation publishes the write) and only
     //     reads happen afterwards. The fake keeps NO state; cross-thread
     //     observation is the mailbox capture alone.
-    //  4. The contract's JSONValue construction does not work in this
-    //     Phobos: `JSONValue(JSONType.array)` builds a uinteger, not an
-    //     empty array (a `.array` read throws at runtime), and the
-    //     mixed-type AA literal does not compile; the tool-calls JSON is
-    //     built with the established setter pattern, same resulting shape.
+    //  4. `JSONValue(JSONType.array)` does not work in this Phobos: it
+    //     builds a uinteger, not an empty array (a `.array` read throws
+    //     at runtime), and the mixed-type AA literal does not compile;
+    //     the tool-calls JSON is built with the established setter
+    //     pattern, same resulting shape.
 
-    /// All-ones 8-dim test embedder; the contract's name is kept as an
-    /// alias. The worker-side factory and the query-side instances share
+    /// All-ones 8-dim test embedder, aliased to the shared test
+    /// embedder. The worker-side factory and the query-side instances share
     /// modelName()/dimensions() ("ri-test",
     /// 8), as the read-only DB open requires.
     alias E2ETestEmbedder = RiTestEmbedder;
@@ -1188,8 +1234,10 @@ version (unittest) {
         return new E2ETestEmbedder();
     }
 
-    /// Capture destination for the fake (deviation 3 above).
-    private __gshared Tid e2eCaptureTid;
+    /// Capture destination for the fake (`__gshared` by necessity:
+    /// module-scope vars are thread-local by default; published once
+    /// before the worker spawns).
+    private __gshared WeakAddress e2eCaptureAddr;
 
     /// Canned 4-section records with distinctive tokens.
     private immutable string e2eCanned1 = "Abandoned Hypotheses:\n- brute-force zebra — O(n!) timed out\n"
@@ -1198,9 +1246,9 @@ version (unittest) {
     private immutable string e2eCanned2 = "Abandoned Hypotheses:\n- None\nBinding Decisions:\n- kept memoized zebra — SECONDRECORD\nCurrent Uncertainties:\n- None\nJustification:\n- turn 2: stands";
 
     /// Fake summarizer (DI seam): capture each trace to the test
-    /// mailbox (NO shared state); throw on MAKEFAIL; else branch on content.
+    /// supervisor (NO shared state); throw on MAKEFAIL; else branch on content.
     private string e2eFakeSummarizer(string prompt, string traceText) {
-        send(e2eCaptureTid, traceText);
+        dynSend(e2eCaptureAddr, "e2eCap", traceText);
         if (traceText.canFind("MAKEFAIL"))
             throw new Exception("fake summarizer failure");
         if (traceText.canFind("second thinking zebra"))
@@ -1220,11 +1268,13 @@ unittest {
         tmpDir.cleanup;
 
     string sid = "20240101-120000-e2ea";
-    // The fake runs on the worker's spawned thread: publish the capture Tid
-    // before the worker exists (thread creation publishes the write).
-    e2eCaptureTid = thisTid;
+    // The fake runs on the worker's spawned summarizer thread: publish the
+    // capture address before the worker exists (thread creation publishes
+    // the write). The supervisor is a scoped actor (no System needed).
+    auto sup = scopedActor;
+    e2eCaptureAddr = sup.address();
     scope (exit)
-        e2eCaptureTid = Tid.init; // no stale capture target left behind
+        e2eCaptureAddr = WeakAddress.init; // no stale capture target left behind
 
     auto cfg = EmbedConfig(RemoteEmbedConfig(server: ServerConfig(url: "http://127.0.0.1:0"),
             modelName: "e2e-embed", dimensions: 8));
@@ -1232,12 +1282,14 @@ unittest {
     auto summaryCfg = SummaryModelConfig(server: ServerConfig(url: "http://127.0.0.1:0"),
             modelName: "e2e-summary", contextSize: 16384); // 16384 → positive budget (at 8192 budget is 0, no RiJob)
 
-    auto di = new DialogueIndex(tmpDir, cfg, ragCfg, &e2eFactory, summaryCfg,
-            "e2e-reasoning-prompt", &e2eFakeSummarizer);
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
+    auto di = new DialogueIndex(tmpDir, cfg, ragCfg, &sys, &e2eFactory,
+            summaryCfg, "e2e-reasoning-prompt", &e2eFakeSummarizer);
     scope (exit)
         di.dispose;
-    Thread.sleep(100.dur!"msecs"); // let worker start
-    auto ri = new ReasoningIndex(tmpDir, summaryCfg, di.workerTid);
+    auto ri = new ReasoningIndex(tmpDir, summaryCfg, di.worker.weakRef);
 
     CompressionCheckpoint mkcp(long ts, long te, Chat.MessageT[] msgs) {
         return CompressionCheckpoint(timestamp: Clock.currTime, sessionId: sid, evictedSummarized: msgs,
@@ -1285,17 +1337,20 @@ unittest {
     da.turnId = 1;
     di.onCheckpoint(mkcp(1, 1, [Chat.MessageT(du), Chat.MessageT(da)]));
 
-    // -- Drain: the bounded join consumes ALL in-flight completions before
+    // -- Drain: the bounded drain deadline consumes ALL in-flight completions before
     //    DB destroy; each fake sends its capture before its completion.
-    send(di.workerTid, DiDrain(thisTid));
+    //    Traces (string) and the DiDrained reply both land on the supervisor.
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
     bool drained = false;
     string[] traces;
     while (!drained) {
-        bool got = receiveTimeout(10.dur!"seconds", (DiDrained _) {
+        bool got = sup.receiveTimeout(ReasoningDrainBudget + 10.dur!"seconds", (DiDrained _) {
             drained = true;
         }, (string t) { traces ~= t; });
         assert(got, "drain/capture receive timed out");
     }
+    gate.close();
     assert(traces.length == 3, "expected 3 captured traces, got " ~ traces.length.to!string);
 
     // -- Feedback loop: match by content (fakes run on concurrent threads).

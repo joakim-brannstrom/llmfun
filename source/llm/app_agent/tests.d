@@ -5,7 +5,6 @@ import logger = std.logger;
 import std.algorithm;
 import std.array : empty, array, appender;
 import std.conv : to, text;
-import std.concurrency : Tid, receiveTimeout, send, thisTid;
 import std.datetime : dur;
 import std.exception : collectException;
 import std.format : format;
@@ -30,7 +29,7 @@ import llm.memory;
 import llm.metric.monitor : MetricMonitor;
 import llm.query;
 import llm.rag.dialogue_index : DialogueIndex;
-import llm.rag.dialogue_worker : DiDegraded;
+import llm.rag.dialogue_worker : CompletionGate, DiDrained;
 import llm.rag.rag : RAG;
 import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
@@ -40,6 +39,9 @@ import llm.utility;
 import llmfun_tui;
 
 version (unittest) {
+    import llm.common.config : EmbedConfig, RemoteEmbedConfig;
+    import llm.common.embedder : Embedder, EmbedResult, EmbedError;
+
     /// Minimal headless LlmConfig for constructing a real Agent in tests: one code model (never contacted) plus a temp summary prompt file. dataDir is intentionally NOT created so dispose()'s saveState() is a no-op - the tests never write a state.json.
     ///
     /// Coupling invariants: the Agent is built with null SkillManager/MetricMonitor/RAG (tolerated by the constructor) and a model name that is never contacted; any future Agent constructor change must keep this helper compiling and passing.
@@ -61,6 +63,73 @@ version (unittest) {
         cfg.promptDir = [promptDir.Path];
         cfg.dataDir = buildPath(tmpDir, "no-state").Path;
         return cfg;
+    }
+
+    // Two-phase exit block fakes: the cheap-model seam for the real worker (module scope:
+    // SummarizerFn is a plain function pointer and cannot capture; the factory mirrors the
+    // worker test seam in llm.rag.dialogue_worker).
+    private class ExitEmbedder : Embedder {
+        override void destroy() {
+        }
+
+        override string modelName() {
+            return "wke";
+        }
+
+        override long dimensions() {
+            return 8;
+        }
+
+        override bool supportsTokenization() {
+            return false;
+        }
+
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        EmbedResult embed(string text) {
+            auto v = new float[8];
+            foreach (ref f; v)
+                f = 1.0f;
+            return EmbedResult(v);
+        }
+
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(tokens);
+        }
+
+        EmbedResult embed(int[] tokens) {
+            return EmbedResult(EmbedError("no tokens"));
+        }
+
+        override int[] tokenize(string text, bool addSpecial) {
+            return null;
+        }
+
+        override string detokenize(int[] tokens) {
+            return null;
+        }
+
+        override int batchSize() {
+            return 16;
+        }
+    }
+
+    private Embedder exitEmbFactory(EmbedConfig config) {
+        return new ExitEmbedder();
+    }
+
+    private string exitSummFake(string prompt, string traceText) {
+        return "EXITBLOCK record body";
     }
 }
 
@@ -517,8 +586,7 @@ unittest {
     assert(app.pendingDeleteId == SessionId.init);
 }
 
-// --- Test: sidebar snapshot mapping (SessionMeta[] -> UiSessionItem[]) ---
-
+@("sidebar snapshot mapping (SessionMeta[] -> UiSessionItem[])")
 unittest {
     SessionMeta a, b;
     a.id = SessionId("20260618-153045-a1b2");
@@ -551,8 +619,7 @@ unittest {
     assert(noActive.length == 1 && !noActive[0].isActive);
 }
 
-@("Test: sidebar invalid-id rejection for each action type")
-
+@("sidebar invalid-id rejection for each action type")
 unittest {
     import llm.app_config : UserConfig;
 
@@ -902,8 +969,7 @@ unittest {
     assert(app.agent_ is null, "dispose() must clear the agent");
 }
 
-@("Test: dispose() keeps the active session even when empty")
-
+@("dispose() keeps the active session even when empty")
 unittest {
     import my.filter : ReFilter;
     import std.file : exists, mkdirRecurse, rmdirRecurse;
@@ -1155,22 +1221,23 @@ unittest {
 // AppAgentActor integration
 //
 // Exercise the actor shell around AgentApp on a real my.actor System. The
-// actor reports completion over a std.concurrency mailbox to the test
-// thread (the pattern established in llm.rag and llm.mcp_server); every
-// test creates the System with the no-arg makeSystem() and shuts it down
-// in scope(exit) so no pool thread outlives the test.
+// actor reports completion over a scoped supervisor actor's mailbox,
+// pumped by the test thread with receiveTimeout (the pattern established
+// in llm.rag and llm.mcp_server); every test creates the System with the
+// no-arg makeSystem() and shuts it down in scope(exit) so no pool thread
+// outlives the test.
 // ---------------------------------------------------------------------------
 
 /// Mirrors the onException body AppAgentActor uses when a handler throws:
-/// report the failure to the main thread, then exit with
+/// report the failure to the supervisor, then exit with
 /// unhandledException. The real hook is a private member of
 /// AppAgentActor, so the test drives a shell with the same body.
 private final class TestExceptionActor {
     private ActorRef self_;
-    private Tid mainTid;
+    private WeakAddress out_;
 
-    this(Tid mainTid) {
-        this.mainTid = mainTid;
+    this(WeakAddress outAddr) {
+        this.out_ = outAddr;
     }
 
     void onSpawn(ActorRef self) {
@@ -1183,31 +1250,31 @@ private final class TestExceptionActor {
 
     void onException(Exception e) {
         logger.warning("TestExceptionActor exception: ", e.msg);
-        send(mainTid, AgentDone(1));
+        dynSend(out_, "agentDone", AgentDone(1));
         sendExit(self_.address(), ExitReason.unhandledException);
     }
 }
 
-/// Watches `b`: when b shuts down, the DownMsg reports "down" to the main
-/// thread.
+/// Watches `b`: when b shuts down, the DownMsg reports "down" to the
+/// supervisor.
 private final class TestWatcher {
     private ActorRef self_;
     private WeakAddress b;
-    private Tid mainTid;
+    private WeakAddress out_;
 
-    this(Tid mainTid, WeakAddress b) {
-        this.mainTid = mainTid;
+    this(WeakAddress outAddr, WeakAddress b) {
+        this.out_ = outAddr;
         this.b = b;
     }
 
     void onSpawn(ActorRef self) {
         self_ = self;
         monitor(self.address(), b);
-        send(mainTid, "watching");
+        dynSend(out_, "watchEvent", "watching");
     }
 
     void onDownMessage(DownMsg d) {
-        send(mainTid, "down");
+        dynSend(out_, "downEvent", "down");
     }
 }
 
@@ -1230,12 +1297,16 @@ unittest {
     scope (exit)
         sys.shutdown();
 
+    auto sup = scopedActor;
+
     auto conf = UserConfig.AgentChatConfig.init;
-    auto a = sys.spawn!AppAgentActor(UserConfig.init, conf, &sys, thisTid());
+    auto a = sys.spawn!AppAgentActor(UserConfig.init, conf, &sys, sup.address());
 
     dynSend(a, "uiTerminated");
     int code = -1;
-    bool got = receiveTimeout(5.dur!"seconds", (AgentDone ad) { code = ad.code; });
+    bool got = sup.receiveTimeout(5.dur!"seconds", (AgentDone ad) {
+        code = ad.code;
+    });
     assert(got && code == 0, "expected AgentDone(0) within 5s");
 }
 
@@ -1245,8 +1316,10 @@ unittest {
     scope (exit)
         sys.shutdown();
 
+    auto sup = scopedActor;
+
     auto conf = UserConfig.AgentChatConfig.init;
-    auto a = sys.spawn!AppAgentActor(UserConfig.init, conf, &sys, thisTid());
+    auto a = sys.spawn!AppAgentActor(UserConfig.init, conf, &sys, sup.address());
 
     // The degraded hook only logs; a follow-up message must still be
     // answered (actor alive).
@@ -1254,7 +1327,9 @@ unittest {
     dynSend(a, "uiTerminated");
 
     int code = -1;
-    bool got = receiveTimeout(5.dur!"seconds", (AgentDone ad) { code = ad.code; });
+    bool got = sup.receiveTimeout(5.dur!"seconds", (AgentDone ad) {
+        code = ad.code;
+    });
     assert(got && code == 0, "expected AgentDone(0) within 5s");
 }
 
@@ -1264,11 +1339,15 @@ unittest {
     scope (exit)
         sys.shutdown();
 
-    auto a = sys.spawn!TestExceptionActor(thisTid());
+    auto sup = scopedActor;
+
+    auto a = sys.spawn!TestExceptionActor(sup.address());
     dynSend(a, "boom");
 
     int code = -1;
-    bool got = receiveTimeout(5.dur!"seconds", (AgentDone ad) { code = ad.code; });
+    bool got = sup.receiveTimeout(5.dur!"seconds", (AgentDone ad) {
+        code = ad.code;
+    });
     assert(got && code == 1, "expected AgentDone(1) within 5s");
 }
 
@@ -1278,16 +1357,174 @@ unittest {
     scope (exit)
         sys.shutdown();
 
+    auto sup = scopedActor;
+
     auto b = sys.spawn!TestVictim();
-    auto a = sys.spawn!TestWatcher(thisTid(), b.weakRef);
+    auto a = sys.spawn!TestWatcher(sup.address(), b.weakRef);
 
     // "watching" proves the MonitorRequest was queued on b before "die".
     string marker = "";
-    bool got = receiveTimeout(5.dur!"seconds", (string s) { marker = s; });
+    bool got = sup.receiveTimeout(5.dur!"seconds", (string s) { marker = s; });
     assert(got && marker == "watching", "watcher must monitor before B dies");
 
     dynSend(b, "die");
     marker = "";
-    got = receiveTimeout(5.dur!"seconds", (string s) { marker = s; });
+    got = sup.receiveTimeout(5.dur!"seconds", (string s) { marker = s; });
     assert(got && marker == "down", "watcher must receive DownMsg within 5s");
+}
+
+@("agent wiring: actor DI ctor spawns a live worker that answers a drain")
+unittest {
+    import llm.common.config : ServerConfig, EmbedConfig, RemoteEmbedConfig;
+    import llm.test_util : TestArea, testArea;
+
+    // Runtime verification of the production wiring: the actor
+    // DialogueIndex ctor with a NULL
+    // embedder factory — production shape: the worker resolves from the
+    // process-global registry, empty in tests, so the worker degrades
+    // and its one-shot DiDegraded lands on sup, where it is stashed —
+    // must leave a LIVE worker handle, and the worker must answer a
+    // drain. The RiJob-receipt half is covered by the reasoning_index
+    // E2E test (same ctor, capture actor).
+    auto tmpDir = testArea("agent_wiring_worker", __FILE__, __LINE__);
+    scope (exit)
+        tmpDir.cleanup();
+
+    auto sup = scopedActor;
+    auto sys = makeSystem();
+    scope (exit)
+        sys.shutdown();
+
+    auto cfg = EmbedConfig(RemoteEmbedConfig(server: ServerConfig(url: "http://127.0.0.1:0"),
+            modelName: "wiring-embed", dimensions: 8));
+    auto ragCfg = RagConfig(windowOverlapPercent: 10);
+    auto di = new DialogueIndex(tmpDir, cfg, ragCfg, &sys, null,
+            SummaryModelConfig.init, "", null, sup.address());
+    scope (exit)
+        di.dispose();
+
+    // (a) the handle is live right after the ctor...
+    assert(!di.worker.weakRef.empty, "worker handle must be live after the actor ctor");
+    // (b) ...and the worker answers a drain (spawn + mailbox proven).
+    auto gate = new CompletionGate;
+    di.beginDispose(sup.address(), gate);
+    assert(sup.receiveTimeout(30.dur!"seconds", (DiDrained _) {}), "worker must answer the drain");
+    gate.close();
+}
+
+// Two-phase exit integration: a test AgentApp with the REAL worker (the production DialogueIndex
+// actor ctor) and the cheap-model seam (fake embedder + summarizer). The exit is driven through
+// the same phase methods the actor funnel calls: beginDispose (what startExit does for
+// uiTerminated) must answer DiDrained within ~10 s from the real worker BEFORE finishDispose
+// (what finishExit does) truncates the session store. The full startSetup is deliberately not
+// driven: it also spawns the interactive TUI actor (terminal I/O), which is out of unittest
+// scope -- semantics over realism, per the migration note. The AgentDone half runs the REAL
+// actor funnel (startExit -> finishExit -> agentDone) on its default no-drain app: the actor's
+// private app field cannot be wired without startSetup, so the funnel's phase-1/phase-2 code
+// (beginDispose/finishDispose on a live AgentApp) is proven on the real worker above, and the
+// funnel's reply/cleanup/AgentDone path here.
+@"agent exit: the real worker drains before the store is truncated"unittest {
+    import core.thread : Thread;
+    import std.datetime : Clock;
+    import std.file : exists, mkdirRecurse;
+    import std.path : buildPath;
+    import llm.rag.database : Database, openDatabase;
+    import llm.rag.dialogue_worker : DiEpisode, DiJob;
+    import llm.test_util : TestArea, testArea;
+    import llm.common.config : EmbedConfig, RemoteEmbedConfig, ServerConfig;
+    import my.optional : None;
+
+    auto tmpDir = testArea("agent_exit_two_phase", __FILE__, __LINE__);
+    scope (exit)
+        tmpDir.cleanup();
+
+    // Prompt fixture (SUMMARY.md + default nudge templates) and a real Agent config; point the
+    // store, the worker dir and the state file at the test area.
+    auto llmConf = testLlmConfig(tmpDir);
+    llmConf.dataDir = buildPath(tmpDir, "data").Path;
+    mkdirRecurse(llmConf.dataDir.toString); // saveState must actually write state.json
+    llmConf.chatDir = buildPath(tmpDir, "chat").Path;
+    llmConf.dialogueDir = buildPath(tmpDir, "dialogue").Path;
+    llmConf.embedConfig = EmbedConfig(RemoteEmbedConfig(server: ServerConfig(url: "http://127.0.0.1:0"),
+            modelName: "wke", dimensions: 8));
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = llmConf;
+    app.sessionStore = new SessionStore(llmConf.chatDir.AbsolutePath);
+    app.activeSession = app.sessionStore.create();
+    auto swept = app.sessionStore.create(); // empty, non-active: the exit sweep target
+
+    auto sys = makeSystem();
+    scope (exit)
+        sys.shutdown();
+    auto sup = scopedActor;
+
+    // The real worker (actor path): the production ctor spawns it on sys; the fake embedder
+    // factory + summarizer are the cheap-model seam (no network, no LLM spend).
+    auto ragCfg = RagConfig(windowOverlapPercent: 10, nBatch: 1, maxChunksPerTopic: 512);
+    app.dialogueIndex = new DialogueIndex(llmConf.dialogueDir.AbsolutePath, llmConf.embedConfig,
+            ragCfg, &sys, &exitEmbFactory, llmConf.summaryModel, "",
+            &exitSummFake, sup.address());
+
+    // A real Agent: finishDispose's commit/sweep/saveState block runs only when agent_ is set.
+    app.agent_ = new Agent("main", llmConf, null, null);
+
+    // One episode for the worker to index before the exit; bounded wait for it to commit.
+    string sid = "20240101-120000-ab23";
+    dynSend(app.dialogueIndex.worker, "diJob", DiJob(sid,
+            [
+                DiEpisode("d_20240101_120000_ab23__t1_1__1000".idup,
+                "EXITBLOCK episode body".idup, 1)
+    ]));
+    auto dbPath = buildPath(llmConf.dialogueDir.toString, sid ~ ".db");
+    auto deadline = Clock.currTime + 5.dur!"seconds";
+    bool recorded = false;
+    while (!recorded && Clock.currTime < deadline) {
+        if (exists(dbPath)) {
+            auto dbOpt = openDatabase(dbPath.AbsolutePath, "wke", 8, readOnly: true);
+            if (dbOpt.hasValue) {
+                auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+                scope (exit)
+                    db.destroy;
+                recorded = db.queryTextSearch("EXITBLOCK", 10).length >= 1;
+            }
+        }
+        if (!recorded)
+            Thread.sleep(5.dur!"msecs"); // allowlisted unittest backoff: bounded completion poll
+    }
+    assert(recorded, "the episode must be indexed before the drain under test");
+
+    // Phase 1 (startExit for uiTerminated): enqueue the worker's drain and wait for the reply.
+    auto gate = new CompletionGate;
+    auto drainStart = Clock.currTime;
+    assert(app.beginDispose(sup.address(), gate), "beginDispose must enqueue the drain");
+    assert(sup.receiveTimeout(10.dur!"seconds", (DiDrained _) {}),
+            "the real worker must answer the drain within ~10 s");
+    gate.close();
+    assert(Clock.currTime - drainStart < 10.dur!"seconds",
+            "the drain must complete within ~10 s, before the cleanup phase");
+
+    // Phase 2 (finishExit after DiDrained): cleanup runs now that the drain is done.
+    app.finishDispose();
+
+    // Store truncation: the empty non-active session is swept, the active one is exempt, the
+    // state file is written, and the drained resources are cleared.
+    assert(!exists(buildPath(llmConf.chatDir.toString, swept.id.get ~ ".json")),
+            "the empty non-active session must be swept on exit");
+    assert(exists(buildPath(llmConf.chatDir.toString,
+            app.activeSession.id.get ~ ".json")), "the active session is exempt from the sweep");
+    assert(exists(buildPath(llmConf.dataDir.toString, "state.json")),
+            "saveState must run at finishDispose");
+    assert(app.dialogueIndex is null, "dialogueIndex must be cleared");
+    assert(app.agent_ is null, "agent_ must be cleared");
+
+    // The AgentDone code: the real actor funnel (startExit -> finishExit -> agentDone).
+    auto a = sys.spawn!AppAgentActor(UserConfig.init,
+            UserConfig.AgentChatConfig.init, &sys, sup.address());
+    dynSend(a, "uiTerminated");
+    int code = -1;
+    bool got = sup.receiveTimeout(10.dur!"seconds", (AgentDone ad) {
+        code = ad.code;
+    });
+    assert(got && code == 0, "expected AgentDone(0) from the actor funnel within ~10 s");
 }
