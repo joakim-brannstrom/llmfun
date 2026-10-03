@@ -4072,6 +4072,16 @@ void ImGui::RenderNavCursor(const ImRect& bb, ImGuiID id, ImGuiNavRenderCursorFl
         return;
     if (id == g.LastItemData.ID && (g.LastItemData.ItemFlags & ImGuiItemFlags_NoNav))
         return;
+    // LLMFUN PATCH (imtui): the item being edited/held already shows its own
+    // state (InputText caret, button active colours). Its nav cursor only adds
+    // the outline ring, and on the 1-cell grid that ring is the stray grey bar
+    // hugging the focused multiline input (measured: a 1-2 cell band around
+    // and above the input frame). Skip the cursor for the active item while
+    // the imtui text backend is active; pixel backends (OpenGL) keep the
+    // upstream behaviour.
+    if (ImTui_TextEncodingActive && g.ActiveId == id &&
+        (flags & ImGuiNavRenderCursorFlags_AlwaysDraw) == 0)
+        return;
 
     // We don't early out on 'window->Flags & ImGuiWindowFlags_NoNavInputs' because it would be inconsistent with
     // other code directly checking NavCursorVisible. Instead we aim for NavCursorVisible to always be false.
@@ -4089,14 +4099,23 @@ void ImGui::RenderNavCursor(const ImRect& bb, ImGuiID id, ImGuiNavRenderCursorFl
     ImRect display_rect = bb;
     display_rect.ClipWith(window->ClipRect);
     const float scale_factor = GetScale(); // FIXME-DPI
-    const float thickness = (float)(int)ImMax(2.0f, 1.5f * scale_factor);
+    // LLMFUN PATCH (imtui): cell-grid nav cursor. Upstream reserves a 4-px gap
+    // and draws a 2-px border around the focused item; in the 1-cell text
+    // backend that becomes a 2-cell-thick band sitting 4 cells outside the
+    // item, so focusing the multiline input painted a stray 2x76-cell grey
+    // bar four rows above the input frame. While the imtui text backend is
+    // active, hug the item with a 1-cell border instead; pixel backends
+    // (OpenGL) keep the upstream geometry.
+    const float thickness =
+        ImTui_TextEncodingActive ? 1.0f : (float)(int)ImMax(2.0f, 1.5f * scale_factor);
     if (flags & ImGuiNavRenderCursorFlags_Compact)
     {
         window->DrawList->AddRect(display_rect.Min, display_rect.Max, GetColorU32(ImGuiCol_NavCursor), rounding, thickness);
     }
     else
     {
-        const float distance = (float)(int)(3.0f + thickness * 0.5f);
+        const float distance =
+            ImTui_TextEncodingActive ? 0.0f : (float)(int)(3.0f + thickness * 0.5f);
         display_rect.Expand(ImVec2(distance, distance));
         bool fully_visible = window->ClipRect.Contains(display_rect);
         if (!fully_visible)

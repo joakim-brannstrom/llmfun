@@ -124,6 +124,17 @@ void applyTheme() {
     colors[ImGuiCol_Button] = colors[ImGuiCol_ScrollbarGrab];
     colors[ImGuiCol_ButtonHovered] = ImVec4(0.42f, 0.42f, 0.42f, 0.60f);
     colors[ImGuiCol_ButtonActive] = ImVec4(0.50f, 0.50f, 0.50f, 0.65f);
+    // Scrollbars: the base theme's colors are semi-transparent near-blacks
+    // (bg 0.05 @ 0.54 alpha, grab 0.34 @ 0.54) which blend into the black
+    // background, so the chat log's vertical scrollbar was invisible on
+    // screen. Use solid greys that stay visible on black; assigned AFTER the
+    // Button/NavCursor aliases above so those keep their dimmer look.
+    colors[ImGuiCol_ScrollbarBg] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.55f, 0.55f, 0.55f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.65f, 0.65f, 0.65f, 1.00f);
+    // One cell is a dot on a tall track; three cells read as a thumb.
+    ImGui::GetStyle().GrabMinSize = 3.0f;
     // fprintf(stderr, "[style] NavCursor=%08x ScrollbarGrab=%08x\n",
     // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_NavCursor]),
     // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_ScrollbarGrab]));

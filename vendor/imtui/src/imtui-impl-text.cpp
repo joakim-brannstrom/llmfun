@@ -18,53 +18,36 @@
 
 #define ABS(x) ((x >= 0) ? x : -x)
 
+// LLMFUN PATCH: per-row edge evaluation. The original incremental DDA
+// stepped x only when the accumulated error counter k crossed m, but for
+// near-vertical edges (|dy| >> |dx|) it advanced x once per |dy| rows, so
+// depending on the phase the edge collapsed onto a single column: a
+// 1-cell-wide vertical rect (a child-window scrollbar track/grab) then had a
+// zero-width span on every row except the rows its horizontal edges touched,
+// so the middle of the scrollbar was never painted even though its geometry
+// was a full cell wide. Evaluate the crossing x for each row instead (edges
+// are at most ydelta ≈ screen-height steps long).
 void ScanLine(float x1, int y1, float x2, int y2, int ymax, std::vector<float> & xrange) {
-    float sx, x;
-    int sy, dx1, dy1, dx2, dy2, y, m, n, k, cnt;
-
-    sx = x2 - x1;
-    sy = y2 - y1;
-
-    if (sx > 0) dx1 = 1;
-    else if (sx < 0) dx1 = -1;
-    else dx1 = 0;
-
-    if (sy > 0) dy1 = 1;
-    else if (sy < 0) dy1 = -1;
-    else dy1 = 0;
-
-    m = ABS(sx);
-    n = ABS(sy);
-    dx2 = dx1;
-    dy2 = 0;
-
-    if (m < n)
-    {
-        m = ABS(sy);
-        n = ABS(sx);
-        dx2 = 0;
-        dy2 = dy1;
+    if (y1 == y2) {
+        // Horizontal edge: contributes to its single row.
+        if (y1 >= 0 && y1 < ymax) {
+            if (x1 < xrange[2*y1+0]) xrange[2*y1+0] = x1;
+            if (x1 > xrange[2*y1+1]) xrange[2*y1+1] = x1;
+            if (x2 < xrange[2*y1+0]) xrange[2*y1+0] = x2;
+            if (x2 > xrange[2*y1+1]) xrange[2*y1+1] = x2;
+        }
+        return;
     }
 
-    x = x1; y = y1;
-    cnt = m + 1;
-    k = n / 2;
-
-    while (cnt--) {
-        if ((y >= 0) && (y < ymax)) {
-            if (x < xrange[2*y+0]) xrange[2*y+0] = x;
-            if (x > xrange[2*y+1]) xrange[2*y+1] = x;
-        }
-
-        k += n;
-        if (k < m) {
-            x += dx2;
-            y += dy2;
-        } else {
-            k -= m;
-            x += dx1;
-            y += dy1;
-        }
+    const int ylo = std::min(y1, y2);
+    const int yhi = std::max(y1, y2);
+    for (int y = ylo; y <= yhi; ++y) {
+        if (y < 0 || y >= ymax)
+            continue;
+        const float t = static_cast<float>(y - y1) / static_cast<float>(y2 - y1);
+        const float x = x1 + (x2 - x1) * t;
+        if (x < xrange[2*y+0]) xrange[2*y+0] = x;
+        if (x > xrange[2*y+1]) xrange[2*y+1] = x;
     }
 }
 
@@ -362,10 +345,18 @@ bool ImTui_ImplText_Init() {
     ImGui::GetStyle().ItemInnerSpacing        = ImVec2(1.0f, 0.0f);
     ImGui::GetStyle().TouchExtraPadding       = ImVec2(0.5f, 0.0f);
     ImGui::GetStyle().IndentSpacing           = 1.0f;
-    ImGui::GetStyle().ColumnsMinSpacing       = 1.0f;
-    ImGui::GetStyle().ScrollbarSize           = 0.5f;
+    ImGui::GetStyle().ColumnsMinSpacing        = 1.0f;
+    // LLMFUN PATCH: scrollbars must span a full cell. The upstream 0.5-cell
+    // strip (x = [col+0.5, col+1)) maps through nearbyint to zero or one cell
+    // depending only on the column parity, so the vertical scrollbar of an
+    // even-right-edge child never painted (test_utf8_grid check (d))) and the
+    // chat log's scrollbar was invisible. A full cell = one deterministic
+    // column.
+    ImGui::GetStyle().ScrollbarSize           = 1.0f;
     ImGui::GetStyle().ScrollbarRounding       = 0.0f;
-    ImGui::GetStyle().GrabMinSize             = 0.1f;
+    // LLMFUN PATCH: a 0.1-cell minimum grab is sub-cell (a 0-1 row sliver);
+    // one cell guarantees the thumb can actually be painted.
+    ImGui::GetStyle().GrabMinSize             = 1.0f;
     ImGui::GetStyle().GrabRounding            = 0.0f;
     ImGui::GetStyle().TabRounding             = 0.0f;
     ImGui::GetStyle().TabBorderSize           = 0.0f;

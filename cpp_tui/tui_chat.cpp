@@ -477,6 +477,23 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         state.startProcesssingTime = std::chrono::system_clock::now();
     bool focusInput{focusInput_};
 
+    // The multiline input and its button row own the nav focus from startup.
+    // ImGui's nav cursor draws a highlight ring around the focused item which,
+    // on the 1-cell grid, surfaces as long grey bars above and around the
+    // input (the reported horizontal bar) — and the text backend keeps painted
+    // cells until something repaints them, so even a single frame with the
+    // cursor visible leaves the bar on screen. The caret already marks the
+    // focus, so keep the cursor hidden while the nav or edit focus is on any
+    // widget of the input row; tabbing to other widgets still shows theirs.
+    auto suppressInputRowNavCursor = []() {
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        const ImGuiID inputId = ImGui::GetID("##user_input");
+        if (g.ActiveId == inputId || g.NavId == inputId ||
+            g.NavId == ImHashStr("##Child", 0, inputId) || g.NavId == ImGui::GetID("##llm_send") ||
+            g.NavId == ImGui::GetID("Prev") || g.NavId == ImGui::GetID("Next"))
+            g.NavCursorVisible = false;
+    };
+
     auto outputArea = [&state, &log, &inputHeight, &DisplaySize, &focusInput]() {
         // Clamp height to avoid negative values on very small terminals
         const int lpw = leftPanelWidth(state);
@@ -637,7 +654,8 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
     };
 
-    auto inputArea = [&state, &inputHeight, &inputHistory, &focusInput]() {
+    auto inputArea = [&state, &inputHeight, &inputHistory, &focusInput,
+                      &suppressInputRowNavCursor]() {
         float buttonWidth =
             ImGui::CalcTextSize("Send   ").x + ImGui::GetStyle().FramePadding.x * 2.0f;
 
@@ -660,10 +678,15 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         const ImGuiID userInputId = ImGui::GetID("##user_input");
         const bool inputActive = (ImGui::GetActiveID() == userInputId);
 
+        suppressInputRowNavCursor();
+
         ImGui::InputTextMultiline(
             "##user_input", state.userQuery.inputBuf.data(), state.userQuery.inputBuf.size() + 1,
             ImVec2(inputWidth, inputHeight), ImGuiInputTextFlags_CallbackResize,
             InputResizeCallback, &state.userQuery);
+        // The widget's own nav processing may re-show the cursor during the
+        // call; hide it again before the button group renders.
+        suppressInputRowNavCursor();
         if (!state.userQuery.newInputBufString.empty()) {
             state.userQuery.newInputBufString.clear();
         }
@@ -698,6 +721,7 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         bool historyPrev = ImGui::Button("Prev");
         bool historyNext = ImGui::Button("Next");
         ImGui::EndGroup();
+        suppressInputRowNavCursor();
 
         inputHistory(historyNext, historyPrev);
 
@@ -738,6 +762,7 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
 
     renderTabChatSessionPanel(state, log);
     renderTabChatLeftPanel(state.left, log);
+    suppressInputRowNavCursor();
     outputArea();
     inputArea();
     statusLine();
