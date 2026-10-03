@@ -225,11 +225,13 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                     // vertex 1's color and the cell width in vertex 2's color
                     // (encoding contract, imgui_draw.cpp RenderText). The
                     // cell position is the average of the six quad vertices;
-                    // the "+1" offset (xx = x + 1) is the "avg + 1" mapping
-                    // that puts the first text cell in grid column 1 (column
-                    // 0 is the window frame/margin; the scrollbar occupies
-                    // the last column, clip_rect.z - 1, per the clip guard
-                    // below). The dedup heuristic below pushes a second quad
+                    // the glyph occupies the cell containing its pen x
+                    // (xx = trunc(avg) = trunc(pen x), the same rule used for
+                    // yy). Do NOT re-add the legacy "+1" that used to shift
+                    // all text one column right: it desynchronized text from
+                    // the rects/caret/hit-testing coordinate system
+                    // (plan/imgui_report.md §8). The dedup heuristic below
+                    // pushes a second quad
                     // landing on the same cell to lastCharX + 1 so two glyphs never
                     // overwrite one cell. Vertices are clipped to
                     // clip_rect.z - 1 so content can never overwrite the
@@ -301,7 +303,7 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                             lastCharX = x;
                             lastCharY = y;
 
-                            int xx = (x) + 1;
+                            int xx = (x);      // cell containing the pen x (no +1)
                             int yy = (y) + 0;
                             if (xx < clip_rect.x || xx >= clip_rect.z || yy < clip_rect.y || yy >= clip_rect.w) {
                             } else {

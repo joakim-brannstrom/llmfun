@@ -5689,7 +5689,10 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
         {
             // LLMFUN PATCH: the imtui text backend needs a caret tuned for its 1px
             // bitmap font; a generic (OpenGL) backend keeps the upstream form below.
-            cursor_screen_pos = ImTrunc(draw_pos + cursor_offset - draw_scroll) + ImVec2(1.0f, 0.0f); // +1 col: the imtui font paints glyphs one cell LEFT of their pen ([pen-1, pen]), so the caret belongs on the pen cell (the cell after the text), not on the last text cell.
+            // The caret sits on the pen cell: the imtui backend decodes each glyph
+            // to the cell containing its pen x, so the pen is the cell where the
+            // next character goes (right after the last rendered glyph).
+            cursor_screen_pos = ImTrunc(draw_pos + cursor_offset - draw_scroll);
             cursor_screen_rect = ImRect(cursor_screen_pos.x, cursor_screen_pos.y - g.FontSize + 0.5f, cursor_screen_pos.x + 1.0f, cursor_screen_pos.y + 0.5f); // spans [y-FontSize+0.5, y+0.5] — the glyph line for the centered 1px font.
         }
         else

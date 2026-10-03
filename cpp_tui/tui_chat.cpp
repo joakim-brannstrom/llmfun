@@ -423,7 +423,7 @@ static void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
             panel.panelW = panelWClosed;
         }
         ImGui::SameLine();
-        if (renderButton("Clear", 5, false, panel.activeButton)) {
+        if (renderButton("Clear", 7, false, panel.activeButton)) {
             panel.agents.clear();
             panel.activeAgent = -1;
             panel.panelW = 0;
@@ -463,20 +463,31 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
     ImVec2 DisplaySize = io.DisplaySize;
     const auto inputBufLines =
         std::min(20, std::max(2, static_cast<int>(countNewLines(state.userQuery.inputBuf))));
+    // Effective height of the multiline input in rows. InputTextMultiline's
+    // frame is an imgui child window, and child windows are clamped to the hard
+    // minimum IMGUI_WINDOW_HARD_MIN_SIZE (4 rows, upstream imgui_internal.h):
+    // a 1-line input renders 4 rows tall, one more than the line count
+    // implies. Derive both the output-area reserve and the widget size from
+    // this value so the input frame cannot overlap the status row
+    // (plan/imgui_report.md §5).
+    const float inputHeight = std::max(4.0f, 1.0f + ImGui::GetTextLineHeight() * inputBufLines +
+                                                 ImGui::GetStyle().FramePadding.y * 2.0f);
 
     if (state.readyStatus)
         state.startProcesssingTime = std::chrono::system_clock::now();
     bool focusInput{focusInput_};
 
-    auto outputArea = [&state, &log, &inputBufLines, &DisplaySize, &focusInput]() {
+    auto outputArea = [&state, &log, &inputHeight, &DisplaySize, &focusInput]() {
         // Clamp height to avoid negative values on very small terminals
         const int lpw = leftPanelWidth(state);
         ImVec2 outPos(lpw, 1.0f);
-        ImVec2 outSize(DisplaySize.x - lpw - 1, std::max(1.0f, DisplaySize.y - 3 - inputBufLines));
+        ImVec2 outSize(DisplaySize.x - lpw - 1, std::max(1.0f, DisplaySize.y - 2 - inputHeight));
         ImGui::SetCursorPos(outPos);
-        ImGuiWindowFlags outFlags = ImGuiWindowFlags_HorizontalScrollbar;
-
-        ImGui::BeginChild("llm_output", outSize, false, outFlags);
+        // No ImGuiWindowFlags_HorizontalScrollbar: code blocks render without
+        // wrapping, and any code line wider than the viewport would surface a
+        // horizontal scrollbar as a long grey line at the bottom of the child
+        // (plan/imgui_report.md §4). Overwide content is clipped instead.
+        ImGui::BeginChild("llm_output", outSize, false);
 
         const bool lastMsgIsTool = [&state]() {
             if (state.chat.outputLines.size() > 0) {
@@ -626,17 +637,13 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
     };
 
-    auto inputArea = [&state, &inputBufLines, &inputHistory, &focusInput]() {
+    auto inputArea = [&state, &inputHeight, &inputHistory, &focusInput]() {
         float buttonWidth =
             ImGui::CalcTextSize("Send   ").x + ImGui::GetStyle().FramePadding.x * 2.0f;
 
         float inputWidth =
             ImGui::GetContentRegionAvail().x - buttonWidth - ImGui::GetStyle().ItemSpacing.x;
         inputWidth = std::max(0.0f, inputWidth);
-
-        float lineHeight = 1.0f + ImGui::GetTextLineHeight() * inputBufLines;
-        float framePaddingY = ImGui::GetStyle().FramePadding.y;
-        float inputHeight = lineHeight + framePaddingY * 2.0f;
 
         if (!state.userQuery.newInputBufString.empty()) {
             state.userQuery.inputBuf = state.userQuery.newInputBufString;
@@ -741,9 +748,11 @@ static void renderTabLog(TuiState& state, Log& log) {
     ImVec2 childPos(0, 1.0f);
     ImVec2 childSize(DisplaySize.x, DisplaySize.y - 2);
     ImGui::SetCursorPos(childPos);
-    ImGuiWindowFlags outFlags = ImGuiWindowFlags_HorizontalScrollbar;
-
-    ImGui::BeginChild("llm_log", childSize, false, outFlags);
+    // No ImGuiWindowFlags_HorizontalScrollbar: unwrapped wide lines render
+    // their tail beyond the viewport, and the flag would surface a horizontal
+    // scrollbar as a long grey line at the bottom of the child
+    // (plan/imgui_report.md §4). Overwide lines are clipped instead.
+    ImGui::BeginChild("llm_log", childSize, false);
 
     for (size_t i = 0; i < state.logMessages.size(); ++i) {
         const auto flags = (static_cast<int>(i) >= static_cast<int>(state.logMessages.size()) - 5)

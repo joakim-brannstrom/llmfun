@@ -38,13 +38,16 @@ static bool renderTitleButton(const std::string& label, int width, bool active, 
         ImGui::PushStyleColor(ImGuiCol_Text, colorActive);
         ++npop;
     }
-    ImGui::SetCursorScreenPos(p0);
+    // Same label inset as renderButton (FramePadding.x from the button
+    // origin): the cell mapping draws text on the cell containing its pen.
+    const float labelX = p0.x + ImGui::GetStyle().FramePadding.x;
+    ImGui::SetCursorScreenPos(ImVec2(labelX, p0.y));
     ImGui::Text("%s", label.c_str());
     ImGui::PopStyleColor(npop);
     if (!runs.empty()) {
         const char* lbl = label.c_str();
         for (const auto& run : runs) {
-            const float x = p0.x + ImGui::CalcTextSize(lbl, lbl + run.first).x;
+            const float x = labelX + ImGui::CalcTextSize(lbl, lbl + run.first).x;
             ImGui::SetCursorScreenPos(ImVec2(x, p0.y));
             ImGui::PushStyleColor(ImGuiCol_Text, matchColor);
             ImGui::TextUnformatted(lbl + run.first, lbl + run.second);
@@ -56,7 +59,7 @@ static bool renderTitleButton(const std::string& label, int width, bool active, 
         // Restore both cursor positions to the label's right edge so
         // sameLineAfterButton places the del button where it sits without a
         // filter, instead of pulling it left over the title.
-        const ImVec2 anchor(p0.x + ImGui::CalcTextSize(label.c_str()).x, p0.y);
+        const ImVec2 anchor(labelX + ImGui::CalcTextSize(label.c_str()).x, p0.y);
         ImGui::SetCursorScreenPos(anchor);
         ImGui::GetCurrentWindow()->DC.CursorPosPrevLine = anchor;
         // ImGui::SetCursorScreenPos(p0);
@@ -203,15 +206,16 @@ static void queueSessionAction(ChatTabSessionPanel& panel, SessionActionType typ
 }
 
 // Continue a button row past the previous button's click rect.
-// renderButton draws its label at the button origin, so ImGui::SameLine
-// anchors on the TEXT item - a label shorter than the button would pull
-// the next button left, inside the previous button's rect, making the
-// second button unclickable (the first button owns the hover id). Move the
-// cursor to the end of the previous button rect plus one spacing instead.
+// renderButton draws its label inset by FramePadding.x (like ImGui's own
+// buttons), so ImGui::SameLine anchors on the TEXT item - a label shorter
+// than the button would pull the next button left, inside the previous
+// button's rect, making the second button unclickable (the first button owns
+// the hover id). Move the cursor to the end of the previous button rect plus
+// one spacing instead (subtracting the label inset SameLine anchored on).
 static void sameLineAfterButton(float buttonWidth, float labelWidth) {
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + buttonWidth - labelWidth +
-                         ImGui::GetStyle().ItemSpacing.x);
+                         ImGui::GetStyle().ItemSpacing.x - ImGui::GetStyle().FramePadding.x);
 }
 
 // Initialize the rename buffer from a title. A title that does not fit the
@@ -314,7 +318,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         log("session panel: close\n");
     }
     sameLineAfterButton(panelWClosed, ImGui::CalcTextSize("Close").x);
-    if (renderButton("New", 3, false, panel.activeButton)) {
+    if (renderButton("New", 5, false, panel.activeButton)) {
         panel.pendingDeleteId.clear();
         if (canQueue) {
             queueSessionAction(panel, SessionActionType::New, "", "");
@@ -552,7 +556,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         }
         if (isActive) {
             // Rename toggle + input on the active row only (R4/L8).
-            if (renderButton("Rename", 6, panel.renameActive, panel.activeButton)) {
+            if (renderButton("Rename", 8, panel.renameActive, panel.activeButton)) {
                 panel.pendingDeleteId.clear(); // non-delete control (L1)
                 panel.renameActive = !panel.renameActive;
                 if (panel.renameActive) {
@@ -618,7 +622,11 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         const std::string preview = previewRowLabel(entry, rowWidth);
         if (!preview.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, panel.previewColor);
+            // Align the preview with the row label (both inset by one
+            // FramePadding cell from the row button's left edge).
+            ImGui::Indent(ImGui::GetStyle().FramePadding.x);
             ImGui::TextUnformatted(preview.c_str());
+            ImGui::Unindent(ImGui::GetStyle().FramePadding.x);
             ImGui::PopStyleColor();
         }
         ImGui::PopID();
@@ -647,7 +655,11 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
     // renders no rows and no indicator regardless of the filter.
     if (!isWhitespaceOnly(filterQuery) && visible.empty() && !panel.sessions.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, panel.previewColor);
+        // Inset like the row labels, which draw their text one FramePadding
+        // cell inside the row button (renderTitleButton).
+        ImGui::Indent(ImGui::GetStyle().FramePadding.x);
         ImGui::TextUnformatted("no matches");
+        ImGui::Unindent(ImGui::GetStyle().FramePadding.x);
         ImGui::PopStyleColor();
     }
     // End-of-frame snapshot of the rendered query for A23's revert
