@@ -10,12 +10,18 @@ The llmfun TUI is a terminal-based user interface built in C++17 on top of the *
 
 ```
 llmfun/cpp_tui/
-├── CMakeLists.txt   # Build configuration (CMake 3.10+, C++17)
-├── main.cpp         # Lightweight test/dry-run for the TUI (not the main application entry point)
-├── tui.h            # Internal C++ structs and API declarations
-├── tui.cpp          # All TUI logic: render, theme, init/shutdown, data feeds
-├── tui_api.h        # Pure C API header — entry point for D code (extern "C" linkage)
-└── tui_api.cpp      # C++ implementation of C API, bridges to tui.h/tui.cpp
+├── CMakeLists.txt   # Build configuration (CMake 3.10+, C++17); driven by ../../tui.mak
+├── main.cpp         # Standalone/dry-run entry (`--frames N` headless), not the app entry point
+├── tui.h / tui.cpp  # TuiState, render dispatch, theme, init/shutdown, data feeds
+├── tui_api.h / tui_api.cpp  # Pure C API for D (extern "C"); bridges to tui.h/tui.cpp
+├── tui_chat.h / tui_chat.cpp  # Chat/log cluster: message widgets, input area, status line
+├── tui_common.h / tui_common.cpp  # Shared helpers: Log, whitespace test, multiline text
+├── tui_widgets.h / tui_widgets.cpp  # Shared widgets: renderButton, separator, style guard
+├── session_panel.h / session_panel.cpp  # Session sidebar: rows, filter, rename, delete
+├── session_fuzzy.h  # Pure fzf-style matcher for the session filter (stdlib-only)
+├── probe_margin.c   # PTY probe: asserts no cell lands at/beyond the max-width cap
+├── test_*.cpp       # Headless test binaries (session filter, max width, clear output, fuzzy)
+└── test/            # Dev probes (keyboard/mouse/PTY scratch programs)
 ```
 
 ### D Bindings
@@ -83,15 +89,17 @@ The terminal is divided vertically into three fixed-position regions for the cha
 │                                              │
 │                                              │
 │                                              │
-├──────────────────────────────────────────────┤  ← y=H-3
+├──────────────────────────────────────────────┤  ← y=H-5
 │  > User input line 1                         │
-│    User input line 2 (multiline)             │
+│    (multiline input; 4-row minimum frame)    │
 ├──────────────────────────────────────────────┤  ← y=H-1
 │  Context: 0/0 tokens | Model: none | Ready   │
 └──────────────────────────────────────────────┘  ← y=H
 ```
 
 All windows use `ImGuiCond_Always` for stable positioning. Minimum terminal size is **40 columns × 15 rows**; below this, an error message is rendered instead of the normal UI.
+
+The bottom regions are sized from the input's effective height: `inputHeight = max(4, 1 + textLineHeight*inputBufLines + 2*FramePadding.y)` (the 4-row floor is imgui's hard child minimum, `IMGUI_WINDOW_HARD_MIN_SIZE`), the output reserve is `DisplaySize.y - 2 - inputHeight`, and the input frame occupies `H-1-inputHeight .. H-2` (`H-5 .. H-2` for the default 4-row frame); the status line is pinned to row `H-1`. See "Rendering Internals" below for why the 4-row minimum matters.
 
 ### Chat Message Types
 
@@ -371,8 +379,8 @@ panel's own width. `renderTabChat` calls `renderTabChatSessionPanel` before
   the arm. Pressing another row's delete moves the pending target; any
   non-delete control clears it.
 - **Busy gating**: when `!state.readyStatus`, every interactive widget is
-  guarded so no action is queued (guard-and-skip only — the vendored ImGui
-  1.81 has no `BeginDisabled`). A click already in flight when the busy state
+  guarded so no action is queued (guard-and-skip: the widgets stay rendered,
+  the handlers drop the action). A click already in flight when the busy state
   flips is processed between queries (the mailbox race); see
   `doc/sessions.md` for the observable late-click effect.
 - **Scrolling**: the panel child window has no vertical scrollbar yet; rows
@@ -437,9 +445,10 @@ active row only), and the rule below guarantees `renameActive` is false
 whenever the active row is filtered out, so the two Escape paths are
 disjoint on every frame. The check fires when the query is non-empty **or**
 `filterRevertedEmpty` (non-empty last frame, empty now): on an *active*
-input, 1.81's `cancel_edit` reverts the buffer to its activation value
-during `NewFrame` — before this code runs — so the end-of-last-frame
-snapshot is what tells the handler the user really had a query.
+input, ImGui's Escape handling (cancel-edit; `EscapeClearsAll` not set)
+reverts the buffer to its activation value during the widget call, which is
+rendered above this check — so the end-of-last-frame snapshot is what tells
+the handler the user really had a query.
 `clearFilter()` empties `filterBuf` and bumps `filterSeq` (see below);
 logs `filter cleared (Escape)`.
 
@@ -464,7 +473,7 @@ keeping the Escape branches disjoint.
 
 **Rename-Esc filter restore**: on the frame the rename box closes
 via Escape, an *active* filter input reverts its buffer to its activation
-value (`cancel_edit`) in the same frame, which would wipe the query along
+value (cancel-edit) in the same frame, which would wipe the query along
 with the box. The handler snapshots the pre-frame query
 (`filterPreFrame`), and if the buffer changed, restores it and bumps
 `filterSeq` (log `filter restored (rename Esc frame)`), so the query
@@ -491,11 +500,11 @@ dimmed (`previewColor`) `no matches` line replaces the blank area.
 fills `filterBuf` with NUL and does `++filterSeq`. The seq suffixes the
 InputText widget id, so a programmatic clear changes the id and forces a
 fresh InputText state that reads the now-empty buffer. This is robust
-against the vendored ImGui 1.81, whose InputText (a) reverts an active
-edit to its activation value on Escape (`cancel_edit`,
-`imgui_widgets.cpp:4260-4275`) and (b) can re-assert stale internal edit
-state from a deactivated widget on refocus — both bypassed by the id
-change. (The same pattern powers `renameSeq`.)
+against imgui's InputText, which (a) reverts an active edit to its
+activation value on Escape (the `revert_edit` path in `imgui_widgets.cpp`)
+and (b) can re-assert stale internal edit state from a deactivated widget
+on refocus — both bypassed by the id change. (The same pattern powers
+`renameSeq`.)
 
 **End-of-frame snapshot**: `filterNonEmptyLastFrame` is set from the final
 buffer after the rows child closes, so the rename-Esc restore counts as a
@@ -585,3 +594,165 @@ Note: History navigation uses `Ctrl+Up`/`Ctrl+Down` instead of plain `Up`/`Down`
 
 - A child window with all decorations disabled (`NoCollapse`, `NoResize`, `NoMove`, `NoTitleBar`, `NoScrollbar`, `NoScrollWithMouse`).
 - Falls back to a default status string (`"Context: 0/0 tokens | Model: none | Ready"`) if `statusText` is empty.
+
+---
+
+## Rendering Internals: Vendored imtui / imgui Patches
+
+The TUI renders through a patched fork of **imtui** (`llmfun/vendor/imtui`:
+the text rasteriser in `src/imtui-impl-text.cpp`, the ncurses output in
+`src/imtui-impl-ncurses.cpp`) built on a vendored **Dear ImGui**
+(`vendor/imtui/third-party/imgui`, currently 1.92.9b). The patches are marked
+with `LLMFUN PATCH` comments so they can be re-applied after an upstream sync.
+They exist because the 1-cell terminal grid exposes assumptions made for pixel
+backends (coordinates, stroke widths, half-cell sizes), and because a terminal
+keeps what was painted.
+
+### The `ImTui_TextEncodingActive` guard
+
+One imgui build serves both the terminal backend and pixel backends (e.g.
+OpenGL): the runtime flag `bool ImTui_TextEncodingActive` (declared
+`IMGUI_API` in `imgui/imgui.h`, defined `false` in `imgui/imgui_draw.cpp`)
+tells the imgui core that the imtui text path is the active renderer.
+
+- `ImTui_ImplText_Init()` sets it **true**; `ImTui_ImplText_Shutdown()`
+  resets it to **false** (the reset was added 2026-10-03; before that the
+  flag stayed true for the process lifetime).
+- **Convention:** a patch that exists only because of the text grid must be
+  conditional on the flag, and its flag-false branch must keep the upstream
+  expression verbatim. Guarded today: `imgui_draw.cpp` (imtui vertex-color
+  encoding, unit-cell glyph quads, zero-width/emoji folding, fine-clip
+  branch, filled-triangle guard), `imgui_widgets.cpp` (caret line row and
+  caret rect) and `imgui.cpp` (`RenderNavCursor`, see below).
+- App code needs no guard: `cpp_tui/*` is only ever compiled against the
+  imtui backend, and the ncurses-side patches live in an always-imtui file.
+
+### Cell-grid rendering model
+
+- **Mapping:** a quad or rect is mapped to the cell containing its pen
+  coordinate `(x, y)` — a pen at `x` paints column `x`. Text, rects, caret
+  and mouse coordinates all follow this rule (see the off-by-one fix below).
+- **Persistence:** the backend paints a persistent screen — cells stay until
+  something repaints them. A widget that shows for a single frame leaves its
+  cells behind, so transient states (focus rings, streaming banners) must be
+  suppressed on every frame, not just in the steady state.
+- **Metrics:** the font is a 1px bitmap (`SizePixels = 1`), glyphs occupy
+  `[pen.y-0.5, pen.y+0.5]`, `FramePadding = (1, 0)`, `ItemSpacing = (1, 0)`;
+  caret and scrollbar geometry are tuned for those values.
+
+### Fixed rendering defects (2026-10-03)
+
+Commits `df96b90` (`tui: fix render bugs`) and `fc7bcf7` (`tui: fix side
+scrollbar`), plus the nav-cursor follow-up.
+
+**Text/background one-cell offset.** Every text run painted one cell right of
+where imgui placed it, while background rects painted true. Normally
+invisible, it showed wherever text abutted the left edge of a background
+rect: the `New` button (3-cell label in a 3-cell rect) rendered as `" Ne"w`
+with the last glyph outside the grey cell, and the input row's
+`Send`/`Prev`/`Next` sat shifted. Cause: the text backend mapped glyph quads
+to `trunc(pen_x) + 1` (`int xx = (x) + 1;` — the quad's six-vertex average is
+`pen + 0.5`, so the truncation already yields `pen`), while rects, caret and
+mouse mapping use the containing cell; the caret patch carried a matching
+`+ ImVec2(1, 0)` compensation. Fix: `int xx = (x);` and drop the caret
+compensation in the same change; then re-create the intended one-cell inset
+explicitly in the affected widgets — `renderButton` / `renderTitleButton`
+draw labels at `p0 + FramePadding.x` (like imgui's own buttons),
+`sameLineAfterButton` subtracts `FramePadding.x` again, tight button widths
+became `label + 2*FramePadding` (`New` 3→5, `Clear` 5→7, `Rename` 6→8), and
+session previews / the "no matches" line are inset by `FramePadding.x`.
+Visible consequence to remember: plain text now sits at its true coordinate,
+so the menu bar, the `Sessions`/`Pipeline` separators, message and header
+text, and the status line (column 0) each moved one column left; buttons and
+rows keep their previous inset look.
+
+**Output horizontal scrollbar removed; input/status layout.** (a) A long grey
+line at the bottom of the chat output appeared for messages with code lines
+wider than the viewport: `llm_output` had
+`ImGuiWindowFlags_HorizontalScrollbar`, and unwrapped overwide content
+surfaced the h-scrollbar as a full-width strip. The flag is gone from
+`llm_output` and `llm_log`; overwide content is clipped instead. (b) The
+single-line input frame overlapped the status row and lost its last frame
+row: the output reserve was computed from `inputBufLines`, but the multiline
+input's frame is an imgui child clamped to the 4-row hard minimum
+(`IMGUI_WINDOW_HARD_MIN_SIZE`), so a 1-line input is 4 rows tall with its
+bottom edge on the display bottom (where the renderer's clip clamp swallows
+the frame's last row). Both sizes are now derived from the effective height
+(see the Three-Region Layout section): `inputHeight` (4-row minimum) is the
+widget size and `DisplaySize.y - 2 - inputHeight` the output reserve; the
+input frame occupies `H-1-inputHeight .. H-2` (H-5..H-2 for the default
+frame) and the status line is pinned to `H-1`.
+
+**Vertical scrollbar invisible.** (a) `ImTui_ImplText_Init` set
+`ScrollbarSize = 0.5f`, and the strip `[col+0.5, col+1)` rounds to 0 or 1
+columns purely by parity, so the output child's `x = 78.5` scrollbar never
+painted a cell; `ScrollbarSize` is now `1.0f` (one deterministic column).
+(b) The patched `ScanLine` DDA stepped x only when its error counter crossed
+`m`, which for near-vertical edges (`|dy| >> |dx|`) collapsed the edge onto
+one column: the middle rows of a 1-cell-wide rect got zero-width spans, so
+even a full-cell scrollbar stayed black in the middle. `ScanLine` now
+evaluates the crossing `x` for each row (`x = x1 + (x2-x1)*t`); horizontal
+edges contribute to their single row. (c) The base scrollbar colours were
+semi-transparent near-blacks that blend into the black background;
+`applyTheme()` (`tui.cpp`) now uses solid greys — `ScrollbarBg` (0.15, alpha
+1.0), `ScrollbarGrab` (0.45, 1.0), hovered 0.55, active 0.65 — assigned after
+the Button/NavCursor aliases so those keep the dimmer grey, and
+`GrabMinSize = 3.0` (backend `GrabMinSize` is `1.0f`; a sub-cell grab is a
+0-1 row sliver). Result: a full-height track column at `x = W-2` (ANSI 235)
+with a 3-cell grab (ANSI 242) — e.g. column 78 at 80x24, column 118 at
+120x30. This also fixed `imtui_utf8_grid_test` check (d) (the scrollbar
+column), which had been failing since the imgui update.
+
+**Keyboard-nav cursor — the "long grey horizontal bar".** A two-cell-tall
+grey band sat a few rows above the input frame, appearing "on" whatever line
+was there (the startup help line with `/code <query>`, a thinking trace's
+`End ----` separator); a mouse click hid it, keyboard/Tab brought it back.
+Root cause: ImGui's *nav cursor* (keyboard focus highlight) for the input,
+which the app focuses programmatically (the input starts with
+`isSubmitted = true`, so the first frame calls `SetKeyboardFocusHere`;
+submissions and the Chat menu refocus it the same way). Upstream
+`RenderNavCursor` draws a ring *outside* the item (expanded 4 px, stroked
+2 px thick) — on the 1-cell grid that is a 2-cell band 4 cells away from the
+item; and because the screen persists, one frame with the cursor visible
+leaves the bar. Fix, two layers: (1) `imgui.cpp` `RenderNavCursor`, guarded
+by `ImTui_TextEncodingActive` — cell-grid geometry (`thickness = 1`,
+`distance = 0`: a 1-cell border hugging the item) and no cursor for the
+*active* item (`g.ActiveId == id`, unless `AlwaysDraw`), since the caret /
+active colours already show that state; (2) `tui_chat.cpp`
+`suppressInputRowNavCursor()` keeps `g.NavCursorVisible = false` while nav or
+edit focus is on the input row (`##user_input`, its `##Child` id,
+`##llm_send`, `Prev`, `Next`), called before the output area, before and
+after the `InputTextMultiline` call (the widget can re-show the cursor during
+its own call) and after the button group; focus on any other widget still
+shows its cursor. Triage note: the ring used the dim `ScrollbarGrab` alias
+(0.34 @ 0.54 alpha → ANSI 236), visually indistinguishable from the input
+frame's `FrameBg` (0.16 → ANSI 235) — hence "the same colour as the input
+field" in the bug report. Earlier suspects that proved wrong: the output
+horizontal scrollbar (a real but different defect, removed above) and the
+hidden-label header rows (an experiment targeting those was reverted).
+
+### Verifying TUI rendering changes
+
+- Build the C++ side with `make -f tui.mak build/tui` (CMake into
+  `build/tui`); the D application links `build/tui/libllmfun_tui_all_lib.a`
+  (`dub build --config=application`).
+- Headless checks in `build/tui/` (run with `</dev/null`; ncurses needs a
+  glibc environment and, for the ncurses test, `TERM` set):
+  `imtui_utf8_grid_test` (grid, fold and scrollbar checks),
+  `imtui_arrow_text_channel_test`, `imtui_ncurses_fold_redraw_test`,
+  `test_session_filter_smoke`, `test_tui_maxwidth`, `test_clear_output_state`,
+  `test_session_fuzzy`.
+- PTY: `probe_margin` (`cpp_tui/probe_margin.c`) runs the real binary on a
+  pseudo-terminal and asserts no cell is written at/after
+  `LLMFUN_TUI_MAX_WIDTH`; `llmfun_tui --frames N` runs the standalone UI
+  headlessly.
+- Init order matters: `ImTui_ImplText_Init()` overwrites style values
+  (scrollbar size/grab minimum, the nav-cursor colour — it sets it
+  transparent), so `applyTheme()` must run after it; a harness that
+  initialises in the other order does not see the shipped style.
+- When a stray bar or line is suspected again, check the frame's nav state
+  first (`NavCursorVisible`, `ActiveId`, `NavId` — a nav cursor shows as a
+  ring around the focused item) before suspecting content or scrollbars. The
+  ad-hoc visual probe used during the investigation (a grid dump of painted
+  cells with background colours plus the frame's nav state) is not committed
+  to the repo.
