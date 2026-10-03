@@ -70,13 +70,24 @@ struct ServerConfig {
     }
 }
 
+/// Execution mode for a local embedding model.
+enum EmbedMode {
+    /// No GPU involvement: weights and computation stay on the CPU.
+    cpu,
+    /// Weights stay in system memory; llama.cpp may offload individual
+    /// operations to a GPU.
+    mixed,
+    /// Offload the model (layers) to the GPU.
+    gpu,
+}
+
 /// Configuration for a local embedding backend (llama.cpp).
 struct LocalEmbedConfig {
     string modelName;
     long chunkSize = 512;
     long dimensions;
-    // if the model should run only on CPU
-    bool onlyCpu = true;
+    /// How the local model runs: cpu, mixed or gpu.
+    EmbedMode mode = EmbedMode.cpu;
     Path modelPath;
     long cpuThreads; // 0: use as many as there are cores
     long cpuThreadsBatch; // 0: use as many as there are cores

@@ -236,6 +236,7 @@ embedConfig:
   modelName: nomic-embed-text
   chunkSize: 512
   dimensions: 768
+  mode: cpu # local backend only: cpu (default) | mixed | gpu
   nBatch: 512
   uBatch: 512
   onlyCpu: true

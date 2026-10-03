@@ -845,10 +845,15 @@ embedConfig:
   type: local
   modelName: nomic-embed-text
   modelPath: /path/to/embedding-model.gguf
-  onlyCpu: true
+  mode: cpu
   nBatch: 512
   dimensions: 768
 ```
+
+`mode` selects how the local model executes: `cpu` never uses the GPU
+(weights and computation stay on the CPU), `mixed` keeps the weights in system
+memory but lets llama.cpp offload individual operations to a GPU, and `gpu`
+offloads all model layers to the GPU.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -856,7 +861,7 @@ embedConfig:
 | `server` | object | - | Server config (remote only) |
 | `modelName` | string | - | Model name (remote: embedding model name; local: label) |
 | `modelPath` | string | - | Path to GGUF model file (local only) |
-| `onlyCpu` | bool | `true` | Run local embedding on CPU only |
+| `mode` | string | `cpu` | Execution mode: `cpu`, `mixed` or `gpu` |
 | `nBatch` | long | 512 | Batch size for embedding |
 | `dimensions` | long | 768 | Embedding vector dimensions |
 

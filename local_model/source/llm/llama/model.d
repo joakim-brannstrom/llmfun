@@ -11,6 +11,9 @@
 module llm.llama.model;
 
 import std.string : toStringz;
+
+import llm.common.config : EmbedMode;
+
 public import llama_imports;
 
 /**
@@ -151,6 +154,9 @@ struct LlamaParams {
  *   - `embeddings`    = true
  *   - `n_batch`       = the specified batch size
  *
+ * Execution-device parameters (weights placement, offloading) are set
+ * separately by `applyMode()`.
+ *
  * Returns the modified `LlamaParams` so calls can be chained.
  */
 LlamaParams contextEmbedding(LlamaParams params, uint ctxSize, uint nBatch,
@@ -162,8 +168,6 @@ LlamaParams contextEmbedding(LlamaParams params, uint ctxSize, uint nBatch,
 
     params.ctxParams.no_perf = true;
     params.ctxParams.embeddings = true;
-    params.ctxParams.op_offload = true;
-    params.ctxParams.offload_kqv = true;
     // llama.cpp will use the models default.
     params.ctxParams.pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED;
     params.ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
@@ -175,49 +179,84 @@ LlamaParams contextEmbedding(LlamaParams params, uint ctxSize, uint nBatch,
     return params;
 }
 
-LlamaParams onlyCpu(LlamaParams p) {
-    p.modelParams.n_gpu_layers = 0;
-    p.ctxParams.offload_kqv = false;
-    return p;
-}
-
-LlamaParams onlyGpu(LlamaParams p) {
-    p.modelParams.n_gpu_layers = -1;
-    p.ctxParams.offload_kqv = true;
-    return p;
-}
-
-// ---------------------------------------------------------------------------
-// Unit tests
-// ---------------------------------------------------------------------------
+/// Empty, NULL-terminated device list: tells llama.cpp that no device exists
+/// for offloading. Static because the loaded model keeps the pointer.
+private __gshared ggml_backend_dev_t[1] noDevices = [null];
 
 /**
- * Verify that LlamaParams.make() returns defaults consistent with
- * the llama.cpp API, and that contextEmbedding modifies them correctly.
+ * Apply `mode` to `LlamaParams` and return it.
+ *
+ * `cpu` keeps everything on the CPU: weights stay in system memory and no
+ * device is offered to llama.cpp, so neither operations nor buffers can end
+ * up on a GPU. `mixed` keeps the weights in system memory and lets llama.cpp
+ * offload individual operations to a GPU. `gpu` offloads all model layers
+ * to the GPU.
+ */
+LlamaParams applyMode(LlamaParams p, EmbedMode mode) {
+    final switch (mode) {
+    case EmbedMode.cpu:
+        p.modelParams.n_gpu_layers = 0;
+        p.modelParams.devices = noDevices.ptr;
+        p.ctxParams.offload_kqv = false;
+        p.ctxParams.op_offload = false;
+        break;
+    case EmbedMode.mixed:
+        p.modelParams.n_gpu_layers = 0;
+        p.ctxParams.offload_kqv = false;
+        p.ctxParams.op_offload = true;
+        break;
+    case EmbedMode.gpu:
+        p.modelParams.n_gpu_layers = -1;
+        p.ctxParams.offload_kqv = true;
+        p.ctxParams.op_offload = true;
+        break;
+    }
+    return p;
+}
+
+/**
+ * Verify the LlamaParams helpers: applyMode maps each EmbedMode to the
+ * expected llama.cpp knobs and contextEmbedding sizes the context.
  *
  * Note: Full integration tests that load a real model are in the
  * separate integration test suite.
  */
 unittest {
-    // --- LlamaParams.make() defaults ---
-    auto p = LlamaParams.make();
+    import std.parallelism : totalCPUs;
 
-    // Model params: n_gpu_layers defaults to 0 (CPU only)
-    assert(p.modelParams.n_gpu_layers == 0, "Default n_gpu_layers should be 0");
-
-    // Context params: n_ctx defaults to 0 (use model's value)
-    assert(p.ctxParams.n_ctx == 0, "Default n_ctx should be 0 (from model)");
-
-    // Context params: embeddings defaults to false
-    assert(p.ctxParams.embeddings == false, "Default embeddings should be false");
+    // --- applyMode() ---
+    {
+        auto p = LlamaParams.make().applyMode(EmbedMode.cpu);
+        assert(p.modelParams.n_gpu_layers == 0, "cpu mode must keep weights on the CPU");
+        assert(p.modelParams.devices !is null, "cpu mode must pass an explicit device list");
+        assert(p.modelParams.devices[0] is null, "cpu mode must not offer any device");
+        assert(p.ctxParams.offload_kqv == false, "cpu mode must not offload KQV");
+        assert(p.ctxParams.op_offload == false, "cpu mode must not offload operations");
+    }
+    {
+        auto p = LlamaParams.make().applyMode(EmbedMode.mixed);
+        assert(p.modelParams.n_gpu_layers == 0, "mixed mode must keep weights on the CPU");
+        assert(p.ctxParams.offload_kqv == false, "mixed mode must not offload KQV");
+        assert(p.ctxParams.op_offload == true, "mixed mode must allow op offloading");
+    }
+    {
+        auto p = LlamaParams.make().applyMode(EmbedMode.gpu);
+        assert(p.modelParams.n_gpu_layers == -1, "gpu mode must offload all layers");
+        assert(p.ctxParams.offload_kqv == true, "gpu mode must offload KQV");
+        assert(p.ctxParams.op_offload == true, "gpu mode must allow op offloading");
+    }
 
     // --- contextEmbedding() ---
-    auto ep = contextEmbedding(p, 512);
+    auto ep = contextEmbedding(LlamaParams.make(), 512, 512, 512, 0, 0);
 
     assert(ep.ctxParams.embeddings == true, "embeddings should be true after contextEmbedding");
+    assert(ep.ctxParams.n_ctx == 512, "n_ctx should be the requested context size");
+    assert(ep.ctxParams.n_batch == 512, "n_batch should be the requested batch size");
+    assert(ep.ctxParams.n_ubatch == 512, "n_ubatch should be the requested batch size");
+    assert(ep.ctxParams.n_threads == cast(int) totalCPUs, "threads = 0 uses all CPUs");
+    assert(ep.ctxParams.n_threads_batch == cast(int) totalCPUs, "threadsBatch = 0 uses all CPUs");
 
-    assert(ep.ctxParams.pooling_type == LLAMA_POOLING_TYPE_CLS,
-            "pooling_type should be LLAMA_POOLING_TYPE_CLS after contextEmbedding");
-
-    assert(ep.ctxParams.n_batch == 512, "n_batch should be 512 after contextEmbedding");
+    auto ep2 = contextEmbedding(LlamaParams.make(), 512, 512, 512, 3, 4);
+    assert(ep2.ctxParams.n_threads == 3, "explicit thread count must be used");
+    assert(ep2.ctxParams.n_threads_batch == 4, "explicit batch thread count must be used");
 }

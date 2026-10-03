@@ -1042,6 +1042,10 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].str;
                         } else static if (is(Type : bool)) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].boolean;
+                        } else static if (is(Type == enum)) {
+                            // Enum fields are configured by member name, e.g. `mode: mixed`.
+                            __traits(getMember, conf, llmMemberName) = json[llmMemberName]
+                                .str.to!Type;
                         } else static if (isFloatingPoint!Type) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].floating;
                         } else static if (isIntegral!Type) {
@@ -1473,6 +1477,45 @@ unittest {
     assert(conf.options.length == 2);
     assert(conf.options["security"] == ["--read-only"]);
     assert(conf.options["network"] == ["--network", "none"]);
+}
+
+/// Test: enum-valued config fields parse from the member name string and keep
+/// the default when the value is not a valid member.
+unittest {
+    auto ec = embedConfigFromValue(parseJSON(`{"type": "local", "mode": "cpu"}`));
+    ec.match!((LocalEmbedConfig l) {
+        assert(l.mode == EmbedMode.cpu, "mode: cpu must parse");
+    }, (RemoteEmbedConfig) { assert(false, "expected a local embed config"); });
+
+    ec = embedConfigFromValue(parseJSON(`{"type": "local", "mode": "gpu"}`));
+    ec.match!((LocalEmbedConfig l) {
+        assert(l.mode == EmbedMode.gpu, "mode: gpu must parse");
+    }, (RemoteEmbedConfig) { assert(false, "expected a local embed config"); });
+
+    // Absent mode keeps the default.
+    ec = embedConfigFromValue(parseJSON(`{"type": "local"}`));
+    ec.match!((LocalEmbedConfig l) {
+        assert(l.mode == EmbedMode.cpu, "absent mode must default to cpu");
+    }, (RemoteEmbedConfig) { assert(false, "expected a local embed config"); });
+
+    // Invalid member name: warns (not fails silently) and keeps the default.
+    import llm.agent.nudges : sharedLogSwapMutex;
+    import std.algorithm : canFind;
+    import std.array : join;
+
+    synchronized (sharedLogSwapMutex) {
+        auto prevLog = logger.sharedLog;
+        auto cap = cast(shared) new CfgLogCapture();
+        logger.sharedLog = cap;
+        scope (exit)
+            logger.sharedLog = prevLog;
+
+        auto conf = applyConfig!(LocalEmbedConfig)(LocalEmbedConfig.init,
+                parseJSON(`{"mode": "bogus"}`));
+        assert(conf.mode == EmbedMode.cpu, "invalid mode must fall back to the default");
+        assert(canFind((cast() cap).takeLines().join("\n"),
+                "unable to read 'mode'"), "invalid mode must warn");
+    }
 }
 
 /// Test: Explicit config path always loads regardless of trusted-config.
