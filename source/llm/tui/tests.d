@@ -14,8 +14,8 @@ module llm.tui.tests;
 
 // The join uses a core.sync latch (Mutex + Condition, the pattern
 // established in llm.pipeline) instead of a legacy send/receive mailbox so
-// the tui package stays free of the deprecated concurrency module (task 8
-// gate: no such imports anywhere under source/llm/tui/).
+// the tui package stays free of the deprecated concurrency module (no such
+// imports anywhere under source/llm/tui/).
 import core.sync : Condition, Mutex;
 import std.datetime : Duration, SysTime, Clock, dur;
 
@@ -65,6 +65,7 @@ private class RecordingTUIListener : TUIListener {
     string[] renameTitles;
     SessionId[] deletes;
     int terminated;
+    string startupFailure;
 
     this(FiredLatch l) {
         latch = l;
@@ -94,6 +95,10 @@ private class RecordingTUIListener : TUIListener {
     void uiTerminated() {
         terminated++;
         latch.fire();
+    }
+
+    void uiStartupFailed(string reason) {
+        startupFailure = reason;
     }
 }
 
@@ -125,6 +130,13 @@ private final class DrivenActor(T) {
         kernel.process(fake);
     }
 
+    /// One shell tick at an explicit time. Unlike process(), a repeating
+    /// self-tick armed at the real-time schedule moment becomes due once
+    /// `now` passes it — used to prove a tick was (not) armed.
+    void processAt(SysTime now) {
+        kernel.process(now);
+    }
+
     /// Full exit: tick 1 - SystemExitMsg(kill) runs the user onExit first
     /// (zombie: ui = TextUserInterface.init tears down the C state and
     /// restores the global logger the actor ctor swapped in), then
@@ -150,10 +162,10 @@ unittest {
     auto latch = new FiredLatch();
     auto listener = sys.spawn!RecordingTUIListener(latch);
 
-    // Headless TUI: real state, null screen (C render no-ops). The 4-arg
-    // ctor takes the raw pointers so `ui` owns the state exactly once.
+    // Headless TUI: real state, no backend (the C frame calls no-op). The
+    // 3-arg ctor takes the raw state so `ui` owns it exactly once.
     auto tui = sys.spawn!TextUserInterfaceActor(
-            TypedAddress!TUIListener(listener.addr), 80, tuiCreateState(), null);
+            TypedAddress!TUIListener(listener.addr), 80, tuiCreateState());
 
     // spawn! instantiates TextUserInterfaceActor, compile-gating the hooks
     // (onSpawn/onExit/onException/onError) and the full TUICommands surface.
@@ -168,9 +180,11 @@ unittest {
 
 /// Builds the manual-drive fixture used by the message-flow tests: a
 /// RecordingTUIListener and a headless TextUserInterfaceActor (real C
-/// state, null screen) on their own shells; the actor shell is
-/// bootstrapped (onSpawn ran, first tick armed) - the listener shell's
-/// first tick runs on the first drive(). The caller must kill() both.
+/// state, no backend) on their own shells; the actor shell is
+/// bootstrapped unless `bootstrap` is false (onSpawn ran, first tick
+/// armed) - the listener shell's first tick runs on the first drive().
+/// The startup-failure test passes false to inject `startupError` before
+/// onSpawn. The caller must kill() both.
 private final class TuiDriveFixture {
     FiredLatch latch;
     RecordingTUIListener listener;
@@ -178,19 +192,20 @@ private final class TuiDriveFixture {
     TextUserInterfaceActor actor;
     DrivenActor!TextUserInterfaceActor dActor;
 
-    this() {
+    this(bool bootstrap = true) {
         latch = new FiredLatch();
         listener = new RecordingTUIListener(latch);
         dListener = new DrivenActor!RecordingTUIListener(listener);
-        // 4-arg ctor: raw C state (owned once by `ui`), null screen so the
+        // 3-arg ctor: raw C state (owned once by `ui`), no backend, so the
         // C render path no-ops (headless).
         actor = new TextUserInterfaceActor(TypedAddress!TUIListener(dListener.address.lock),
-                80, tuiCreateState(), null);
+                80, tuiCreateState());
         dActor = new DrivenActor!TextUserInterfaceActor(actor);
 
         // Bootstrap: onSpawn runs and arms the repeating self-tick at
         // real-time + UpdateInterval (never due under the frozen clock).
-        dActor.process();
+        if (bootstrap)
+            dActor.process();
     }
 
     /// One uiMsg round trip through both shells.
@@ -270,5 +285,44 @@ unittest {
     auto advanced = f.actor.nextUpdate - armed;
     assert(advanced >= 9.dur!"msecs", "render branch should have run (nextUpdate advanced)");
     assert(advanced <= 30.dur!"msecs", "at most one render per drive (no double advance)");
+    f.teardown();
+}
+
+@("TUI actor: startup failure dispatch")
+unittest {
+    // No bootstrap: the failure must be injected before onSpawn runs.
+    auto f = new TuiDriveFixture(false);
+    f.actor.startupError = "boom";
+    f.dActor.process(); // onSpawn: dispatch the failure, do not arm the tick
+    f.dListener.process(); // deliver the channel message to the listener
+
+    assert(f.listener.startupFailure == "boom", "listener must receive uiStartupFailed(reason)");
+    assert(f.listener.terminated == 0, "no terminate expected");
+
+    // No frame tick was armed: with one, the due tick below would run
+    // uiTick -> postProcess and render (updateCycle would advance).
+    f.dActor.processAt(Clock.currTime + 1.dur!"seconds");
+    assert(f.actor.updateCycle == 0, "a failed startup must not arm the frame tick");
+
+    f.teardown();
+}
+
+@("TUI actor: user-terminated render runs the exit handshake")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // Package seam: a frame reported user-terminated (GUI window close).
+    f.actor.ui.userTerminated_ = true;
+    f.actor.nextUpdate = Clock.currTime - 1.dur!"msecs";
+    f.drive(); // render branch -> sees the flag -> uiTerminate
+
+    assert(f.listener.terminated == 1, "uiTerminated must be dispatched once");
+
+    // A later message must not re-run the handshake (running is false; the
+    // exit is already on its way).
+    f.actor.nextUpdate = Clock.currTime - 1.dur!"msecs";
+    f.drive();
+    assert(f.listener.terminated == 1, "no duplicate uiTerminated");
+
     f.teardown();
 }

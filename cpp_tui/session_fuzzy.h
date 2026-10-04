@@ -1,13 +1,12 @@
 // session_fuzzy.h
 //
-// Pure, self-contained fzf-style fuzzy matcher for session titles
-// (Phase 4 item 2, design A20/A21/A27; plan/implementation_plan.md Task 1).
+// Pure, self-contained fzf-style fuzzy matcher for session titles.
 //
 // The public interface is a pure function:
 //
 //     int fuzzyScore(const std::string& query, const std::string& text);
 //
-// a multi-field convenience built on it (Phase 4 item 2 Task 9, R26):
+// a multi-field convenience built on it:
 //
 //     int fuzzyScoreFields(const std::string& query,
 //                          const std::string& title,
@@ -15,31 +14,30 @@
 //
 // which matches a session against both its title and preview (title weighted
 // 2x; a session matches if either field matches), and a match-position
-// companion (Phase 4 item 2 Task 10, R25) built on the same alignment:
+// companion built on the same alignment:
 //
 //     bool fuzzyMatchPositions(const std::string& query,
 //                              const std::string& text,
 //                              std::vector<std::size_t>& positions);
 //
 // which fills `positions` with the byte offsets of the matched text bytes so
-// the TUI can highlight the matched characters (R25).
+// the TUI can highlight the matched characters.
 //
 // Returns -1 if `query` is not a case-insensitive byte-level subsequence of
-// `text`; otherwise the match score clamped to a floor of 0 (A27), where a
-// higher score means a better match (A21). A boolean "does it match" is
+// `text`; otherwise the match score clamped to a floor of 0, where a
+// higher score means a better match. A boolean "does it match" is
 // subsumed by `fuzzyScore(...) >= 0`. The scoring functions are pure and
 // total: no allocation, no throw, no out-of-bounds read (`fuzzyMatchPositions`
-// additionally fills a caller-owned, reusable vector, N5). `query` and
+// additionally fills a caller-owned, reusable vector). `query` and
 // `text` are UTF-8 byte strings;
-// matching is byte-level (N7), so a multi-byte character matches as its exact
+// matching is byte-level, so a multi-byte character matches as its exact
 // byte sequence and is never split. The reported match positions are byte
 // offsets; for valid UTF-8 input they always fall on character boundaries
 // (a multi-byte character matches only as its whole byte sequence). The
 // renderer snaps highlight run boundaries to character starts and extends
-// each run to the whole word enclosing it, so a character is never split
-// (N7/R25).
+// each run to the whole word enclosing it, so a character is never split.
 //
-// Matching (A20): case-insensitive byte-level subsequence. Each query byte
+// Matching: case-insensitive byte-level subsequence.
 // must appear in `text` in order (not necessarily contiguously). Case-folding
 // is ASCII-only (explicit A-Z fold, locale-independent). Multi-byte
 // (non-ASCII) bytes are NOT case-folded — they match as exact byte sequences.
@@ -48,7 +46,7 @@
 // character, and a multi-byte query character only matches the identical
 // character.
 //
-// Scoring (A21, simplified fzf): computed on the LEFTMOST subsequence
+// Scoring (simplified fzf): computed on the LEFTMOST subsequence
 // alignment (the first valid alignment scanning left-to-right):
 //     +100  per matched query byte (base)
 //     +40   if the matched byte is at a word boundary (start of text, or
@@ -60,13 +58,12 @@
 //           better)
 // The raw score can be NEGATIVE for a valid-but-poor match (the gap and
 // first-position penalties are both unbounded by title length), so the
-// returned match score is clamped to a floor of 0 (A27): -1 = no match,
+// returned match score is clamped to a floor of 0: -1 = no match,
 // >= 0 = match. Clamping only affects very-poor matches, which all tie at 0
 // and fall back to the caller's stable snapshot order.
 //
-// The weights are a tunable baseline (A21); they are kept as named constants
-// at the top of this header so the P3 DP scoring (Task 15) reuses the same
-// factors.
+// The weights are a tunable baseline, kept as named constants for future DP
+// scoring.
 //
 // No imtui/ncurses/ImGui dependency: this header is standalone so it unit-
 // tests without the TUI (see test_session_fuzzy.cpp).
@@ -80,20 +77,18 @@
 
 namespace llmfun::tui {
 
-// Score weights (A21 baseline, tunable). Reused by the P3 DP scoring
-// (Task 15).
 inline constexpr int kFuzzyBase = 100;       // per matched query byte
 inline constexpr int kFuzzyBoundary = 40;    // matched byte at a word boundary
 inline constexpr int kFuzzyConsecutive = 25; // adjacent to the previous match
 inline constexpr int kFuzzyGap = 3;          // per skipped byte between matches
 inline constexpr int kFuzzyFirstPos = 1;     // per position of the first match
 
-// Case-fold one byte (ASCII-only, A20). Non-ASCII (multi-byte) bytes pass
+// Case-fold one byte (ASCII-only). Non-ASCII (multi-byte) bytes pass
 // through unchanged, so they match as exact byte sequences. Deliberately NOT
 // std::tolower: tolower is locale-dependent (C standard) and the TUI calls
-// setlocale(LC_ALL, "") (tui.cpp tuiInit); in a single-byte locale (e.g.
+// setlocale(LC_ALL, "") (tui_api.cpp tuiInit); in a single-byte locale (e.g.
 // en_US.iso8859-1) it would fold 0x80-0xFF and break the "multi-byte never
-// folded" contract (N7). This explicit A-Z fold is locale-independent and
+// folded" contract. This explicit A-Z fold is locale-independent and
 // correct-by-construction.
 static unsigned char fuzzyFold(unsigned char c) {
     if (c >= 'A' && c <= 'Z') {
@@ -102,7 +97,7 @@ static unsigned char fuzzyFold(unsigned char c) {
     return c;
 }
 
-// True if text position `pos` is a word boundary (A21): start of text, or
+// True if text position `pos` is a word boundary: start of text, or
 // immediately after a space / '-' / '_' / '/'. The boundary characters are
 // ASCII and unaffected by case-folding, so the original (un-folded) byte is
 // used.
@@ -114,11 +109,11 @@ static bool fuzzyIsBoundary(const std::string& text, std::size_t pos) {
     return c == ' ' || c == '-' || c == '_' || c == '/';
 }
 
-// Leftmost subsequence alignment (A21): match each query byte to the
+// Leftmost subsequence alignment: match each query byte to the
 // EARLIEST text position at/after the previous match (one left-to-right
 // pass, no allocation). Returns false when the query is not a subsequence of
 // the text. On success, *raw receives the UN-clamped score (the public
-// functions clamp to the floor of 0 per A27) and, when non-null, *positions
+// functions clamp to the floor of 0) and, when non-null, *positions
 // receives the text byte offset of each matched query byte in match order
 // (cleared first; the caller owns the vector and may reuse it). Assumes a
 // non-empty query no longer than the text; the public functions apply those
@@ -182,8 +177,7 @@ static bool fuzzyAlign(const std::string& query, const std::string& text, std::i
 // See the header comment for the full contract.
 inline int fuzzyScore(const std::string& query, const std::string& text) {
     // Degenerate "no filter": the caller treats an empty query as "show all"
-    // in snapshot order, so an empty query scores 0 (a match) rather than -1
-    // (A20).
+    // in snapshot order, so an empty query scores 0 (a match) rather than -1.
     if (query.empty()) {
         return 0;
     }
@@ -198,19 +192,19 @@ inline int fuzzyScore(const std::string& query, const std::string& text) {
         return -1; // not a subsequence
     }
     if (raw < 0) {
-        raw = 0; // clamp to a floor of 0 (A27)
+        raw = 0; // clamp to a floor of 0
     }
     return static_cast<int>(raw);
 }
 
-// Matched byte positions (Phase 4 item 2 Task 10, R25): fill `positions`
+// Matched byte positions: fill `positions`
 // (cleared first) with the text byte offset of each matched query byte in
 // match order, using the LEFTMOST alignment — the same alignment fuzzyScore
 // scores. Returns true when the query matches (positions holds one entry per
 // matched byte), false when it does not (positions left empty). An empty
 // query returns false with an empty vector: "no filter" highlights nothing.
 // Pure like fuzzyScore except for the caller-owned output vector (reusable,
-// so per-frame filtering causes no allocation churn, N5).
+// so per-frame filtering causes no allocation churn).
 inline bool fuzzyMatchPositions(const std::string& query, const std::string& text,
                                 std::vector<std::size_t>& positions) {
     positions.clear();
@@ -224,7 +218,7 @@ inline bool fuzzyMatchPositions(const std::string& query, const std::string& tex
     return fuzzyAlign(query, text, &raw, &positions);
 }
 
-// Multi-field score (Phase 4 item 2 Task 9, design R26): match a session
+// Multi-field score: match a session
 // against BOTH its title and its preview. A session matches if EITHER field
 // matches (i.e. either single-field fuzzyScore is >= 0). The combined score
 // weights the title 2x over the preview:
@@ -240,12 +234,12 @@ inline bool fuzzyMatchPositions(const std::string& query, const std::string& tex
 //     and therefore ranks below a comparable title match;
 //   - a match on neither field returns -1 (no match).
 //
-// This keeps the single-field fuzzyScore as the primitive (reused by the P3
-// DP scoring, Task 15) and layers the field weighting on top. Pure and total
+// This keeps the single-field fuzzyScore as the primitive and layers the
+// field weighting on top. Pure and total
 // like fuzzyScore: no allocation, no throw, no out-of-bounds read.
 inline int fuzzyScoreFields(const std::string& query, const std::string& title,
                             const std::string& preview) {
-    // Empty query is the degenerate "no filter" case (A20): the caller treats
+    // Empty query is the degenerate "no filter" case: the caller treats
     // it as "show all", so score it 0 (a match), mirroring fuzzyScore.
     if (query.empty()) {
         return 0;
@@ -255,7 +249,7 @@ inline int fuzzyScoreFields(const std::string& query, const std::string& title,
     if (titleScore < 0 && previewScore < 0) {
         return -1; // no field matches
     }
-    // Title weighted 2x (R26): a matching preview contributes half its raw
+    // Title weighted 2x: a matching preview contributes half its raw
     // score; a non-matching field contributes 0. Integer division (floor) is
     // fine for ranking (ties fall back to stable snapshot order).
     const int titlePart = (titleScore >= 0) ? titleScore : 0;

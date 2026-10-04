@@ -1,23 +1,19 @@
 #include "tui_api.h"
 #include "tui.h"
-
-#include "imtui/imtui-impl-ncurses.h"
-#include "imtui/imtui-impl-text.h"
+#include "tui_backend.h"
 
 #include <algorithm>
-#include <cassert>
 #include <chrono>
+#include <clocale>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
 #include <string>
+#include <unistd.h>
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-struct TuiScreen {
-    ImTui::TScreen* screen;
-};
 
 struct TuiState {
     ::llmfun::tui::TuiState* inner;
@@ -99,30 +95,94 @@ String tuiLastError(void) {
     return String_New(lastError);
 }
 
-/* Backend initialization guard — prevents crashes from calling
-   backend functions before tuiInit() or after tuiShutdown(). */
-static bool backendInitialized{false};
+// TODO: global variables are bad.
+/* v4 init guard: the one state whose backend is attached (at most one
+   initialized state per process). Set by tuiInit, cleared by tuiDestroyState. */
+static TuiState* attachedState = nullptr;
 
-TuiScreen* tuiInit(void) {
-    ImTui::TScreen* raw = nullptr;
-    if (::llmfun::tui::tuiInit(&raw)) {
-        backendInitialized = true;
-        return new TuiScreen{raw};
-    }
-    setLastError("Failed to initialize TUI terminal");
-    return nullptr;
-}
+// TODO: llmfun may execute the TUI on different threads
+/* Fallback note of the most recent tuiInit on the calling thread (empty when
+   no fallback happened); read via tuiBackendNote(). */
+static thread_local std::string backendNote;
 
-void tuiShutdown(TuiScreen* screen) {
-    if (!screen) {
-        backendInitialized = false;
-        setLastError("tuiShutdown called with NULL screen");
-        return;
+int tuiInit(TuiState* state, TuiBackendMode mode) {
+    backendNote.clear();
+
+    if (!state || !state->inner) {
+        setLastError("tuiInit: NULL state");
+        return 1;
     }
-    ::llmfun::tui::tuiShutdown(screen->screen);
-    screen->screen = nullptr; /* prevent accidental reuse */
-    delete screen;
-    backendInitialized = false;
+    if (state->inner->backend) {
+        setLastError("tuiInit: state is already initialized");
+        return 1;
+    }
+    if (attachedState != nullptr) {
+        setLastError("tuiInit: another state is already initialized (at most one per process)");
+        return 1;
+    }
+
+    // Create the ImGui context for this state (destroyed by tuiDestroyState;
+    // headless harnesses never call tuiInit and keep their own). setlocale
+    // mirrors the pre-v4 init order.
+    setlocale(LC_ALL, "");
+
+    IMGUI_CHECKVERSION();
+    ImGuiContext* context = ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+    state->inner->ownedContext = context;
+
+    std::unique_ptr<::llmfun::tui::Backend> backend;
+    std::string error;
+    bool initialized = false;
+
+    if (mode == TuiBackendMode_Tui) {
+        backend = ::llmfun::tui::makeNcursesBackend();
+        initialized = backend->init(error);
+    } else if (mode == TuiBackendMode_Gui) {
+        backend = ::llmfun::tui::makeGuiBackend();
+        initialized = backend->init(error);
+    } else {
+        // Auto (also the defensive default for unknown values): try the GUI
+        // backend first. On failure, fall back to the terminal UI iff both
+        // stdio ends are TTYs — a full-screen TUI drawn into a pipe is
+        // useless, so there the GUI error is the result.
+        backend = ::llmfun::tui::makeGuiBackend();
+        initialized = backend->init(error);
+        if (!initialized) {
+            if (isatty(0) && isatty(1)) {
+                const std::string note =
+                    "GUI unavailable: " + error + "; falling back to terminal UI";
+                std::fprintf(stderr, "%s\n", note.c_str());
+                backend = ::llmfun::tui::makeNcursesBackend();
+                std::string tuiError;
+                if (backend->init(tuiError)) {
+                    backendNote = note;
+                    initialized = true;
+                } else {
+                    error = "GUI unavailable: " + error + "; terminal UI also failed: " + tuiError;
+                }
+            }
+        }
+    }
+
+    if (!initialized) {
+        // Clean unwind: the state stays backend-less and retryable.
+        ImGui::DestroyContext(context);
+        state->inner->ownedContext = nullptr;
+        setLastError(error.empty() ? "tuiInit: backend initialization failed" : error.c_str());
+        return 1;
+    }
+
+    state->inner->backend = std::move(backend);
+    attachedState = state;
+
+    // Theme AFTER the backend inits: ImTui_ImplText_Init() resets several
+    // style colors (notably Colors[ImGuiCol_NavHighlight] = (0,0,0,0), which
+    // aliases ImGuiCol_NavCursor in ImGui 1.91.4+), so applying the theme
+    // before the backend would let the backend undo the NavCursor override.
+    ::llmfun::tui::applyTheme();
+
+    return 0;
 }
 
 TuiState* tuiCreateState(void) {
@@ -143,42 +203,71 @@ TuiState* tuiCreateState(void) {
 void tuiDestroyState(TuiState* state) {
     if (!state)
         return;
-    delete state->inner;
+    if (state->inner) {
+        if (state->inner->backend) {
+            state->inner->backend->shutdown();
+            state->inner->backend.reset();
+        }
+        // Destroy only the context tuiInit created FOR THIS state; a context
+        // created by the caller (headless test harness) must survive.
+        if (state->inner->ownedContext != nullptr) {
+            ImGui::DestroyContext(state->inner->ownedContext);
+            state->inner->ownedContext = nullptr;
+        }
+        if (attachedState == state)
+            attachedState = nullptr;
+        delete state->inner;
+    }
     delete state;
 }
 
-// Backend frame. render, main-thread onl
-
-void tuiBackendNewFrame(void) {
-    if (!backendInitialized) {
-        setLastError("Backend not initialized. Call tuiInit() first.");
+void tuiBackendNewFrame(TuiState* state) {
+    // None-safe (v4): NULL and backend-less states are legal and inert.
+    if (!state || !state->inner || !state->inner->backend)
         return;
-    }
-    ImTui_ImplNcurses_NewFrame();
-    ImTui_ImplText_NewFrame();
-    // fprintf(stderr, "[style@draw] NavCursor=%08x ScrollbarGrab=%08x Button=%08x\n",
-    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_NavCursor]),
-    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_ScrollbarGrab]),
-    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_Button]));
-    ImGui::NewFrame();
+    state->inner->backend->newFrame();
 }
 
-void tuiBackendRender(TuiScreen* screen) {
-    if (!backendInitialized) {
-        setLastError("Backend not initialized. Call tuiInit() first.");
+void tuiBackendRender(TuiState* state) {
+    if (!state || !state->inner || !state->inner->backend)
         return;
-    }
-    if (!screen)
-        return;
-    ImGui::Render();
-    ImTui_ImplText_RenderDrawData(ImGui::GetDrawData(), screen->screen);
-    ImTui_ImplNcurses_DrawScreen();
+    state->inner->backend->renderFrame();
 }
 
 int tuiRender(TuiState* state) {
     if (!state || !state->inner)
         return 0;
-    return ::llmfun::tui::tuiRender(*state->inner) ? 1 : 0;
+    // None-safety: a backend-less state is inert — no ImGui access, keep
+    // going (deliberate asymmetry with the NULL case above, which stays on
+    // the v3 exit convention).
+    if (!state->inner->backend)
+        return 1;
+    const bool continueRender = ::llmfun::tui::tuiRender(*state->inner);
+    // A closed GUI window (backend exit request) ends the loop like Ctrl+C.
+    return (continueRender && !state->inner->backend->shouldClose()) ? 1 : 0;
+}
+
+/* Compile-time linkage between the C enums (tui_api.h) and the internal C++
+ * mirror (tui_backend.h): both lists are append-only and must stay in sync,
+ * or tuiBackendActive would silently mis-report the attached backend.
+ */
+static_assert(static_cast<int>(::llmfun::tui::BackendKind::None) == TuiBackendKind_None,
+              "C/C++ backend kind mismatch (None)");
+static_assert(static_cast<int>(::llmfun::tui::BackendKind::Tui) == TuiBackendKind_Tui,
+              "C/C++ backend kind mismatch (Tui)");
+static_assert(static_cast<int>(::llmfun::tui::BackendKind::Gui) == TuiBackendKind_Gui,
+              "C/C++ backend kind mismatch (Gui)");
+
+int tuiBackendActive(const TuiState* state) {
+    if (!state || !state->inner || !state->inner->backend)
+        return TuiBackendKind_None;
+    return static_cast<int>(state->inner->backend->kind());
+}
+
+String tuiBackendNote(void) {
+    if (backendNote.empty())
+        return {nullptr, 0};
+    return String_New(backendNote.c_str());
 }
 
 void tuiSetLogging(TuiState* state, int onOff) {
@@ -298,20 +387,12 @@ String tuiGetSubmitQuery(TuiState* state) {
 int tuiGetAutoScroll(TuiState* state) {
     if (!state || !state->inner)
         return 0;
-#ifndef NDEBUG
-    assert(backendInitialized &&
-           "tuiGetAutoScroll must be called from main thread after tuiInit()");
-#endif
     return state->inner->autoScroll ? 1 : 0;
 }
 
 void tuiSetAutoScroll(TuiState* state, int enabled) {
     if (!state || !state->inner)
         return;
-#ifndef NDEBUG
-    assert(backendInitialized &&
-           "tuiSetAutoScroll must be called from main thread after tuiInit()");
-#endif
     state->inner->autoScroll = enabled != 0;
 }
 
@@ -433,13 +514,13 @@ static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Rename) == TuiS
 static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Delete) == TuiSessionAction_Delete,
               "C/C++ session action enum mismatch (Delete)");
 
-/* ---- Session sidebar ---- */
+/* Session sidebar */
 
 void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count) {
     if (!state || !state->inner)
         return;
     auto& panel = state->inner->sessionPanel;
-    // The previous active id, for the stale-pending rule (M3): a slash
+    // The previous active id, for the stale-pending rule: a slash
     // /switch typed while busy changes the active session, and the queued
     // click must not override the user's explicit switch.
     const std::string prevActiveId = panel.activeId;
@@ -471,9 +552,9 @@ void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count) 
         if (found == panel.sessions.end())
             panel.pendingDeleteId.clear();
     }
-    // Pending-switch slot (A12): drop the queued id when its target left
+    // Pending-switch slot: drop the queued id when its target left
     // the snapshot (mirror of the pendingDeleteId rule above) or when the
-    // active session changed since the previous snapshot (M3) - a slash
+    // active session changed since the previous snapshot - a slash
     // /switch typed while busy wins over the queued click.
     if (!panel.pendingSelectId.empty()) {
         const std::string& pending = panel.pendingSelectId;
@@ -486,7 +567,7 @@ void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count) 
     // The rename box binds to the active row; when the active row is no
     // longer in the snapshot (deleted between refreshes, or the snapshot
     // has no active entry at all), close the box - an open box bound to a
-    // missing row is dead-but-harmless state (Task 8 tracked fix).
+    // missing row is dead-but-harmless state.
     if (panel.renameActive) {
         auto found = std::find_if(
             panel.sessions.begin(), panel.sessions.end(),

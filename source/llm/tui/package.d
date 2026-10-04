@@ -136,28 +136,26 @@ void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
 struct TextUserInterface {
     private {
         TuiState* tuiState;
-        TuiScreen* tuiScreen;
         TuiLogSwap logSwap;
-        bool userTerminated_;
     }
 
-    // Package-visible state: read/write seam for the llm.tui.tests driver
-    // (the test module lives in package llm.tui, so package members are
-    // reachable; plan task 9).
+    // Package-visible state: read/write seam for the llm.tui.tests driver (the
+    // test module lives in package llm.tui, so package members are reachable).
     package {
         string query_;
         string statusText;
+        // Set when the C frame reports user-terminated (GUI window close);
+        // consumed by the actor's postProcess exit handshake.
+        bool userTerminated_;
     }
 
-    this(TuiState* state, TuiScreen* screen) {
+    this(TuiState* state) {
         this.tuiState = state;
         tuiSetLogging(tuiState, false);
-        this.tuiScreen = screen;
     }
 
     ~this() {
         tuiDestroyState(tuiState);
-        tuiShutdown(tuiScreen);
     }
 
     bool hasMoreEvents() {
@@ -289,14 +287,10 @@ struct TextUserInterface {
     void render() {
         import std.string : strip;
 
-        // Headless (null screen, e.g. the test seam): no ImGui backend was
-        // initialized, so the C++ core render would dereference a null
-        // context. Backend-level calls are null-safe; the core render is not.
-        if (tuiScreen is null) {
-            return;
-        }
-
-        tuiBackendNewFrame();
+        // None-safe C API: on a backend-less state (the headless test
+        // seam) the C frame calls no-op and tuiRender reports continue (1)
+        // — no screen/backend guard is needed here.
+        tuiBackendNewFrame(tuiState);
 
         if (tuiRender(tuiState) == 0) {
             userTerminated_ = true;
@@ -314,7 +308,7 @@ struct TextUserInterface {
 
         tuiLogToTui(logSwap, tuiState);
 
-        tuiBackendRender(tuiScreen);
+        tuiBackendRender(tuiState);
     }
 }
 
@@ -325,6 +319,7 @@ interface TUIListener {
     void sessionRename(SessionId id, string title);
     void sessionDelete(SessionId id);
     void uiTerminated();
+    void uiStartupFailed(string reason);
 }
 
 interface TUICommands {
@@ -345,6 +340,18 @@ interface TUICommands {
     void uiAgentBusy();
     void uiAgentReady();
     void uiTerminate();
+}
+
+// Human-readable TuiBackendKind name for the startup log line.
+private string backendKindName(int kind) {
+    switch (kind) {
+    case TuiBackendKind_Tui:
+        return "Tui";
+    case TuiBackendKind_Gui:
+        return "Gui";
+    default:
+        return "None";
+    }
 }
 
 class TextUserInterfaceActor : TUICommands {
@@ -375,7 +382,23 @@ class TextUserInterfaceActor : TUICommands {
         // and how often the UI render has executed.
         ulong updateCycle;
 
+        // Non-empty when the backend attach failed (it runs in onSpawn, on
+        // the actor's own thread); dispatched once from onSpawn via
+        // uiStartupFailed (the typed listener exists only there) instead of
+        // arming the frame tick. The startup-failure test injects it before
+        // onSpawn runs.
+        string startupError;
+
         TextUserInterface ui;
+
+        // Production path: the backend attach is deferred from the ctor to
+        // onSpawn so the GLFW/GL context (thread-affine) is created on the
+        // same thread that later drives the frames (the actor is spawned
+        // with Config.detached). state is non-owning: ui owns it and its
+        // dtor destroys it once.
+        bool initPending;
+        TuiBackendMode pendingMode;
+        TuiState* state;
 
         TuiSessionActionType pendingAction = TuiSessionAction_None;
 
@@ -385,20 +408,65 @@ class TextUserInterfaceActor : TUICommands {
         SysTime nextUpdate;
     }
 
-    this(TypedAddress!TUIListener listener, long maxWidth) {
-        this(listener, maxWidth, tuiCreateState(), tuiInit());
-    }
-
-    // Headless injection seam (tests): raw C pointers, because a by-value
-    // TextUserInterface parameter would double-free the state (its copy's
-    // dtor runs at ctor exit, then the field's dtor runs again in onExit).
-    // Ownership of state/screen transfers on successful return only; a
-    // throw (assert) leaves them with the caller.
-    this(TypedAddress!TUIListener listener, long maxWidth, TuiState* state, TuiScreen* screen) {
+    // Production path: create the C state now (no backend); the backend
+    // attach selected by `mode` is deferred to onSpawn so the window and the
+    // GL context are created on the actor's own thread - GLFW/GL state is
+    // thread-affine and the frame loop below drives it (the actor is spawned
+    // with Config.detached, keeping onSpawn and every frame on one thread).
+    // Auto's GUI->TUI failover is resolved in C++ (a TTY check cannot be
+    // faked from here); a failure records the precise reason, dispatched
+    // from onSpawn. On success the active backend and any fallback note are
+    // logged; the note also seeds the status line. The ui field takes the
+    // state on every path so its dtor tears it down once.
+    this(TypedAddress!TUIListener listener, long maxWidth, TuiBackendMode mode) {
         assert(maxWidth >= 0 && maxWidth <= 10_000,
                 "maxWidth out of int-safe range: " ~ maxWidth.to!string);
         this.listenerAddress = listener;
-        ui = TextUserInterface(state, screen);
+        pendingMode = mode;
+        initPending = true;
+        state = tuiCreateState();
+        ui = TextUserInterface(state);
+        ui.setMaxWidth(cast(int) maxWidth);
+    }
+
+    // Backend attach, run from onSpawn on the actor's own thread: the window
+    // and the GL context are created (and the context made current) HERE,
+    // the thread that also drives the frames. On success the active backend
+    // and any fallback note are logged; the note also seeds the status line.
+    // The TuiLogger swap only makes sense with a UI that drains it: on a
+    // failed init nothing renders, so the normal console logger stays
+    // installed and the app's shutdown diagnostics are not swallowed.
+    private void attachBackend() {
+        initPending = false;
+        string note;
+        if (tuiInit(state, pendingMode) != 0) {
+            auto err = tuiLastError();
+            startupError = .toString(err); // module helper: Object.toString shadows it in a class
+            String_Free(err);
+            return;
+        }
+        logger.infof("TUI backend active: %s", backendKindName(tuiBackendActive(state)));
+        auto n = tuiBackendNote();
+        note = .toString(n);
+        String_Free(n);
+        if (!note.empty)
+            logger.info("TUI backend note: ", note);
+        ui.setUiAsStdLogger;
+        if (!note.empty)
+            ui.setStatusText(note);
+    }
+
+    // Headless injection seam (tests): raw C state pointer, no init; a
+    // by-value TextUserInterface parameter would double-free the state (its
+    // copy's dtor runs at ctor exit, then the field's dtor runs again in
+    // onExit). Ownership transfers on successful return only; a throw
+    // (assert) leaves the state with the caller.
+    this(TypedAddress!TUIListener listener, long maxWidth, TuiState* state) {
+        assert(maxWidth >= 0 && maxWidth <= 10_000,
+                "maxWidth out of int-safe range: " ~ maxWidth.to!string);
+        this.listenerAddress = listener;
+        this.state = state;
+        ui = TextUserInterface(state);
         ui.setMaxWidth(cast(int) maxWidth);
         ui.setUiAsStdLogger;
     }
@@ -406,11 +474,20 @@ class TextUserInterfaceActor : TUICommands {
     void onSpawn(ActorRef selfRef) {
         this.selfRef = selfRef;
         listener = typeof(listener)(listenerAddress, this.selfRef);
+        // Production path: attach the backend HERE, on the actor's own
+        // thread (see the ctor note); the test seam may have injected a
+        // startup error before spawn, in which case no init is attempted.
+        if (initPending && startupError.empty)
+            attachBackend();
+        if (!startupError.empty) {
+            listener.uiStartupFailed(startupError);
+            return;
+        }
         selfRef.scheduleRepeating(UpdateInterval, "uiTick");
     }
 
     void onExit(ExitMsg _) {
-        ui = TextUserInterface.init; // dtor: tuiDestroyState + tuiShutdown
+        ui = TextUserInterface.init; // dtor: tuiDestroyState
     }
 
     void onException(Exception e) {
@@ -431,6 +508,14 @@ class TextUserInterfaceActor : TUICommands {
             ui.render();
             nextUpdate = Clock.currTime + UpdateInterval;
         } else {
+            return;
+        }
+
+        // GUI window close: the C frame reports user-terminated
+        // (tuiRender returned 0). Run the same exit handshake as the
+        // app-initiated uiTerminate (final render + notify + exit).
+        if (ui.hasUserTerminated()) {
+            uiTerminate();
             return;
         }
 
@@ -571,10 +656,15 @@ class TextUserInterfaceActor : TUICommands {
     }
 
     // Termination handshake: final render, async-notify the agent, exit.
-    // cancelTick keeps the zombie quiescent: without it the shell would
-    // keep re-arming due ticks (uiTick no-ops via `running`) until the
-    // system shuts the actor down at process exit.
+    // Idempotent: the window-close path can observe user-terminated on later
+    // frames before the exit message is processed; only the first call runs
+    // (running flips false and later calls no-op). cancelTick keeps the
+    // zombie quiescent: without it the shell would keep re-arming due ticks
+    // (uiTick no-ops via `running`) until the system shuts the actor down at
+    // process exit.
     void uiTerminate() {
+        if (!running)
+            return;
         running = false;
         selfRef.cancelTick();
         ui.render();

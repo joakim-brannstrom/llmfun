@@ -819,6 +819,44 @@ struct AgentApp {
     }
 }
 
+/// Parse the `LLMFUN_TUI_BACKEND` value; invalid values warn and yield Auto.
+TuiBackendMode parseTuiBackendMode(string value) {
+    import std.string : toLower;
+
+    switch (value.toLower) {
+    case "auto":
+        return TuiBackendMode_Auto;
+    case "gui":
+        return TuiBackendMode_Gui;
+    case "tui":
+        return TuiBackendMode_Tui;
+    case "":
+        break;
+    default:
+        logger.warningf("LLMFUN_TUI_BACKEND: unknown value '%s' (expected auto|gui|tui); using auto",
+                value);
+        break;
+    }
+    return TuiBackendMode_Auto;
+}
+
+/// Resolve the requested backend mode: CLI flag > env > Auto. `envValue`
+/// is injectable for tests (null = read the process environment).
+TuiBackendMode resolveTuiBackendMode(ref const UserConfig.AgentChatConfig conf,
+        string envValue = null) {
+    if (conf.gui)
+        return TuiBackendMode_Gui;
+    if (conf.tui)
+        return TuiBackendMode_Tui;
+    auto v = envValue;
+    if (v is null) {
+        import std.process : environment;
+
+        v = environment.get("LLMFUN_TUI_BACKEND", null);
+    }
+    return parseTuiBackendMode(v);
+}
+
 struct AgentDone {
     int code;
 }
@@ -938,8 +976,17 @@ class AppAgentActor {
         // renders frames anyway, so a dropped frame message is safe;
         // control messages are low-rate and the mailbox drains at frame
         // rate, so their drop probability is negligible.
-        tui_ = sys.spawnBounded!TextUserInterfaceActor(1000,
-                TypedAddress!TUIListener(self_.address().lock()), app.llmConf.tui.maxWidth);
+        // Config.detached: the TUI actor must own one FIXED thread. Its
+        // GLFW window/GL context are thread-affine - created in onSpawn and
+        // driven by every frame. On the shared pool the frames hop across
+        // worker threads where the context is not current; the GL calls
+        // become no-ops and ImGui device-object creation fails at runtime
+        // ("failed to compile vertex shader"). The dedicated thread keeps
+        // onSpawn and all frames on the same thread (design: single UI
+        // thread drives the C API).
+        tui_ = sys.spawnBounded!(Config.detached, TextUserInterfaceActor)(1000,
+                TypedAddress!TUIListener(self_.address().lock()),
+                app.llmConf.tui.maxWidth, resolveTuiBackendMode(app.conf_));
         app.uiMsg = new UiMessenger(new TuiChannelSink(tui_));
         monitor(self_.address(), tui_);
         app.uiMsg.setIniFile(app.llmConf.dataDir ~ "imgui.ini"); // ONCE
@@ -1004,6 +1051,15 @@ class AppAgentActor {
 
     void uiTerminated() {
         startExit(0, ExitReason.userShutdown);
+    }
+
+    // The TUI actor failed to bring up its backend (e.g. --gui without a
+    // display, or Auto in a non-interactive console). Auto's fallback is
+    // C++-side and already resolved when this fires, so there is nothing to
+    // retry: report the reason and exit non-zero (deterministic for scripts).
+    void uiStartupFailed(string reason) {
+        logger.warning("TUI startup failed: ", reason);
+        startExit(1, ExitReason.userShutdown);
     }
 
     // The dialogue worker sends this directly to its owner (this actor —

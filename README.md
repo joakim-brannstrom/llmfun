@@ -21,6 +21,10 @@ An interactive AI agent with tool calling, RAG (Retrieval-Augmented Generation),
 
 - D compiler (DMD or LDC)
 - Dub package manager
+- GLFW ≥ 3.0 development package for the GUI backend (Ubuntu/Debian:
+  `libglfw3-dev`; EL7/EL9: `glfw-devel` from EPEL, to be confirmed by the
+  EL7/EL9 evidence run) — the CMake build fails with an install hint if it
+  is missing
 
 ### Build
 
@@ -28,6 +32,12 @@ An interactive AI agent with tool calling, RAG (Retrieval-Augmented Generation),
 cd llmfun
 dub build
 ```
+
+The binary links GLFW normally, so the `libglfw3` runtime library (together
+with its client-library closure) must be present on the target machine. It is
+needed even for `--tui` runs — without it the process does not start. See
+`doc/tui_design.md` ("Graphical backend (GLFW + OpenGL3)") for the build and
+packaging details.
 
 ## CLI Commands
 
@@ -37,8 +47,23 @@ llmfun supports four subcommands:
 
 Starts the interactive agent chat mode. The agent can process queries, call tools, and maintain conversation history.
 
+By default the UI attempts to open in a graphical window (GLFW + OpenGL3).
+If the GUI cannot start, llmfun falls back to the terminal UI — printing one
+line, `GUI unavailable: <reason>; falling back to terminal UI` — provided
+stdin and stdout are TTYs (interactive use). In a non-interactive console
+(pipes, scripts, CI) there is no fallback: the GUI failure is reported and
+llmfun exits non-zero instead of drawing a full-screen TUI into a pipe.
+`--tui` forces the terminal UI (no GUI attempt); `--gui` requires the GUI (a
+failure prints the reason and exits non-zero, no fallback). The two flags are
+mutually exclusive.
+
+`LLMFUN_TUI_BACKEND=auto|gui|tui` selects the backend from the environment when no flag is given
+(precedence: CLI flag > environment > Auto); an unknown value warns and falls back to Auto.
+
 ```bash
 llmfun agent [options]
+llmfun agent --tui        # terminal UI; no GUI attempt
+llmfun agent --gui        # require the GUI; non-zero exit on failure
 ```
 
 #### Parameters
@@ -50,6 +75,8 @@ llmfun agent [options]
 | `--db <path>` | *none* | RAG database path(s). The first DB is primary (read/write); additional DBs are read-only |
 | `--prompt <text>` | `-p` | One-shot prompt for the agent (non-interactive mode) |
 | `--no-memory` | *none* | Deactivate the persistent read/write memory |
+| `--tui` | *none* | Force the terminal UI (no GUI attempt) |
+| `--gui` | *none* | Require the GUI; fail (non-zero exit) if it cannot start |
 
 ### `rag`
 

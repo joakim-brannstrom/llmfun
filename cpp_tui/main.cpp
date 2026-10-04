@@ -7,7 +7,6 @@
 #include <iostream>
 #include <string>
 
-/* Helper: build a String from a null-terminated C string literal. */
 String makeStr(const char* s) { return String{s, std::strlen(s)}; }
 String makeStr(std::string s) { return String{s.data(), s.size()}; };
 
@@ -17,38 +16,53 @@ int main(int argc, char** argv) {
     // and the action queue without a human. Without the argument the loop
     // below runs until the user quits.
     int maxFrames = -1;
-    if (argc >= 3 && std::strcmp(argv[1], "--frames") == 0) {
-        char* end = nullptr;
-        long n = std::strtol(argv[2], &end, 10);
-        if (end == argv[2] || *end != '\0' || n < 0) {
-            std::fprintf(stderr, "error: --frames requires a non-negative integer\n");
+    // v4 mode flags: --tui / --gui are mutually exclusive. The standalone
+    // default is the terminal backend so the headless --frames/--smoke
+    // dry-runs never attempt a GUI window.
+    bool tuiFlag = false;
+    bool guiFlag = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            long n = std::strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || n < 0) {
+                std::fprintf(stderr, "error: --frames requires a non-negative integer\n");
+                return 2;
+            }
+            maxFrames = static_cast<int>(n);
+        } else if (std::strcmp(argv[i], "--smoke") == 0) {
+            maxFrames = 30;
+        } else if (std::strcmp(argv[i], "--tui") == 0) {
+            tuiFlag = true;
+        } else if (std::strcmp(argv[i], "--gui") == 0) {
+            guiFlag = true;
+        } else {
+            std::fprintf(stderr, "usage: %s [--tui | --gui] [--frames N | --smoke]\n", argv[0]);
             return 2;
         }
-        maxFrames = static_cast<int>(n);
-    } else if (argc == 2 && std::strcmp(argv[1], "--smoke") == 0) {
-        maxFrames = 30;
-    } else if (argc > 1) {
-        std::fprintf(stderr, "usage: %s [--frames N | --smoke]\n", argv[0]);
+    }
+    if (tuiFlag && guiFlag) {
+        std::fprintf(stderr, "error: --tui and --gui are mutually exclusive\n");
         return 2;
     }
+    const TuiBackendMode mode = guiFlag ? TuiBackendMode_Gui : TuiBackendMode_Tui;
 
-    TuiScreen* screen = nullptr;
+    TuiState* state = tuiCreateState();
+    if (!state) {
+        std::fprintf(stderr, "Failed to create TUI state.\n");
+        return 1;
+    }
 
-    screen = tuiInit();
-    if (!screen) {
-        std::fprintf(stderr, "Failed to initialize TUI. Check terminal compatibility.\n");
+    if (tuiInit(state, mode) != 0) {
+        std::fputs(guiFlag ? "Failed to initialize GUI backend.\n"
+                           : "Failed to initialize TUI. Check terminal compatibility.\n",
+                   stderr);
         String err = tuiLastError();
         if (err.data && err.len > 0) {
             std::fprintf(stderr, "Error: %.*s\n", (int)err.len, err.data);
             String_Free(err);
         }
-        return 1;
-    }
-
-    TuiState* state = tuiCreateState();
-    if (!state) {
-        std::fprintf(stderr, "Failed to create TUI state.\n");
-        tuiShutdown(screen);
+        tuiDestroyState(state); // backend-less state: safe teardown
         return 1;
     }
 
@@ -246,7 +260,7 @@ int main(int argc, char** argv) {
         if (maxFrames >= 0 && frame >= maxFrames)
             break;
 
-        tuiBackendNewFrame();
+        tuiBackendNewFrame(state);
 
         if (tuiRender(state) == 0)
             break;
@@ -284,7 +298,7 @@ int main(int argc, char** argv) {
             tuiResetSubmit(state);
         }
 
-        tuiBackendRender(screen);
+        tuiBackendRender(state);
         ++frame;
     }
 
@@ -297,7 +311,6 @@ int main(int argc, char** argv) {
         if (tuiIsSessionActionReady(state) != 0) {
             std::fprintf(stderr, "error: expected empty session action queue\n");
             tuiDestroyState(state);
-            tuiShutdown(screen);
             return 1;
         }
         SessionAction action = tuiGetSessionAction(state);
@@ -306,7 +319,6 @@ int main(int argc, char** argv) {
         if (action.type != TuiSessionAction_None) {
             std::fprintf(stderr, "error: expected TuiSessionAction_None sentinel\n");
             tuiDestroyState(state);
-            tuiShutdown(screen);
             return 1;
         }
         std::printf("smoke ok: rendered %d frames, session action queue empty (None sentinel)\n",
@@ -314,6 +326,5 @@ int main(int argc, char** argv) {
     }
 
     tuiDestroyState(state);
-    tuiShutdown(screen);
     return 0;
 }

@@ -1,7 +1,7 @@
 // test_session_filter_smoke.cpp
 //
-// Panel-level headless smoke harness for the session filter (Phase 4, Task 8,
-// A29) and the filter nav-focus hardening (Phase 4, Task 11, A31).
+// Panel-level headless smoke harness for the session filter and the
+// filter nav-focus hardening.
 //
 // It drives the REAL TuiState through the same frame pipeline as main.cpp,
 // with the ncurses backend replaced by an equivalent injector (mirror of
@@ -16,7 +16,7 @@
 //     ImGui::Render()
 //     ImTui_ImplText_RenderDrawData(drawData, screen)  // into TScreen grid
 //
-// Same pattern as plan/task10/render_check.cpp (text backend only, no PTY).
+// Text backend only, no PTY.
 // pressKey() emits the same down+up AddKeyEvent pair per reported event
 // that the real ncurses backend produces. Fixed 80x24 DisplaySize = the PTY
 // winsize the real app gets in an 80x24 terminal.
@@ -43,7 +43,7 @@
 #include "imgui/imgui_internal.h"
 
 // 1.92 moved ImStbTexteditState into the private imstb_textedit.h (imgui_internal.h
-// only forward-declares it) — needed for the S10 white-box pre-selection assert.
+// only forward-declares it) — needed for the white-box pre-selection assert.
 // imgui_widgets.cpp includes it inside namespace ImStb; mirror that exactly.
 namespace ImStb {
 #include "imgui/imstb_textedit.h"
@@ -62,12 +62,6 @@ namespace ImStb {
 #include <vector>
 
 using namespace llmfun::tui;
-
-namespace llmfun::tui {
-// Theme setup defined in tui.cpp, not declared in tui.h (same pattern as
-// plan/task10/render_check.cpp).
-void applyTheme();
-} // namespace llmfun::tui
 
 namespace {
 
@@ -90,8 +84,6 @@ void fail(const std::string& what) {
     }
     std::exit(1);
 }
-
-// ---------------------------------------------------------------- grid tools
 
 struct Grid {
     int nx = 0, ny = 0;
@@ -206,8 +198,6 @@ bool allRowsValidUtf8(const Grid& g, const char* tag) {
     return true;
 }
 
-// ------------------------------------------------------------- frame driver
-
 void frame(const std::function<void(ImGuiIO&)>& inject = nullptr) {
     g_phase = "frame driver";
     // Per-frame input state: mirror ImTui_ImplNcurses_NewFrame (imtui-impl-
@@ -270,7 +260,7 @@ void typeAll(const std::string& s) {
             // (wchar -> UTF-8 string -> AddInputCharactersUTF8,
             // imtui-impl-ncurses.cpp:296-301). A raw leading or
             // continuation byte is not valid UTF-8 on its own, so injecting
-            // it single-byte-wise would mangle the character (S13).
+            // it single-byte-wise would mangle the character.
             unsigned cp = 0;
             int len = 0;
             if ((c & 0xE0) == 0xC0) {
@@ -307,8 +297,6 @@ void click(int x, int y) {
         io.MouseDown[0] = false;
     });
 }
-
-// ------------------------------------------------------------ state helpers
 
 std::string filter() {
     const char* b = g_state.sessionPanel.filterBuf.data();
@@ -348,8 +336,7 @@ bool checkAction(SessionActionType wantType, const std::string& wantId, const ch
     }
     const SessionAction& a = g_state.sessionPanel.actions.front();
     if (a.type != wantType)
-        fail(std::string(tag) + ": action type != Select (got " + std::to_string((int)a.type) +
-             ")");
+        fail(std::string(tag) + ": action type mismatch (got " + std::to_string((int)a.type) + ")");
     if (a.sessionId != wantId)
         fail(std::string(tag) + ": action id '" + a.sessionId + "' != expected '" + wantId + "'");
     drainActions();
@@ -376,9 +363,9 @@ SessionEntry mk(const char* id, const char* title, const char* preview, int coun
 }
 
 std::string longTitle() {
-    // A27: 186 chars; fuzzy "abz" matches a@0, b@94, z@185 -> raw score
+    // 186 chars; fuzzy "abz" matches a@0, b@94, z@185 -> raw score
     // 100 + 40 + 100 + 25 + 100 + 25 - 94 - 185 = -89 (deeply negative).
-    // Must be clamped to 0 (still shown, last) and truncated by A19.
+    // Must be clamped to 0 (still shown, last) and truncated.
     std::string t = "aaaa";
     t += std::string(90, 'x');
     t += "b";
@@ -409,8 +396,6 @@ std::vector<SessionEntry> seedSessions() {
 }
 
 void setSnapshot(std::vector<SessionEntry> v) { g_state.sessionPanel.sessions = std::move(v); }
-
-// --------------------------------------------------------- layout positions
 
 // The "Sessions ---" separator row, and derived positions:
 //   +1 = filter input row, +2 = first session row (the rows child has no
@@ -464,7 +449,7 @@ void resetClean() {
     for (int i = 0; i < 8; ++i) {
         auto& p = g_state.sessionPanel;
         if (p.renameActive) {
-            pressKey(ImGuiKey_Escape); // closes rename first (R21)
+            pressKey(ImGuiKey_Escape); // closes rename first
             idle(1);
             continue;
         }
@@ -549,10 +534,10 @@ void scenario0_calibration() {
         fail("S0: no active widget after startup");
 }
 
-// C11: typing at startup goes to the main query input; the filter never
+// Typing at startup goes to the main query input; the filter never
 // steals focus; clicking the filter moves focus there and back.
 void scenario16_focus() {
-    g_phase = "S16 focus (C11)";
+    g_phase = "S16 focus";
     typeAll("hello"); // main input is focused from frame 1
     if (input() != "hello")
         fail("S16: startup typing did not reach the main query input ('" + input() + "')");
@@ -584,7 +569,7 @@ void scenario16_focus() {
             fail("S16: filter list not rendered after focus round-trip");
     }
 
-    // A23: Esc clears the filter. Park focus on the filter first so the
+    // Esc clears the filter. Park focus on the filter first so the
     // main input is not the active widget when Esc lands: a focused text
     // input cancels its own edit session on Escape (imgui 1.81 InputText,
     // vendored imgui_widgets.cpp:4180), which would revert the in-progress
@@ -625,7 +610,7 @@ void scenario1_filter_ranks() {
              std::to_string(y6) + "," + std::to_string(y7) + ")");
     // Preview rows sit right below their session rows. At the default panel
     // width the row budget is 22 cells, so longer previews render truncated
-    // with an ellipsis (previewRowLabel, A17/M1): the 23-char Kappa preview
+    // with an ellipsis (previewRowLabel): the 23-char Kappa preview
     // becomes "set up kappa monito...", the 24-char Iota preview becomes
     // "rollback the iota c...".
     if (findRow(g, "set up kappa monito...") < 0)
@@ -724,7 +709,7 @@ void scenario4_enter_selects_top() {
     if (!filterIsEmpty())
         fail("S4: filter not cleared after Enter-select");
     if (g_state.sessionPanel.filterSeq != seqBefore + 1)
-        fail("S4: filterSeq not bumped by the programmatic clear (C10)");
+        fail("S4: filterSeq not bumped by the programmatic clear");
     {
         Grid g = grid();
         if (findRow(g, "Alpha refactor [3]") < 0)
@@ -761,7 +746,7 @@ void scenario6_enter_busy() {
     if (g_state.sessionPanel.pendingSelectId != "s007-6")
         fail("S6: pendingSelectId != top match ('" + g_state.sessionPanel.pendingSelectId + "')");
     if (!filterIsEmpty())
-        fail("S6 (A24): filter not cleared immediately while busy");
+        fail("S6: filter not cleared immediately while busy");
     g_state.readyStatus = true;
     idle(2);
     checkAction(SessionActionType::Select, "s007-6", "S6 flush");
@@ -786,7 +771,7 @@ void scenario7_click_busy_last_wins() {
     if (actionCount() != 0)
         fail("S7: action queued while busy");
     if (!filterIsEmpty())
-        fail("S7 (A24): filter not cleared immediately while busy");
+        fail("S7: filter not cleared immediately while busy");
     g_state.readyStatus = true;
     idle(2);
     checkAction(SessionActionType::Select, "s004-3", "S7 flush");
@@ -863,9 +848,9 @@ void scenario8_snapshot_updates() {
     resetClean();
 }
 
-// A28: hiding the active row while the rename box is open closes the box.
+// Hiding the active row while the rename box is open closes the box.
 void scenario9_a28_rename_closes() {
-    g_phase = "S9 A28 rename closes on filter";
+    g_phase = "S9 rename closes on filter";
     resetClean();
     clickRowByTitle("Rename"); // opens the box on the active row (s001)
     idle(2);
@@ -880,9 +865,9 @@ void scenario9_a28_rename_closes() {
     typeAll("eta"); // s001 disappears from the filtered list
     idle(1);
     if (g_state.sessionPanel.renameActive)
-        fail("S9 (A28): rename box stayed open with its row filtered out");
+        fail("S9: rename box stayed open with its row filtered out");
     if (filter() != "eta")
-        fail("S9: filter lost after A28 close");
+        fail("S9: filter lost after the rename close");
     {
         Grid g = grid();
         if (findRow(g, "Alpha refactor [3]") >= 0)
@@ -893,10 +878,10 @@ void scenario9_a28_rename_closes() {
     pressKey(ImGuiKey_Escape);
     idle(1);
     if (!filterIsEmpty())
-        fail("S9: filter not cleared after A28");
+        fail("S9: filter not cleared after the rename close");
 }
 
-// R21: with the rename box open, Escape closes the box (rename cancelled);
+// With the rename box open, Escape closes the box (rename cancelled);
 //      the filter is untouched and still shown. The typing step also pins
 //      the focus semantics: the box gains focus via SetKeyboardFocusHere
 //      (code focus), and ImGui pre-selects the whole content on code focus
@@ -904,7 +889,7 @@ void scenario9_a28_rename_closes() {
 //      replaces the pre-selected title. Arrow keys / End clear the
 //      selection and position the cursor for in-place edits.
 void scenario10_esc_priority() {
-    g_phase = "S10 (R21) Esc priority";
+    g_phase = "S10 Esc priority";
     clickFilter();
     typeAll("alp"); // shows s001 (active)
     idle(1);
@@ -947,9 +932,9 @@ void scenario10_esc_priority() {
     pressKey(ImGuiKey_Escape);
     idle(1);
     if (g_state.sessionPanel.renameActive)
-        fail("S10 (R21): first Esc did not close the rename box");
+        fail("S10: first Esc did not close the rename box");
     if (filter() != "alp")
-        fail("S10 (R21): first Esc consumed by rename but cleared the filter too");
+        fail("S10: first Esc consumed by rename but cleared the filter too");
     {
         Grid g = grid();
         if (findRow(g, "Alpha refactor [3]") < 0)
@@ -973,7 +958,7 @@ void scenario11_rename_coexist() {
     if (!g_state.sessionPanel.renameActive)
         fail("S11: rename box did not open");
     clickFilter();  // box stays open, just unfocused
-    typeAll("alp"); // s001 still visible -> A28 must NOT fire
+    typeAll("alp"); // s001 still visible -> the auto-close must NOT fire
     idle(1);
     if (!g_state.sessionPanel.renameActive)
         fail("S11 (h): rename box closed while its row is still visible");
@@ -1005,11 +990,11 @@ void scenario12_enter_single_active() {
         fail("S12: filter not cleared after no-op Enter");
 }
 
-// N7 + R25: multi-byte title/query render valid UTF-8; matched bytes (the
+// Multi-byte title/query render valid UTF-8; matched bytes (the
 // full "Caf\u00E9" including both bytes of \u00E9) carry the match highlight,
 // unmatched characters keep the row color.
 void scenario13_multibyte() {
-    g_phase = "S13 N7/R25 multi-byte + highlight";
+    g_phase = "S13 multi-byte + highlight";
     clickFilter();
     typeAll("caf");
     idle(1);
@@ -1070,10 +1055,10 @@ void scenario13_multibyte() {
     idle(1);
 }
 
-// A27: a deeply-negative raw fuzzy score is clamped to 0 (row still shown,
-// last); A19: the 186-char title truncates with "..." and a valid label.
+// A deeply-negative raw fuzzy score is clamped to 0 (row still shown,
+// last); the 186-char title truncates with "..." and a valid label.
 void scenario14_weak_match_and_truncation() {
-    g_phase = "S14 A27 clamp + A19 truncation";
+    g_phase = "S14 clamp + truncation";
     clickFilter();
     typeAll("abz");
     idle(1);
@@ -1114,10 +1099,10 @@ void scenario14_weak_match_and_truncation() {
     resetClean();
 }
 
-// A19: typing far beyond the 63-byte budget keeps the buffer at 63 bytes,
+// Typing far beyond the 63-byte budget keeps the buffer at 63 bytes,
 // the filter keeps working, and nothing crashes.
 void scenario15_long_query() {
-    g_phase = "S15 A19 query > 64 bytes";
+    g_phase = "S15 query > 64 bytes";
     clickFilter();
     std::string q(80, 'a');
     typeAll(q);
@@ -1136,11 +1121,11 @@ void scenario15_long_query() {
         fail("S15: 63-byte filter not cleared by Esc");
 }
 
-// Task 11 (A31): while the filter InputText is active, arrow keys must not
+// While the filter InputText is active, arrow keys must not
 // move the keyboard nav focus. The nav id captured after focusing the filter
 // must be stable across Up/Down presses and idle frames.
 void scenario17_nav_stability() {
-    g_phase = "S17 nav stability (A31)";
+    g_phase = "S17 nav stability";
     resetClean();
     clickFilter();
     typeAll("e");
@@ -1181,11 +1166,11 @@ void scenario17_nav_stability() {
     idle(1);
 }
 
-// C10: after a programmatic clear (Esc), re-typing must re-apply exactly
+// After a programmatic clear (Esc), re-typing must re-apply exactly
 // (fresh InputText id via filterSeq); a second Esc leaves the field empty
 // (no stale text resurfacing).
 void scenario18_reapply_after_clear() {
-    g_phase = "S18 C10 re-apply after clear";
+    g_phase = "S18 re-apply after clear";
     clickFilter();
     typeAll("eta");
     idle(1);
@@ -1204,7 +1189,7 @@ void scenario18_reapply_after_clear() {
     int seq1 = g_state.sessionPanel.filterSeq;
     if (!filterIsEmpty())
         fail("S18: filter not empty after Esc");
-    // C10: the Esc clear bumps the id suffix, so the recreated input starts
+    // The Esc clear bumps the id suffix, so the recreated input starts
     // from a fresh (empty) state and can never revert to the cleared query.
     if (seq1 <= seq0)
         fail("S18: filterSeq did not advance on the Esc clear");
@@ -1235,9 +1220,9 @@ void scenario18_reapply_after_clear() {
     }
 }
 
-// A23: closing the panel keeps the filter; reopening re-applies it.
+// Closing the panel keeps the filter; reopening re-applies it.
 void scenario20_close_reopen() {
-    g_phase = "S20 A23 close/reopen";
+    g_phase = "S20 close/reopen";
     clickFilter();
     typeAll("eta");
     idle(1);
@@ -1245,10 +1230,10 @@ void scenario20_close_reopen() {
     idle(1);
     if (g_state.sessionPanel.panelOpen)
         fail("S20: panel not closed");
-    // A23: the buffer keeps the query across the close - the filter is
+    // The buffer keeps the query across the close - the filter is
     // preserved, not lost.
     if (filterIsEmpty())
-        fail("S20 (A23): filter lost when the panel was closed");
+        fail("S20: filter lost when the panel was closed");
     {
         Grid g = grid();
         if (findRow(g, "Open") < 0)
@@ -1265,7 +1250,7 @@ void scenario20_close_reopen() {
     {
         Grid g = grid();
         if (findRow(g, "Eta migrate [7]") < 0)
-            fail("S20 (A23): filter not re-applied after reopen");
+            fail("S20: filter not re-applied after reopen");
         // The filter field shows the surviving query text.
         if (rowText(g, sepRowY() + 1, 0, 30).find("eta") == std::string::npos)
             fail("S20: filter field empty after reopen");
@@ -1277,10 +1262,10 @@ void scenario20_close_reopen() {
     resetClean();
 }
 
-// A23/H1: a pipeline (agent streams) occupying the left slot hides the whole
+// A pipeline (agent streams) occupying the left slot hides the whole
 // session panel; the filter survives; clearing the agents re-applies it.
 void scenario21_pipeline_occupancy() {
-    g_phase = "S21 A23 pipeline occupancy";
+    g_phase = "S21 pipeline occupancy";
     clickFilter();
     typeAll("eta");
     idle(1);
@@ -1293,9 +1278,9 @@ void scenario21_pipeline_occupancy() {
         if (findRow(g, "Eta migrate") >= 0)
             fail("S21: session rows rendered while the pipeline owns the left slot");
     }
-    // A23: the buffer keeps the query while the pipeline hides the panel.
+    // The buffer keeps the query while the pipeline hides the panel.
     if (filterIsEmpty())
-        fail("S21 (A23): filter lost while the pipeline occupied the panel");
+        fail("S21: filter lost while the pipeline occupied the panel");
     g_state.left.agents.clear();
     idle(2);
     {
@@ -1356,13 +1341,13 @@ void scenario23_log_lines() {
 
 } // namespace
 
-// ------------------------------------------------------------------ harness
-// init/shutdown: mirror llmfun::tui::tuiInit/tuiShutdown minus the ncurses
-// terminal (no initscr/getmaxyx/DrawScreen). Same context + theme + text
-// backend setup as the real app. No legacy key map: it is gone in 1.92 — pressKey()
-// passes ImGuiKey_* values directly via io.AddKeyEvent, emitting the same
-// down+up pairs the real backend produces. DisplaySize is fixed at 80x24 —
-// the PTY winsize the real app receives in an 80x24 terminal.
+// harness:
+// init/shutdown: mirror the real app's init (C API tuiInit / tuiDestroyState)
+// minus the ncurses terminal (no initscr/getmaxyx/DrawScreen). Same context +
+// theme + text backend setup as the real app. No legacy key map: it is gone
+// in 1.92 — pressKey() passes ImGuiKey_* values directly via io.AddKeyEvent,
+// emitting the same down+up pairs the real backend produces. DisplaySize is
+// fixed at 80x24 — the PTY winsize the real app receives in an 80x24 terminal.
 
 void harnessInit() {
     std::setlocale(LC_ALL, "");

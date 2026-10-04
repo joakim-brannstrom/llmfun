@@ -1,4 +1,4 @@
-// scratch_app_pty.cpp — task 8: the REAL app (tuiRender frame loop) + the REAL
+// scratch_app_pty.cpp — the REAL app (tuiRender frame loop) + the REAL
 // ncurses backend on a PTY + REAL SGR mouse clicks; asserts the app's own log
 // (llmfun_ui_log.txt) gets "session panel:" lines.
 #include "tui_api.h"
@@ -95,12 +95,24 @@ int main() {
     if (pid == 0)
         feeder(m);
 
-    TuiScreen* screen = tuiInit();
-    if (!screen) {
-        fprintf(stderr, "tuiInit failed\n");
+    TuiState* state = tuiCreateState();
+    if (!state) {
+        fprintf(stderr, "tuiCreateState failed\n");
         return 1;
     }
-    TuiState* state = tuiCreateState();
+    // v4 single-handle flow: Auto mode (the real app's default). This process
+    // runs on the pty as both stdio ends, so a GUI-unavailable environment
+    // falls back to the terminal backend here.
+    if (tuiInit(state, TuiBackendMode_Auto) != 0) {
+        String err = tuiLastError();
+        if (err.data && err.len > 0)
+            fprintf(stderr, "tuiInit failed: %.*s\n", (int)err.len, err.data);
+        else
+            fprintf(stderr, "tuiInit failed\n");
+        String_Free(err);
+        tuiDestroyState(state);
+        return 1;
+    }
     tuiSetLogging(state, true);
     tuiSetStatusText(state, makeStr("Context: 0/0 tokens | Model: none | Ready"));
     tuiSetIniFilename(state, makeStr("imgui2.ini"));
@@ -116,12 +128,11 @@ int main() {
     tuiSetSessionList(state, sessions, sizeof(sessions) / sizeof(sessions[0]));
 
     for (int frame = 0; frame < 600; frame++) {
-        tuiBackendNewFrame();
+        tuiBackendNewFrame(state);
         if (tuiRender(state) == 0)
             break;
         usleep(30 * 1000);
     }
-    tuiShutdown(screen);
     tuiDestroyState(state);
     kill(pid, SIGKILL);
     waitpid(pid, nullptr, 0);

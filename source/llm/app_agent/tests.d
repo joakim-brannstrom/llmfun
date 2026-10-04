@@ -358,19 +358,39 @@ unittest {
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
     app.llmConf = cfg;
     app.sessionStore = store;
-    // AgentApp's ctor leaves agent_ null (production creates it in AppAgentActor.startSetup); tests that drive the Agent assign it manually, as the sibling tests below.
+    // AgentApp's ctor leaves agent_ null (production creates it in
+    // AppAgentActor.startSetup); tests that drive the Agent assign it
+    // manually, as the sibling tests below.
     app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
 
-    // Establish the active session the way production does: create() writes the file with messages: [], then switchToSession activates it (clean loaded chat, flag false, activeSession set). Without this the turn commits below would write under a default (empty) SessionId.
+    // Establish the active session the way production does: create() writes
+    // the file with messages: [], then switchToSession activates it (clean
+    // loaded chat, flag false, activeSession set). Without this the turn
+    // commits below would write under a default (empty) SessionId.
     auto meta = store.create();
     app.switchToSession(meta.id);
 
-    // Turn 1: a user query committed through the app-level submit path - addUserQuery + flag + commit, the primitives runAgent uses (agent_.addUserQuery then chatDirty = true).
+    // Turn 1: a user query committed through the app-level submit path -
+    // addUserQuery + flag + commit, the primitives runAgent uses
+    // (agent_.addUserQuery then chatDirty = true).
     app.agent_.addUserQuery("hello");
     app.chatDirty = true;
     app.commitActiveSession();
 
-    // Turn 2: flag cleared (as after turn 1's commit), then the agent turn appends ONLY agent-layer content, exactly as production does: handleToolCalls adds the taskDone ToolMessage (with the final answer in save_data) and its ToolResponse (agent), process() reports the appended slice through ProcessResult.chat (rval.chat = chat.lastResponses), and runToCompletion hands it to processResult as the step hook (the &this.processResult delegate). (Turn 1 bypasses process(), so prevIndex stays 0 and turn 2's lastResponses slice also replays the user message - benign: printUser:false -> trace only; persistence serializes the full history regardless.) Before the fix this turn was never persisted: the flag stayed false and the commit was a no-op, so a session switch/restart lost the final answer. (The task snippet's direct r.chat array is reshaped into the sibling test's append + lastResponses pattern - the production-exact seam; processResult only reads result.chat.)
+    // Turn 2: flag cleared (as after turn 1's commit), then the agent turn
+    // appends ONLY agent-layer content, exactly as production does:
+    // handleToolCalls adds the taskDone ToolMessage (with the final answer in
+    // save_data) and its ToolResponse (agent), process() reports the appended
+    // slice through ProcessResult.chat (rval.chat = chat.lastResponses), and
+    // runToCompletion hands it to processResult as the step hook (the
+    // &this.processResult delegate). (Turn 1 bypasses process(), so prevIndex
+    // stays 0 and turn 2's lastResponses slice also replays the user message -
+    // benign: printUser:false -> trace only; persistence serializes the full
+    // history regardless.) Before the fix this turn was never persisted: the
+    // flag stayed false and the commit was a no-op, so a session
+    // switch/restart lost the final answer. (The append + lastResponses
+    // pattern is the production-exact seam; processResult only reads
+    // result.chat.)
     app.chatDirty = false;
 
     JSONValue call;
@@ -1289,6 +1309,38 @@ private final class TestVictim {
     void die() {
         sendExit(self_.address(), ExitReason.kill);
     }
+}
+
+@("parseTuiBackendMode: value map, case-insensitivity, invalid fallback")
+unittest {
+    assert(parseTuiBackendMode("auto") == TuiBackendMode_Auto);
+    assert(parseTuiBackendMode("gui") == TuiBackendMode_Gui);
+    assert(parseTuiBackendMode("tui") == TuiBackendMode_Tui);
+    assert(parseTuiBackendMode("TUI") == TuiBackendMode_Tui, "case-insensitive");
+    assert(parseTuiBackendMode("") == TuiBackendMode_Auto, "empty -> Auto");
+    assert(parseTuiBackendMode(null) == TuiBackendMode_Auto, "unset -> Auto");
+    assert(parseTuiBackendMode("bogus") == TuiBackendMode_Auto, "invalid -> Auto (warns)");
+}
+
+@("resolveTuiBackendMode: CLI flag > env > Auto")
+unittest {
+    auto conf = UserConfig.AgentChatConfig.init;
+    // The env value is injected ("" = unset) so the parallel runner's process
+    // environment can never leak into the resolution.
+    assert(resolveTuiBackendMode(conf, "") == TuiBackendMode_Auto, "no flag, no env -> Auto");
+    assert(resolveTuiBackendMode(conf, "auto") == TuiBackendMode_Auto, "env auto -> Auto");
+    assert(resolveTuiBackendMode(conf, "tui") == TuiBackendMode_Tui, "env tui -> Tui");
+    assert(resolveTuiBackendMode(conf, "gui") == TuiBackendMode_Gui, "env gui -> Gui");
+    assert(resolveTuiBackendMode(conf, "bogus") == TuiBackendMode_Auto, "invalid env -> Auto");
+    // A CLI flag wins over every env value (empty, valid, invalid).
+    conf.tui = true;
+    foreach (v; ["", "auto", "tui", "gui", "bogus"])
+        assert(resolveTuiBackendMode(conf, v) == TuiBackendMode_Tui,
+                "--tui must win over env '" ~ v ~ "'");
+    conf.gui = true; // both flags is a CLI usage error; gui wins if reached
+    foreach (v; ["", "auto", "tui", "gui", "bogus"])
+        assert(resolveTuiBackendMode(conf, v) == TuiBackendMode_Gui,
+                "--gui must win over env '" ~ v ~ "'");
 }
 
 @("agent actor: uiTerminated sends AgentDone(0)")

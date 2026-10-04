@@ -1,5 +1,6 @@
 /// TUI core: the TuiState aggregate and the public tui* API.
-/// Holds the shared UI state structs and the entry points the C API drives.
+/// Holds the shared UI state structs and the entry points the C API drives;
+/// each state owns its attached backend (v4; see tui_backend.h).
 #pragma once
 
 #include <algorithm>
@@ -15,6 +16,8 @@
 #include "imtui/imtui.h"
 
 #include "imgui_markdown.h"
+
+#include "tui_backend.h"
 
 namespace llmfun::tui {
 inline ImVec4 lighten(ImVec4 color, float amount) {
@@ -37,7 +40,7 @@ enum class ChatMessageType : uint8_t {
 // Color configuration for each chat message type.
 // 3 background groups (user, system/muted, finalAnswer) + 4 foreground colors for muted group.
 struct ChatMessageStyle {
-    // --- Background colors (3 groups) ---
+    // Background colors (3 groups)
 
     // User & Vision: Sky Blue background
     ImVec4 userBg = ImVec4(0.45f, 0.70f, 0.90f, 1.00f);
@@ -54,7 +57,7 @@ struct ChatMessageStyle {
     ImVec4 finalAnswerBgHover;
     ImVec4 finalAnswerBgActive;
 
-    // --- Foreground/text colors (4 types in muted group) ---
+    // Foreground/text colors (4 types in muted group)
 
     // Assistant: Soft Green
     ImVec4 assistantFg = ImVec4(0.55f, 0.85f, 0.55f, 1.00f);
@@ -178,7 +181,7 @@ struct SessionAction {
     std::string title;     // new title for Rename, empty otherwise
 };
 
-// One row of the session sidebar snapshot (full replace, A1).
+// One row of the session sidebar snapshot (full replace).
 struct SessionEntry {
     std::string id;
     std::string title;
@@ -189,41 +192,41 @@ struct SessionEntry {
 
 struct ChatTabSessionPanel {
     ImVec4 activeButton = ImVec4(0.4f, 0.4f, 0.45f, 1.0f);
-    ImVec4 previewColor = ImVec4(0.55f, 0.55f, 0.58f, 1.0f);  // dimmed preview line (A14)
-    ImVec4 pendingButton = ImVec4(0.60f, 0.52f, 0.25f, 1.0f); // queued-switch row color (R18)
-    ImVec4 matchColor = ImVec4(1.0f, 0.85f, 0.45f, 1.0f);     // filter match highlight (R25)
+    ImVec4 previewColor = ImVec4(0.55f, 0.55f, 0.58f, 1.0f);  // dimmed preview line
+    ImVec4 pendingButton = ImVec4(0.60f, 0.52f, 0.25f, 1.0f); // queued-switch row color
+    ImVec4 matchColor = ImVec4(1.0f, 0.85f, 0.45f, 1.0f);     // filter match highlight
     int panelW = 0; // 0 = unset; init to PanelWActivated on first render
     static constexpr int PanelWActivated = 30;
     bool panelOpen{true}; // auto-open at startup
 
-    std::vector<SessionEntry> sessions; // full snapshot (A1)
+    std::vector<SessionEntry> sessions; // full snapshot
     std::string activeId;               // active session id from the snapshot
-    std::deque<SessionAction> actions;  // UI -> D queue (A2/A7)
+    std::deque<SessionAction> actions;  // UI -> D queue
 
     char renameBuf[128] = {};            // rename input; init on row change or
                                          // toggle-open, never per frame
-    bool renameActive{false};            // rename input visible (L8)
-    std::string renameRowId;             // row renameBuf was initialized for (L3)
+    bool renameActive{false};            // rename input visible
+    std::string renameRowId;             // row renameBuf was initialized for
     bool renameFocus{false};             // focus the rename input on the next frame
     int renameSeq{0};                    // bumped on each toggle-open; keeps the
                                          // InputText state fresh per open
-    std::string pendingDeleteId;         // two-step delete state (A5)
-    std::string pendingSelectId;         // queued switch while busy (A12/R18); single
+    std::string pendingDeleteId;         // two-step delete state
+    std::string pendingSelectId;         // queued switch while busy; single
                                          // slot, last click wins; set by the busy
                                          // row-click branch, flushed as an ordinary
                                          // Select on the first ready frame, cleared
-                                         // by tuiSetSessionList when stale (M3)
-    std::array<char, 64> filterBuf = {}; // filter query (A19); whitespace = no
+                                         // by tuiSetSessionList when stale
+    std::array<char, 64> filterBuf = {}; // filter query; whitespace = no
                                          // filter; zero-init because TuiState's
                                          // user-provided ctor skips value-init
-    int filterSeq{0};                    // bumped on every programmatic clear
-                                         // (A23); suffixes the InputText id to
-                                         // force a fresh state (C10)
+    int filterSeq{0};                    // bumped on every programmatic clear;
+                                         // suffixes the InputText id to force
+                                         // a fresh state
     bool filterNonEmptyLastFrame{false}; // rendered buffer was a real query at
-                                         // the end of the last frame; lets A23
-                                         // tell that 1.81's cancel_edit revert
-                                         // already emptied the buffer on the
-                                         // Esc frame (the revert runs in
+                                         // the end of the last frame; lets the
+                                         // clear tell that 1.81's cancel_edit
+                                         // revert already emptied the buffer on
+                                         // the Esc frame (the revert runs in
                                          // NewFrame, before this code)
 };
 
@@ -263,6 +266,15 @@ struct TuiState {
     std::string iniFilename;
     int maxWidth = 0; // 0 = unlimited (current behavior)
 
+    /// v4 backend ownership: attached by the C API's tuiInit(), torn down by
+    /// tuiDestroyState() before this state is freed; null = backend-less
+    /// (legal and inert — headless harnesses never attach one).
+    std::unique_ptr<Backend> backend;
+    /// ImGui context created by tuiInit() for this state; null = none.
+    /// tuiDestroyState() destroys exactly this context and never a context it
+    /// did not create (headless harnesses keep their own).
+    ImGuiContext* ownedContext = nullptr;
+
     bool readyStatus{true};
     std::chrono::system_clock::time_point startProcesssingTime;
 
@@ -287,26 +299,35 @@ struct TuiState {
     TuiState() { startProcesssingTime = std::chrono::system_clock::now(); }
 };
 
-/// Resolved width of the left panel slot (A6/H1): the pipeline panel wins
+/// Resolved width of the left panel slot: the pipeline panel wins
 /// whenever it has agents (open or collapsed); otherwise the session panel
 /// renders when open and keeps its 8-wide "Open" strip when closed (the
 /// output area never covers the panel).
 int leftPanelWidth(const TuiState& s);
 
+// TODO: this should probably be in tui_common.h instead
+/// A terminal-column length in the active backend's units (pixel
+/// profile): the text grid stores it verbatim (1 unit = 1 cell); the GUI
+/// scales it by the font's cell advance. Used for the side-panel widths (the
+/// 30-column slots) and for the column-constant control widths in the
+/// panels (buttons, row budgets), so the pixel profile keeps the same
+/// character counts. Every consumer treats the result as a raw length.
+int colUnits(int cols);
+
 void initMarkdownConfig(TuiState& state);
 
-/// Initialize terminal and create TScreen.
-/// Returns true on success, false on failure.
-bool tuiInit(ImTui::TScreen** screen);
+/// Apply the shared dark theme to the current ImGui context. The C API's
+/// tuiInit() calls this after the backend initialized (a backend init resets
+/// some style colors); headless test harnesses call it right after their own
+/// ImGui::CreateContext().
+void applyTheme();
 
-/// Cleanup and restore terminal state.
-void tuiShutdown(ImTui::TScreen* screen);
-
-/// Backend frame wrappers — encapsulate imtui backend details.
-/// Call tuiNewFrame() at the start of each frame and tuiRenderFrame() at the end.
-void tuiNewFrame();
-
-void tuiRenderFrame(ImTui::TScreen* screen);
+/// True while the text (ncurses/imtui) backend is live: the UI renders on the
+/// 1-cell terminal grid. Set by ImTui_ImplText_Init() and reset by
+/// ImTui_ImplText_Shutdown(); the GUI path never sets it. The pixel profile
+/// is selected when this is false — see the gates in tui.cpp and
+/// the shared-path audit in tui_chat.cpp.
+bool tuiIsTextGrid();
 
 /// Render one frame. Returns false to exit.
 bool tuiRender(TuiState& state);
@@ -317,7 +338,10 @@ void tuiSetLogging(TuiState& state, bool onOff);
 /// Set the maximum rendered width in terminal columns. 0 = unlimited.
 /// Re-evaluated every frame, so the value applies from the next
 /// tuiRender regardless of when it is set.
-/// Effective width = min(terminal width, maxWidth).
+/// Text backend only: effective width = min(terminal width, maxWidth).
+/// The GUI ignores the cap (pixel profile) — its DisplaySize is in
+/// pixels, so a column value cannot be applied meaningfully; the window
+/// size is the cap.
 void tuiSetMaxWidth(TuiState& state, int maxWidth);
 
 /// Set the filename that imgui save window settings to.

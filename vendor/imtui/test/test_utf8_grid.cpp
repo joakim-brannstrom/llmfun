@@ -1,13 +1,12 @@
 // test_utf8_grid.cpp
 //
-// Headless grid-invariant regression test for the imtui UTF-8 cell-width fix
-// (implementation plan Task 3; plan/system_design.md §7 Task 3).
+// Headless grid-invariant regression test for the imtui UTF-8 cell-width fix.
 //
 // This TU renders fixed text rows through the REAL vendored imgui + imtui text
 // backend (linked like llmfun_tui: imgui-for-imtui is compiled with IMTUI +
 // IMGUI_USE_WCHAR32 by the build; this TU itself defines neither) into an
-// ImTui::TScreen grid and asserts the grid-vs-terminal-width invariants that
-// Tasks 1-2 restored. It is NOT the fake-ImGui stub used by
+// ImTui::TScreen grid and asserts the grid-vs-terminal-width invariants.
+// It is NOT the fake-ImGui stub used by
 // test_inline_code_runtime.cpp.
 //
 // Setup mirrors cpp_tui/tui.cpp (tuiInit 606-631, renderTabChat 726-734):
@@ -48,11 +47,11 @@
 //   (d) scrollbar cells (rect cells: ch == ' ', chwidth == 0, non-default bg)
 //       occupy one constant column across all six table rows (post-fix guard
 //       only — passes pre-fix by construction: the TScreen grid is internally
-//       consistent even when broken; only the terminal stream diverges, which
-//       Task 4's PTY capture observes).
+//       consistent even when broken; only the terminal stream diverges,
+//       which the PTY smoke test observes).
 //   (e) content cells never overwrite the scrollbar column (post-fix guard
 //       only; text is clipped to clip_rect.z - 1 by the backend).
-//   (f) P3 Task 6 folding mode only (LLMFUN_IMTUI_EMOJI_PRESENTATION=1,
+//   (f) folding mode only (LLMFUN_IMTUI_EMOJI_PRESENTATION=1,
 //       set by build_test.py's second run): row 1's 'e' cell carries
 //       ch2 == U+0301 (combining mark merged, width unchanged) and row 6's
 //       U+26A0 cell carries ch2 == U+FE0F with chwidth == 2 (VS16 promotes
@@ -71,8 +70,8 @@
 
 #include "imtui/imtui.h"
 
-// P3 (Task 6) folding mode: build_test.py runs this binary twice — without
-// LLMFUN_IMTUI_EMOJI_PRESENTATION (P0 fallback expectations: nothing folds,
+// Folding mode: build_test.py runs this binary twice — without
+// LLMFUN_IMTUI_EMOJI_PRESENTATION (fallback expectations: nothing folds,
 // ch2 == 0 everywhere) and with =1 (folding expectations: VS16 promotes the
 // U+26A0 base to width 2 with ch2 = U+FE0F, combining marks merge into their
 // base). Mirrors the production gate read by imgui_draw.cpp.
@@ -88,7 +87,7 @@ static bool g_folding = []() {
 // expectations match conforming terminals), different implementation (a flat
 // ordered range table with linear scan). Reference data:
 //  - zero-width ranges: Markus Kuhn's wcwidth() non-printing classes plus the
-//    format/control block documented in plan/system_design.md §5;
+//    format/control code points;
 //  - width-2 emoji-presentation ranges: Unicode emoji-data.txt version 15.1
 //    (2023-09), the version pinned in imgui_draw.cpp;
 //  - U+26A0 (WARNING SIGN) is width 1 (not Emoji_Presentation=Yes; narrow
@@ -591,7 +590,7 @@ int main()
         }
     }
 
-    // --- (f) P3 Task 6 folding (only asserted in folding mode) -------------
+    // --- (f) folding (only asserted in folding mode) -----------------------
     if (g_folding)
     {
         // Row 1 "e<U+0301><U+200D>b": the combining mark merges into 'e'
@@ -630,7 +629,7 @@ int main()
     }
     else
     {
-        // Default mode regression guard: the P0 narrow base must hold —
+        // Default mode regression guard: the narrow base must hold —
         // row 6's U+26A0 cell stays width 1 with no continuation.
         const int row = 6;
         int w_col = -1;
@@ -787,7 +786,10 @@ int main()
            g_failures == 0 ? "ALL CHECKS PASSED" : "CHECKS FAILED",
            g_failures, g_failures == 1 ? "" : "s");
 
-    ImTui_ImplText_Shutdown();  // matches tuiShutdown; currently a no-op
+    ImTui_ImplText_Shutdown();  // matches tuiShutdown; must reset the text-grid guard
+    // check(), not assert(): the tree builds Release (-DNDEBUG, forced by
+    // vendor/imtui/CMakeLists.txt), which compiles a plain assert() away.
+    check(!ImTui_TextEncodingActive, "shutdown must reset ImTui_TextEncodingActive");
     ImGui::DestroyContext();
     return g_failures == 0 ? 0 : 1;
 }

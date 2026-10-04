@@ -14,14 +14,14 @@
 
 namespace llmfun::tui {
 
-// Session row title button with filter-match highlighting (R25). Same
+// Session row title button with filter-match highlighting. Same
 // button and widget id as renderButton (id = the full label), same hover /
 // active color, but the label bytes covered by `runs` (label offsets [begin,
 // end)) are over-drawn in `matchColor`. The overdraw happens on top of the
 // just-drawn base label, so an empty `runs` leaves the frame exactly as
 // renderButton draws it (one Text call, no extra items). `runs` must stay
 // within the title portion of the label so the ellipsis and the " [N]"
-// count suffix are never highlighted (R25).
+// count suffix are never highlighted.
 static bool renderTitleButton(const std::string& label, int width, bool active, ImVec4 colorActive,
                               const ImVec4& matchColor,
                               const std::vector<std::pair<std::size_t, std::size_t>>& runs) {
@@ -29,7 +29,12 @@ static bool renderTitleButton(const std::string& label, int width, bool active, 
 
     ImGui::PushID(label.c_str());
     const auto p0 = ImGui::GetCursorScreenPos();
-    if (ImGui::Button("##but", ImVec2(width, 1))) {
+    // Pixel profile: like renderButton, the row button is one
+    // grid cell tall in the text backend and a full frame height in the GUI
+    // (mouse-usable hit box); the label and its match runs are vertically
+    // centered (the grid formula reduces to the historical label-at-p0).
+    const float buttonH = tuiIsTextGrid() ? 1.0f : ImGui::GetFrameHeight();
+    if (ImGui::Button("##but", ImVec2(width, buttonH))) {
         result = true;
     }
 
@@ -41,14 +46,15 @@ static bool renderTitleButton(const std::string& label, int width, bool active, 
     // Same label inset as renderButton (FramePadding.x from the button
     // origin): the cell mapping draws text on the cell containing its pen.
     const float labelX = p0.x + ImGui::GetStyle().FramePadding.x;
-    ImGui::SetCursorScreenPos(ImVec2(labelX, p0.y));
+    const float labelY = p0.y + (buttonH - ImGui::GetTextLineHeight()) * 0.5f;
+    ImGui::SetCursorScreenPos(ImVec2(labelX, labelY));
     ImGui::Text("%s", label.c_str());
     ImGui::PopStyleColor(npop);
     if (!runs.empty()) {
         const char* lbl = label.c_str();
         for (const auto& run : runs) {
             const float x = labelX + ImGui::CalcTextSize(lbl, lbl + run.first).x;
-            ImGui::SetCursorScreenPos(ImVec2(x, p0.y));
+            ImGui::SetCursorScreenPos(ImVec2(x, labelY));
             ImGui::PushStyleColor(ImGuiCol_Text, matchColor);
             ImGui::TextUnformatted(lbl + run.first, lbl + run.second);
             ImGui::PopStyleColor();
@@ -59,7 +65,7 @@ static bool renderTitleButton(const std::string& label, int width, bool active, 
         // Restore both cursor positions to the label's right edge so
         // sameLineAfterButton places the del button where it sits without a
         // filter, instead of pulling it left over the title.
-        const ImVec2 anchor(labelX + ImGui::CalcTextSize(label.c_str()).x, p0.y);
+        const ImVec2 anchor(labelX + ImGui::CalcTextSize(label.c_str()).x, labelY);
         ImGui::SetCursorScreenPos(anchor);
         ImGui::GetCurrentWindow()->DC.CursorPosPrevLine = anchor;
         // ImGui::SetCursorScreenPos(p0);
@@ -71,15 +77,15 @@ static bool renderTitleButton(const std::string& label, int width, bool active, 
 
 static bool isUtf8Continuation(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
 
-// Word separator for the R25 highlight runs: the same four bytes the fuzzy
-// matcher treats as word boundaries (A21, fuzzyIsBoundary). Separators are
+// Word separator for the highlight runs: the same four bytes the fuzzy
+// matcher treats as word boundaries (fuzzyIsBoundary).
 // always whole ASCII characters, so walking over them never splits a
 // multi-byte character.
 static bool isWordSeparator(char c) { return c == ' ' || c == '-' || c == '_' || c == '/'; }
 
 // Title bytes shown in a session row of width `rowWidth` (UTF-8-safe
 // truncation, ellipsis only when something was cut). Shared by
-// sessionRowLabel and the match highlight (R25) so the displayed prefix and
+// sessionRowLabel and the match highlight, so the displayed prefix and
 // the highlight clip never disagree.
 static std::size_t sessionTitlePortionLen(const SessionEntry& entry, int rowWidth) {
     const std::string count = " [" + std::to_string(entry.messageCount) + "]";
@@ -131,7 +137,7 @@ static void titleMatchRuns(const std::string& query, const std::string& title, s
             ++i;
         }
         // Snap to the enclosing character(s): a character is highlighted iff
-        // any of its bytes matched (no mid-character splits, N7). A matched
+        // any of its bytes matched (no mid-character splits). A matched
         // continuation byte walks s back to its character start; a matched
         // byte whose character continues walks e forward to the end.
         while (s > 0 && isUtf8Continuation(title[s])) {
@@ -141,11 +147,11 @@ static void titleMatchRuns(const std::string& query, const std::string& title, s
             ++e;
         }
         // The highlight covers the whole word enclosing the matched
-        // character(s) (word = maximal span between the A21 separator
+        // character(s) (word = maximal span between the separator
         // bytes), so an ASCII prefix match lights an accented word whole
-        // ("caf" -> "Café") instead of leaving the accented tail unlit
-        // (S13). The walks stop only on separator bytes - always whole
-        // ASCII characters - so s/e remain at character starts (N7).
+        // ("caf" -> "Café") instead of leaving the accented tail unlit.
+        // The walks stop only on separator bytes - always whole
+        // ASCII characters - so s/e remain at character starts.
         while (s > 0 && !isWordSeparator(title[s - 1])) {
             --s;
         }
@@ -199,7 +205,7 @@ static std::string previewRowLabel(const SessionEntry& entry, int rowWidth) {
     return out;
 }
 
-// Queue one sidebar action for the D side to poll (A2/A7).
+// Queue one sidebar action for the D side to poll.
 static void queueSessionAction(ChatTabSessionPanel& panel, SessionActionType type,
                                const std::string& id, const std::string& title) {
     panel.actions.push_back(SessionAction{type, id, title});
@@ -219,7 +225,7 @@ static void sameLineAfterButton(float buttonWidth, float labelWidth) {
 }
 
 // Initialize the rename buffer from a title. A title that does not fit the
-// 128-byte buffer initializes the buffer empty - no silent truncation (L4).
+// 128-byte buffer initializes the buffer empty - no silent truncation.
 static void initRenameBuf(ChatTabSessionPanel& panel, const std::string& title) {
     const size_t bufSize = sizeof(panel.renameBuf);
     if (title.size() < bufSize) {
@@ -230,9 +236,9 @@ static void initRenameBuf(ChatTabSessionPanel& panel, const std::string& title) 
     }
 }
 
-// Programmatic filter clear (A23): reset the buffer and bump filterSeq so
+// Programmatic filter clear: reset the buffer and bump filterSeq so
 // the InputText id changes and the widget re-reads the now-empty user
-// buffer instead of its stale internal edit state (C10).
+// buffer instead of its stale internal edit state.
 static void clearFilter(ChatTabSessionPanel& panel) {
     panel.filterBuf.fill('\0');
     ++panel.filterSeq;
@@ -241,10 +247,10 @@ static void clearFilter(ChatTabSessionPanel& panel) {
 void renderTabChatSessionPanel(TuiState& state, Log& log) {
     auto& panel = state.sessionPanel;
 
-    // Pending-switch flush (A12/R14): a session row clicked while the
+    // Pending-switch flush: a session row clicked while the
     // agent was busy becomes an ordinary Select on the first ready frame.
     // This runs at the VERY TOP, before every early return (mutual
-    // exclusion below and the collapsed-state branch further down, M8),
+    // exclusion below and the collapsed-state branch further down),
     // so the queued switch applies even when the pipeline panel currently
     // owns the left slot or the panel was collapsed after the click; if
     // the panel is not rendered at all, the slot simply survives until it
@@ -262,16 +268,20 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         panel.pendingSelectId.clear();
     }
 
-    // Mutual exclusion (R6/A6/H1): the pipeline panel renders whenever it
+    // Mutual exclusion: the pipeline panel renders whenever it
     // has agents - open or collapsed - so the session panel must not. Panel
     // state is preserved so the session panel reappears when the pipeline
     // clears.
     if (!state.left.agents.empty())
         return;
 
-    // First open: never offset the output area by 0 on the first frame (F5).
+    // Pixel profile: the 30-column constant is fed through
+    // colUnits() so the pixel panel keeps its character width (identity in
+    // the text grid, font-scaled in the GUI). The collapsed 8-column "Open"
+    // strip goes through the same conversion (the whole header cluster below
+    // uses colUnits for its column-constant widths).
     if (panel.panelW == 0)
-        panel.panelW = panel.PanelWActivated;
+        panel.panelW = colUnits(panel.PanelWActivated);
 
     // The rename input is bound to the active row; when the active row is
     // absent from the snapshot (deleted session), close the box - an open
@@ -284,25 +294,28 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
             panel.renameFocus = false;
         } else if (panel.renameRowId != panel.activeId) {
             // The active row changed but still exists: re-initialize the
-            // buffer from the new active row (L3) and rebind the box.
+            // buffer from the new active row and rebind the box.
             panel.renameRowId = panel.activeId;
             initRenameBuf(panel, it->title);
         }
     }
 
-    const auto panelWClosed = 8;
+    // The collapsed strip and the header buttons are
+    // column constants too; colUnits() keeps their character widths in the
+    // pixel profile (identity in the grid).
+    const auto panelWClosed = colUnits(8);
     const bool canQueue = state.readyStatus;
 
-    // Outer child: panel border/background, id unchanged (A15). The header
+    // Outer child: panel border/background, id unchanged. The header
     // (Close/Open, New, separator) stays fixed; the rows live in their own
-    // scrollable child sized to the remaining panel height (R15).
+    // scrollable child sized to the remaining panel height.
     ImGui::BeginChild("Session child window", ImVec2(panel.panelW - 1, 0), true);
     if (!panel.panelOpen) {
         panel.panelW = panelWClosed;
         if (renderButton("Open", panelWClosed, false, panel.activeButton)) {
             panel.pendingDeleteId.clear();
             panel.panelOpen = true;
-            panel.panelW = panel.PanelWActivated;
+            panel.panelW = colUnits(panel.PanelWActivated);
             log("session panel: open\n");
         }
         ImGui::EndChild();
@@ -318,7 +331,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         log("session panel: close\n");
     }
     sameLineAfterButton(panelWClosed, ImGui::CalcTextSize("Close").x);
-    if (renderButton("New", 5, false, panel.activeButton)) {
+    if (renderButton("New", colUnits(5), false, panel.activeButton)) {
         panel.pendingDeleteId.clear();
         if (canQueue) {
             queueSessionAction(panel, SessionActionType::New, "", "");
@@ -330,15 +343,16 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
 
     renderSeparator("Sessions ", "-", ImGui::GetContentRegionMax().x, true);
 
-    // Filter input (A19): a single-line InputText fixed in the header,
+    // Filter input: a single-line InputText fixed in the header,
     // between the separator and the rows child, so it stays put while the
-    // rows scroll (A15). Click-to-focus only (C11): no
+    // rows scroll. Click-to-focus only: no
     // SetKeyboardFocusHere, so the always-rendered input never steals
     // keyboard focus from the main query input. The id is suffixed by
-    // filterSeq so a programmatic clear (Escape, A23) can force a fresh InputText
-    // state (C10). EnterReturnsTrue: the return value is handled after the
-    // visible list is computed below (Enter selects the top match, A22/R23).
-    // S11: snapshot for the rename-Esc compensation at the end of the rows
+    // filterSeq so a programmatic clear (Escape) can force a fresh
+    // InputText state. EnterReturnsTrue: the return value is handled
+    // after the visible list is computed below (Enter selects the top
+    // match).
+    // Snapshot for the rename-Esc compensation at the end of the rows
     // loop. 1.81's InputText treats Escape as cancel_edit: an ACTIVE input
     // reverts its buffer to the value at activation (InitialTextA,
     // imgui_widgets.cpp:4260-4275). While the rename box is open, Escape
@@ -368,13 +382,13 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         g.ActiveIdUsingNavDirMask |= (1 << ImGuiDir_Up) | (1 << ImGuiDir_Down);
     }
 
-    // Real-time filter + ranking (A20/A21/A27/A28): compute the visible
+    // Real-time filter + ranking: compute the visible
     // (filtered + ranked) list each frame from the local snapshot. A
-    // whitespace-only filter is "no filter" (A19): all entries in snapshot
+    // whitespace-only filter is "no filter": all entries in snapshot
     // order, no reordering. Otherwise keep the entries whose title OR preview
-    // matches (fuzzyScoreFields >= 0, R26) and rank them by descending score;
+    // matches (fuzzyScoreFields >= 0) and rank them by descending score;
     // stable ties keep snapshot order.
-    // Per-frame local (N5, no caching): store an index into panel.sessions
+    // Per-frame local (no caching): store an index into panel.sessions
     // plus the score, not a copy of the SessionEntry (three std::strings)
     // per match per frame.
     struct VisibleRow {
@@ -391,7 +405,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
     } else {
         for (std::size_t i = 0; i < panel.sessions.size(); ++i) {
             const SessionEntry& e = panel.sessions[i];
-            // Multi-field match (R26): title + preview, title weighted
+            // Multi-field match: title + preview, title weighted
             // 2x. A session shows if either field matches.
             const int s = fuzzyScoreFields(filterQuery, e.title, e.preview);
             if (s >= 0) {
@@ -403,7 +417,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
             [](const VisibleRow& a, const VisibleRow& b) { return a.score > b.score; });
     }
 
-    // A28: if the filter hides the active row while the rename box is open,
+    // If the filter hides the active row while the rename box is open,
     // close the box - an open box bound to a hidden row is dead state
     // (mirrors the tuiSetSessionList "active row absent" rule). This also
     // keeps the two Esc branches disjoint: the rename's own Esc check (inside
@@ -421,22 +435,22 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         }
     }
 
-    // Escape clears the filter (A23): the filter input has no key binding
+    // Escape clears the filter: the filter input has no key binding
     // of its own (InputText only drops focus on Escape), so the key is
     // caught here, before the row loop. The rename box owns Escape while
     // open: its own check runs in the row loop (active row only), and
-    // renameActive is read AFTER the A28 close above, so the frame where
-    // A28 closed the box (the active row was filtered out by a keystroke in
-    // this very input) still clears the filter, while a frame where the box
-    // is still live only closes the box - the two Escape paths stay
-    // disjoint. A whitespace-only query is already "no filter" (A19), so it
+    // renameActive is read AFTER the close above, so the frame where
+    // the close happened (the active row was filtered out by a keystroke
+    // in this very input) still clears the filter, while a frame where the
+    // box is still live only closes the box - the two Escape paths stay
+    // disjoint. A whitespace-only query is already "no filter", so it
     // never triggers the clear (no pointless id churn). While the input is
     // ACTIVE, 1.81's cancel_edit (NavUpdate Cancel -> ClearActiveID,
     // imgui.cpp:9010-9016) reverts the buffer to its activation value
     // during NewFrame - before this code runs - so "was the query real" is
     // also read from the end-of-last-frame snapshot: a query that was
     // non-empty last frame and is empty now counts as the clear, which
-    // keeps C10's filterSeq bump firing on the Esc frame (S18).
+    // keeps the filterSeq bump firing on the Esc frame.
     const bool filterRevertedEmpty = panel.filterNonEmptyLastFrame && isWhitespaceOnly(filterQuery);
     if (!panel.renameActive && (!isWhitespaceOnly(filterQuery) || filterRevertedEmpty) &&
         ImGui::IsKeyPressed(ImGuiKey_Escape)) {
@@ -444,12 +458,12 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         log("session panel: filter cleared (Escape)\n");
     }
 
-    // Enter selects the top visible match (A22/R23/A24): with a non-empty
+    // Enter selects the top visible match: with a non-empty
     // visible list, Enter in the filter input selects visible[0]'s id. A
     // non-empty filter ranks best-first, so visible[0] is the best match; an
     // empty filter keeps snapshot order, so visible[0] is the first session.
     // Reuses the existing Select path: queue when ready, else defer in the
-    // single pending slot (A12, last action wins; it flushes as an ordinary
+    // single pending slot (last action wins; it flushes as an ordinary
     // Select on the first ready frame at the top of this function). Selecting
     // the already-active session is a no-op (log only, no action). An empty
     // visible list is a no-op. The filter clears at selection time
@@ -471,13 +485,20 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
     }
 
     // The rows live in a child of their own, sized to the remaining panel
-    // height, so ImGui 1.81 enables the scrollbar when the list overflows
-    // (R15). The id is stable, so the scroll position survives snapshot
+    // height, so ImGui 1.81 enables the scrollbar when the list overflows.
+    // The id is stable, so the scroll position survives snapshot
     // refreshes (the full-replace list does not reset it).
-    ImGui::BeginChild("session_rows", ImVec2(panel.panelW - 1, ImGui::GetContentRegionAvail().y),
-                      true);
+    // Pixel profile: the historical panelW - 1 is a
+    // grid-column width (the imtui padding is sub-cell, so it fills the
+    // bordered panel exactly); the GUI's content origin is inset by the
+    // window padding, so sizing the child from panelW would overflow the
+    // parent and clip the rows' scrollbar. Use the available content width
+    // there (text branch unchanged).
+    const float rowsW =
+        tuiIsTextGrid() ? static_cast<float>(panel.panelW - 1) : ImGui::GetContentRegionAvail().x;
+    ImGui::BeginChild("session_rows", ImVec2(rowsW, ImGui::GetContentRegionAvail().y), true);
 
-    const int delWidth = 4;
+    const int delWidth = colUnits(4);
     // Row width budget from the actual clip rect, not the content size. The
     // rows child is bordered and nested inside the bordered panel child, and
     // each border level costs one clipped column, so the draw clip rect is
@@ -489,19 +510,41 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
     // appears (the WorkRect shrinks instead), so rows narrow with the
     // scrollbar instead of clipping. The trailing -1 keeps the del button
     // one cell short of the clip edge, like before.
-    const int usableWidth = static_cast<int>(std::floor(ImGui::GetContentRegionMax().x)) -
-                            static_cast<int>(std::floor(ImGui::GetCursorScreenPos().x)) - 1;
-    const int rowWidth =
-        usableWidth - delWidth - static_cast<int>(ImGui::GetStyle().ItemSpacing.x) - 1;
+    // Pixel profile: the grid keeps this exact formula
+    // (cell units, exact at the window origin). The GUI derives the row
+    // width from the available content width instead: the clip-rect math
+    // mixes window-local maxima with screen-space cursors (it loses the
+    // child's screen x), and rowWidth below doubles as a character budget
+    // for the label builder, which must be a character count in both
+    // profiles — in the GUI it is derived from the pixel width via the
+    // font's cell advance (titleChars), so ellipsis and the " [N]" suffix
+    // still fit the button instead of being clipped away.
+    const bool textGrid = tuiIsTextGrid();
+    int rowWidth;
+    int titleChars;
+    if (textGrid) {
+        const int usableWidth = static_cast<int>(std::floor(ImGui::GetContentRegionMax().x)) -
+                                static_cast<int>(std::floor(ImGui::GetCursorScreenPos().x)) - 1;
+        rowWidth = usableWidth - delWidth - static_cast<int>(ImGui::GetStyle().ItemSpacing.x) - 1;
+        titleChars = rowWidth;
+    } else {
+        rowWidth = static_cast<int>(ImGui::GetContentRegionAvail().x) - delWidth -
+                   static_cast<int>(ImGui::GetStyle().ItemSpacing.x) - 1;
+        if (rowWidth < 1)
+            rowWidth = 1;
+        titleChars = static_cast<int>(static_cast<float>(rowWidth) /
+                                      std::max(1.0f, ImGui::CalcTextSize("W").x));
+        titleChars = std::max(1, titleChars);
+    }
     for (const auto& row : visible) {
         const SessionEntry& entry = panel.sessions[row.index];
         const bool isActive = (entry.id == panel.activeId);
         const bool delPending = (panel.pendingDeleteId == entry.id);
-        const std::string label = sessionRowLabel(entry, rowWidth);
+        const std::string label = sessionRowLabel(entry, titleChars);
         const float labelWidth = ImGui::CalcTextSize(label.c_str()).x;
         std::vector<std::pair<std::size_t, std::size_t>> matchRuns;
         if (!isWhitespaceOnly(filterQuery)) {
-            titleMatchRuns(filterQuery, entry.title, sessionTitlePortionLen(entry, rowWidth),
+            titleMatchRuns(filterQuery, entry.title, sessionTitlePortionLen(entry, titleChars),
                            matchRuns);
         }
         const ImVec4& rowColor =
@@ -509,12 +552,12 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         // The session id keeps row widgets unique even when titles collide.
         ImGui::PushID(entry.id.c_str());
         if (renderTitleButton(label, rowWidth, isActive, rowColor, panel.matchColor, matchRuns)) {
-            panel.pendingDeleteId.clear(); // non-delete control (L1)
+            panel.pendingDeleteId.clear();
             if (canQueue && !isActive) {
                 queueSessionAction(panel, SessionActionType::Select, entry.id, "");
                 log("session panel: queued select %s\n", entry.id.c_str());
             } else if (!canQueue && !isActive) {
-                // Busy (A12): defer the switch in the single pending slot
+                // Busy: defer the switch in the single pending slot
                 // (last click wins); it flushes as an ordinary Select on
                 // the first ready frame (top of this function). Selecting
                 // is safe to defer - the in-flight query completes in the
@@ -524,7 +567,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
                 log("session panel: pending select %s (busy)\n", entry.id.c_str());
             } else {
                 // Active-row click: no-op, and any pending target stays
-                // armed (A12).
+                // armed.
                 log("session panel: select %s skipped (already active)\n", entry.id.c_str());
             }
             clearFilter(panel);
@@ -541,12 +584,12 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         if (renderButton(delPending ? "del?" : "del", delWidth, false, rowColor)) {
             if (canQueue) {
                 if (delPending) {
-                    // Second press: confirmed (A5).
+                    // Second press: confirmed.
                     queueSessionAction(panel, SessionActionType::Delete, entry.id, "");
                     panel.pendingDeleteId.clear();
                     log("session panel: queued delete %s\n", entry.id.c_str());
                 } else {
-                    // First press - or the pending target moves to this row (L1).
+                    // First press - or the pending target moves to this row.
                     panel.pendingDeleteId = entry.id;
                     log("session panel: delete armed %s\n", entry.id.c_str());
                 }
@@ -555,9 +598,9 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
             }
         }
         if (isActive) {
-            // Rename toggle + input on the active row only (R4/L8).
-            if (renderButton("Rename", 8, panel.renameActive, panel.activeButton)) {
-                panel.pendingDeleteId.clear(); // non-delete control (L1)
+            // Rename toggle + input on the active row only.
+            if (renderButton("Rename", colUnits(8), panel.renameActive, panel.activeButton)) {
+                panel.pendingDeleteId.clear();
                 panel.renameActive = !panel.renameActive;
                 if (panel.renameActive) {
                     panel.renameRowId = entry.id;
@@ -587,7 +630,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
                 // the key alone. Trade-off: Escape closes the rename box
                 // even when another widget holds the keyboard focus (e.g.
                 // the query input); acceptable, because Escape has no other
-                // TUI binding - the filter clear (A23) is gated on
+                // TUI binding - the filter clear is gated on
                 // !renameActive - and canceling the rename is the safe action.
                 const bool esc = ImGui::IsKeyPressed(ImGuiKey_Escape);
                 if (esc) {
@@ -598,7 +641,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
                 } else if (enter) {
                     const std::string newTitle(panel.renameBuf);
                     if (isWhitespaceOnly(newTitle)) {
-                        // Empty titles are rejected here and again in D (L4).
+                        // Empty titles are rejected here and again in D.
                         log("session panel: empty rename rejected\n");
                     } else if (canQueue) {
                         queueSessionAction(panel, SessionActionType::Rename, entry.id, newTitle);
@@ -614,12 +657,14 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         // The rename input stays inside the row's PushID scope so its widget
         // id changes with the row: when the active row changes, the InputText
         // re-reads the (re-initialized) user buffer instead of its stale
-        // internal edit state (L3).
-        // Line 2: dimmed non-interactive preview of the first user message
-        // (A14). Skipped entirely when the preview is empty so rows without
+        // internal edit state.
+        // Line 2: dimmed non-interactive preview of the first user message.
+        // Skipped entirely when the preview is empty so rows without
         // one stay single-line; non-interactive (no button, no hover
         // action, no tooltip of its own).
-        const std::string preview = previewRowLabel(entry, rowWidth);
+        // Same character budget as the title (the preview is an ellipsized
+        // single line, not a pixel width).
+        const std::string preview = previewRowLabel(entry, titleChars);
         if (!preview.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, panel.previewColor);
             // Align the preview with the row label (both inset by one
@@ -631,14 +676,14 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         }
         ImGui::PopID();
     }
-    // S11 compensation: when the box just closed via Escape above, the
+    // Compensation: when the box just closed via Escape above, the
     // filter widget (if it was the active input) reverted its buffer to
     // InitialTextA on the same frame (cancel_edit, see snapshot above).
     // Restore the pre-frame query and bump filterSeq so the next frame
     // re-initializes a fresh InputText state from the restored buffer
-    // (C10 pattern); without the bump the deactivated widget's stale stb
-    // (holding the reverted text) would resurface on the next
-    // click-to-focus.
+    // (same pattern as clearFilter); without the bump the deactivated
+    // widget's stale stb (holding the reverted text) would resurface on
+    // the next click-to-focus.
     if (renameEscClosedThisFrame && strcmp(panel.filterBuf.data(), filterPreFrame.c_str()) != 0) {
         panel.filterBuf.fill('\0');
         std::copy_n(filterPreFrame.begin(),
@@ -648,7 +693,7 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         log("session panel: filter restored (rename Esc frame)\n");
     }
 
-    // No-match indicator (A26): when a non-empty filter matches nothing
+    // No-match indicator: when a non-empty filter matches nothing
     // but the snapshot is non-empty, render a single dimmed "no matches"
     // line instead of a blank area. The !panel.sessions.empty() clause
     // keeps this consistent with the edge-case table: an empty snapshot
@@ -662,22 +707,36 @@ void renderTabChatSessionPanel(TuiState& state, Log& log) {
         ImGui::Unindent(ImGui::GetStyle().FramePadding.x);
         ImGui::PopStyleColor();
     }
-    // End-of-frame snapshot of the rendered query for A23's revert
-    // detection next frame (filterNonEmptyLastFrame); reads the final
-    // buffer so the S11 rename-Esc restore is counted.
+    // End-of-frame snapshot of the rendered query for the Escape
+    // clear's revert detection next frame (filterNonEmptyLastFrame);
+    // reads the final buffer so the rename-Esc restore is counted.
     panel.filterNonEmptyLastFrame = !isWhitespaceOnly(std::string(panel.filterBuf.data()));
     ImGui::EndChild(); // session_rows
     ImGui::EndChild(); // Session child window
 }
 
+int colUnits(int cols) {
+    if (tuiIsTextGrid())
+        return cols;
+    // Pixel profile: a column is one character cell, so scale the column
+    // count by a wide glyph's advance to keep roughly `cols` characters of
+    // width. Font metrics, not a constant: the value tracks the
+    // embedded font (and any later font change) instead of assuming the
+    // 1 px grid cell.
+    return static_cast<int>(ImGui::CalcTextSize("W").x * static_cast<float>(cols));
+}
+
 int leftPanelWidth(const TuiState& s) {
-    // One left-panel slot (A6/H1): the pipeline panel wins whenever it has
+    // One left-panel slot: the pipeline panel wins whenever it has
     // agents - open or collapsed; otherwise the session panel renders when
-    // open (30 wide) and stays an 8-wide "Open" strip when closed, so the
-    // output area never covers the panel's Open button (mirrors the
-    // pipeline panel's collapsed width).
-    return !s.left.agents.empty() ? s.left.panelW
-                                  : (s.sessionPanel.panelOpen ? s.sessionPanel.panelW : 8);
+    // open and stays an 8-column "Open" strip when closed, so the output area
+    // never covers the panel's Open button (mirrors the pipeline panel's
+    // collapsed width). The collapsed strip is a column
+    // constant as well, so it goes through colUnits() to stay aligned with
+    // the panels' own collapsed width in the pixel profile.
+    return !s.left.agents.empty()
+               ? s.left.panelW
+               : (s.sessionPanel.panelOpen ? s.sessionPanel.panelW : colUnits(8));
 }
 
 } // namespace llmfun::tui

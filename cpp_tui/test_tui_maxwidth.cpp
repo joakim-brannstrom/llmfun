@@ -1,7 +1,7 @@
 // test_tui_maxwidth.cpp
 //
-// Headless clamp test for the TUI max-width cap (implementation plan Task 5,
-// design T5). Drives a REAL llmfun::tui::TuiState through the real
+// Headless clamp test for the TUI max-width cap. Drives a REAL
+// llmfun::tui::TuiState through the real
 // tuiRender() on the imtui TEXT backend — no ncurses, no terminal, no PTY
 // (same pattern as test_session_filter_smoke, text backend only) — and
 // asserts the clamp math: effective width = min(terminal width, maxWidth).
@@ -12,7 +12,7 @@
 // ImTui_ImplText_RenderDrawData then consumes to resize the TScreen grid.
 // So the grid width (screen.nx) is the observable proof that the clamp took
 // effect — DrawScreen (ncurses or text) can then write at most maxWidth
-// columns (R2).
+// columns.
 //
 // Per case: set ImGui::GetIO().DisplaySize = ImVec2(80, 24) (the simulated
 // 80x24 terminal), set maxWidth, run ONE frame
@@ -28,8 +28,7 @@
 //                                                 no-op, terminal width kept)
 //   C (cap above terminal):  maxWidth = 120 -> text grid screen.nx == 80
 //                                                 (min() behavior: terminal wins)
-//   D (C API floor, Task 2
-//     carry-forward): C-API tuiSetMaxWidth(30) on a tuiCreateState() handle
+//   D (C API floor): C-API tuiSetMaxWidth(30) on a tuiCreateState() handle
 //                                                 -> inner->maxWidth == 40,
 //                                                 i.e. the floor equals the
 //                                                 core MIN_TERMINAL_WIDTH
@@ -59,12 +58,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-
-namespace llmfun::tui {
-// Theme setup defined in tui.cpp, not declared in tui.h (same pattern as
-// test_session_filter_smoke).
-void applyTheme();
-} // namespace llmfun::tui
 
 // Legal completion of the C API's forward declaration
 // `typedef struct TuiState TuiState;` (tui_api.h) — layout matches
@@ -137,11 +130,11 @@ void renderAt(llmfun::tui::TuiState& state, int maxWidth) {
     frame(state);
 }
 
-// Harness init/shutdown: mirror llmfun::tui::tuiInit/tuiShutdown minus the
-// ncurses terminal (no initscr/getmaxyx/DrawScreen) — same context + theme +
-// text backend setup as test_session_filter_smoke. No legacy key map in 1.92 — this
-// test injects no keyboard input. DisplaySize is re-armed per
-// case (the clamp under test overwrites it).
+// Harness init/shutdown: mirror the real app's init (C API tuiInit /
+// tuiDestroyState) minus the ncurses terminal (no initscr/getmaxyx/DrawScreen)
+// — same context + theme + text backend setup as test_session_filter_smoke.
+// No legacy key map in 1.92 — this test injects no keyboard input.
+// DisplaySize is re-armed per case (the clamp under test overwrites it).
 void harnessInit() {
     std::setlocale(LC_ALL, "");
     IMGUI_CHECKVERSION();
@@ -178,7 +171,7 @@ int main() {
         return 2;
     }
 
-    // --- Case A: cap below terminal (40 < 80) ---------------------------
+    // Case A: cap below terminal (40 < 80)
     // The clamp engages: io.DisplaySize.x is written back to the cap and
     // RenderDrawData sizes the grid from it.
     g_case = 'A';
@@ -186,7 +179,7 @@ int main() {
     expect(ImGui::GetIO().DisplaySize.x == 40.0f, "case A: io.DisplaySize.x must be clamped to 40");
     expect(g_screen.nx == 40, "case A: text grid nx must be 40");
 
-    // --- Case B: default, regression guard (0 = unlimited) --------------
+    // Case B: default, regression guard (0 = unlimited)
     // maxWidth = 0 must be a no-op: no write-back, grid at full terminal
     // width — the default stays byte-identical to the pre-cap behavior.
     g_case = 'B';
@@ -195,7 +188,7 @@ int main() {
            "case B: io.DisplaySize.x must stay 80 (default is a no-op)");
     expect(g_screen.nx == 80, "case B: text grid nx must be 80");
 
-    // --- Case C: cap above terminal (120 > 80) --------------------------
+    // Case C: cap above terminal (120 > 80)
     // min() behavior: the terminal width wins; no write-back.
     g_case = 'C';
     renderAt(state, 120);
@@ -203,7 +196,7 @@ int main() {
            "case C: io.DisplaySize.x must stay 80 (terminal wins)");
     expect(g_screen.nx == 80, "case C: text grid nx must be 80");
 
-    // --- Case D: C API floor == core minimum (Task 2 carry-forward) -----
+    // Case D: C API floor == core minimum
     // The C API tuiSetMaxWidth floors a positive sub-40 cap to the TUI's
     // 40-column minimum render width (a smaller cap would leave the TUI
     // stuck on its "Terminal too small!" screen). Drive the REAL C API

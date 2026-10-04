@@ -2,7 +2,7 @@
 
 ## Overview
 
-The llmfun TUI is a terminal-based user interface built in C++17 on top of the **imtui** library (a terminal-based ImGui wrapper at `llmfun/vendor/imtui`). It provides a full-screen chat interface for interacting with an LLM: a scrollable chat output area with typed/color-coded messages, a multiline input area, and a status line. The TUI is self-contained in the `llmfun/cpp_tui/` directory.
+The llmfun TUI is a C++17 user interface that renders either into a terminal (built on the **imtui** library, a terminal-based ImGui wrapper at `llmfun/vendor/imtui`) or into a graphical window via the GLFW + OpenGL3 backend (see "Graphical backend (GLFW + OpenGL3)" below). It provides a full-screen chat interface for interacting with an LLM: a scrollable chat output area with typed/color-coded messages, a multiline input area, and a status line. The TUI is self-contained in the `llmfun/cpp_tui/` directory.
 
  A pure C API layer (`tui_api.h` / `tui_api.cpp`) wraps the internal C++ implementation, enabling D to link against the TUI without C++ name mangling. D imports `tui_api.h` directly.
 
@@ -11,16 +11,20 @@ The llmfun TUI is a terminal-based user interface built in C++17 on top of the *
 ```
 llmfun/cpp_tui/
 ├── CMakeLists.txt   # Build configuration (CMake 3.10+, C++17); driven by ../../tui.mak
-├── main.cpp         # Standalone/dry-run entry (`--frames N` headless), not the app entry point
-├── tui.h / tui.cpp  # TuiState, render dispatch, theme, init/shutdown, data feeds
+├── main.cpp         # Standalone/dry-run entry (`--tui|--gui --frames N`), not the app entry point
+├── tui.h / tui.cpp  # TuiState, render dispatch, theme, data feeds
 ├── tui_api.h / tui_api.cpp  # Pure C API for D (extern "C"); bridges to tui.h/tui.cpp
+├── tui_backend.h    # Backend seam: init/newFrame/renderFrame/shutdown + kind/shouldClose
+├── tui_backend_ncurses.cpp  # Terminal backend (ImTui/ncurses; text-only popen clipboard)
+├── tui_backend_gui.cpp      # GUI backend (GLFW window + OpenGL3; platform clipboard)
+├── tui_backend_null.cpp     # Inert Null backend (headless/tests)
 ├── tui_chat.h / tui_chat.cpp  # Chat/log cluster: message widgets, input area, status line
 ├── tui_common.h / tui_common.cpp  # Shared helpers: Log, whitespace test, multiline text
 ├── tui_widgets.h / tui_widgets.cpp  # Shared widgets: renderButton, separator, style guard
 ├── session_panel.h / session_panel.cpp  # Session sidebar: rows, filter, rename, delete
 ├── session_fuzzy.h  # Pure fzf-style matcher for the session filter (stdlib-only)
 ├── probe_margin.c   # PTY probe: asserts no cell lands at/beyond the max-width cap
-├── test_*.cpp       # Headless test binaries (session filter, max width, clear output, fuzzy)
+├── test_*.cpp       # Headless test binaries (session filter, fuzzy, max width, v4 API, ...)
 └── test/            # Dev probes (keyboard/mouse/PTY scratch programs)
 ```
 
@@ -42,8 +46,9 @@ llmfun/source/llm/tui/
 │  module llm.tui;                                                 │
 │  import llmfun_tui;   ← links against llmfun_tui_lib            │
 │                                                                  │
-│  Main loop: tuiInit → tuiCreateState → tuiBackendNewFrame →     │
-│             tuiRender → tuiBackendRender → ... → tuiShutdown     │
+│  Main loop: tuiCreateState → tuiInit(state, mode) →              │
+│    tuiBackendNewFrame(state) → tuiRender(state) →                │
+│    tuiBackendRender(state) → ... → tuiDestroyState               │
 │                                                                  │
 ├──────────────────────────────────────────────────────────────────┤
 │              C API Boundary (tui_api.h) — extern "C"             │
@@ -51,8 +56,8 @@ llmfun/source/llm/tui/
 │  C header with extern "C" linkage:                               │
 │    String (POD struct, explicit ownership)                        │
 │    ChatMessageParam (bundles summary, text, thinking, type)       │
-│    TuiState* (opaque handle)                                      │
-│    TuiScreen* (opaque handle)                                     │
+│    TuiState* (single opaque handle)                               │
+│    TuiBackendMode in → TuiBackendKind out (v4)                    │
 │    All functions: pointers only, String by value, null-safe       │
 │    Error reporting: tuiLastError()                                │
 │                                                                  │
@@ -65,7 +70,7 @@ llmfun/source/llm/tui/
 │    - Implements error handling with thread-local storage         │
 │    - Calls existing C++ functions (tuiAddChatMessage, etc.)      │
 │    - All functions declared with extern "C" linkage              │
-│    - Backend init guard prevents calls before tuiInit()          │
+│    - None-safe: frame calls are inert without a backend (v4)     │
 │                                                                  │
 ├──────────────────────────────────────────────────────────────────┤
 │              C++ Core (tui.h / tui.cpp)                          │
@@ -132,6 +137,205 @@ Key design decisions:
 
 ---
 
+## Graphical backend (GLFW + OpenGL3)
+
+The same C++ core, C API and D front end can render either into a terminal
+(the imtui text grid, the original mode) or into a real window: the **GUI
+backend** is a GLFW window with the stock Dear ImGui OpenGL3 renderer
+(`imgui_impl_glfw.cpp` + `imgui_impl_opengl3.cpp` from the vendored imgui —
+imtui is bypassed entirely in GUI mode). Both profiles live in the single
+`llmfun` binary and are selected through the same C API.
+
+### Backends and the `Backend` seam
+
+`cpp_tui/tui_backend.h` defines the lifecycle interface every backend
+implements — `init(error)` / `newFrame()` / `renderFrame()` / `shutdown()`,
+plus `kind()` (None/Tui/Gui) and `shouldClose()` (exit request, e.g. a closed
+window). `tuiInit` creates one backend through the factories
+(`makeNcursesBackend` / `makeGuiBackend` / `makeNullBackend`) and the
+per-state `TuiState` owns it:
+
+| Backend | Implementation | Notes |
+|---------|----------------|-------|
+| `NcursesBackend` | `tui_backend_ncurses.cpp` | the terminal: ImTui text rasteriser + ncurses output; also installs the **popen clipboard** helpers (`xclip` / `wl-copy`) |
+| `GuiBackend` | `tui_backend_gui.cpp` | the window: GLFW + OpenGL3; 800x600, title `llmfun`; the **GLFW platform clipboard** (no subprocess) |
+| `NullBackend` | `tui_backend_null.cpp` | inert (attaches nothing, `kind() == None`); the seam's placeholder for headless/tests — `tuiInit` never attaches it |
+
+The GUI backend asks for a GL 3.0 context with GLSL `#version 130` and
+retries once with GL 2.1 + `#version 120` if window/context creation fails.
+Each attempt passes its **own pinned shader string** to
+`ImGui_ImplOpenGL3_Init` — never `nullptr`, whose desktop auto-branch can
+emit a version the context does not have. GLFW errors are captured by an
+error callback and become the init failure reason.
+
+### Selection and fallback contract
+
+`TuiBackendMode` is resolved once at startup and passed to
+`tuiInit(state, mode)`:
+
+```
+TuiBackendMode_Tui    terminal UI; no GUI attempt
+TuiBackendMode_Gui    require the GUI; fail if it cannot start (no fallback)
+TuiBackendMode_Auto   default: try the GUI first, then the fallback rule
+```
+
+- The `agent` command defaults to Auto. `--tui` / `--gui` (mutually
+  exclusive) select Tui / Gui; D resolves this in `resolveTuiBackendMode`.
+- `LLMFUN_TUI_BACKEND=auto|gui|tui` selects the mode from the environment when no flag is given
+  (precedence: CLI flag > env > Auto); an unknown value warns and falls back to Auto.
+- **Auto fallback is resolved inside C++** (the TTY check cannot be faked
+  from D): when GUI init fails and **stdin AND stdout are TTYs**, `tuiInit`
+  prints one line to stderr — `GUI unavailable: <reason>; falling back to
+  terminal UI` — records it as the *backend note* (`tuiBackendNote()`, which
+  the D actor reads and uses to seed the status line) and attaches the
+  terminal backend. Without a TTY (pipes, CI, headless Auto) there is no
+  fallback: the GUI reason is the init error. If the terminal fallback
+  itself fails, the combined reason is reported
+  (`...; terminal UI also failed: ...`) and no note is recorded.
+- Fallback is **init-time only**. Once the frame loop is running, a failure
+  is an ordinary error and the backend never changes mid-session.
+- Every failure stage reports a precise reason through `tuiLastError()`
+  (`glfwInit failed: ...`, `GLFW window creation failed (GL 3.0 and GL 2.1)`,
+  `ImGui_ImplOpenGL3_Init(...) failed: OpenGL driver unavailable`, ...).
+
+### Pixel profile (GUI vs text grid)
+
+The text grid's constraints are terminal-cell constraints; they are
+runtime-gated with `tuiIsTextGrid()` (which reports
+`ImTui_TextEncodingActive`), so one build serves both profiles:
+
+- **text-grid only:** the 40x15 minimum-size screen (small GUI windows keep
+  rendering instead), the `maxWidth` clamp (a column cap must not be read as
+  pixels), the cell-tuned `GrabMinSize = 3.0` scrollbar grab (GUI keeps
+  imgui's 12.0 default), the input-row nav-cursor suppression
+  (`suppressInputRowNavCursor`; the GUI uses the upstream nav cursor), and
+  the cell-derived label-truncation budgets (GUI measures pixels via
+  `CalcTextSize` / `GetContentRegionAvail`).
+- **shared:** theme colors (`applyTheme`, applied after the backend init),
+  widget semantics (Escape, history, submit), `Ctrl+C` exit, and the
+  root-window scroll pinning (`SetNextWindowScroll(0, 0)`), which re-asserts
+  the "the root never scrolls" invariant inside every `Begin`: the absolute
+  layout would otherwise slide when a startup nav request asks for a centered
+  scroll.
+- **GUI only:** the root window paints the themed background — the text grid
+  deliberately keeps it transparent so the terminal background shows through,
+  while the pixel framebuffer would otherwise keep stale pixels after a
+  resize; buttons and regions size from imgui metrics (`GetFrameHeight`,
+  `GetTextLineHeight`, `ItemSpacing`) instead of one-cell constants.
+
+### Fonts & DPI
+
+The GUI renders with imgui's embedded bitmap font (ProggyClean, 13 px base)
+by default — no asset is needed, and the font is pinned explicitly instead of
+left to `AddFontDefault()`'s size heuristic. Two optional environment
+variables (GUI only; the terminal backend's imtui font path is untouched):
+
+- `LLMFUN_GUI_FONT` — path to a TTF font, replacing the embedded default
+  (`io.Fonts->AddFontFromFileTTF`).
+- `LLMFUN_GUI_FONT_SIZE` — its pixel size (default 16; unset, empty,
+  non-numeric, or out-of-range values keep the default). Without
+  `LLMFUN_GUI_FONT` the variable has no effect.
+
+A path that cannot be loaded prints
+`LLMFUN_GUI_FONT: cannot load '<path>'; using the embedded font` to stderr
+and keeps the default. The 1.92 atlas rasterizes glyphs on demand, so no
+glyph ranges are passed (they only matter to legacy backends); a glyph the
+font lacks renders as its fallback (`?`) glyph. Without configuration the
+rendering is exactly as before on a 1.0-scale monitor.
+
+**DPI:** at init the backend queries the primary monitor's content scale
+(`ImGui_ImplGlfw_GetContentScaleForMonitor`) and, when it is not 1.0, scales
+the style metrics once (`style.ScaleAllSizes(scale)`) and sets the font scale
+(`style.FontScaleDpi` — 1.92's replacement for `io.FontGlobalScale`). The
+per-monitor query requires GLFW 3.3+; older GLFW compiles the call out inside
+the vendored backend and reports 1.0, so the defaults stay unscaled
+(Wayland/macOS report 1.0 as well). The window size is not changed — the
+layout scales inside the existing 800x600 window.
+
+### Clipboard
+
+Both profiles copy through `ImGui::SetClipboardText` (the `[c]` buttons and
+markdown links call it), but the installed handler differs: the terminal
+backend installs the popen helpers (`xclip`, or `wl-copy`/`wl-paste` on
+Wayland); the GUI backend keeps the GLFW platform clipboard installed by
+`imgui_impl_glfw` — no subprocess runs in GUI mode. Paste is the input
+widget's own handling in both profiles; `Ctrl+C` is the exit key in both (not
+a copy binding).
+
+### Idle pacing
+
+The GUI is vsynced (`glfwSwapInterval(1)`) and waits for input: each frame
+calls `glfwWaitEventsTimeout(1/60 s)`, so the loop blocks between frames
+instead of busy-spinning (measured on llvmpipe: event-waiting, no spin, with
+the CPU cost being the software rasterisation of ~60 fps redraws). The
+terminal backend keeps its ncurses 60/3 FPS pacing; the D actor polls at
+10 ms in both profiles. Window close (X / Alt+F4) goes through the backend's
+`shouldClose()` into the existing user-terminated path — the same exit as
+`Ctrl+C`.
+
+### Startup-failure reporting (`uiStartupFailed`)
+
+An init failure reaches the application as a typed message: the D
+`TextUserInterfaceActor` attaches the backend from `onSpawn` — on the actor's
+own thread, so the window/GL context are created and driven from one thread
+(the app spawns the actor with `Config.detached`) — records any failure reason
+there, and dispatches `TUIListener.uiStartupFailed(reason)` instead of arming
+its frame tick. `AppAgentActor.uiStartupFailed` logs
+`TUI startup failed: <reason>` to stderr and exits the process non-zero — so
+`--gui` without a display and headless Auto runs fail deterministically for
+scripts. On success the actor logs `TUI backend active: <Tui|Gui>` and, when
+a fallback happened, logs `TUI backend note: <note>`.
+
+### Build (GLFW discovery and link flags)
+
+`cpp_tui/CMakeLists.txt` locates GLFW in three steps (normalized to a target
+named `glfw`):
+
+1. `find_package(glfw3 3.0 QUIET)` — the GLFW CMake package config;
+2. pkg-config (`glfw3`, when pkg-config is installed);
+3. `find_path(GLFW/glfw3.h)` + `find_library(glfw glfw3)`.
+
+If all three fail, configure stops with an install hint (`libglfw3-dev` on
+Ubuntu/Debian; `glfw-devel` from EPEL on EL7/EL9 — the EL specifics are to
+be confirmed by the EL7/EL9 evidence run; building GLFW from source remains
+the fallback). The two vendored imgui backend translation units
+(`imgui_impl_glfw.cpp`, `imgui_impl_opengl3.cpp`) compile into
+`libllmfun_tui_all_lib.a`. The GLFW-including sources — the vendored
+`imgui_impl_glfw.cpp` and `tui_backend_gui.cpp` — get `-DGLFW_INCLUDE_NONE`
+(the GLFW header otherwise pulls in GL headers), and the build adds the
+explicit imgui core + `backends/` include directories.
+Nothing links `-lGL`: the OpenGL3 backend loads the driver at run time
+through its bundled loader, which is why the executables link
+`${CMAKE_DL_LIBS}` (libdl) alongside `glfw`. `dub.sdl` adds `-L-lglfw` and
+`-L-ldl` unconditionally on Linux (dub cannot probe libc versions; `libdl` is
+a stub after glibc 2.34 — non-glibc toolchains can override the flags).
+
+### Packaging: the `libglfw3` runtime closure
+
+GLFW is linked normally (no dlopen plugin), so `libglfw3` is a **load-time
+dependency of the process**: it is needed even for `--tui` runs, and without
+it the process cannot start at all. This is the accepted limitation of the
+normal-linking design — packagers must depend on the closure.
+
+The rest of the closure is a property of the distro's GLFW build. Derive it
+from the distro package metadata (or from `ldd libglfw3` where that build
+links its clients directly). Debian/Ubuntu example (26.04, `libglfw3`
+3.4-4): the runtime package depends on the X11 client set (`libx11-6`,
+`libx11-xcb1`, `libxcursor1`, `libxext6`, `libxi6`, `libxinerama1`,
+`libxkbcommon0`, `libxrandr2`, `libxrender1`), the Wayland client set
+(`libwayland-client0`, `libwayland-cursor0`, `libwayland-egl1`,
+`libdecor-0-0`) and the GL dispatcher trio (`libegl1`, `libglx0`,
+`libopengl0`) — this GLFW build loads the display clients lazily (its own
+`ldd` shows only libm/libc), so read the package dependency list, not just
+`ldd`.
+
+The OpenGL driver is opened at run time by the bundled loader; Mesa's
+software rasteriser (llvmpipe) is accepted, so VMs without a GPU run the
+GUI. A missing driver surfaces as `ImGui_ImplOpenGL3_Init(...) failed:
+OpenGL driver unavailable (bundled loader)`.
+
+---
+
 ## C API Layer
 
  The C API (`tui_api.h` \/ `tui_api.cpp`) provides a language-agnostic interface. D imports it directly (ImportC) — no `extern(C++)` name mangling, no module declarations.
@@ -173,12 +377,15 @@ typedef struct String {
 
 ### Opaque Handles
 
-Two opaque handle types hide internal C++ types from D:
+One opaque handle type hides the internal C++ state from D (v4):
 
 ```c
-typedef struct TuiState TuiState;     // Wraps ::llmfun::tui::TuiState*
-typedef struct TuiScreen TuiScreen;   // Wraps ImTui::TScreen*
+typedef struct TuiState TuiState;   // Wraps ::llmfun::tui::TuiState*
 ```
+
+`TuiScreen` (the ImTui screen handle) and `tuiShutdown` were removed in API
+v4: the screen is an implementation detail of the terminal backend, and
+`tuiDestroyState` tears down the whole state — backend included.
 
 ### Error Handling
 
@@ -190,21 +397,41 @@ String tuiLastError(void);
 
 Returns an owned `String` with the last error message. Thread-local: each thread gets its own error. The error is **consumed** (cleared) on the first call. Returns `{NULL, 0}` if no error was set. Caller must free the result with `String_Free()`.
 
- ### Threading Model
+A second thread-local channel carries the init fallback note (`tuiBackendNote()`, see the API Reference below): an owned `String` that is non-empty only after an Auto init fell back to the terminal backend, and — unlike the error — it is not consumed by reading.
 
- The TUI is driven from a single thread (the main/UI thread). All API functions must be called from this thread. No mutexes or locks protect the TUI state.
+### Threading Model
+
+The TUI is driven from a single thread (the main/UI thread). All API functions must be called from this thread. No mutexes or locks protect the TUI state. The app keeps this rule by spawning `TextUserInterfaceActor` on a dedicated thread (`Config.detached`): the backend attach (`onSpawn`) and every frame run on that one thread.
 
 
 ### API Reference
 
-See `tui_api.h` for the complete C API. The header is self-documented with detailed comments for each function.
+See `tui_api.h` for the complete C API. The header is self-documented with
+detailed comments for each function.
+
+The v4 lifecycle (single `TuiState*` handle):
+
+| Step | Call | Semantics |
+|------|------|-----------|
+| create | `tuiCreateState()` | creates the state; no backend, no ImGui context |
+| attach | `tuiInit(state, mode)` | creates the ImGui context and attaches exactly one backend; `0` = success, otherwise the precise stage reason is in `tuiLastError()`. Single-shot per success; at most one initialized state per process; after a failure the state stays backend-less and a retry (possibly another mode) is allowed. Auto's GUI→TUI fallback is resolved here, in C++ |
+| frame | `tuiBackendNewFrame(state)` / `tuiBackendRender(state)` | backend input + ImGui frame start / present the finished frame; no-ops on a backend-less state |
+| render | `tuiRender(state)` | draws the widgets; returns `0` when the user requested exit (`Ctrl+C`, or a closed GUI window) |
+| inspect | `tuiBackendActive(state)` | the attached `TuiBackendKind` (None/Tui/Gui) |
+| note | `tuiBackendNote()` | owned `String` with the fallback note of the most recent `tuiInit` on the calling thread; empty when no fallback happened |
+| destroy | `tuiDestroyState(state)` | shuts the backend down, destroys the ImGui context `tuiInit` created (a caller-created context survives), frees the state; null-safe and pre-init-safe |
+
+None-safety is deliberately asymmetric (pinned by `test_tui_api_v4`):
+`tuiRender(NULL)` returns `0` (the v3 exit convention) while a valid
+backend-less state returns `1` (continue); neither touches ImGui.
 
 ### Session API
 
 The session sidebar added a second API family to `tui_api.h`, and bumped
 `TUI_API_VERSION` from 1 to 2. The version macro is a **documentation marker
-only** — nothing consumes it at compile time or runtime; the header comment
-lists the additions.
+only** — no runtime behavior depends on it, and the contract tests pin its
+current value with `static_assert` so a bump stays deliberate; the header
+comment lists the additions.
 
 New types:
 
@@ -254,14 +481,14 @@ comments.
 
 Max width caps the TUI's rendered width in terminal columns and bumps
 `TUI_API_VERSION` from 2 to 3. As with version 2, the macro is a
-**documentation marker only** — nothing consumes it at compile time or
-runtime.
+**documentation marker only** — no runtime behavior depends on it, and the
+contract tests pin its current value with `static_assert`.
 
 New function:
 
 | Function | Semantics |
 |----------|-----------|
-| `tuiSetMaxWidth(TuiState*, int)` | Cap the rendered width in terminal columns. `0` = unlimited (default, current behavior). Positive values should be in `[40, 10000]`; a positive value below 40 is raised to 40 (below the TUI's `MIN_TERMINAL_WIDTH` it would be stuck on its "Terminal too small!" screen), and negative values are treated as 0 (unlimited). Null-safe. Call after `tuiCreateState` and before the first frame; a late call applies from the next frame. Effective width = `min(terminal width, maxWidth)` |
+| `tuiSetMaxWidth(TuiState*, int)` | Cap the rendered width in terminal columns. `0` = unlimited (default, current behavior). Positive values should be in `[40, 10000]`; a positive value below 40 is raised to 40 (below the TUI's `MIN_TERMINAL_WIDTH` it would be stuck on its "Terminal too small!" screen), and negative values are treated as 0 (unlimited). Null-safe. Call after `tuiCreateState` and before the first frame; a late call applies from the next frame. Effective width = `min(terminal width, maxWidth)`. Text backend only (v4): the GUI pixel profile ignores the cap (see below) |
 
 Layout note: the cap is enforced in exactly one place — at the top of
 `llmfun::tui::tuiRender` (reading `TuiState.maxWidth`), re-evaluated every
@@ -273,11 +500,36 @@ by the TUI; it is terminal/ncurses-managed (typically blank — the alternate
 screen + first-refresh clear). No vendor code and no C↔D render-loop ABI
 change.
 
+The v4 gate: the clamp is applied under `tuiIsTextGrid()` in `tuiRender`, so
+it binds the terminal backend only — the GUI's `DisplaySize` is in pixels,
+and reading a column cap as pixels would truncate the window to a sliver. D
+still validates and forwards `TuiConfig.maxWidth` for both modes; the pixel
+profile simply ignores it.
+
 The standalone `cpp_tui` executable honors `LLMFUN_TUI_MAX_WIDTH=<cols>` (env
 var only; no CLI flag) for PTY debugging and the max-width byte-stream test. Unset,
 empty, non-numeric, or negative values are ignored (0 = unlimited); values
 above 10000 are clamped to 10000 (mirrors `validateConfig`), and positive
-sub-40 caps are raised to 40 by the C API.
+sub-40 caps are raised to 40 by the C API. (The cap is text-backend only:
+GUI runs ignore it.)
+
+### API Version History
+
+`TUI_API_VERSION` is a **documentation marker only** — no runtime behavior
+depends on it (the contract tests pin its current value with `static_assert`
+so a bump stays deliberate); the changelog lives in the `tui_api.h` header
+comment. The generations so far:
+
+1. original API: `String`, `ChatMessageParam`, `TuiState` + `TuiScreen`,
+   `tuiInit()` + `tuiShutdown(screen)`.
+2. session sidebar: `SessionItem`, `TuiSessionActionType`, `SessionAction`,
+   `tuiSetSessionList`, `tuiIsSessionActionReady`, `tuiGetSessionAction`.
+3. max width: `tuiSetMaxWidth` (cap the rendered width in columns;
+   0 = unlimited).
+4. single handle: `TuiBackendMode`/`TuiBackendKind`, `tuiInit(state, mode)`,
+   per-state frame calls (`tuiBackendNewFrame/Render(state)`), None-safe
+   `tuiRender`, `tuiBackendActive`, `tuiBackendNote`, destroy-tears-down;
+   `TuiScreen` + `tuiShutdown` removed.
 
 ---
 
@@ -543,13 +795,13 @@ sandbox. `test_session_fuzzy` (matcher unit test, stdlib-only) and the
 
 The `main.cpp` file provides a lightweight test/dry-run for the TUI (not the main application entry point). It follows a standard ImGui frame loop:
 
-1. **Initialization**: Call `tuiInit()`, create state via `tuiCreateState()`, set initial status text and welcome message.
+1. **Initialization**: create the state via `tuiCreateState()`, attach a backend via `tuiInit(state, mode)` (`--tui` / `--gui`; the standalone default is the terminal backend so the headless modes never open a window), set initial status text and welcome message.
 2. **Frame loop**:
-   - `tuiBackendNewFrame()` — processes backend input and starts new ImGui frame
-   - `tuiRender(state)` — renders all three regions, handles keyboard shortcuts. Returns `0` to exit.
+   - `tuiBackendNewFrame(state)` — processes backend input (terminal input or window events) and starts a new ImGui frame
+   - `tuiRender(state)` — renders all three regions, handles keyboard shortcuts. Returns `0` to exit (Ctrl+C, or a closed GUI window).
    - **Submission check**: If `tuiIsSubmitReady(state)`, extract the query via `tuiGetSubmitQuery()`, echo it to output, and reset submit flag.
-   - `tuiBackendRender(screen)` — renders the ImGui frame to the terminal screen
-3. **Shutdown**: Call `tuiDestroyState(state)` and `tuiShutdown(screen)` on exit.
+   - `tuiBackendRender(state)` — renders the ImGui frame through the active backend (terminal grid draw or GL present)
+3. **Shutdown**: Call `tuiDestroyState(state)` — it shuts the backend down and frees the state (v4 has no separate screen object).
 
 ### Headless Smoke Mode
 
@@ -560,6 +812,8 @@ frames, verifies the session action queue is empty (`tuiIsSessionActionReady`
 == 0 and `tuiGetSessionAction` returns the None sentinel), prints
 `smoke ok: ...`, and exits 0. Without the argument the interactive loop is
 unchanged. `--frames` requires a non-negative integer; usage errors exit 2.
+`--gui --frames N` runs the window backend for N frames and needs a display
+(run it under `xvfb-run` where available).
 The committed `test_session_filter_smoke` harness (see
 [Filter Input](#filter-input) above) covers the session filter panel
 flows headlessly the same way.
@@ -569,7 +823,6 @@ flows headlessly the same way.
 | Shortcut | Action | Condition |
 |----------|--------|-----------|
 | `Ctrl+C` | Exit TUI (return `false`) | Anywhere |
-| `Ctrl+D` | Exit TUI (return `false`) | Anywhere |
 | `Ctrl+L` | Clear output area | Only when no widget has focus |
 | `End` | Scroll to bottom, re-enable auto-scroll | Anywhere |
 | `Escape` | Clear input buffer | Input widget active |
@@ -616,16 +869,20 @@ OpenGL): the runtime flag `bool ImTui_TextEncodingActive` (declared
 tells the imgui core that the imtui text path is the active renderer.
 
 - `ImTui_ImplText_Init()` sets it **true**; `ImTui_ImplText_Shutdown()`
-  resets it to **false** (the reset was added 2026-10-03; before that the
-  flag stayed true for the process lifetime).
+  resets it to **false** (restored 2026-10-04 — one imgui build now serves
+  both the text and the pixel backend, so a stale `true` would corrupt pixel
+  rendering after a text-backend shutdown).
 - **Convention:** a patch that exists only because of the text grid must be
   conditional on the flag, and its flag-false branch must keep the upstream
   expression verbatim. Guarded today: `imgui_draw.cpp` (imtui vertex-color
   encoding, unit-cell glyph quads, zero-width/emoji folding, fine-clip
   branch, filled-triangle guard), `imgui_widgets.cpp` (caret line row and
   caret rect) and `imgui.cpp` (`RenderNavCursor`, see below).
-- App code needs no guard: `cpp_tui/*` is only ever compiled against the
-  imtui backend, and the ncurses-side patches live in an always-imtui file.
+- App code that must behave differently per profile uses the runtime
+  predicate `tuiIsTextGrid()` (defined as `ImTui_TextEncodingActive` in
+  `tui.h`/`tui.cpp`) rather than the core guard — see "Graphical backend
+  (GLFW + OpenGL3)" for the gated items; the ncurses-side patches live in an
+  always-imtui file.
 
 ### Cell-grid rendering model
 
@@ -741,11 +998,23 @@ hidden-label header rows (an experiment targeting those was reverted).
   `imtui_utf8_grid_test` (grid, fold and scrollbar checks),
   `imtui_arrow_text_channel_test`, `imtui_ncurses_fold_redraw_test`,
   `test_session_filter_smoke`, `test_tui_maxwidth`, `test_clear_output_state`,
-  `test_session_fuzzy`.
+  `test_session_fuzzy`, `test_tui_api_v4` (the v4 C-API contract: None-state
+  no-ops, the NULL-vs-None `tuiRender` asymmetry, retry-after-failure, and
+  the Auto/TTY fallback matrix through child processes).
 - PTY: `probe_margin` (`cpp_tui/probe_margin.c`) runs the real binary on a
   pseudo-terminal and asserts no cell is written at/after
   `LLMFUN_TUI_MAX_WIDTH`; `llmfun_tui --frames N` runs the standalone UI
-  headlessly.
+  headlessly — `--tui` / `--gui` pick the backend, the default is the
+  terminal, and `--gui --frames N` needs a display (run it under `xvfb-run`
+  where available; `MESA_GL_VERSION_OVERRIDE=2.1` exercises the GL 2.1 +
+  GLSL 120 retry path).
+- GUI smoke on a headless runner (opt-in; NOT part of the default
+  `make`/`dub test` gates): `sh cpp_tui/test/xvfb_gui_smoke.sh
+  build/tui/llmfun_tui` runs the standalone driver under `xvfb-run` with
+  `LIBGL_ALWAYS_SOFTWARE=1` (llvmpipe) as `--gui --frames 30`; exit 0 =
+  pass. Where Xvfb is absent it prints `SKIP: xvfb-run not available` and
+  exits 77 — skipped, not failed (install it with `apt-get install xvfb`);
+  a missing binary skips the same way.
 - Init order matters: `ImTui_ImplText_Init()` overwrites style values
   (scrollbar size/grab minimum, the nav-cursor colour — it sets it
   transparent), so `applyTheme()` must run after it; a harness that

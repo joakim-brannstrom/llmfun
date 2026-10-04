@@ -24,7 +24,6 @@ extern "C" {
  *           TuiChatMessageType type;
  *       }
  *       struct TuiState {}
- *       struct TuiScreen {}
  *       void tuiAddChatMessage(TuiState* state, ChatMessageParam param);
  *       // ... etc
  *   }
@@ -36,10 +35,12 @@ extern "C" {
  *
  *   Thread-local (per-thread):
  *     tuiLastError
+ *     tuiBackendNote
  */
 
-/* TUI_API_VERSION - API generation marker. Documentation only: nothing
- * consumes this macro at compile time or runtime. Bump it (with a comment
+/* TUI_API_VERSION - API generation marker. Documentation only: no runtime
+ * behavior depends on it (the contract tests pin the current value with
+ * static_assert so a bump stays deliberate). Bump it (with a comment
  * listing the additions) whenever the C API surface grows.
  *
  * Version history:
@@ -49,8 +50,11 @@ extern "C" {
  *   3 - max width: tuiSetMaxWidth (cap the rendered width in columns;
  *       0 = unlimited). No signature or struct-layout changes to existing
  *       symbols.
+ *   4 - single handle: TuiBackendMode/TuiBackendKind, tuiInit(state, mode),
+ *       per-state frame calls, None-safe tuiRender, tuiBackendActive/Note,
+ *       destroy-tears-down; TuiScreen + tuiShutdown removed.
  */
-#define TUI_API_VERSION 3
+#define TUI_API_VERSION 4
 
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
@@ -198,15 +202,12 @@ typedef struct SessionAction {
     String title;              /* offset 24, size 16 */
 } SessionAction;               /* total size: 40 bytes */
 
-/* TuiState — Opaque handle to the internal TUI state.
- * Created via tuiCreateState(), destroyed via tuiDestroyState().
+/* TuiState — Opaque handle to the internal TUI state; the single lifecycle
+ * object of the v4 API.
+ * Created via tuiCreateState(), a backend is attached via tuiInit(), and the
+ * whole state is torn down via tuiDestroyState().
  */
 typedef struct TuiState TuiState;
-
-/* TuiScreen — Opaque handle to the terminal screen.
- * Created via tuiInit(), destroyed via tuiShutdown().
- */
-typedef struct TuiScreen TuiScreen;
 
 /* Retrieve the last error message as an owned String.
  * The error is consumed (cleared) on the first call — this is intentional
@@ -219,34 +220,51 @@ typedef struct TuiScreen TuiScreen;
  */
 String tuiLastError(void);
 
-/* Initialize the TUI terminal backend.
- *
- * Sets up the terminal (ncurses), creates the ImGui context, applies the
- * dark theme, and initializes the ImTui backend. After this call succeeds,
- * the terminal is in a controlled state and you must call tuiShutdown()
- * to restore it before the program exits.
- *
- * Must be called before any other API function (except String_New / String_NewBuf).
- * Returns an opaque TuiScreen* on success, NULL on failure (check tuiLastError).
- *
- * active will likely crash.
- */
-TuiScreen* tuiInit(void);
+/* TuiBackendMode — requested backend for tuiInit (append-only). */
+typedef enum TuiBackendMode {
+    TuiBackendMode_Auto = 0, /* try the GUI, fall back to the terminal UI */
+    TuiBackendMode_Tui = 1,  /* terminal UI; no GUI attempt */
+    TuiBackendMode_Gui = 2   /* require the GUI; fail if it cannot start */
+} TuiBackendMode;
 
-/* Shutdown the TUI terminal backend and restore terminal state.
+/* TuiBackendKind — backend actually attached to a state (append-only). */
+typedef enum TuiBackendKind {
+    TuiBackendKind_None = 0, /* no backend (headless/tests) */
+    TuiBackendKind_Tui = 1,
+    TuiBackendKind_Gui = 2
+} TuiBackendKind;
+
+/* Initialize and attach a backend to the state.
  *
- * Cleans up the ImTui backend, destroys the ImGui context, and restores
- * the terminal to its original state (ncurses end). After this call, the
- * TuiScreen* handle is invalid and must not be used again.
+ * mode selects what to bring up (any other value is treated as Auto):
+ *   - TuiBackendMode_Tui: the terminal (ncurses) backend; no GUI attempt.
+ *   - TuiBackendMode_Gui: the GUI (GLFW/OpenGL3) backend; fails if it cannot
+ *     start — no fallback.
+ *   - TuiBackendMode_Auto: try the GUI backend first; on failure, if stdin
+ *     AND stdout are TTYs, print one line "GUI unavailable: <reason>;
+ *     falling back to terminal UI" to stderr, record it as the backend note
+ *     (see tuiBackendNote) and attach the terminal backend instead;
+ *     otherwise fail with the GUI reason. (If the terminal fallback itself
+ *     fails, the reported error combines both reasons and no note is
+ *     recorded.)
  *
- * Null-safe: passing NULL is a no-op.
+ * Creates the ImGui context (destroyed by tuiDestroyState) and applies the
+ * dark theme after the backend initialized. Returns 0 on success.
+ *
+ * On failure the return value is non-zero; the precise stage reason is
+ * available via tuiLastError(). The state stays backend-less and the call
+ * may be retried (possibly with a different mode). Re-initializing an
+ * already-initialized state fails cleanly; at most one initialized state
+ * may exist per process.
  */
-void tuiShutdown(TuiScreen* screen);
+int tuiInit(TuiState* state, TuiBackendMode mode);
 
 /* Create a new TUI state object.
  *
  * Allocates and initializes a TuiState instance containing empty output,
  * empty input buffer, disabled submission flag, and default auto-scroll.
+ * No backend is attached and no ImGui context is created — call tuiInit()
+ * to attach a backend.
  * The state is independent — you can create multiple states and pass them
  * to API functions to manage separate TUI sessions.
  *
@@ -256,51 +274,79 @@ TuiState* tuiCreateState(void);
 
 /* Destroy a TUI state object and free all associated memory.
  *
+ * Tears down the attached backend (if any) and destroys the ImGui context
+ * that tuiInit created for this state; an ImGui context created by the
+ * caller itself (headless test harnesses) is left alone.
+ *
  * After this call the TuiState* handle is invalid and must not be used again.
  *
- * Null-safe: passing NULL is a no-op.
+ * Null-safe: passing NULL is a no-op. Safe before tuiInit.
  */
 void tuiDestroyState(TuiState* state);
 
 /* Process backend input and start a new ImGui frame.
  *
- * This function encapsulates the three backend calls required to begin a
- * frame: reads terminal input (ncurses), initializes the text renderer,
- * and creates a new ImGui frame. Call this at the start of each iteration
- * of your main loop, before calling tuiRender().
- */
-void tuiBackendNewFrame(void);
-
-/* Render the current ImGui frame to the terminal screen.
+ * This function encapsulates the backend calls required to begin a frame:
+ * reads terminal input (ncurses) or pumps window events (GLFW), then creates
+ * a new ImGui frame. Call this at the start of each iteration of your main
+ * loop, before calling tuiRender().
  *
- * This function encapsulates the three backend calls required to end a
- * frame: renders the ImGui draw list, sends it to the text renderer,
- * and draws the result to the terminal. Call this at the end of each
+ * None-safe: no-op if state is NULL or has no backend attached.
+ */
+void tuiBackendNewFrame(TuiState* state);
+
+/* Render the current ImGui frame through the active backend.
+ *
+ * This function encapsulates the backend calls required to end a frame:
+ * renders the ImGui draw list and presents it — draws the text renderer to
+ * the terminal, or presents to the GLFW window. Call this at the end of each
  * iteration of your main loop, after calling tuiRender().
+ *
+ * None-safe: no-op if state is NULL or has no backend attached.
  *
  * Typical frame loop:
  *
- *   tuiBackendNewFrame();
+ *   tuiBackendNewFrame(state);
  *   if (tuiRender(state) == 0) break;  // user requested exit
  *   // ... process input, update state ...
- *   tuiBackendRender(screen);
+ *   tuiBackendRender(state);
  */
-void tuiBackendRender(TuiScreen* screen);
+void tuiBackendRender(TuiState* state);
 
-/* Render one TUI frame using the given state.
+/* Render one UI frame using the given state.
  *
  * Draws the three UI regions: the scrollable output area, the multiline
  * input field, and the status line. Handles keyboard shortcuts internally
- * (Ctrl+C/D to exit, Ctrl+L to clear output, End to scroll to bottom,
- * Escape to clear input, Ctrl+Up/Down for history navigation).
+ * (Ctrl+C to exit, End to scroll to bottom, Escape to clear input).
  *
- * Returns 0 if the user requested exit (pressed Ctrl+C, Ctrl+D, or Escape
- * in certain contexts), 1 otherwise. The caller should break the main loop
- * when this returns 0.
+ * Returns 0 if the user requested exit (pressed Ctrl+C, or closed the GUI
+ * window), 1 otherwise. The caller should break the main loop when this
+ * returns 0.
  *
- * Null-safe: returns 0 if state is NULL.
+ * None-safety (deliberate asymmetry): tuiRender(NULL) returns 0 (the v3 exit
+ * convention), while a valid state with no backend attached is inert and
+ * returns 1 (continue). No ImGui access happens in either case.
  */
 int tuiRender(TuiState* state);
+
+/* Get the backend currently attached to the state as a TuiBackendKind.
+ *
+ * Returns TuiBackendKind_None for a NULL state or an uninitialized
+ * (backend-less) state.
+ */
+int tuiBackendActive(const TuiState* state);
+
+/* Get the fallback note recorded by the most recent tuiInit call on the
+ * calling thread, as an owned String (free with String_Free()).
+ *
+ * Non-empty only when an Auto init fell back from the GUI to the terminal
+ * backend; the note is exactly the one-line message printed to stderr:
+ * "GUI unavailable: <reason>; falling back to terminal UI".
+ * Every tuiInit call resets the note, so it is empty ({NULL, 0}) when the
+ * most recent call had no fallback (including a call rejected by the init
+ * guards). Thread-local, like tuiLastError; reading does not consume it.
+ */
+String tuiBackendNote(void);
 
 /* Set the logging to on/off. Must be done before tuiRender is called. */
 void tuiSetLogging(TuiState* state, int onOff);
@@ -311,7 +357,9 @@ void tuiSetLogging(TuiState* state, int onOff);
  * leave the TUI stuck on its "Terminal too small!" screen). Negative values
  * are treated as 0 (unlimited). Call after tuiCreateState and before the
  * first tuiBackendNewFrame/tuiRender; a late call applies from the next
- * frame. Effective width = min(terminal width, maxWidth). Null-safe.
+ * frame. Effective width = min(terminal width, maxWidth). Text backend only:
+ * the GUI pixel profile ignores the cap; see tuiSetMaxWidth in
+ * tui.h). Null-safe.
  */
 void tuiSetMaxWidth(TuiState* state, int maxWidth);
 
@@ -413,7 +461,7 @@ void tuiPipelineClear(TuiState* state);
  */
 void tuiSetStatusText(TuiState* state, String text);
 
-/* ---- Input ---- */
+/* Input */
 
 /* Get the current content of the user's input buffer as an owned String.
  *
@@ -495,7 +543,7 @@ void tuiSetAutoScroll(TuiState* state, int enabled);
  */
 void tuiReadyStatus(TuiState* state, int ready);
 
-/* ---- Session sidebar ---- */
+/* Session sidebar */
 
 /* Replace the session snapshot shown in the sidebar panel.
  *

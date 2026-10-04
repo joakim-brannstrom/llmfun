@@ -411,11 +411,14 @@ static void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
         panel.panelW = 0;
         return;
     } else if (panel.panelW == 0) {
-        panel.panelW = panel.PanelWActivated;
+        // audit: pixel profile — the panel width and the header
+        // button widths are column constants; colUnits() keeps their
+        // character counts in the pixel profile (identity in the grid).
+        panel.panelW = colUnits(panel.PanelWActivated);
     }
 
     ImGui::BeginChild("Child window", ImVec2(panel.panelW - 1, 0), true);
-    const auto panelWClosed = 8;
+    const auto panelWClosed = colUnits(8);
     if (panel.panelOpen) {
         if (renderButton("Close", panelWClosed, false, panel.activeButton)) {
             panel.activeAgent = -1;
@@ -423,7 +426,7 @@ static void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
             panel.panelW = panelWClosed;
         }
         ImGui::SameLine();
-        if (renderButton("Clear", 7, false, panel.activeButton)) {
+        if (renderButton("Clear", colUnits(7), false, panel.activeButton)) {
             panel.agents.clear();
             panel.activeAgent = -1;
             panel.panelW = 0;
@@ -433,13 +436,18 @@ static void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
         if (renderButton("Open", panelWClosed, false, panel.activeButton)) {
             panel.activeAgent = -1;
             panel.panelOpen = true;
-            panel.panelW = panel.PanelWActivated;
+            panel.panelW = colUnits(panel.PanelWActivated);
         }
         ImGui::EndChild();
         return;
     }
 
-    if (renderButton("Main Agent", ImGui::GetContentRegionMax().x, false, panel.activeButton)) {
+    // audit: the full-width buttons use the available content width,
+    // not the window-local content max (which counts from the window origin
+    // and overshoots by the cursor inset in the GUI; identical in the grid
+    // after the width conversion).
+    if (renderButton("Main Agent", static_cast<int>(ImGui::GetContentRegionAvail().x), false,
+                     panel.activeButton)) {
         panel.activeAgent = -1;
     }
     renderSeparator("Pipeline ", "-", ImGui::GetContentRegionMax().x, true);
@@ -448,8 +456,8 @@ static void renderTabChatLeftPanel(ChatTabLeftPanel& panel, Log& log) {
         s.append(" [");
         s.append(std::to_string(panel.agents[i].updateCnt));
         s.append("]");
-        if (renderButton(s.c_str(), ImGui::GetContentRegionMax().x, !panel.agents[i].activity,
-                         panel.activeButton)) {
+        if (renderButton(s.c_str(), static_cast<int>(ImGui::GetContentRegionAvail().x),
+                         !panel.agents[i].activity, panel.activeButton)) {
             panel.activeAgent = i;
             panel.agents[i].activity = false;
             panel.autoScroll = true;
@@ -468,10 +476,29 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
     // minimum IMGUI_WINDOW_HARD_MIN_SIZE (4 rows, upstream imgui_internal.h):
     // a 1-line input renders 4 rows tall, one more than the line count
     // implies. Derive both the output-area reserve and the widget size from
-    // this value so the input frame cannot overlap the status row
-    // (plan/imgui_report.md §5).
+    // this value so the input frame cannot overlap the status row.
     const float inputHeight = std::max(4.0f, 1.0f + ImGui::GetTextLineHeight() * inputBufLines +
                                                  ImGui::GetStyle().FramePadding.y * 2.0f);
+
+    // audit: pixel profile — the chat layout below mixes row/column
+    // units (grid cells) into pixel math. In the text backend one unit is one
+    // cell, so the historical constants are exact (menu bar row 1, status row
+    // 1, 1-cell slack, no flow gap between the output child and the input
+    // area); in the GUI (pixel DisplaySize) the same quantities are derived
+    // from the font/style metrics: the menu bar is a frame height, a reserved
+    // row is a text line, the lateral slack and the flow gap the child adds
+    // via EndChild's ItemSize are the item spacing.
+    const bool textGrid = tuiIsTextGrid();
+    const float menuBarH = textGrid ? 1.0f : ImGui::GetFrameHeight();
+    const float statusRowH = textGrid ? 1.0f : ImGui::GetTextLineHeight();
+    const float colSlack = textGrid ? 1.0f : ImGui::GetStyle().ItemSpacing.x;
+    const float rowGapY = textGrid ? 0.0f : ImGui::GetStyle().ItemSpacing.y;
+    // The side panels and the input row are flow-placed at the root window's
+    // content origin, which is inset by the window padding; the explicit
+    // output position must share that origin (otherwise the output child
+    // covers the panel's last column / scrollbar). Zero in the text grid (the
+    // imtui padding is sub-cell), so the historical formulas stay exact.
+    const ImVec2 rootPad = textGrid ? ImVec2(0.0f, 0.0f) : ImGui::GetStyle().WindowPadding;
 
     if (state.readyStatus)
         state.startProcesssingTime = std::chrono::system_clock::now();
@@ -485,7 +512,13 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
     // cursor visible leaves the bar on screen. The caret already marks the
     // focus, so keep the cursor hidden while the nav or edit focus is on any
     // widget of the input row; tabbing to other widgets still shows theirs.
+    // audit: gated to the text grid — the bar exists because a
+    // 1-cell ring quantizes to whole cells; the pixel profile must show the
+    // upstream nav cursor (accessibility), so the suppression is a no-op
+    // there.
     auto suppressInputRowNavCursor = []() {
+        if (!llmfun::tui::tuiIsTextGrid())
+            return;
         ImGuiContext& g = *ImGui::GetCurrentContext();
         const ImGuiID inputId = ImGui::GetID("##user_input");
         if (g.ActiveId == inputId || g.NavId == inputId ||
@@ -494,16 +527,23 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
             g.NavCursorVisible = false;
     };
 
-    auto outputArea = [&state, &log, &inputHeight, &DisplaySize, &focusInput]() {
+    auto outputArea = [&state, &log, &inputHeight, &DisplaySize, &focusInput, menuBarH, statusRowH,
+                       colSlack, rowGapY, rootPad]() {
         // Clamp height to avoid negative values on very small terminals
         const int lpw = leftPanelWidth(state);
-        ImVec2 outPos(lpw, 1.0f);
-        ImVec2 outSize(DisplaySize.x - lpw - 1, std::max(1.0f, DisplaySize.y - 2 - inputHeight));
+        // The child sits below the menu bar, at the same content-origin
+        // padding the flow-placed panels get; its height reserves the status
+        // row at the bottom plus the flow gap EndChild's ItemSize adds before
+        // the input area (0 in the grid, the item spacing in the GUI).
+        ImVec2 outPos(rootPad.x + static_cast<float>(lpw), rootPad.y + menuBarH);
+        ImVec2 outSize(
+            DisplaySize.x - outPos.x - colSlack,
+            std::max(1.0f, DisplaySize.y - outPos.y - statusRowH - rowGapY - inputHeight));
         ImGui::SetCursorPos(outPos);
         // No ImGuiWindowFlags_HorizontalScrollbar: code blocks render without
         // wrapping, and any code line wider than the viewport would surface a
-        // horizontal scrollbar as a long grey line at the bottom of the child
-        // (plan/imgui_report.md §4). Overwide content is clipped instead.
+        // horizontal scrollbar as a long grey line at the bottom of the child.
+        // Overwide content is clipped instead.
         ImGui::BeginChild("llm_output", outSize, false);
 
         const bool lastMsgIsTool = [&state]() {
@@ -656,6 +696,13 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
 
     auto inputArea = [&state, &inputHeight, &inputHistory, &focusInput,
                       &suppressInputRowNavCursor]() {
+        // audit: accepted — the input row keeps terminal parity: it
+        // spans the content width (from the root padding) exactly like the
+        // grid, so its frame overlays the sidebar's bottom band (including
+        // the lower part of the rows scrollbar; the track above stays
+        // usable). Insetting it to the output slot was considered and
+        // rejected: the grid behaves the same and the narrower input would
+        // move the Send/history group.
         float buttonWidth =
             ImGui::CalcTextSize("Send   ").x + ImGui::GetStyle().FramePadding.x * 2.0f;
 
@@ -741,7 +788,7 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
     };
 
-    auto statusLine = [&state, &DisplaySize]() {
+    auto statusLine = [&state, &DisplaySize, statusRowH]() {
         static constexpr std::string_view defaultStatus =
             "Context: 0/0 tokens | Model: none | Ready";
 
@@ -751,7 +798,10 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         // status text that follows the group is placed at the group's right
         // edge and clipped off the terminal. Whatever cursor state the group
         // leaves behind, the status must sit at the bottom-left cell.
-        ImGui::SetCursorPos(ImVec2(0.0f, DisplaySize.y - 1.0f));
+        // audit: the 1-cell reserve becomes one text line in the
+        // pixel profile (statusRowH), keeping the status flush with the
+        // window bottom instead of one pixel above it.
+        ImGui::SetCursorPos(ImVec2(0.0f, DisplaySize.y - statusRowH));
 
         if (state.statusText.empty()) {
             ImGui::TextUnformatted(defaultStatus.data());
@@ -770,13 +820,23 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
 
 static void renderTabLog(TuiState& state, Log& log) {
     ImVec2 DisplaySize = ImGui::GetIO().DisplaySize;
-    ImVec2 childPos(0, 1.0f);
-    ImVec2 childSize(DisplaySize.x, DisplaySize.y - 2);
+    // audit: pixel profile — the text backend starts the log child
+    // one cell below the menu bar and reserves two rows at the bottom (the
+    // menu bar row + a status-row margin, matching the chat tab's frame); the
+    // GUI derives the same quantities from the font metrics and uses the same
+    // content origin as the chat tab (root padding + menu bar), so both tabs'
+    // content starts at the same inset.
+    const bool textGrid = tuiIsTextGrid();
+    const ImVec2 rootPad = textGrid ? ImVec2(0.0f, 0.0f) : ImGui::GetStyle().WindowPadding;
+    const float menuBarH = textGrid ? 1.0f : ImGui::GetFrameHeight();
+    const float bottomReserve = textGrid ? 1.0f : ImGui::GetTextLineHeight();
+    ImVec2 childPos(rootPad.x, rootPad.y + menuBarH);
+    ImVec2 childSize(DisplaySize.x - 2.0f * rootPad.x, DisplaySize.y - childPos.y - bottomReserve);
     ImGui::SetCursorPos(childPos);
     // No ImGuiWindowFlags_HorizontalScrollbar: unwrapped wide lines render
     // their tail beyond the viewport, and the flag would surface a horizontal
-    // scrollbar as a long grey line at the bottom of the child
-    // (plan/imgui_report.md §4). Overwide lines are clipped instead.
+    // scrollbar as a long grey line at the bottom of the child.
+    // Overwide lines are clipped instead.
     ImGui::BeginChild("llm_log", childSize, false);
 
     for (size_t i = 0; i < state.logMessages.size(); ++i) {

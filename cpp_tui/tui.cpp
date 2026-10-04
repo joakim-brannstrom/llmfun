@@ -1,51 +1,16 @@
-/// TUI frame-loop lifecycle and public state accessors.
-/// Owns terminal init/shutdown, the render entry point, and the tui* accessors.
+/// TUI core: the widget render entry point and the public state accessors.
+/// Backend lifecycle (init/frames/shutdown) is driven by the C API layer and
+/// owned per state (TuiState::backend); this file renders the widgets.
 #include "tui.h"
 #include "tui_chat.h"
 #include "tui_common.h"
 
-#include "imtui/imtui-impl-ncurses.h"
-#include "imtui/imtui-impl-text.h"
-
 #include "imgui/imgui_internal.h"
 
-#include <clocale>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <string>
 
 namespace llmfun::tui {
-
-static bool isWayland() {
-    const char* wayland = std::getenv("WAYLAND_DISPLAY");
-    const char* session = std::getenv("XDG_SESSION_TYPE");
-    return wayland != nullptr && wayland[0] != '\0' ||
-           (session != nullptr && strcmp(session, "wayland") == 0);
-}
-
-static void SetClipboardText(void*, const char* text) {
-    const char* cmd = isWayland() ? "wl-copy" : "xclip -selection clipboard -i";
-    FILE* f = popen(cmd, "w");
-    if (f) {
-        fputs(text, f);
-        pclose(f);
-    }
-}
-
-static const char* GetClipboardText(void*) {
-    static char buf[8192];
-    const char* cmd = isWayland() ? "wl-paste -n" : "xclip -selection clipboard -o";
-    FILE* f = popen(cmd, "r");
-    if (f) {
-        if (fread(buf, 1, sizeof(buf) - 1, f) <= 0) {
-            return "";
-        }
-        buf[sizeof(buf) - 1] = '\0';
-        pclose(f);
-    }
-    return buf;
-}
 
 void tuiAddOutputLine(TuiState& state, const ChatMessage& msg) {
     state.chat.outputLines.push_back(msg);
@@ -134,66 +99,21 @@ void applyTheme() {
     colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.55f, 0.55f, 0.55f, 1.00f);
     colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.65f, 0.65f, 0.65f, 1.00f);
     // One cell is a dot on a tall track; three cells read as a thumb.
-    ImGui::GetStyle().GrabMinSize = 3.0f;
+    // audit: gated - the cell-tuned grab is a text-grid metric; the
+    // GUI keeps imgui's default (12.0) so its scrollbar thumb is not clamped
+    // to a 3 px length. Caveat: harnesses that apply the theme before
+    // ImTui_ImplText_Init() (applyTheme-then-init order, e.g.
+    // test_tui_maxwidth's harnessInit) run this line while the guard is still
+    // false and keep the imtui 1.0 value instead; no harness asserts the grab
+    // metric.
+    if (tuiIsTextGrid())
+        ImGui::GetStyle().GrabMinSize = 3.0f;
     // fprintf(stderr, "[style] NavCursor=%08x ScrollbarGrab=%08x\n",
     // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_NavCursor]),
     // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_ScrollbarGrab]));
 }
 
-bool tuiInit(ImTui::TScreen** screen) {
-    setlocale(LC_ALL, "");
-
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-
-    ImGui::GetIO().IniFilename = nullptr;
-
-    // mouseSupport=true, fps_active=60.0, fps_idle=3.0 (save CPU when idle)
-    *screen = ImTui_ImplNcurses_Init(true, 60.0f, 3.0f);
-    if (!*screen) {
-        std::fprintf(stderr, "Failed to initialize ncurses terminal. Aborting.\n");
-        ImGui::DestroyContext();
-        return false;
-    }
-
-    ImTui_ImplText_Init();
-
-    // Apply the theme AFTER the backend inits: ImTui_ImplText_Init() resets
-    // several style colors (notably Colors[ImGuiCol_NavHighlight] = (0,0,0,0),
-    // which aliases ImGuiCol_NavCursor in ImGui 1.91.4+), so applying the
-    // theme before the backends lets the backend undo the NavCursor override.
-    applyTheme();
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.GetClipboardTextFn = GetClipboardText;
-    io.SetClipboardTextFn = SetClipboardText;
-
-    return true;
-}
-
-void tuiShutdown(ImTui::TScreen* screen) {
-    if (screen) {
-        ImTui_ImplText_Shutdown();
-        ImTui_ImplNcurses_Shutdown();
-    }
-    ImGui::DestroyContext();
-}
-
-void tuiNewFrame() {
-    ImTui_ImplNcurses_NewFrame();
-    ImTui_ImplText_NewFrame();
-    // fprintf(stderr, "[style@draw] NavCursor=%08x ScrollbarGrab=%08x Button=%08x\n",
-    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_NavCursor]),
-    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_ScrollbarGrab]),
-    // ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_Button]));
-    ImGui::NewFrame();
-}
-
-void tuiRenderFrame(ImTui::TScreen* screen) {
-    ImGui::Render();
-    ImTui_ImplText_RenderDrawData(ImGui::GetDrawData(), screen);
-    ImTui_ImplNcurses_DrawScreen();
-}
+bool tuiIsTextGrid() { return ImTui_TextEncodingActive; }
 
 bool tuiRender(TuiState& state) {
     auto logFile = [&state]() {
@@ -206,7 +126,11 @@ bool tuiRender(TuiState& state) {
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImVec2 DisplaySize = ImGui::GetIO().DisplaySize;
 
-    if (state.maxWidth > 0 && DisplaySize.x > state.maxWidth) {
+    // audit: gated - maxWidth is a terminal-column cap (D validates
+    // 40..10000); the GUI's DisplaySize is in pixels, so applying the clamp
+    // would read a column value as pixels and truncate the window to a
+    // sliver. The text backend keeps the exact clamp.
+    if (tuiIsTextGrid() && state.maxWidth > 0 && DisplaySize.x > state.maxWidth) {
         DisplaySize.x = static_cast<float>(state.maxWidth);
         ImGui::GetIO().DisplaySize = DisplaySize; // propagate to grid sizing
     }
@@ -214,7 +138,11 @@ bool tuiRender(TuiState& state) {
     static constexpr float MIN_TERMINAL_WIDTH = 40.0f;
     static constexpr float MIN_TERMINAL_HEIGHT = 15.0f;
 
-    if (DisplaySize.x < MIN_TERMINAL_WIDTH || DisplaySize.y < MIN_TERMINAL_HEIGHT) {
+    // audit: gated - 40x15 is the text grid's minimum cell area; a
+    // 40x15-pixel window is not "too small" for the GUI, and blanking the UI
+    // to an error page when the user shrinks the window would be wrong.
+    if (tuiIsTextGrid() &&
+        (DisplaySize.x < MIN_TERMINAL_WIDTH || DisplaySize.y < MIN_TERMINAL_HEIGHT)) {
         ImGui::Begin("Error");
         ImGui::Text("Terminal too small! Minimum size: 40x15");
         ImGui::End();
@@ -223,6 +151,11 @@ bool tuiRender(TuiState& state) {
 
     ImGuiIO& io = ImGui::GetIO();
 
+    // audit: accepted for BOTH modes - Ctrl+C exits the app in the
+    // GUI too (terminal parity: the key is documented as quit). GUI copy is
+    // unaffected: it goes through the [c] buttons / markdown links calling
+    // ImGui::SetClipboardText (platform clipboard), and Ctrl+V paste is
+    // handled by the input widget, not by this binding.
     if (io.KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_C))) {
         return false;
     }
@@ -237,18 +170,31 @@ bool tuiRender(TuiState& state) {
                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
                                    ImGuiWindowFlags_NoScrollWithMouse |
                                    ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_MenuBar;
+    // audit: pixel profile — the grid intentionally draws no root
+    // background (the terminal's own background shows through), while the GUI
+    // has a real framebuffer and the backend never clears it (no glClear):
+    // without a background, pixels the children do not repaint keep stale
+    // frame content (visible after a resize or an early-frame layout change).
+    // Let the root window paint the themed background in the GUI only.
+    if (!tuiIsTextGrid())
+        parentFlags &= ~ImGuiWindowFlags_NoBackground;
     static bool noClose = true;
     ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
     ImGui::SetNextWindowSize(DisplaySize, ImGuiCond_Always);
+    // The root window is an absolute-positioned layout; it must never scroll.
+    // Two ways it otherwise can: the content overshoots the bottom edge (27 px
+    // of scrollable range in the pixel profile), and a nav focus request made
+    // while a child window is Appearing (the input row at startup) asks for a
+    // centered scroll. SetNextWindowScroll() pins the scroll to 0 inside this
+    // same Begin — unlike SetScrollY(0), whose target the *next* Begin applies
+    // (1.92 semantics), so the startup request used to leave one frame
+    // scrolled and the whole layout slid up before settling.
+    // audit: accepted for BOTH modes — the absolute SetCursorPos
+    // layout depends on the root window never scrolling, and the pixel
+    // profile wants the same invariant (a stale scroll offset would slide
+    // the whole UI); gating this would risk the drift described above.
+    ImGui::SetNextWindowScroll(ImVec2(0.0f, 0.0f));
     ImGui::Begin("##TuiRoot", &noClose, parentFlags);
-    // The root window is an absolute-positioned terminal grid; it must never
-    // scroll. On 1.92, content that ends exactly at the inner bottom edge
-    // leaves one row of scrollable range, and something during Begin/nav
-    // scrolls the window by that 1 row on every frame after the first
-    // (observed: GetScrollY() == 1 from frame 2 on), shifting every
-    // SetCursorPos-based position up one row. SetScrollY(0) below re-asserts
-    // each frame after Begin's scroll calc, so it wins.
-    ImGui::SetScrollY(0.0f);
 
     renderMainWindow(state, log);
 

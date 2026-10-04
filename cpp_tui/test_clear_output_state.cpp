@@ -19,8 +19,10 @@
 // handle (same white-box completion of the C API's opaque TuiState as test_tui_maxwidth.cpp). No
 // terminal, no ImGui context, no rendering — pure state-level assertions.
 //
-// Also checks that outputLineNextId is NOT reset (monotonic per-message id, uniqueness
-// only), TUI_API_VERSION unchanged, and the auto-scroll flag is unaffected by the clear.
+// Also checks that the C-API clear functions are no-ops on a NULL state,
+// that outputLineNextId is NOT reset (monotonic per-message id, uniqueness
+// only), TUI_API_VERSION is pinned at the current generation (4), and the
+// auto-scroll flag is unaffected by the clear.
 //
 // Exit codes: 0 = all scenarios pass; 1 = first assertion failure.
 //
@@ -69,7 +71,7 @@ llmfun::tui::ChatMessage makeMsg(const char* text, size_t id) {
     return llmfun::tui::ChatMessage{"summary", text, "", llmfun::tui::ChatMessageType::User, id};
 }
 
-// — Scenario 1: stale open-group positions are reset by the clear.
+// Scenario 1: stale open-group positions are reset by the clear.
 void scenario1_openGroupReset() {
     g_scenario = 1;
     phase("stale outputLineOpen positions suppressed header labels after clear");
@@ -103,7 +105,7 @@ void scenario1_openGroupReset() {
                                                             " renders with its header label");
 }
 
-// — Scenario 2: the stream bubble does not survive a clear.
+// Scenario 2: the stream bubble does not survive a clear.
 void scenario2_streamBubbleCleared() {
     g_scenario = 2;
     phase("in-flight stream message cleared with the output area");
@@ -124,7 +126,7 @@ void scenario2_streamBubbleCleared() {
            "stream message id reset to the stream sentinel");
 }
 
-// — Scenario 3: outputLineNextId is NOT reset (monotonic, uniqueness only).
+// Scenario 3: outputLineNextId is NOT reset (monotonic, uniqueness only).
 void scenario3_nextIdMonotonic() {
     g_scenario = 3;
     phase("outputLineNextId not reset by the clear");
@@ -142,10 +144,10 @@ void scenario3_nextIdMonotonic() {
            "new message id is strictly greater than any pre-clear id (unique)");
 }
 
-// — Scenario 4: auto-scroll flag unaffected + TUI_API_VERSION unchanged.
+// Scenario 4: auto-scroll flag unaffected + TUI_API_VERSION pinned.
 void scenario4_scrollAndApiVersion() {
     g_scenario = 4;
-    phase("auto-scroll flag and TUI_API_VERSION unaffected");
+    phase("auto-scroll flag unaffected; TUI_API_VERSION pinned");
 
     llmfun::tui::TuiState state;
     state.autoScroll = false;
@@ -156,11 +158,11 @@ void scenario4_scrollAndApiVersion() {
     expect(state.autoScroll == true, "auto-scroll on stays on across a clear");
 
     // Documentation-only marker: the widened clear contract must not bump it.
-    static_assert(TUI_API_VERSION == 3,
-                  "TUI_API_VERSION must not change for the widened clear contract");
+    // 4 is the current generation (the single-handle v4 reshape).
+    static_assert(TUI_API_VERSION == 4, "TUI_API_VERSION must stay at the current v4 generation");
 }
 
-// — Scenario 5: C-API null-safety preserved.
+// Scenario 5: C-API null-safety preserved.
 void scenario5_cApiNullSafety() {
     g_scenario = 5;
     phase("C-API clear functions are no-ops on NULL state");
@@ -171,7 +173,7 @@ void scenario5_cApiNullSafety() {
     tuiUpdateStreamChatMessage(nullptr, param); // must not crash
 }
 
-// — Scenario 6: end-to-end through the real C-API session-switch path.
+// Scenario 6: end-to-end through the real C-API session-switch path.
 void scenario6_cApiSwitchPath() {
     g_scenario = 6;
     phase("C API switch path: tuiClearChatMessages reaches the fixed tuiClearOutput");

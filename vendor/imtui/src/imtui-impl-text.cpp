@@ -212,16 +212,15 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                     // (xx = trunc(avg) = trunc(pen x), the same rule used for
                     // yy). Do NOT re-add the legacy "+1" that used to shift
                     // all text one column right: it desynchronized text from
-                    // the rects/caret/hit-testing coordinate system
-                    // (plan/imgui_report.md §8). The dedup heuristic below
-                    // pushes a second quad
+                    // the rects/caret/hit-testing coordinate system.
+                    // The dedup heuristic below
                     // landing on the same cell to lastCharX + 1 so two glyphs never
                     // overwrite one cell. Vertices are clipped to
                     // clip_rect.z - 1 so content can never overwrite the
                     // scrollbar column. ch/chwidth/ch2 are taken from the
                     // encoded vertex colors (vertex 1 = codepoint, vertex 2
                     // = cell width, vertex 3 = continuation codepoint folded
-                    // into the base, P3 Task 6 — decoded below, guarded by
+                    // into the base — decoded below, guarded by
                     // col2 being a cell width); rect cells painted by
                     // drawTriangle() (scrollbar track/grab, window bg) set
                     // ch = ' ' and leave chwidth/ch2 = 0.
@@ -257,7 +256,7 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                             int vvidx0 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 3];
                             int vvidx1 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 4];
                             int vvidx2 = cmd_list->IdxBuffer[pcmd->IdxOffset + i + 5];
-                            // LLMFUN PATCH (P3, Task 6): vertex 3's color
+                            // LLMFUN PATCH: vertex 3's color
                             // carries the continuation codepoint
                             // (VS16/combining mark folded into the base by
                             // RenderText; 0 = none). vvidx2 IS the quad's
@@ -293,7 +292,7 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                                 auto & cell = screen->data[yy*screen->nx + xx];
                                 cell.ch = col1;
                                 cell.chwidth = (uint8_t)col2;
-                                // LLMFUN PATCH (P3, Task 6): decode the
+                                // LLMFUN PATCH: decode the
                                 // continuation codepoint (VS16/combining mark
                                 // folded into the base by RenderText) into
                                 // TCell::ch2. col3 is only meaningful for
@@ -394,6 +393,12 @@ bool ImTui_ImplText_Init() {
 }
 
 void ImTui_ImplText_Shutdown() {
+    // LLMFUN PATCH (imtui): reset the text-backend opt-in flag. One imgui build
+    // now serves both the imtui text path and a pixel backend (OpenGL) in the
+    // same process; a stale `true` would corrupt pixel rendering (see the
+    // declaration in imgui.h and the guarded patches in imgui_draw.cpp /
+    // imgui_widgets.cpp / imgui.cpp).
+    ImTui_TextEncodingActive = false;
 }
 
 void ImTui_ImplText_NewFrame() {

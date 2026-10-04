@@ -10,7 +10,7 @@ import argparse : CLI, NamedArgument, PositionalArgument, Command, Description,
 import my.path;
 import colorlog : VerboseMode;
 
-import llm.config : RagDatabaseConfig, LlmConfig, EmbedConfig, RemoteEmbedConfig;
+import llm.config : RagDatabaseConfig, LlmConfig, EmbedConfig, RemoteEmbedConfig, TuiConfig;
 import llm.rag.rag : RAG;
 
 struct UserConfig {
@@ -56,6 +56,13 @@ struct UserConfig {
 
         @(NamedArgument("no-memory").Description("Deactivate the persistent read/write memory"))
         bool noMemory;
+
+        @MutuallyExclusive() {
+            @(NamedArgument("tui").Description("Force the terminal UI (no GUI attempt)"))
+            bool tui;
+            @(NamedArgument("gui").Description("Require the GUI; fail if it cannot start"))
+            bool gui;
+        }
     }
 
     @(Command("rag"))
@@ -197,6 +204,11 @@ LlmConfigT userToLlmConfig(LlmConfigT, ConfigT)(LlmConfigT llm, ConfigT conf) {
                             __traits(getMember, llm, llmMemberName) = __traits(getMember,
                                     conf, confMemberName);
                         }
+                    } else static if (is(Type == TuiConfig)) {
+                        // LlmConfig.tui (YAML maxWidth) shares only its name
+                        // with the CLI --tui/--gui booleans, which select a
+                        // backend mode (resolveTuiBackendMode) and do not
+                        // update this config struct; nothing to convert.
                     } else {
                         static assert(0,
                                 "unknown conversion of field " ~ llmMemberName

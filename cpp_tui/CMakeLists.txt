@@ -15,13 +15,45 @@ set(IMTUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(../vendor/imtui ${CMAKE_BINARY_DIR}/imtui)
 add_subdirectory(../vendor/imgui_markdown ${CMAKE_BINARY_DIR}/imgui_markdown)
 
-# Ensure pthreads are available
 find_package(Threads REQUIRED)
+
+# GLFW — GUI backend dependency. Three-step discovery normalized to a target
+# named `glfw`: package config → pkg-config (optional, may be absent) →
+# find_library. The configure must fail here with an install hint when the dev
+# package is missing, not at link time.
+find_package(glfw3 3.0 QUIET)                 # config mode (needs glfw3Config.cmake)
+if (NOT TARGET glfw)
+    find_package(PkgConfig QUIET)
+    if (PkgConfig_FOUND)
+        pkg_check_modules(GLFW3 QUIET IMPORTED_TARGET glfw3)
+        if (TARGET PkgConfig::GLFW3)
+            add_library(glfw INTERFACE IMPORTED)
+            # set_property, not target_link_libraries: the latter needs CMake
+            # >= 3.11 for IMPORTED targets; this file declares 3.10.
+            set_property(TARGET glfw PROPERTY INTERFACE_LINK_LIBRARIES PkgConfig::GLFW3)
+        endif()
+    endif()
+endif()
+if (NOT TARGET glfw)
+    find_path(GLFW_INCLUDE_DIR GLFW/glfw3.h)
+    find_library(GLFW_LIBRARY NAMES glfw glfw3)
+    if (NOT GLFW_INCLUDE_DIR OR NOT GLFW_LIBRARY)
+        message(FATAL_ERROR
+            "GLFW not found. Install the GLFW dev package (Ubuntu/Debian: libglfw3-dev; "
+            "EL7/EL9: glfw-devel from EPEL) and re-run cmake.")
+    endif()
+    add_library(glfw UNKNOWN IMPORTED)
+    set_target_properties(glfw PROPERTIES IMPORTED_LOCATION "${GLFW_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${GLFW_INCLUDE_DIR}")
+endif()
 
 # Static library: implementation + C API layer
 # Enables D code (and other languages) to link against the library independently
 add_library(llmfun_tui_lib STATIC
     tui.cpp
+    tui_backend_ncurses.cpp
+    tui_backend_null.cpp
+    tui_backend_gui.cpp
     tui_common.cpp
     tui_widgets.cpp
     session_panel.cpp
@@ -35,6 +67,27 @@ target_link_libraries(llmfun_tui_lib
     PUBLIC imtui-ncurses imgui_markdown
     PRIVATE Threads::Threads stdc++
 )
+
+# Vendored imgui GLFW/OpenGL3 backend translation units (GUI mode). They need
+# the explicit imgui core + backends include dirs: the core dir is PRIVATE on
+# imgui-for-imtui and the backend files include bare "imgui.h" (upstream's
+# example build uses -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends). IMGUI_USE_WCHAR32
+# reaches these sources through imgui-for-imtui's PUBLIC usage requirement.
+set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/imtui/third-party/imgui/imgui)
+target_sources(llmfun_tui_lib PRIVATE
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+)
+# GLFW-including sources must not pull in GL headers; nothing here links an
+# OpenGL library (the OpenGL3 backend dlopens the driver at run time - no -lGL).
+set_source_files_properties(${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/tui_backend_gui.cpp
+    PROPERTIES COMPILE_DEFINITIONS GLFW_INCLUDE_NONE)
+target_include_directories(llmfun_tui_lib PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+# The GLFW usage requirements (include dir) must reach the TUs that include
+# <GLFW/glfw3.h> — tui_backend_gui.cpp here, imgui_impl_glfw.cpp above —
+# including when GLFW lives under a non-system prefix.
+target_link_libraries(llmfun_tui_lib PRIVATE glfw)
 
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/libllmfun_tui_all_lib.a
@@ -54,15 +107,40 @@ set_target_properties(llmfun_tui_all_lib PROPERTIES
 )
 add_dependencies(llmfun_tui_all_lib libllmfun_tui_all_lib)
 
-# Main executable — links against the static library
 add_executable(llmfun_tui
     main.cpp
 )
 
 add_dependencies(llmfun_tui llmfun_tui_all_lib)
+# glfw + libdl: the combined archive carries the GUI backend objects.
 target_link_libraries(llmfun_tui PRIVATE
     llmfun_tui_all_lib
     ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
+)
+
+# Headless v4 C-API contract test: none-state no-ops, the NULL-vs-None
+# tuiRender asymmetry, destroy-without-init (a harness ImGui context must
+# survive), a failed Gui init with a forced-empty display env (retryable, no
+# leaked context, empty backend note), and the Auto/TTY matrix via forked
+# children with pipe/PTY-controlled stdio. Invoke from the build dir:
+#   ./test_tui_api_v4
+# (the pty-auto-gui child mode expects a display; run it under xvfb-run).
+add_executable(test_tui_api_v4
+    test_tui_api_v4.cpp
+)
+add_dependencies(test_tui_api_v4 llmfun_tui_all_lib)
+# imtui/imtui.h (and the IMGUI_USE_WCHAR32 definition) come from the
+# interface-providing targets; their archives are already inside
+# llmfun_tui_all_lib, so they contribute no extra objects.
+target_link_libraries(test_tui_api_v4 PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    imgui_markdown
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
 )
 
 # Headless grid-invariant regression test for the imtui UTF-8 cell-width fix
@@ -106,6 +184,8 @@ target_link_libraries(test_session_filter_smoke PRIVATE
     imtui-ncurses
     imgui_markdown
     ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
 )
 
 # Headless clamp test for tuiSetMaxWidth / the tuiRender clamp. Text backend only (no ncurses, no PTY) — runs a real TuiState through tuiRender and checks the grid width. Invoke: ./test_tui_maxwidth
@@ -122,6 +202,8 @@ target_link_libraries(test_tui_maxwidth PRIVATE
     imtui-ncurses
     imgui_markdown
     ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
 )
 
 # Headless regression test for the widened clear contract: tuiClearOutput / C-API tuiClearChatMessages must reset ALL derived chat-display state — output lines, the open-group set (collapsed headers; stale positions suppressed header labels of replayed messages) and the in-flight stream message — not just outputLines. Pure state-level assertions; no terminal, no ImGui context, no rendering needed. Invoke:
@@ -139,4 +221,6 @@ target_link_libraries(test_clear_output_state PRIVATE
     imtui-ncurses
     imgui_markdown
     ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
 )
