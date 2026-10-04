@@ -65,7 +65,8 @@ If your identity is **llmfun** then:
 
 **Important**: The container image to use when running the tool `executeCommand` is `llmfun/app:latest`.
 
-Example of using `executeCommand`: `executeCommand(environmentTag="llmfun", command=["cd", "llmfun", "&&", "dub", "build", "--config=application"])`
+Example of using `executeCommand`: `executeCommand(environmentTag="llmfun", command=["cd", "llmfun && dub build --config=application"])`
+- command must be a string, not a string array.
 
 ```bash
 cd llmfun
