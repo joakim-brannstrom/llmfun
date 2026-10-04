@@ -523,6 +523,9 @@ SessionAction tuiGetSessionAction(TuiState* state) {
         out.title = String_NewBuf(a.title.data(), a.title.size());
     return out;
 }
+
+int tuiHasMoreEvents() { return ::llmfun::tui::tuiHasMoreEvents() ? 1 : 0; }
+
 #ifdef __cplusplus
 }
 #endif

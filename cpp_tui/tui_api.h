@@ -535,6 +535,15 @@ int tuiIsSessionActionReady(TuiState* state);
  */
 SessionAction tuiGetSessionAction(TuiState* state);
 
+/* Reports whether the frame we just rendered consumed at least one input
+ * event (mouse, key, ...). If so, more input is likely to arrive: the next
+ * frame should be rendered immediately instead of waiting for the refresh
+ * interval.
+ *
+ * Returns 1 if the last rendered frame consumed input, 0 otherwise.
+ * */
+int tuiHasMoreEvents();
+
 #ifdef __cplusplus
 }
 #endif

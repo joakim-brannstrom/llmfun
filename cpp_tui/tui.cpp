@@ -275,4 +275,9 @@ void tuiInitQueryHistory(TuiState& state, const std::vector<std::string>& histor
     state.userQuery.historyPos = -1;
 }
 
+bool tuiHasMoreEvents() {
+    auto ctx = ImGui::GetCurrentContext();
+    return ctx != nullptr && ctx->InputEventsTrail.Size > 0;
+}
+
 } // namespace llmfun::tui

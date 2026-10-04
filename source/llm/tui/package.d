@@ -160,6 +160,10 @@ struct TextUserInterface {
         tuiShutdown(tuiScreen);
     }
 
+    bool hasMoreEvents() {
+        return tuiHasMoreEvents() == 1;
+    }
+
     void addChatMessage(string msg, string thinking, TuiChatMessageType type) {
         string summary = shortSummary(msg);
         auto s = String(summary.ptr, summary.length);
@@ -367,6 +371,10 @@ class TextUserInterfaceActor : TUICommands {
     // Package-visible state: read/write seam for the llm.tui.tests driver
     // (see the TextUserInterface block above).
     package {
+        // Incremented each render cycle which make it possible to observe if
+        // and how often the UI render has executed.
+        ulong updateCycle;
+
         TextUserInterface ui;
 
         TuiSessionActionType pendingAction = TuiSessionAction_None;
@@ -416,6 +424,17 @@ class TextUserInterfaceActor : TUICommands {
     // Must be called by every message handler except uiTerminate. Polls the
     // pending user query and at most one session action, then renders if due.
     private void postProcess() {
+        // it is only worth processing the rest of the method if render() has
+        // been called because the rest of the function react on "input" that
+        // is updated by render via imgui.
+        if (Clock.currTime > nextUpdate) {
+            ui.render();
+            nextUpdate = Clock.currTime + UpdateInterval;
+        } else {
+            return;
+        }
+
+        ++updateCycle;
         auto query = ui.userQuery();
 
         if (!query.strip.empty) {
@@ -450,14 +469,15 @@ class TextUserInterfaceActor : TUICommands {
             pendingActionTitle = null;
         }
 
-        if (Clock.currTime > nextUpdate) {
-            ui.render();
-            nextUpdate = Clock.currTime + UpdateInterval;
-            // Poll one session action per frame; never overwrite an
-            // action still awaiting forward.
-            if (pendingAction == TuiSessionAction_None) {
-                ui.pollSessionAction(pendingAction, pendingActionId, pendingActionTitle);
-            }
+        // Poll one session action per frame; never overwrite an
+        // action still awaiting forward.
+        if (pendingAction == TuiSessionAction_None) {
+            ui.pollSessionAction(pendingAction, pendingActionId, pendingActionTitle);
+        }
+
+        if (ui.hasMoreEvents()) {
+            dynSend(selfRef.address, "uiTick");
+            nextUpdate = Clock.currTime; // force an update
         }
     }
 

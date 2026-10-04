@@ -363,4 +363,9 @@ void tuiResetSubmit(TuiState& state);
 /// tuiGetSubmitQuery() returns the last submitted query (read-only snapshot).
 std::string tuiGetSubmitQuery(const TuiState& state);
 
+/// Reports whether the frame we just rendered consumed at least one input
+/// event (mouse, key, ...). If so, more input is likely to arrive: render
+/// the next frame immediately instead of waiting for the refresh interval.
+bool tuiHasMoreEvents();
+
 } // namespace llmfun::tui
