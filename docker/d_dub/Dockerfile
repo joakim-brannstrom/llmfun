@@ -9,13 +9,18 @@ RUN apt update && \
 
 RUN apt upgrade -y
 
+RUN apt update && \
+    DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends install \
+        ca-certificates
+
 RUN apt install -y --no-install-recommends \
         git \
         make cmake ninja-build \
         gcc g++ gdb \
         curl \
         xz-utils \
-        libncurses-dev
+        libncurses-dev \
+        libglfw3-dev xvfb mesa-utils pkg-config
 
         # vulkan-tools libvulkan-dev vulkan-validationlayers glslc spirv-headers pkg-config
 WORKDIR /opt
