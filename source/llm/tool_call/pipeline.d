@@ -20,8 +20,9 @@ struct PipelineOutputParams {
 /// Tool for agents to communicate their output to downstream nodes.
 /// This tool stores the output string in the pipeline's execution context
 /// for edge propagation. It does NOT signal node completion (that is taskDone's role).
-@Function("Stores the output of this node for downstream propagation in the pipeline. Use this to pass structured output to the next nodes.")
-ExecuteFuncResult pipelineOutput(Context baseCtx, PipelineOutputParams params) @trusted {
+@Function("Stores the output of this node for downstream propagation in the pipeline. Use this to pass structured output to the next nodes.",
+    tags:
+        ["pipeline"]) ExecuteFuncResult pipelineOutput(Context baseCtx, PipelineOutputParams params) @trusted {
     if (params.output.strip.empty) {
         return ExecuteFuncResult("error: 'output' parameter is required and must not be empty",
                 success: false);

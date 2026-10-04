@@ -96,6 +96,7 @@ toolBroker:
     encoding: "Base64 and md5 encoding"
     vision: "Vision model tools for imagesfor"
     env: "Environment tools: execute/list"
+    pipeline: "Completion tools for agents running in a pipeline"
 
 ragFilter:
   include:

@@ -19,7 +19,8 @@ enum KnownToolTag {
     mcp,
     encoding,
     vision,
-    env
+    env,
+    pipeline
 }
 
 /// Tags in `tags` that are not members of KnownToolTag (registration-time
