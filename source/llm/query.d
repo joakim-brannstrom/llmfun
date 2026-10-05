@@ -86,7 +86,8 @@ struct LlmRequester {
 
         try {
             auto jsonReq = chat.toJson.merge(cfg.header);
-            jsonReq["tools"] = tools;
+            if (!tools.empty)
+                jsonReq["tools"] = tools;
             if (rqCfg.stream !is null) {
                 jsonReq["stream"] = true;
             }

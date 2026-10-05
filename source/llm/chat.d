@@ -683,7 +683,8 @@ struct Message {
     // toJson — REST API: does NOT include thinking (no change needed)
     JSONValue toJson() @safe {
         auto j = JSONValue(["role": role.to!string, "content": content]);
-        j["reasoning_content"] = thinking;
+        if (!thinking.empty)
+            j["reasoning_content"] = thinking;
         return j;
     }
 
