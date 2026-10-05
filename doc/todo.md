@@ -25,6 +25,7 @@
 - memory consolidation is too slow. It has to be more automated. Maybe something like a configured max number of memories that can be kept? Or that it tells the LLM that it will remove the "10 oldes" so if there is any information worth keeping in them the LLM has to "write one new memory" containing the important facts.
 - when the context is at 90% only a call to requestCompression should be accepted. Everything else is blocked.
 - imgui 1.92 use a queue for key pressed. When a user hold down a key they queue up but the consumer (the GUI thread) only run at 60hz which mean that the GUI start to "lag behind" the queue. Maybe there is a function in imgui 1.92 which can check if there are more events in the queue and then schedule a GUI refresh immediately?
+- agent.md summary must be executed async in case it is "severly slowed down"
 
 # ui
 - change the background color for the input field to dark grey
