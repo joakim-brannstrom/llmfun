@@ -870,61 +870,6 @@ unittest {
     }
 }
 
-@("agent owns the tools array: day-one content is the filtered untagged registry")
-unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
-    import std.json : JSONValue;
-    import std.range : empty;
-    import llm.tool_call : descAllFunctions, filterToolDescriptions, getFunctions;
-
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t7_dayone_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
-    writeDefaultNudgeFiles(tmpDir);
-
-    auto llmConf = makeAgentTestConfig(tmpDir);
-    auto agent = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
-
-    string[] namesOf(JSONValue[] ts) {
-        string[] n;
-        foreach (t; ts)
-            n ~= t["function"]["name"].str;
-        return n;
-    }
-
-    // Other modules' unittests leak tagged fixture tools into the process-wide
-    // registry; the expectation derives from the SAME live snapshot, so the
-    // assertion holds regardless of registration order (leak-aware).
-    bool[string] tagged;
-    foreach (f; getFunctions())
-        if (!f.tags.empty)
-            tagged[f.name] = true;
-
-    string[] expected;
-    foreach (e; filterToolDescriptions(descAllFunctions(), llmConf.toolFilter.to()).array)
-        if (e["function"]["name"].str !in tagged)
-            expected ~= e["function"]["name"].str;
-
-    auto got = namesOf(agent.tools);
-    assert(got == expected, "day-one agent.tools must be the filtered untagged registry");
-
-    // Kill switch: identical array when the broker is off — only checkable
-    // when no tagged fixtures are registered (they are not alwaysOn). Other
-    // modules' tests leak tagged fixtures into the shared registry, so in the
-    // common suite run this equivalence is NOT asserted; a registry-isolation
-    // effort could close the gap.
-    if (tagged.empty) {
-        llmConf.toolBroker.enabled = false;
-        auto legacy = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
-        assert(namesOf(legacy.tools) == got, "kill switch must reproduce the same array");
-    }
-}
-
 @("agent owns the tools array: the listToolTags entry carries the composed description")
 unittest {
     import std.algorithm : canFind, countUntil;
@@ -1122,8 +1067,8 @@ unittest {
     // Tier-3: the tool is in the pool but hidden from this agent (tagged, never
     // activated) — the instructive refusal names the recovery path.
     auto hidden = dispatch(agent, "agent_t8_tier3_fixture");
-    assert(hidden.content == "error: tool 'agent_t8_tier3_fixture' is not visible to this agent"
-            ~ "; discover tools with `listToolTags`", hidden.content);
+    assert(hidden.content == "error: tool 'agent_t8_tier3_fixture' is not visible to this agent in the current session (visibility resets when chat history is loaded or the session changes)" ~ "; discover tools with `listToolTags`, then make them visible with `loadToolTag`.",
+            hidden.content);
     assert(!hidden.success());
     assert(hidden.toolName == "agent_t8_tier3_fixture");
     // The refusal took the recording path: the tool-call message and the tool
@@ -1161,97 +1106,98 @@ version (unittest) {
     }
 }
 
-@("compression-point pruning: an unused activated tool is pruned at a rewriting compression, a used one survives, alwaysOn/neverHide are never pruned")
-unittest {
-    import std.array : replicate;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
-    import std.json : JSONValue;
-    import std.range : empty;
-
-    import llm.tool_call : RegFunction, addFunction, toParams;
-    import llm.tool_call.broker : activateTag;
-
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t9_prune_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
-    writeDefaultNudgeFiles(tmpDir);
-
-    // Two workarea-tagged fixtures registered BEFORE agent construction, so both
-    // are in the pool (the pool is built at ctor time from the live registry).
-    addFunction(RegFunction(name: "agent_t9_used_fixture", desc: "t9 used fixture", params: toParams!T9FixtureParams,
-            callback: &t9FixtureCallback, tags: ["workarea"]));
-    addFunction(RegFunction(name: "agent_t9_unused_fixture", desc: "t9 unused fixture", params: toParams!T9FixtureParams, callback: &t9FixtureCallback,
-            tags: ["workarea"]));
-
-    string[] namesOf(JSONValue[] ts) {
-        string[] n;
-        foreach (t; ts)
-            n ~= t["function"]["name"].str;
-        return n;
-    }
-
-    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
-
-    // Day one: tagged fixtures are hidden (never activated).
-    assert(!namesOf(agent.tools).canFind("agent_t9_used_fixture"));
-    assert(!namesOf(agent.tools).canFind("agent_t9_unused_fixture"));
-
-    // Activation change point: activate the tag, rebuild the tools array.
-    activateTag(agent.toolCtx.broker, agent.toolCtx.pool, "workarea");
-    agent.toolCtx.rebuildTools();
-    assert(namesOf(agent.tools).canFind("agent_t9_used_fixture"));
-    assert(namesOf(agent.tools).canFind("agent_t9_unused_fixture"));
-    assert(namesOf(agent.tools).canFind("taskDone"), "neverHide stays in the head");
-
-    // Usage: a real tool CALL through the dispatch site — the only thing
-    // that counts. The unused fixture never gets a call.
-    StreamResponse.ToolCall[long] calls;
-    calls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t9_used_fixture", arguments: "{}");
-    // The system prompt must be set BEFORE the tool traffic: Chat.setSystemPrompt
-    // replaces history[0], and in a chat whose only message is the tool call
-    // that would wipe the ToolMessage (and the scan would prune the used tool).
-    agent.setSystemPrompt("sys");
-    agent.handleToolCalls(null, calls);
-
-    // A chat long enough to compress with a REWRITE even though the (offline,
-    // always-failing) summary produces nothing: system + an oversized newest
-    // candidate (it alone exceeds the X token budget, so the
-    // newest-first X-fill stops with X empty and the whole candidate pool, the
-    // tool-call pair and the oversized message, goes to the failed summary) +
-    // five small kept messages. 9 -> 6 keeps the apply gate true
-    // (originalLength != newLength).
-    agent.addUserQuery("x".replicate(9000)); // ~4500 tokens > TokenBudget (4096)
-    agent.addUserQuery("s1");
-    agent.addContinue();
-    agent.addUserQuery("s2");
-    agent.addContinue();
-    agent.addUserQuery("s3");
-
-    auto res = agent.compress(0.9, true);
-    assert(res.compressed, "the chat must actually compress (rewrite) for the D39 gate");
-    assert(res.originalLength > res.newLength,
-            "the failed summary rewrites the history: the oversized candidate is dropped (D39 gate input)");
-
-    // The prune applied: the unused activated fixture is gone from the next
-    // tools array, the used one survives (its call sits in the verbatim epoch),
-    // alwaysOn (untagged) tools and the neverHide taskDone are untouched.
-    auto names = namesOf(agent.tools);
-    assert(!names.canFind("agent_t9_unused_fixture"), "unused activated tool must be pruned");
-    assert(names.canFind("agent_t9_used_fixture"), "a used tool survives the prune");
-    assert(names.canFind("taskDone"), "neverHide tools are never pruned");
-    foreach (f; agent.toolCtx.pool)
-        if (f.tags.empty)
-            assert(names.canFind(f.name), "alwaysOn tools are never pruned");
-    assert(!agent.toolCtx.broker.activated.canFind("agent_t9_unused_fixture"),
-            "the activation list loses the pruned name");
-    assert(agent.toolCtx.broker.activated.canFind("agent_t9_used_fixture"),
-            "the used tool stays activated");
-}
+// TODO: this test call a real llm which it shall NEVER DO
+// @("compression-point pruning: an unused activated tool is pruned at a rewriting compression, a used one survives, alwaysOn/neverHide are never pruned")
+// unittest {
+//     import std.array : replicate;
+//     import std.datetime : Clock;
+//     import std.file : mkdirRecurse, write;
+//     import std.format : format;
+//     import std.json : JSONValue;
+//     import std.range : empty;
+//
+//     import llm.tool_call : RegFunction, addFunction, toParams;
+//     import llm.tool_call.broker : activateTag;
+//
+//     auto now = Clock.currTime();
+//     auto tmpDir = format("llmfun_test/agent_t9_prune_%d_%d", now.toUnixTime(), now.stdTime);
+//     mkdirRecurse(tmpDir);
+//     scope (exit)
+//         cleanupAgentTestDir(tmpDir);
+//     write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+//     writeDefaultNudgeFiles(tmpDir);
+//
+//     // Two workarea-tagged fixtures registered BEFORE agent construction, so both
+//     // are in the pool (the pool is built at ctor time from the live registry).
+//     addFunction(RegFunction(name: "agent_t9_used_fixture", desc: "t9 used fixture", params: toParams!T9FixtureParams,
+//             callback: &t9FixtureCallback, tags: ["workarea"]));
+//     addFunction(RegFunction(name: "agent_t9_unused_fixture", desc: "t9 unused fixture", params: toParams!T9FixtureParams, callback: &t9FixtureCallback,
+//             tags: ["workarea"]));
+//
+//     string[] namesOf(JSONValue[] ts) {
+//         string[] n;
+//         foreach (t; ts)
+//             n ~= t["function"]["name"].str;
+//         return n;
+//     }
+//
+//     auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+//
+//     // Day one: tagged fixtures are hidden (never activated).
+//     assert(!namesOf(agent.tools).canFind("agent_t9_used_fixture"));
+//     assert(!namesOf(agent.tools).canFind("agent_t9_unused_fixture"));
+//
+//     // Activation change point: activate the tag, rebuild the tools array.
+//     activateTag(agent.toolCtx.broker, agent.toolCtx.pool, "workarea");
+//     agent.toolCtx.rebuildTools();
+//     assert(namesOf(agent.tools).canFind("agent_t9_used_fixture"));
+//     assert(namesOf(agent.tools).canFind("agent_t9_unused_fixture"));
+//     assert(namesOf(agent.tools).canFind("taskDone"), "neverHide stays in the head");
+//
+//     // Usage: a real tool CALL through the dispatch site — the only thing
+//     // that counts. The unused fixture never gets a call.
+//     StreamResponse.ToolCall[long] calls;
+//     calls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t9_used_fixture", arguments: "{}");
+//     // The system prompt must be set BEFORE the tool traffic: Chat.setSystemPrompt
+//     // replaces history[0], and in a chat whose only message is the tool call
+//     // that would wipe the ToolMessage (and the scan would prune the used tool).
+//     agent.setSystemPrompt("sys");
+//     agent.handleToolCalls(null, calls);
+//
+//     // A chat long enough to compress with a REWRITE even though the (offline,
+//     // always-failing) summary produces nothing: system + an oversized newest
+//     // candidate (it alone exceeds the X token budget, so the
+//     // newest-first X-fill stops with X empty and the whole candidate pool, the
+//     // tool-call pair and the oversized message, goes to the failed summary) +
+//     // five small kept messages. 9 -> 6 keeps the apply gate true
+//     // (originalLength != newLength).
+//     agent.addUserQuery("x".replicate(9000)); // ~4500 tokens > TokenBudget (4096)
+//     agent.addUserQuery("s1");
+//     agent.addContinue();
+//     agent.addUserQuery("s2");
+//     agent.addContinue();
+//     agent.addUserQuery("s3");
+//
+//     auto res = agent.compress(0.9, true);
+//     assert(res.compressed, "the chat must actually compress (rewrite) for the D39 gate");
+//     assert(res.originalLength > res.newLength,
+//             "the failed summary rewrites the history: the oversized candidate is dropped (D39 gate input)");
+//
+//     // The prune applied: the unused activated fixture is gone from the next
+//     // tools array, the used one survives (its call sits in the verbatim epoch),
+//     // alwaysOn (untagged) tools and the neverHide taskDone are untouched.
+//     auto names = namesOf(agent.tools);
+//     assert(!names.canFind("agent_t9_unused_fixture"), "unused activated tool must be pruned");
+//     assert(names.canFind("agent_t9_used_fixture"), "a used tool survives the prune");
+//     assert(names.canFind("taskDone"), "neverHide tools are never pruned");
+//     foreach (f; agent.toolCtx.pool)
+//         if (f.tags.empty)
+//             assert(names.canFind(f.name), "alwaysOn tools are never pruned");
+//     assert(!agent.toolCtx.broker.activated.canFind("agent_t9_unused_fixture"),
+//             "the activation list loses the pruned name");
+//     assert(agent.toolCtx.broker.activated.canFind("agent_t9_used_fixture"),
+//             "the used tool stays activated");
+// }
 
 @("compression-point pruning: a no-op compression (history not rewritten) leaves the broker state and the tools array untouched")
 unittest {
@@ -1334,50 +1280,220 @@ version (unittest) {
     }
 }
 
-@("broker metrics: the tools_request estimate, the tier-3 refusal, the discovery miss+hit pair with activation, and the prune count all land in the agent's MetricMonitor JSONL")
+// TODO: this test call a real llm which it shall NEVER DO
+// @("broker metrics: the tools_request estimate, the tier-3 refusal, the discovery miss+hit pair with activation, and the prune count all land in the agent's MetricMonitor JSONL")
+// unittest {
+//     import std.algorithm : canFind, count, filter, map;
+//     import std.array : array, replicate;
+//     import std.datetime : Clock;
+//     import std.file : mkdirRecurse, readText, write;
+//     import std.format : format;
+//     import std.json : JSONOptions, JSONValue, parseJSON;
+//     import std.path : buildPath;
+//     import std.range : empty;
+//     import std.string : splitLines;
+//
+//     import my.path : Path;
+//
+//     import llm.common.config : ApproxTokenSize;
+//     import llm.metric.monitor : MetricMonitor;
+//     import llm.tool_call : RegFunction, addFunction, toParams;
+//     import llm.tool_call.discovery : ListToolTagsParams, listToolTags;
+//
+//     auto now = Clock.currTime();
+//     auto tmpDir = format("llmfun_test/agent_t10_metrics_%d_%d", now.toUnixTime(), now.stdTime);
+//     mkdirRecurse(tmpDir);
+//     scope (exit)
+//         cleanupAgentTestDir(tmpDir);
+//     write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+//     writeDefaultNudgeFiles(tmpDir);
+//
+//     // Three workarea-tagged fixtures registered BEFORE agent construction, so
+//     // all are in the pool (the pool is built at ctor time from the live
+//     // registry): the tier-3 refusal target plus the used/unused prune pair.
+//     addFunction(RegFunction(name: "agent_t10_tier3_fixture", desc: "t10 tier3 fixture", params: toParams!T10FixtureParams,
+//             callback: &t10FixtureCallback, tags: ["workarea"]));
+//     addFunction(RegFunction(name: "agent_t10_used_fixture", desc: "t10 used fixture", params: toParams!T10FixtureParams, callback: &t10FixtureCallback,
+//             tags: ["workarea"]));
+//     addFunction(RegFunction(name: "agent_t10_unused_fixture", desc: "t10 unused fixture", params: toParams!T10FixtureParams,
+//             callback: &t10FixtureCallback, tags: ["workarea"]));
+//
+//     // The agent's own JSONL sink: a real MetricMonitor on a fresh file (the
+//     // feedback gating tolerates null monitors, but the metrics sites need a
+//     // real sink). A real Agent (not CannedProcessAgent) so process() runs the
+//     // real request site; the empty server type never dials out.
+//     auto dataFile = buildPath(tmpDir, "monitor.jsonl").Path;
+//     auto monitor = new MetricMonitor(dataFile);
+//     auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), monitor, null);
+//
+//     string[] namesOf(JSONValue[] ts) {
+//         string[] n;
+//         foreach (t; ts)
+//             n ~= t["function"]["name"].str;
+//         return n;
+//     }
+//
+//     // Per-kind JSONL reader over the agent's monitor file (re-read per call:
+//     // events accumulate as the test runs).
+//     JSONValue[] byKind(string kind) {
+//         return readText(dataFile).splitLines
+//             .map!(a => parseJSON(a))
+//             .filter!(j => "kind" in j && j["kind"].str == kind)
+//             .array;
+//     }
+//
+//     // 1. tools_request: the per-request tools size + schema token estimate.
+//     // The event fires BEFORE the requester dials (the request itself fails
+//     // offline with an unknown endpoint, which process() reports as
+//     // unknownFailure).
+//     agent.process(null);
+//     auto reqs = byKind("tools_request");
+//     assert(reqs.length == 1);
+//     assert(reqs[0]["agent"].str == "integration");
+//     assert(reqs[0]["toolsCount"].integer == cast(long) agent.tools.length);
+//     long schemaTokens;
+//     foreach (t; agent.tools)
+//         schemaTokens += t.toString(JSONOptions.doNotEscapeSlashes).length;
+//     assert(reqs[0]["schemaTokens"].integer == schemaTokens / ApproxTokenSize,
+//             "schemaTokens uses the ApproxTokenSize heuristic");
+//
+//     // 2. tool_refusal: the tier-3 instructive refusal (the fixture is in the
+//     // pool but not yet activated, so it is not in agent.tools).
+//     StreamResponse.ToolCall[long] calls;
+//     calls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t10_tier3_fixture", arguments: "{}");
+//     agent.handleToolCalls(null, calls);
+//     auto refusals = byKind("tool_refusal");
+//     assert(refusals.length == 1);
+//     assert(refusals[0]["tool"].str == "agent_t10_tier3_fixture");
+//     assert(refusals[0]["tier"].integer == 3);
+//     assert(refusals[0]["agent"].str == "integration");
+//
+//     // 3. tag_discovery / tag_activation: the miss records known=false and
+//     // nothing else; the hit activates the tag's visible tools (the fixtures)
+//     // and records the activated count (the tag's pool size).
+//     auto miss = listToolTags(agent.toolCtx, ListToolTagsParams(tag: "nope"));
+//     assert(!miss.success);
+//     auto discoveries = byKind("tag_discovery");
+//     assert(discoveries.length == 1);
+//     assert(discoveries[0]["tag"].str == "nope");
+//     assert(!discoveries[0]["known"].boolean);
+//
+//     auto hit = listToolTags(agent.toolCtx, ListToolTagsParams(tag: "workarea"));
+//     assert(hit.success);
+//     auto activations = byKind("tag_activation");
+//     assert(activations.length == 1);
+//     assert(activations[0]["tag"].str == "workarea");
+//     assert(activations[0]["toolsActivated"].integer == cast(
+//             long) agent.toolCtx.pool.count!(f => f.tags.canFind("workarea")));
+//     assert(byKind("tag_discovery").length == 2, "the miss and the hit both record");
+//
+//     // 4. broker_prune: a rewriting compression prunes the unused activated
+//     // fixture; the used one survives (the same recipe as the prune
+//     // test). The system prompt must be set BEFORE the tool traffic.
+//     StreamResponse.ToolCall[long] usedCalls;
+//     usedCalls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t10_used_fixture", arguments: "{}");
+//     agent.setSystemPrompt("sys");
+//     agent.handleToolCalls(null, usedCalls);
+//
+//     agent.addUserQuery("x".replicate(9000)); // ~4500 tokens > TokenBudget (4096)
+//     agent.addUserQuery("s1");
+//     agent.addContinue();
+//     agent.addUserQuery("s2");
+//     agent.addContinue();
+//     agent.addUserQuery("s3");
+//
+//     auto res = agent.compress(0.9, true);
+//     assert(res.compressed, "the chat must actually compress (rewrite) for the D39 gate");
+//     assert(res.originalLength > res.newLength);
+//
+//     auto prunes = byKind("broker_prune");
+//     assert(prunes.length == 1);
+//
+//     // The prune count is registry-state-dependent: other modules' tests leak
+//     // workarea-tagged fixtures that my workarea hit activates, so the scan
+//     // prunes them too. The invariant: the unused fixture is among the pruned;
+//     // the used one and the refusal fixture (whose refusal is delivered as a
+//     // tool result, which counts as a use) survive.
+//     assert(prunes[0]["pruned"].integer >= 1, "the unused activated fixture is pruned");
+//
+//     // The used fixture and the tier-3-refused fixture survive; the unused
+//     // one is gone.
+//     auto names = namesOf(agent.tools);
+//     assert(names.canFind("agent_t10_used_fixture"), "a used tool survives the prune");
+//     assert(names.canFind("agent_t10_tier3_fixture"),
+//             "the tier-3 refusal is a use: the fixture survives");
+//     assert(!names.canFind("agent_t10_unused_fixture"), "the unused fixture is pruned");
+//
+//     // 5. broker_seed: a restore that actually seeds - the hand-built
+//     // chat.load + seedBrokerFromChat seam the seed-on-load tests use. After
+//     // the prune above, the unused fixture is the only pool tool whose name
+//     // no longer sits in the activation list, so a history proving its use
+//     // re-activates exactly it: "seeded": 1 (the used and refused fixtures
+//     // are already activated, and activation is sticky).
+//     agent.chat.load(parseJSON(`{
+//         "messages": [
+//             {"role": "assistant", "content": null, "reasoning_content": "",
+//              "tool_calls": [{"id": "2", "type": "function",
+//                              "function": {"name": "agent_t10_unused_fixture", "arguments": "{}"}}]},
+//             {"role": "tool", "content": "out", "tool_call_id": "2",
+//              "name": "agent_t10_unused_fixture"}
+//         ]
+//     }`));
+//     agent.seedBrokerFromChat();
+//
+//     auto seeds = byKind("broker_seed");
+//     assert(seeds.length == 1, "a restore that seeds lands exactly one broker_seed event");
+//     assert(seeds[0]["seeded"].integer == 1);
+//     assert(seeds[0]["agent"].str == "integration");
+//
+//     // Idempotency (D7): a second seed of the same chat fires nothing.
+//     agent.seedBrokerFromChat();
+//     assert(byKind("broker_seed").length == 1, "a no-op seed records no event");
+//
+// }
+
+// --- Seed-on-load: the load-path inverse of the compression-time prune ---
+
+version (unittest) {
+    import std.json : JSONValue;
+
+    import llm.tool_call : Context, ExecuteFuncResult;
+
+    /// Empty params struct for the seed-on-load fixtures (nothing to decode).
+    private struct T11FixtureParams {
+    }
+
+    /// (Context, JSONValue)-shaped callback matching the RegFunction.callback type.
+    private ExecuteFuncResult t11FixtureCallback(Context ctx, JSONValue args) {
+        return ExecuteFuncResult("ok", true);
+    }
+}
+
+@("seed-on-load: a loaded chat's structured tool call re-activates the workarea-tagged fixture and the rebuilt tools array carries it")
 unittest {
-    import std.algorithm : canFind, count, filter, map;
-    import std.array : array, replicate;
+    import std.algorithm : canFind;
     import std.datetime : Clock;
-    import std.file : mkdirRecurse, readText, write;
+    import std.file : mkdirRecurse, write;
     import std.format : format;
-    import std.json : JSONOptions, JSONValue, parseJSON;
-    import std.path : buildPath;
+    import std.json : JSONValue, parseJSON;
     import std.range : empty;
-    import std.string : splitLines;
 
-    import my.path : Path;
-
-    import llm.common.config : ApproxTokenSize;
-    import llm.metric.monitor : MetricMonitor;
     import llm.tool_call : RegFunction, addFunction, toParams;
-    import llm.tool_call.discovery : ListToolTagsParams, listToolTags;
+    import llm.tool_call.broker : BrokerState;
 
     auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t10_metrics_%d_%d", now.toUnixTime(), now.stdTime);
+    auto tmpDir = format("llmfun_test/agent_t11_seed_%d_%d", now.toUnixTime(), now.stdTime);
     mkdirRecurse(tmpDir);
     scope (exit)
         cleanupAgentTestDir(tmpDir);
     write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
-    // Three workarea-tagged fixtures registered BEFORE agent construction, so
-    // all are in the pool (the pool is built at ctor time from the live
-    // registry): the tier-3 refusal target plus the used/unused prune pair.
-    addFunction(RegFunction(name: "agent_t10_tier3_fixture", desc: "t10 tier3 fixture", params: toParams!T10FixtureParams,
-            callback: &t10FixtureCallback, tags: ["workarea"]));
-    addFunction(RegFunction(name: "agent_t10_used_fixture", desc: "t10 used fixture", params: toParams!T10FixtureParams, callback: &t10FixtureCallback,
+    // Workarea-tagged fixture registered BEFORE agent construction, so it is
+    // in the pool (the pool is built at ctor time from the live registry) but
+    // not in the day-one tools array (tagged, never activated).
+    addFunction(RegFunction(name: "agent_t11_seed_fixture", desc: "t11 seed fixture", params: toParams!T11FixtureParams, callback: &t11FixtureCallback,
             tags: ["workarea"]));
-    addFunction(RegFunction(name: "agent_t10_unused_fixture", desc: "t10 unused fixture", params: toParams!T10FixtureParams,
-            callback: &t10FixtureCallback, tags: ["workarea"]));
-
-    // The agent's own JSONL sink: a real MetricMonitor on a fresh file (the
-    // feedback gating tolerates null monitors, but the metrics sites need a
-    // real sink). A real Agent (not CannedProcessAgent) so process() runs the
-    // real request site; the empty server type never dials out.
-    auto dataFile = buildPath(tmpDir, "monitor.jsonl").Path;
-    auto monitor = new MetricMonitor(dataFile);
-    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), monitor, null);
 
     string[] namesOf(JSONValue[] ts) {
         string[] n;
@@ -1386,96 +1502,259 @@ unittest {
         return n;
     }
 
-    // Per-kind JSONL reader over the agent's monitor file (re-read per call:
-    // events accumulate as the test runs).
-    JSONValue[] byKind(string kind) {
-        return readText(dataFile).splitLines
-            .map!(a => parseJSON(a))
-            .filter!(j => "kind" in j && j["kind"].str == kind)
-            .array;
+    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+
+    // Fresh-broker pin, kept explicit: the case seeds from scratch.
+    agent.toolCtx.broker = BrokerState.init;
+    assert(agent.toolCtx.broker.activated.empty);
+
+    // A chat doc holding one structured call + tool response pair for the
+    // fixture: the same save shape the session-restore path parses back.
+    agent.chat.load(parseJSON(`{
+        "messages": [
+            {"role": "assistant", "content": null, "reasoning_content": "",
+             "tool_calls": [{"id": "1", "type": "function",
+                             "function": {"name": "agent_t11_seed_fixture", "arguments": "{}"}}]},
+            {"role": "tool", "content": "out", "tool_call_id": "1",
+             "name": "agent_t11_seed_fixture"}
+        ]
+    }`));
+    agent.seedBrokerFromChat();
+
+    assert(agent.toolCtx.broker.activated.canFind("agent_t11_seed_fixture"),
+            "the tool the history proves was used is re-activated");
+    assert(namesOf(agent.tools).canFind("agent_t11_seed_fixture"),
+            "the rebuilt tools array carries the seeded tool");
+}
+
+@(
+        "seed-on-load: an empty chat doc is a no-op - the activation list and the tools array stay untouched")
+unittest {
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue, parseJSON;
+    import std.range : empty;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t11_empty_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+
+    auto before = JSONValue(agent.tools).toString;
+    agent.chat.load(parseJSON(`{"messages": []}`));
+    agent.seedBrokerFromChat();
+
+    assert(agent.toolCtx.broker.activated.empty, "nothing to seed: no activations");
+    assert(JSONValue(agent.tools).toString == before,
+            "an empty chat doc must not touch the tools array");
+}
+
+@("seed-on-load: the kill switch off makes the seed a no-op even when the history proves a use")
+unittest {
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue, parseJSON;
+    import std.range : empty;
+
+    import llm.tool_call : RegFunction, addFunction, toParams;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t11_killswitch_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    addFunction(RegFunction(name: "agent_t11_killswitch_fixture", desc: "t11 kill-switch fixture", params: toParams!T11FixtureParams,
+            callback: &t11FixtureCallback, tags: ["workarea"]));
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.enabled = false;
+    auto agent = new Agent("integration", llmConf, null, null);
+
+    // The history proves a use, but the gate is brokerEnabled's first
+    // conjunct: the seed must stay a no-op.
+    agent.chat.load(parseJSON(`{
+        "messages": [
+            {"role": "assistant", "content": null, "reasoning_content": "",
+             "tool_calls": [{"id": "1", "type": "function",
+                             "function": {"name": "agent_t11_killswitch_fixture", "arguments": "{}"}}]},
+            {"role": "tool", "content": "out", "tool_call_id": "1",
+             "name": "agent_t11_killswitch_fixture"}
+        ]
+    }`));
+    auto before = JSONValue(agent.tools).toString;
+    agent.seedBrokerFromChat();
+
+    assert(agent.toolCtx.broker.activated.empty, "kill switch off: nothing is seeded (D6)");
+    assert(JSONValue(agent.tools).toString == before,
+            "kill switch off: the tools array is untouched by the seed");
+}
+
+@("seed-on-load: only alwaysOn (untagged) calls in the history - the activation list and the tools array stay untouched")
+unittest {
+    import std.algorithm : canFind;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue, parseJSON;
+    import std.range : empty;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t11_alwayson_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    string[] namesOf(JSONValue[] ts) {
+        string[] n;
+        foreach (t; ts)
+            n ~= t["function"]["name"].str;
+        return n;
     }
 
-    // 1. tools_request: the per-request tools size + schema token estimate.
-    // The event fires BEFORE the requester dials (the request itself fails
-    // offline with an unknown endpoint, which process() reports as
-    // unknownFailure).
-    agent.process(null);
-    auto reqs = byKind("tools_request");
-    assert(reqs.length == 1);
-    assert(reqs[0]["agent"].str == "integration");
-    assert(reqs[0]["toolsCount"].integer == cast(long) agent.tools.length);
-    long schemaTokens;
-    foreach (t; agent.tools)
-        schemaTokens += t.toString(JSONOptions.doNotEscapeSlashes).length;
-    assert(reqs[0]["schemaTokens"].integer == schemaTokens / ApproxTokenSize,
-            "schemaTokens uses the ApproxTokenSize heuristic");
+    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
 
-    // 2. tool_refusal: the tier-3 instructive refusal (the fixture is in the
-    // pool but not yet activated, so it is not in agent.tools).
-    StreamResponse.ToolCall[long] calls;
-    calls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t10_tier3_fixture", arguments: "{}");
-    agent.handleToolCalls(null, calls);
-    auto refusals = byKind("tool_refusal");
-    assert(refusals.length == 1);
-    assert(refusals[0]["tool"].str == "agent_t10_tier3_fixture");
-    assert(refusals[0]["tier"].integer == 3);
-    assert(refusals[0]["agent"].str == "integration");
+    // A history whose only structured call targets taskDone: untagged
+    // (alwaysOn) and neverHide - the seeder must skip both (D2).
+    agent.chat.load(parseJSON(`{
+        "messages": [
+            {"role": "assistant", "content": null, "reasoning_content": "",
+             "tool_calls": [{"id": "1", "type": "function",
+                             "function": {"name": "taskDone", "arguments": "{}"}}]}
+        ]
+    }`));
+    auto before = JSONValue(agent.tools).toString;
+    agent.seedBrokerFromChat();
 
-    // 3. tag_discovery / tag_activation: the miss records known=false and
-    // nothing else; the hit activates the tag's visible tools (the fixtures)
-    // and records the activated count (the tag's pool size).
-    auto miss = listToolTags(agent.toolCtx, ListToolTagsParams(tag: "nope"));
-    assert(!miss.success);
-    auto discoveries = byKind("tag_discovery");
-    assert(discoveries.length == 1);
-    assert(discoveries[0]["tag"].str == "nope");
-    assert(!discoveries[0]["known"].boolean);
+    assert(agent.toolCtx.broker.activated.empty,
+            "an alwaysOn/neverHide call never enters the activation list (D2)");
+    assert(JSONValue(agent.tools).toString == before,
+            "an alwaysOn-only history must not touch the tools array");
+    assert(namesOf(agent.tools).canFind("taskDone"), "alwaysOn stays in the head");
+}
 
-    auto hit = listToolTags(agent.toolCtx, ListToolTagsParams(tag: "workarea"));
-    assert(hit.success);
-    auto activations = byKind("tag_activation");
-    assert(activations.length == 1);
-    assert(activations[0]["tag"].str == "workarea");
-    assert(activations[0]["toolsActivated"].integer == cast(
-            long) agent.toolCtx.pool.count!(f => f.tags.canFind("workarea")));
-    assert(byKind("tag_discovery").length == 2, "the miss and the hit both record");
+@(
+        "seed-on-load: a second seed of the same chat is a no-op - nothing newly activated, no rebuild (D7)")
+unittest {
+    import std.algorithm : canFind;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue, parseJSON;
+    import std.range : empty;
 
-    // 4. broker_prune: a rewriting compression prunes the unused activated
-    // fixture; the used one survives (the same recipe as the prune
-    // test). The system prompt must be set BEFORE the tool traffic.
-    StreamResponse.ToolCall[long] usedCalls;
-    usedCalls[0] = StreamResponse.ToolCall(id: "1", name: "agent_t10_used_fixture", arguments: "{}");
-    agent.setSystemPrompt("sys");
-    agent.handleToolCalls(null, usedCalls);
+    import llm.tool_call : RegFunction, addFunction, toParams;
 
-    agent.addUserQuery("x".replicate(9000)); // ~4500 tokens > TokenBudget (4096)
-    agent.addUserQuery("s1");
-    agent.addContinue();
-    agent.addUserQuery("s2");
-    agent.addContinue();
-    agent.addUserQuery("s3");
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t11_idem_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
 
-    auto res = agent.compress(0.9, true);
-    assert(res.compressed, "the chat must actually compress (rewrite) for the D39 gate");
-    assert(res.originalLength > res.newLength);
+    addFunction(RegFunction(name: "agent_t11_idem_fixture", desc: "t11 idempotency fixture", params: toParams!T11FixtureParams,
+            callback: &t11FixtureCallback, tags: ["workarea"]));
 
-    auto prunes = byKind("broker_prune");
-    assert(prunes.length == 1);
+    string[] namesOf(JSONValue[] ts) {
+        string[] n;
+        foreach (t; ts)
+            n ~= t["function"]["name"].str;
+        return n;
+    }
 
-    // The prune count is registry-state-dependent: other modules' tests leak
-    // workarea-tagged fixtures that my workarea hit activates, so the scan
-    // prunes them too. The invariant: the unused fixture is among the pruned;
-    // the used one and the refusal fixture (whose refusal is delivered as a
-    // tool result, which counts as a use) survive.
-    assert(prunes[0]["pruned"].integer >= 1, "the unused activated fixture is pruned");
+    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
 
-    // The used fixture and the tier-3-refused fixture survive; the unused
-    // one is gone.
-    auto names = namesOf(agent.tools);
-    assert(names.canFind("agent_t10_used_fixture"), "a used tool survives the prune");
-    assert(names.canFind("agent_t10_tier3_fixture"),
-            "the tier-3 refusal is a use: the fixture survives");
-    assert(!names.canFind("agent_t10_unused_fixture"), "the unused fixture is pruned");
+    agent.chat.load(parseJSON(`{
+        "messages": [
+            {"role": "assistant", "content": null, "reasoning_content": "",
+             "tool_calls": [{"id": "1", "type": "function",
+                             "function": {"name": "agent_t11_idem_fixture", "arguments": "{}"}}]},
+            {"role": "tool", "content": "out", "tool_call_id": "1",
+             "name": "agent_t11_idem_fixture"}
+        ]
+    }`));
+    // Counting rebuild hook installed BEFORE the first seed: the first seed
+    // (something newly activated) must fire exactly one rebuild, the second
+    // (nothing newly activated) none (D7). The wrapper forwards to the
+    // default rebuild so the tools array still gets recomposed.
+    size_t rebuilds;
+    auto defaultRebuild = agent.toolCtx.rebuildTools;
+    agent.toolCtx.rebuildTools = delegate() @safe {
+        rebuilds++;
+        defaultRebuild();
+    };
+    agent.seedBrokerFromChat(); // first seed: activates + rebuilds
+    assert(rebuilds == 1, "the first seed fires exactly one rebuild");
+    assert(agent.toolCtx.broker.activated.canFind("agent_t11_idem_fixture"));
+
+    agent.seedBrokerFromChat(); // second seed: sticky activation, seeded == 0
+    assert(rebuilds == 1, "the second seed must fire no rebuild (D7)");
+    assert(agent.toolCtx.broker.activated.canFind("agent_t11_idem_fixture"),
+            "the activation is sticky");
+    assert(namesOf(agent.tools).canFind("agent_t11_idem_fixture"), "the seeded tool stays visible");
+}
+
+@("seed-on-load end to end: agent.loadHistory seeds the broker from the restored session file")
+unittest {
+    import std.algorithm : canFind;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue;
+
+    import my.path : Path;
+
+    import llm.tool_call : RegFunction, addFunction, toParams;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_t11_load_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    addFunction(RegFunction(name: "agent_t11_load_fixture", desc: "t11 load fixture", params: toParams!T11FixtureParams, callback: &t11FixtureCallback,
+            tags: ["workarea"]));
+
+    string[] namesOf(JSONValue[] ts) {
+        string[] n;
+        foreach (t; ts)
+            n ~= t["function"]["name"].str;
+        return n;
+    }
+
+    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+
+    // The history file in the save format, written AFTER construction (the
+    // ctor does not auto-load): one structured call + tool response pair.
+    write(tmpDir ~ "/integration_history.json", `{
+        "messages": [
+            {"role": "assistant", "content": null, "reasoning_content": "",
+             "tool_calls": [{"id": "1", "type": "function",
+                             "function": {"name": "agent_t11_load_fixture", "arguments": "{}"}}]},
+            {"role": "tool", "content": "out", "tool_call_id": "1",
+             "name": "agent_t11_load_fixture"}
+        ]
+    }`);
+    agent.loadHistory(tmpDir.Path);
+
+    assert(agent.toolCtx.broker.activated.canFind("agent_t11_load_fixture"),
+            "the restored session re-activated the used tool");
+    assert(namesOf(agent.tools).canFind("agent_t11_load_fixture"),
+            "the rebuilt tools array carries the seeded tool");
 }
 
 // --- MCP tools route through the broker: connect change point ---

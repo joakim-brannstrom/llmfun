@@ -761,8 +761,41 @@ Continue your work from where you left off.";
             chat.load(j);
             chat.resetResponseIndex;
             syncContextFromChat();
+            seedBrokerFromChat();
         } catch (Exception e) {
             logger.trace(e.msg).collectException;
+        }
+    }
+
+    /// Seed the tool broker from the loaded chat: re-activate each tagged tool
+    /// the history proves was used
+    void seedBrokerFromChat() @safe {
+        import llm.tool_call.broker : activateTool, scanUsedTools;
+
+        if (!toolCtx.brokerEnabled)
+            return;
+
+        size_t seeded;
+        auto used = () @trusted { return scanUsedTools(chat); }();
+
+        foreach (name; used) {
+            auto matches = toolCtx.pool.filter!(f => f.name == name);
+            if (matches.empty)
+                continue;
+            auto f = matches.front;
+            if (f.tags.empty || neverHideTools_.canFind!(n => n == name))
+                continue;
+            auto before = toolCtx.broker.activated.length;
+            activateTool(toolCtx.broker, toolCtx.pool, name);
+            if (toolCtx.broker.activated.length != before)
+                seeded++;
+        }
+        if (seeded > 0) {
+            recordBrokerEvent(this, "broker_seed", [
+                "seeded": JSONValue(cast(long) seeded)
+            ]);
+            if (toolCtx.rebuildTools !is null)
+                toolCtx.rebuildTools();
         }
     }
 
@@ -841,9 +874,7 @@ private:
                 if (toolCtx.brokerEnabled
                         && toolCtx.pool.canFind!(f => f.name == call.name)
                         && !tools.canFind!(t => t["function"]["name"].str == call.name)) {
-                    result = (
-                            "error: tool '" ~ call.name
-                            ~ "' is not visible to this agent; discover tools with `listToolTags`")
+                    result = ("error: tool '" ~ call.name ~ "' is not visible to this agent in the current session (visibility resets when chat history is loaded or the session changes); discover tools with `listToolTags`, then make them visible with `loadToolTag`.")
                         .sanitizeUtf8;
                     success = false;
 

@@ -7,8 +7,9 @@
 ///     listToolTags called without arguments lists the visible tools' tags
 ///     with their configured descriptions, so the model can pick one; called
 ///     with a tag it activates the tag (the harness-side loadToolTag step,
-///     activateTag) and returns the newly visible tools as function cards, so
-///     the model can call them immediately. Activations are sticky.
+///     activateTag) and names the newly visible tools in its reply (their
+///     schemas land in the next request's tools array), so the model can call
+///     them immediately. Activations are sticky.
 ///
 /// The tool itself is UNtagged (⇒ alwaysOn): it must never be hidden
 /// or tagged out of existence — otherwise the discovery loop dies
@@ -291,7 +292,8 @@ unittest {
 
 unittest {
     // Activation: a known tag activates its visible tools (sticky) and
-    // returns their cards in the standard tools-array shape.
+    // names them in the reply (no card JSON: the schemas are already in the
+    // next request's tools array, so re-sending them would double the parse).
     auto ctx = discoveryContext();
     ctx.pool = [
         discoveryTool("wf_read", ["workarea"]),
@@ -301,14 +303,8 @@ unittest {
 
     auto rval = listToolTags(ctx, ListToolTagsParams("workarea"));
     assert(rval.success);
-    import std.json : parseJSON;
-
-    auto cards = parseJSON(rval.msg).array;
-    assert(cards.length == 1);
-    assert(cards[0]["type"].str == "function");
-    assert(cards[0]["function"]["name"].str == "wf_read");
-    assert(cards[0]["function"]["description"].str == "desc of wf_read");
-    assert(("path" in cards[0]["function"]["parameters"]["properties"]) !is null);
+    assert(rval.msg.canFind("Loaded tools for tag workarea:"), rval.msg);
+    assert(rval.msg.canFind("wf_read"), rval.msg);
     // sticky: the activation is recorded and re-listing ranks the tag first
     assert(ctx.broker.activated.canFind("wf_read"));
     assert(ctx.broker.tagActivationCount["workarea"] == 1);
@@ -327,8 +323,7 @@ unittest {
 
     auto rval = listToolTags(ctx, ListToolTagsParams("workarea"));
     assert(!rval.success);
-    assert(
-            rval.msg == "error: tag 'workarea' has no visible tools — all "
+    assert(rval.msg == "error: tag 'workarea' has no visible tools - all "
             ~ "excluded by toolFilter");
     assert(ctx.broker.activated.empty);
     assert(ctx.broker.tagActivationCount.empty);
@@ -417,7 +412,7 @@ unittest {
 
     auto rval = listToolTags(ctx, ListToolTagsParams("rag"));
     assert(!rval.success);
-    assert(rval.msg == "error: tag 'rag' has no visible tools — all " ~ "excluded by toolFilter");
+    assert(rval.msg == "error: tag 'rag' has no visible tools - all " ~ "excluded by toolFilter");
 
     // composeDiscoveryDesc with an empty vocabulary: no dangling "Tags:" header.
     assert(composeDiscoveryDesc("Discover tools.", null, BrokerState()) == "Discover tools.");

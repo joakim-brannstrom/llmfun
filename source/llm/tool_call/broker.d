@@ -6,7 +6,7 @@ module llm.tool_call.broker;
 
 import std.algorithm : canFind, filter, map;
 import std.array : array, empty;
-import std.json : JSONValue;
+import std.json : JSONType, JSONValue;
 import std.sumtype : match;
 
 import my.filter : ReFilter;
@@ -154,6 +154,35 @@ void applyPrune(ref BrokerState st, const(string[]) inactive) @safe pure {
     st.activated = st.activated.filter!(n => !inactive.canFind(n)).array;
 }
 
+/// Seed-side usage scan: the inverse corpus of scanInactiveTools -- the
+/// structured tool-call names the chat contains, in chronological message
+/// order, first-occurrence deduplicated. Same corpus rule as
+/// scanInactiveTools: structured ToolMessage calls only -- the toolCalls
+/// extraction mirrors ToolMessage.hasTool (chat.d:880-890); summary text and
+/// assistant prose never count. Refused calls count as uses (the refusal
+/// travels as the tool response to a recorded structured call, so the
+/// request-side ToolMessage exists either way -- the scan must not try to
+/// tell them apart). The applier (Agent.seedBrokerFromChat, task 2) owns
+/// all filtering and state mutation.
+string[] scanUsedTools(scope Chat chat) @system {
+    import llm.utility : getValue;
+
+    string[] used;
+    bool unseen(string name) {
+        return !name.empty && !used.canFind!(n => n == name);
+    }
+
+    foreach (msg; chat.getMessages) {
+        msg.match!((ToolMessage m) {
+            foreach (tool; m.getFunctions) {
+                if (unseen(tool.name))
+                    used ~= tool.name;
+            }
+        }, (_) {});
+    }
+    return used;
+}
+
 version (unittest) {
     /// Registry entry fixture; the callback is never invoked by these tests.
     private RegFunction fixtureTool(string name, string[] tags) @safe pure nothrow {
@@ -284,6 +313,24 @@ unittest {
 
     auto chat = chatWith([["t1"]]);
     assert(scanInactiveTools(BrokerState(), chat).empty);
+}
+
+@("scanUsedTools: calls count, prose mentions do not, refused calls "
+        ~ "count, duplicates collapse in first-occurrence order")
+unittest {
+    import std.array : empty;
+    import std.conv : to;
+
+    auto chat = chatWith([["t1"], [], ["t3", "t1"]]);
+    // Refused calls count as uses: the refusal travels as the tool response
+    // to a recorded structured call, so the request-side ToolMessage exists
+    // either way - the scan reads request-side toolCalls only and never
+    // tries to tell them apart.
+    chat.add(ToolMessage("summary mentions t2", JSONValue("not an array")));
+
+    auto used = scanUsedTools(chat);
+    assert(used == ["t1", "t3"], used.to!string); // t1 dup collapses; prose t2 ignored
+    assert(scanUsedTools(Chat()).empty);
 }
 
 @("activateTag: unknown tag is a full no-op; known tag appends once and " ~ "bumps the counter")

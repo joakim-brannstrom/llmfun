@@ -1671,12 +1671,15 @@ unittest {
     assert(opts["06_network"] == ["--network", "none"]);
     assert(opts["entrypoint_shell"] == ["sh", "-c"]);
 
-    // The tool-broker keys shipped in the example: defaults kept
-    // and the tag-description map intact.
+    // The tool-broker keys shipped in the example: neverHideTools overrides
+    // the default (it un-hides the memory tools) and the tag vocabulary lists
+    // every known tool tag.
     assert(conf.toolBroker.enabled, "toolBroker.enabled must default to true");
-    assert(conf.toolBroker.neverHideTools == ["taskDone"],
-            "neverHideTools must keep the taskDone default");
-    assert(conf.toolBroker.toolTagDescriptions.length == 1);
+    assert(conf.toolBroker.neverHideTools == [
+        "taskDone", "readMemory", "getMemoryTopics", "writeMemory"
+    ], "shipped example neverHideTools: " ~ conf.toolBroker.neverHideTools.to!string);
+    assert(conf.toolBroker.toolTagDescriptions.length == 10,
+            "shipped example tag vocabulary: " ~ conf.toolBroker.toolTagDescriptions.to!string);
     import std.algorithm : canFind;
 
     assert(conf.toolBroker.toolTagDescriptions["workarea"].canFind("workarea"));

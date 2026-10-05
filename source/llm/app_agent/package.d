@@ -340,6 +340,7 @@ struct AgentApp {
         chatDirty = false;
         agent_.chat.resetResponseIndex();
         agent_.syncContextFromChat();
+        agent_.seedBrokerFromChat();
         // Status bar must reflect the target session, not the previous one
         lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
 
@@ -803,6 +804,7 @@ struct AgentApp {
         }
         agent_.chat.resetResponseIndex; // prevent replay of old history
         agent_.syncContextFromChat(); // set prevStat.context from the loaded chat
+        agent_.seedBrokerFromChat(); // re-activate tools the loaded history proves were used
 
         agent_.setSystemPrompt(systemPrompt_ = llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf
                 .agentPrompt, addSkills: true, agentMdSummary: agentMdState.summary));
