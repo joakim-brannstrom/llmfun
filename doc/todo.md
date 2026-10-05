@@ -26,6 +26,7 @@
 - when the context is at 90% only a call to requestCompression should be accepted. Everything else is blocked.
 - imgui 1.92 use a queue for key pressed. When a user hold down a key they queue up but the consumer (the GUI thread) only run at 60hz which mean that the GUI start to "lag behind" the queue. Maybe there is a function in imgui 1.92 which can check if there are more events in the queue and then schedule a GUI refresh immediately?
 - agent.md summary must be executed async in case it is "severly slowed down"
+- a /c must also remove all nudges from latest message and up to hmm ten messages back in the history. This is because sometimes a nudge has been added because of a network failure and if the network then comes back online the model/agent becomes confused.
 
 # ui
 - change the background color for the input field to dark grey
