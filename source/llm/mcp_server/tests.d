@@ -542,16 +542,12 @@ unittest {
     assert(hits[0].tags == ["mcp_ext_server_t12"], text(hits[0].tags));
 }
 
-@("MCP runtime registration skips the known-tag enum check: a free-form server tag warns nothing and registers silently")
+@("MCP runtime registration accepts a free-form server tag: warns nothing and registers silently")
 unittest {
     import std.algorithm : canFind;
 
     import llm.agent.nudges : sharedLogSwapMutex;
     import llm.tool_call : getFunctions;
-    import llm.tool_call.tags : knownToolTagNames;
-
-    enum tag = "mcp_ext_server_t12";
-    assert(!knownToolTagNames.canFind(tag), "the tag must not be a KnownToolTag member");
 
     synchronized (sharedLogSwapMutex) {
         auto prevLog = logger.sharedLog;
@@ -560,10 +556,8 @@ unittest {
         scope (exit)
             logger.sharedLog = prevLog;
 
-        registerMcpTool("mcp_ext_t12_uda_skip",
-                "ext tool with a free-form tag", [], &mcpRegFixtureCallback, [
-                    tag
-        ]);
+        registerMcpTool("mcp_ext_t12_uda_skip", "ext tool with a free-form tag",
+                [], &mcpRegFixtureCallback, ["mcp_ext_server_t12"]);
 
         foreach (line; (cast() cap).takeLines())
             assert(!line.canFind("unknown"), line);

@@ -781,7 +781,8 @@ unittest {
             "include '.*' ⇒ the pool is the whole registry");
     foreach (i, f; agent.toolCtx.pool)
         assert(f.name == reg[i].name, "pool order must match registry order");
-    assert(agent.toolCtx.brokerEnabled, "kill switch defaults to on");
+    assert(!agent.toolCtx.brokerEnabled,
+            "kill switch defaults to off: toolBroker.enabled defaults to false, the broker stays inert unless configured");
     assert(agent.toolCtx.broker.activated.empty, "fresh broker: no activations");
 
     // Convenience-ctor agents get an unfiltered member filter (ReFilter.init),
@@ -847,6 +848,7 @@ unittest {
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.enabled = true; // broker on: the neverHide union-back scenario pins brokerEnabled below
     // A filter that matches nothing hides the WHOLE registry — except the
     // default neverHideTools (["taskDone"]), which is unioned back.
     llmConf.toolFilter.include = ["^no_such_tool_pattern$"];
@@ -887,24 +889,29 @@ unittest {
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
-    llmConf.toolBroker.toolTagDescriptions = [
-        "workarea": "Workarea tools.",
-        "rag": "RAG knowledge base tools.",
-    ];
+    llmConf.toolBroker.enabled = true; // broker on: the composed description needs the selectTools path
+    import llm.config : GroupConfig;
+
+    llmConf.toolBroker.groups["workarea"] = GroupConfig("Workarea tools.", [
+        "wf_read"
+    ]);
+    llmConf.toolBroker.groups["rag"] = GroupConfig("RAG knowledge base tools.", [
+        "rag_search"
+    ]);
     auto agent = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
 
     auto idx = agent.tools.countUntil!(e => e["function"]["name"].str == "listToolTags");
     assert(idx >= 0, "the discovery tool is in the day-one array");
 
     auto desc = agent.tools[idx]["function"]["description"].str;
-    assert(canFind(desc, "List available tool tags"),
+    assert(canFind(desc, "List available tool groups"),
             "the UDA base text must survive the composition:\n" ~ desc);
     assert(canFind(desc, "workarea (Workarea tools.)"),
             "configured workarea description missing:\n" ~ desc);
     assert(canFind(desc, "rag (RAG knowledge base tools.)"),
             "configured rag description missing:\n" ~ desc);
     assert(desc.indexOf("rag") < desc.indexOf("workarea"),
-            "zero activation counts: alphabetical tag order expected:\n" ~ desc);
+            "zero activation counts: alphabetical group order expected:\n" ~ desc);
 
     // Rebuild-at-activation (the change point): the raw selectTools output
     // carries the bare UDA text, so the delegate must recompose — otherwise the
@@ -918,11 +925,99 @@ unittest {
             "the composed description must survive a rebuild:\n" ~ desc);
 }
 
-@("agent owns the tools array: a configured-but-empty tag description warns once")
+@("broker adjust hook: invoked once per model switch with the resolved config, mutations reach the tools array, nothing persists")
+unittest {
+    import std.algorithm : canFind, map;
+    import std.array : array;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue;
+    import std.range : empty;
+    import std.conv : to;
+
+    import llm.config : CodeModelConfig, GroupConfig, ToolBrokerConfig;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_broker_hook_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolFilter.include = [".*"];
+    llmConf.toolBroker.enabled = true;
+    llmConf.toolBroker.groups["workarea"] = GroupConfig("workarea file tools",
+            ["writeFile", "readFile"]);
+    llmConf.toolBroker.hiddenTags = ["workarea"];
+
+    // A second model with no toolBroker block: the hook must fire for it too,
+    // with ITS freshly resolved (global) config - hiddenTags still
+    // ["workarea"], proving the previous hook mutation did not persist.
+    CodeModelConfig other;
+    other.modelName = "hooked-model";
+    other.contextSize = 8192;
+    llmConf.codeModels ~= other;
+
+    auto agent = new Agent("integration", llmConf, null, null);
+
+    string[] namesOf(JSONValue[] ts) {
+        return ts.map!(t => t["function"]["name"].str).array;
+    }
+
+    // Day-one array: the workarea group is hidden, its tools are not advertised.
+    assert(!namesOf(agent.tools).canFind("writeFile"),
+            "hidden group members start out of the array");
+    assert(agent.toolCtx.broker.activated.empty);
+
+    size_t calls;
+    bool freshEachTime = true;
+    agent.setBrokerAdjustHook(delegate(ref ToolBrokerConfig conf) @safe {
+        calls++;
+        // The freshly resolved config, not the previously mutated copy: the
+        // global block still carries hiddenTags: ["workarea"].
+        freshEachTime = freshEachTime && conf.hiddenTags.length == 1
+            && conf.hiddenTags[0] == "workarea";
+        conf.hiddenTags = []; // unhide-all (D7): the group's tools join the array
+        conf.groups["workarea"].tools ~= "readFile2"; // element-level mutation too
+    });
+
+    // Model switch: the hook fires exactly once, before any broker consumer
+    // call of the new model, and its mutation reaches the tools array.
+    agent.resetModel(llmConf.codeModels[1]);
+
+    assert(calls == 1, "exactly one hook invocation per model switch: " ~ calls.to!string);
+    assert(freshEachTime, "the hook saw the freshly resolved config, not a stale copy");
+    assert(namesOf(agent.tools).canFind("writeFile") && namesOf(agent.tools)
+            .canFind("readFile"), "hook mutations affect the tools array of subsequent requests");
+    assert(!namesOf(agent.tools).canFind("readFile2"),
+            "a group entry naming no registry tool never joins the array");
+    assert(agent.toolCtx.broker.activated.empty,
+            "BrokerState is reset on model switch - activation never carries across models");
+    assert(agent.toolCtx.brokerEnabled, "the kill-switch mirror follows the effective config");
+
+    // Switching back: the hook fires again with a fresh resolution - the
+    // previous mutation (hiddenTags = []) did not persist into the cached
+    // resolution or into LlmConfig.
+    agent.resetModel(llmConf.codeModels[0]);
+    assert(calls == 2, "one invocation per model switch: " ~ calls.to!string);
+    assert(freshEachTime, "the second invocation also saw the freshly resolved config");
+    assert(namesOf(agent.tools).canFind("writeFile"), "the mutation took effect on this model too");
+    assert(llmConf.toolBroker.hiddenTags == ["workarea"],
+            "mutations do not write back into LlmConfig");
+    assert(llmConf.toolBroker.groups["workarea"].tools == [
+        "writeFile", "readFile"
+    ], "element-level mutation does not write back into LlmConfig");
+}
+
+@(
+        "agent owns the tools array: a configured-but-empty group description is not advertised (no warning)")
 unittest {
     import core.sync.mutex : Mutex;
     import logger = std.logger;
-    import std.algorithm : canFind;
+    import std.algorithm : canFind, countUntil;
     import std.array : Appender, join;
     import std.datetime : Clock;
     import std.file : mkdirRecurse, write;
@@ -967,7 +1062,12 @@ unittest {
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
-    llmConf.toolBroker.toolTagDescriptions = ["agent_t7_empty_desc_probe": ""];
+    llmConf.toolBroker.enabled = true; // broker on: the not-advertised side is the composed-description pass
+    import llm.config : GroupConfig;
+
+    llmConf.toolBroker.groups["agent_t7_empty_desc_probe"] = GroupConfig("", [
+        "plain_tool"
+    ]);
 
     synchronized (sharedLogSwapMutex) {
         auto prevLog = logger.sharedLog;
@@ -979,10 +1079,14 @@ unittest {
         auto agent = new Agent("integration", llmConf, null, null, null, llmConf.toolFilter.to());
 
         auto captured = (cast() cap).takeLines();
-        assert(captured.canFind!(l => canFind(l, "has an empty configured description")),
-                "the empty tag description must warn:\n" ~ captured.join("\n"));
-        assert(captured.canFind!(l => canFind(l, "agent_t7_empty_desc_probe")),
-                "the warning must name the offending tag:\n" ~ captured.join("\n"));
+        assert(!captured.canFind!(l => canFind(l, "empty configured description")),
+                "an undescribed group is not advertised by design - no " ~ "warning:\n" ~ captured.join(
+                    "\n"));
+
+        auto idx = agent.tools.countUntil!(e => e["function"]["name"].str == "listToolTags");
+        assert(idx >= 0, "the discovery tool is in the day-one array");
+        assert(!canFind(agent.tools[idx]["function"]["description"].str,
+                "agent_t7_empty_desc_probe"), "an undescribed group must not be advertised");
     }
 }
 
@@ -1015,6 +1119,7 @@ unittest {
     import std.sumtype : match;
 
     import llm.chat : ToolResponse;
+    import llm.config : GroupConfig;
     import llm.tool_call : RegFunction, addFunction, toParams;
     import llm.tool_call.broker : activateTag;
 
@@ -1044,7 +1149,12 @@ unittest {
         return rval;
     }
 
-    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.enabled = true; // tier-3 refusal + visible dispatch need the broker on
+    llmConf.toolBroker.groups["workarea"] = GroupConfig("workarea file tools", [
+    ]);
+    llmConf.toolBroker.hiddenTags = ["workarea"];
+    auto agent = new Agent("integration", llmConf, null, null);
 
     // Tier-1: the tool is absent from the registry entirely (⇒ absent from the
     // pool) — the opaque unknown-tool refusal, unchanged.
@@ -1079,7 +1189,7 @@ unittest {
 
     // A visible tool still dispatches normally: activate the tag at the
     // activation change point, rebuild the tools array, dispatch again.
-    activateTag(agent.toolCtx.broker, agent.toolCtx.pool, "workarea");
+    activateTag(agent.toolCtx.broker, agent.toolCtx.pool, "workarea", agent.toolCtx.brokerConf);
     agent.toolCtx.rebuildTools();
     auto ok = dispatch(agent, "agent_t8_tier3_fixture");
     assert(ok.content == "ok", ok.content);
@@ -1230,9 +1340,11 @@ unittest {
         return n;
     }
 
-    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.enabled = true; // the pruning path goes through the rebuildTools hook
+    auto agent = new Agent("integration", llmConf, null, null);
 
-    activateTag(agent.toolCtx.broker, agent.toolCtx.pool, "workarea");
+    activateTag(agent.toolCtx.broker, agent.toolCtx.pool, "workarea", agent.toolCtx.brokerConf);
     agent.toolCtx.rebuildTools();
     assert(namesOf(agent.tools).canFind("agent_t9_noop_fixture"));
 
@@ -1502,7 +1614,9 @@ unittest {
         return n;
     }
 
-    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.enabled = true; // broker on: the seed path re-activates the tools the history proves were used
+    auto agent = new Agent("integration", llmConf, null, null);
 
     // Fresh-broker pin, kept explicit: the case seeds from scratch.
     agent.toolCtx.broker = BrokerState.init;
@@ -1674,7 +1788,9 @@ unittest {
         return n;
     }
 
-    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.enabled = true; // broker on: the seed path re-activates the tools the history proves were used
+    auto agent = new Agent("integration", llmConf, null, null);
 
     agent.chat.load(parseJSON(`{
         "messages": [
@@ -1736,7 +1852,9 @@ unittest {
         return n;
     }
 
-    auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolBroker.enabled = true; // broker on: the seed path re-activates the tools the history proves were used
+    auto agent = new Agent("integration", llmConf, null, null);
 
     // The history file in the save format, written AFTER construction (the
     // ctor does not auto-load): one structured call + tool response pair.
@@ -1771,6 +1889,7 @@ unittest {
     import std.json : parseJSON;
 
     import llm.agent.nudges : sharedLogSwapMutex;
+    import llm.config : GroupConfig;
     import llm.mcp_server.registration : registerMcpTool;
     import llm.tool_call.discovery : ListToolTagsParams, listToolTags;
 
@@ -1814,10 +1933,9 @@ unittest {
 
     auto llmConf = makeAgentTestConfig(tmpDir);
     llmConf.toolBroker.enabled = true;
-
-    llmConf.toolBroker.toolTagDescriptions = [
-        tag: "tags inherited from a connected MCP server"
-    ];
+    llmConf.toolBroker.groups[tag] = GroupConfig("tags inherited from a connected MCP server", [
+    ]);
+    llmConf.toolBroker.hiddenTags = [tag];
 
     auto agent = new Agent("integration", llmConf, null, null);
     assert(!agent.toolCtx.pool.canFind!(f => f.name == "mcp_ext_t12_e2e"),
@@ -1887,4 +2005,68 @@ unittest {
 
     assert(agent.tools.canFind!(e => e["function"]["name"].str == "mcp_ext_t12_legacy"),
             "the legacy path emits registry ∩ toolFilter regardless of tags");
+}
+
+@(
+        "pipeline wiring: the coder/plan broker adjust hook keeps pipelineOutput visible under a hidden group")
+unittest {
+    import std.algorithm : canFind, count, map;
+    import std.array : array;
+    import std.datetime : Clock;
+    import std.file : mkdirRecurse, write;
+    import std.format : format;
+    import std.json : JSONValue;
+    import std.range : empty;
+    import std.conv : to;
+
+    import llm.config : GroupConfig;
+    import llm.pipeline : pipelineOutputAlwaysOnHook;
+
+    auto now = Clock.currTime();
+    auto tmpDir = format("llmfun_test/agent_pipeline_hook_%d_%d", now.toUnixTime(), now.stdTime);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        cleanupAgentTestDir(tmpDir);
+    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.toolFilter.include = [".*"];
+    llmConf.toolBroker.enabled = true;
+    llmConf.toolBroker.groups["workarea"] = GroupConfig("workarea file tools",
+            ["writeFile", "readFile", "pipelineOutput"]);
+    llmConf.toolBroker.hiddenTags = ["workarea"];
+    // pipelineOutput rides INSIDE the hidden group, so the hook is the only
+    // thing un-hiding it: ungrouped tools stay visible under an enabled broker,
+    // so a hook-less config would not exercise the wiring at all.
+
+    string[] namesOf(JSONValue[] ts) {
+        return ts.map!(t => t["function"]["name"].str).array;
+    }
+
+    // The pipelines install the shared hook (pipelineOutputAlwaysOnHook) on
+    // their transient agents; replicated here against the same factory - the
+    // pipelines themselves need a live backend to run.
+    auto coder = new Agent("coder", llmConf, null, null);
+    coder.setBrokerAdjustHook(pipelineOutputAlwaysOnHook());
+    coder.resetModel(llmConf.activeCodeModel);
+
+    auto planner = new Agent("implementation_planner", llmConf, null, null);
+    planner.setBrokerAdjustHook(pipelineOutputAlwaysOnHook());
+    planner.resetModel(llmConf.activeCodeModel);
+
+    assert(namesOf(coder.tools).canFind("pipelineOutput"),
+            "the hook keeps pipelineOutput visible under a hidden group: " ~ namesOf(coder.tools)
+                .to!string);
+    assert(namesOf(planner.tools).canFind("pipelineOutput"),
+            "the hook keeps pipelineOutput visible under a hidden group: " ~ namesOf(
+                planner.tools).to!string);
+    assert(!namesOf(coder.tools).canFind("writeFile"),
+            "the hook forces exactly pipelineOutput, not the hidden group");
+    assert(llmConf.toolBroker.alwaysOn.empty, "hook mutations do not write back into LlmConfig");
+
+    // Idempotence: a same-model reset re-fires the hook on a fresh resolution;
+    // the absence check keeps one alwaysOn entry and the tools array one entry.
+    coder.resetModel(llmConf.activeCodeModel);
+    assert(namesOf(coder.tools).count!(n => n == "pipelineOutput") == 1);
 }

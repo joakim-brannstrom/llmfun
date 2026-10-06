@@ -19,7 +19,6 @@ interface Context {
 // UDA use to mark a function as a tool to be used by llm.
 struct Function {
     string desc;
-    string[] tags; // empty: alwaysOn (never flip this default)
 }
 
 // UDA to mark a parameter as optional
@@ -50,7 +49,7 @@ struct RegFunction {
     string desc;
     RegParam[] params;
     ExecuteFuncResult function(Context, JSONValue) callback;
-    string[] tags; // mirrored from the UDA at registration
+    string[] tags; // runtime tags, filled only by MCP registration
 }
 
 struct FunctionCall {
@@ -172,7 +171,6 @@ JSONValue descAllFunctions() @safe {
 // Register all functions marked by @Function in the module.
 mixin template RegisterLlmFunctions() {
     shared static this() {
-        import llm.tool_call.tags : knownToolTagNames, unknownToolTags;
         import llm.tool_call : addFunction, RegFunction, Function, toParams, initParams;
         import std.array : empty;
         import std.json : JSONValue;
@@ -188,7 +186,6 @@ mixin template RegisterLlmFunctions() {
                     static if (is(typeof(moduleMember) == function)
                             && hasUDA!(moduleMember, Function)) {
                         enum funcDesc = getUDAs!(moduleMember, Function)[0].desc;
-                        enum funcTags = getUDAs!(moduleMember, Function)[0].tags;
                         alias FuncParamTypes = Parameters!moduleMember;
                         static assert(FuncParamTypes.length == 2,
                                 "Function " ~ __MODULE__ ~ "." ~ moduleMemberName
@@ -207,12 +204,8 @@ mixin template RegisterLlmFunctions() {
                             return ExecuteFuncResult(msg: params.errorMsg, success: false);
                         }
 
-                        foreach (t; unknownToolTags(funcTags)) {
-                            std.logger.warningf("Tool '%s' registered with unknown tag '%s' (known: %s)",
-                                    moduleMemberName, t, knownToolTagNames());
-                        }
-                        addFunction(RegFunction(name: moduleMemberName, desc: funcDesc, params: toParams!ParamsT,
-                                callback: &funcCallback, tags: funcTags));
+                        addFunction(RegFunction(name: moduleMemberName, desc: funcDesc,
+                                params: toParams!ParamsT, callback: &funcCallback));
                     }
                 }
             }

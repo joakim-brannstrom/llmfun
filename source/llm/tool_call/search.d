@@ -15,8 +15,9 @@
 /// The tool itself is UNtagged (⇒ alwaysOn): it must never be hidden
 /// or tagged out of existence — otherwise the discovery loop dies
 /// with the very tools it is meant to reveal. The test below asserts the UDA
-/// has empty tags; the startup-warning side lives in config validation
-/// (validateToolBrokerConfig, the Agent ctor's seam).
+/// carries a non-empty description (it has no tags field to assert on - the
+/// compile-time tag channel is gone); the startup-warning side lives in
+/// config validation (validateToolBrokerConfig, the Agent ctor's seam).
 module llm.tool_call.search;
 
 import logger = std.logger;
@@ -295,17 +296,17 @@ unittest {
 
 unittest {
     // Guard: the discovery meta-tools (listToolTags + toolSearch)
-    // must stay untagged (⇒ alwaysOn) — they must never be tagged out of
-    // existence, killing the discovery loop they exist to open. (The
-    // startup-warning side lives in validateToolBrokerConfig.)
+    // must stay described - the description is what the registry lists, and
+    // their untagged/alwaysOn status is what keeps them permanently visible
+    // (the startup-warning side lives in validateToolBrokerConfig).
     import std.traits : getUDAs;
 
     import llm.tool_call.discovery : listToolTags;
 
     enum listUda = getUDAs!(listToolTags, Function)[0];
-    assert(listUda.tags.empty);
+    assert(listUda.desc.length > 0);
     enum searchUda = getUDAs!(toolSearch, Function)[0];
-    assert(searchUda.tags.empty);
+    assert(searchUda.desc.length > 0);
 }
 
 unittest {

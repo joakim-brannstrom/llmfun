@@ -69,9 +69,9 @@ The MCP server constructs a full `AgentContext` inside the actor thread. `AgentC
 The tables above list what CAN be available per context interface: the static
 `tools/list` / `llmfun mcp --list-tools` view (every registered tool that passes
 `toolFilter`), which is unchanged by the tool broker. What the interactive
-agent's model actually sees is narrowed further by the broker: untagged
-tools are always listed (alwaysOn); tagged
-tools are hidden until the model activates their tag via `listToolTags`
+agent's model actually sees is narrowed further by the broker: ungrouped
+tools are always listed (alwaysOn); tools in hidden groups are withheld until
+the model activates their group via `listToolTags`
 (sticky activation, pruned at compression points).
 
 The MCP protocol paths bypass that per-agent selection: `tools/list` is the
@@ -85,8 +85,8 @@ it today -- so with the kill switch off, MCP clients see the same tools as
 with it on.
 
 MCP tools do join the broker pool: a configured server can carry `tags:`
-(free-form; the known-tag enum check does not apply to the runtime registration
-path), and its tools register at runtime (`registerMcpTool`,
+(free-form - the compile-time tag channel is gone, so runtime tags have no enum
+to be checked against), and its tools register at runtime (`registerMcpTool`,
 `mcp_server/registration.d`) with the server's tags, so discovery, filtering
 and activation treat them like any other tool.
 

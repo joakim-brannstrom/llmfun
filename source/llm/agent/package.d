@@ -33,7 +33,7 @@ import llm.skill : SkillManager, makeSkillManager;
 import llm.summary_agent;
 import llm.tool_call : FunctionCall, Context;
 import llm.tool_call.pipeline : PipelineControlContext;
-import llm.tool_call.broker : BrokerState;
+import llm.tool_call.broker : BrokerState, alwaysOnTools;
 import llm.utility : getValue;
 
 import llm.environment.config : EnvironmentBackend;
@@ -50,13 +50,33 @@ class Agent : IBasicAgent {
     /// The model-facing tools array: owned by the Agent, built once
     /// per instance (pool + selectTools with empty activation, plus the
     /// composed listToolTags description), reassigned from pure selectTools
-    /// output ONLY at change points — activation/discovery (the
-    /// toolCtx.rebuildTools hook) and compression — and passed per
-    /// request. The registry is immutable at runtime except the MCP
+    /// output ONLY at change points - model switches (resetModel rebuilds
+    /// it from the new model's effective, hook-adjusted broker config,
+    /// task 6), activation/discovery (the
+    /// toolCtx.rebuildTools hook), compression, and MCP
+    /// connects (inert under a kill-switch model: rebuildTools
+    /// is null). The registry is immutable at runtime except the MCP
     /// connect change point: onMcpServerConnected recomputes the
     /// pool from the live registry and rebuilds this array through
-    /// toolCtx.rebuildTools; resetModel leaves it untouched.
+    /// toolCtx.rebuildTools.
     JSONValue[] tools;
+
+    package {
+        NudgeConfig defaultNudges_; // llmConf.nudges at construction
+        NudgeConfig nudges_; // resolved for the current model
+        NudgeTexts nudgeTexts_;
+        Path[] promptDir_; // copied from llmConf at construction
+        // Per-kind strike counters (they map onto NudgeKind) -
+        // keepReasoningStrikes drives NudgeKind.keepReasoning, continueStrikes
+        // NudgeKind.recovery. Package-visible for the same reason as the fields
+        // above; the per-turn reset lifecycle (resetStrikes) is unchanged.
+        int keepReasoningStrikes;
+        int continueStrikes;
+
+        // Package (not private): llm.agent.tests (and the pool-wiring
+        // tests) construct an Agent and assert on the broker pool/state.
+        AgentContext toolCtx;
+    }
 
     private {
         LlmRequester rq;
@@ -68,6 +88,7 @@ class Agent : IBasicAgent {
         bool taskDone_;
         string taskDoneMessage_;
         long contextSize_;
+        LlmConfig conf;
 
         bool compressNudgeSent;
 
@@ -82,22 +103,6 @@ class Agent : IBasicAgent {
         // `private`: a package.d module's package symbols are visible only inside
         // its own subtree — the same rule that lets llm.agent.tests see
         // makeAgentTestConfig.
-        package {
-            NudgeConfig defaultNudges_; // llmConf.nudges at construction
-            NudgeConfig nudges_; // resolved for the current model
-            NudgeTexts nudgeTexts_;
-            Path[] promptDir_; // copied from llmConf at construction
-            // Per-kind strike counters (they map onto NudgeKind) —
-            // keepReasoningStrikes drives NudgeKind.keepReasoning, continueStrikes
-            // NudgeKind.recovery. Package-visible for the same reason as the fields
-            // above; the per-turn reset lifecycle (resetStrikes) is unchanged.
-            int keepReasoningStrikes;
-            int continueStrikes;
-        }
-
-        // Package (not private): llm.agent.tests (and the pool-wiring
-        // tests) construct an Agent and assert on the broker pool/state.
-        package AgentContext toolCtx;
         ReFilter toolFilter;
 
         // Mirror of llmConf.toolBroker.neverHideTools, captured at construction:
@@ -106,6 +111,14 @@ class Agent : IBasicAgent {
         string[] neverHideTools_;
         bool waitingForVisionResponse;
         ServerStat prevStat;
+
+        // Broker adjust hook (D8, design section 4.6): set via
+        // setBrokerAdjustHook, invoked with the freshly resolved (global +
+        // per-model) config on every model switch (resetModel). Mutations of
+        // the passed config are the broker's own use - they never write back
+        // into LlmConfig and cannot leak into later resolutions (each switch
+        // re-resolves from llmConf) or other agents.
+        void delegate(ref ToolBrokerConfig) brokerAdjustHook;
     }
 
     this(string name, LlmConfig llmConf, MetricMonitor monitor, RAG rag = null) {
@@ -122,6 +135,7 @@ class Agent : IBasicAgent {
         import llm.tool_call.broker : BrokerState, filterRegFunctions, hiddenNeverHideTools;
 
         this.name = name;
+        this.conf = llmConf;
         this.monitor = monitor;
         this.rag = rag;
         this.toolFilter = filter;
@@ -139,42 +153,32 @@ class Agent : IBasicAgent {
         foreach (n; hiddenNeverHideTools(reg, filter, llmConf.toolBroker.neverHideTools))
             logger.warningf("neverHide tool '%s' excluded by toolFilter; fix the config", n);
         toolCtx.broker = BrokerState.init;
-        toolCtx.brokerEnabled = llmConf.toolBroker.enabled;
         neverHideTools_ = llmConf.toolBroker.neverHideTools;
 
-        // Tools array: built once per instance here, owned by the
-        // Agent, passed per request; reassigned from pure selectTools output at
-        // change points only - activation/discovery (the toolCtx.rebuildTools
-        // hook below) and compression.
-        import llm.tool_call : descAllFunctions, filterToolDescriptions;
-        import llm.tool_call.broker : selectTools;
-        import llm.tool_call.discovery : composeDiscoveryDesc;
+        // Resolved broker config for the ACTIVE model: the membership helpers
+        // and the discovery tool read it from the context. resetModel
+        // re-resolves it on every model switch and runs the broker adjust hook
+        // on the fresh copy (task 6, D8); a direct resolve call here keeps the
+        // wiring compiling and gives the array build below its config.
+        toolCtx.brokerConf = resolveToolBrokerConfig(llmConf, llmConf.activeCodeModel);
 
-        if (llmConf.toolBroker.enabled) {
-            tools = selectTools(toolCtx.pool, toolCtx.broker.activated,
-                    llmConf.toolBroker.neverHideTools);
-            // Composed discovery description: swap the listToolTags
-            // entry's description for base text + the configured tag vocabulary.
-            composeDiscoveryDescription(tools,
-                    llmConf.toolBroker.toolTagDescriptions, toolCtx.broker);
-            // Activation change point: the discovery tool rebuilds
-            // the array through this hook after activating a tag, and the
-            // recomposed listToolTags description must be re-applied:
-            // the raw selectTools output carries the bare UDA text.
-            toolCtx.rebuildTools = delegate() @safe {
-                tools = selectTools(toolCtx.pool, toolCtx.broker.activated,
-                        llmConf.toolBroker.neverHideTools);
-                composeDiscoveryDescription(tools,
-                        llmConf.toolBroker.toolTagDescriptions, toolCtx.broker);
-            };
-        } else {
-            // Kill switch: the pre-broker tools array — registry ∩
-            // toolFilter (no neverHide union-back), so tools ⊆ pool, the only
-            // possible difference being a neverHide tool excluded by toolFilter
-            // (in the pool only; warned at construction). Gate inert regardless:
-            // brokerEnabled=false is its first conjunct.
-            tools = filterToolDescriptions(descAllFunctions(), filter).array;
-        }
+        // Broker adjust hook (D8, design section 4.6): invoke-if-set for
+        // symmetry - every path that changes the effective model resolves +
+        // hooks here or in resetModel. The hook is always null at ctor time:
+        // setBrokerAdjustHook is an instance method, so a hook can only be
+        // installed after construction. Hook-mutated configs bypass
+        // validateToolBrokerConfig (warn-only), per design section 4.6
+        // (semantics 3); the pre-hook resolution was validated at construction.
+        if (brokerAdjustHook !is null)
+            brokerAdjustHook(toolCtx.brokerConf);
+        toolCtx.brokerEnabled = toolCtx.brokerConf.enabled;
+
+        // Tools array: built once per instance here and re-built on every
+        // model switch (rebuildModelTools), owned by the Agent, passed per
+        // request; reassigned from pure selectTools output at change points
+        // only - model switches (rebuildModelTools), activation/discovery
+        // (the toolCtx.rebuildTools hook), compression, and MCP connects.
+        rebuildModelTools();
 
         // Nudge policy: the global default and prompt dir must be stored BEFORE
         // resetModel resolves the active model's policy and eagerly loads its
@@ -205,6 +209,63 @@ class Agent : IBasicAgent {
         return prevStat;
     }
 
+    /// Sets the broker adjust hook (D8, design section 4.6). The hook is
+    /// invoked on every model switch (resetModel) with the freshly resolved
+    /// (global + per-model) config by ref - the config is a private copy per
+    /// model (a fresh resolveToolBrokerConfig call per switch), so hook
+    /// mutations never leak into LlmConfig, later resolutions, or other
+    /// agents; the mutated config is used until the next model switch. Null
+    /// hook (the default) = the resolved config is used unchanged. No
+    /// constructor parameter and no YAML section (per non-goals): the hook
+    /// receives only the config ref; delegates capture any context they need.
+    void setBrokerAdjustHook(void delegate(ref ToolBrokerConfig) hook) @safe {
+        brokerAdjustHook = hook;
+    }
+
+    /// Rebuilds the model-facing tools array from the current pool and the
+    /// effective (hook-adjusted, per-model) broker config: the ctor calls it
+    /// once and resetModel calls it on every model switch, so per-model broker
+    /// config and hook mutations take effect on the array. Branches on the
+    /// effective config's kill switch: enabled - the selectTools array
+    /// (alwaysOn head in registry order, activated tail) with the composed
+    /// listToolTags description; disabled - the pre-broker array (registry
+    /// intersect toolFilter, no neverHide union-back), the only possible
+    /// difference being a neverHide tool excluded by toolFilter (in the pool
+    /// only; warned at construction). Under the broker branch the
+    /// toolCtx.rebuildTools hook is (re)pointed at this method - the MCP
+    /// connect change point rebuilds through it; under the kill switch it is
+    /// cleared (the array never changes). @trusted, not @safe: the kill-switch
+    /// branch calls the @system filterToolDescriptions/.array pair - the same
+    /// unchecked pattern the pre-task-6 ctor body had (the ctor was never
+    /// @safe either); the broker branch is fully @safe.
+    private void rebuildModelTools() @trusted {
+        import llm.tool_call : descAllFunctions, filterToolDescriptions;
+        import llm.tool_call.broker : selectTools;
+        import llm.tool_call.discovery : composeDiscoveryDesc;
+
+        if (toolCtx.brokerConf.enabled) {
+            tools = selectTools(toolCtx.pool, toolCtx.broker.activated,
+                    toolCtx.brokerConf.neverHideTools,
+                    alwaysOnTools(toolCtx.brokerConf, toolCtx.pool));
+            // Composed discovery description: swap the listToolTags
+            // entry's description for base text + the configured tag vocabulary.
+            composeDiscoveryDescription(tools, toolCtx.brokerConf, toolCtx.broker);
+            // the array through this hook after activating a tag, and the
+            // recomposed listToolTags description must be re-applied:
+            // the raw selectTools output carries the bare UDA text.
+            toolCtx.rebuildTools = &rebuildModelTools;
+        } else {
+            // Kill switch: the pre-broker tools array - registry intersect
+            // toolFilter (no neverHide union-back), so tools are a subset of
+            // the pool, the only possible difference being a neverHide tool
+            // excluded by toolFilter (in the pool only; warned at
+            // construction). Gate inert regardless: brokerEnabled=false is
+            // its first conjunct.
+            tools = filterToolDescriptions(descAllFunctions(), toolFilter).array;
+            toolCtx.rebuildTools = null;
+        }
+    }
+
     /// Reset the agent's model to a new configuration. Does NOT modify chat history or SummaryAgent.
     void resetModel(CodeModelConfig modelConfig) {
         import llm.endpoint : getContextSize;
@@ -233,6 +294,25 @@ class Agent : IBasicAgent {
         // switch here.
         nudges_ = modelConfig.nudges.get(defaultNudges_);
         nudgeTexts_ = loadNudgeTexts(promptDir_, nudges_);
+        // Broker adjust hook (D8, design section 4.6): a model switch
+        // re-resolves the broker config for the NEW model, hands the fresh
+        // private copy to the hook, and resets the activation state
+        // (BrokerState) - activation never carries across models (semantics
+        // 2) and a hook mutation cannot produce cross-model leakage. The pool
+        // is deliberately NOT rebuilt (see the comment above); the
+        // model-facing tools array IS rebuilt from the new effective config.
+        // The kill-switch mirror (toolCtx.brokerEnabled) follows the effective
+        // (post-hook) config so the request-time gates that read it (the
+        // listToolTags / toolSearch kill switch, the hidden-tool refusal path
+        // and broker seeding) agree with the array. Hook-mutated configs
+        // bypass validateToolBrokerConfig (warn-only), per design section 4.6
+        // (semantics 3); the pre-hook resolution was validated at construction.
+        toolCtx.broker = BrokerState.init;
+        toolCtx.brokerConf = resolveToolBrokerConfig(conf, modelConfig);
+        if (brokerAdjustHook !is null)
+            brokerAdjustHook(toolCtx.brokerConf);
+        toolCtx.brokerEnabled = toolCtx.brokerConf.enabled;
+        rebuildModelTools();
     }
 
     /// MCP connect change point: an MCP server has just registered
@@ -1229,36 +1309,22 @@ struct StreamResponse {
 }
 
 /// Swaps the `listToolTags` discovery entry's description in the tools array
-/// for the composed one: the UDA base text plus the configured tag
-/// vocabulary, ordered by activation frequency then name (composeDiscoveryDesc).
-/// A no-op when toolFilter excluded the discovery tool from the array. Warns
-/// once per tag (per process) on a configured-but-empty tag description — it
-/// renders as a bare tag name in the discovery tool's description.
+/// for the composed one: the UDA base text plus the resolved config's
+/// described groups, ordered by activation frequency then name
+/// (composeDiscoveryDesc). A no-op when toolFilter excluded the discovery
+/// tool from the array. Undescribed groups are not advertised (D3) - by
+/// design, so there is no empty-description warning here.
 private void composeDiscoveryDescription(ref JSONValue[] tools,
-        string[string] tagDescriptions, BrokerState st) @safe {
+        ToolBrokerConfig resolved, BrokerState st) @safe {
     import std.algorithm : countUntil;
-
     import llm.tool_call.discovery : composeDiscoveryDesc;
 
     auto idx = tools.countUntil!(e => e["function"]["name"].str == "listToolTags");
     if (idx < 0)
-        return; // listToolTags filtered out by toolFilter — nothing to compose
-
-    // Per-process warn-once scope (documented intent); single-threaded Agent
-    // construction today — an AA insert would race if construction ever moves
-    // onto worker threads; guard it before that happens.
-    static bool[string] warned;
-    foreach (t; tagDescriptions.byKey) {
-        if (tagDescriptions[t].empty && t !in warned) {
-            warned[t] = true;
-            logger.warningf("listToolTags discovery description: tag '%s' has an "
-                    ~ "empty configured description (toolBroker.toolTagDescriptions) — it " ~ "renders as a bare tag name",
-                    t);
-        }
-    }
+        return; // listToolTags filtered out by toolFilter - nothing to compose
 
     tools[idx]["function"]["description"] = composeDiscoveryDesc(
-            tools[idx]["function"]["description"].str, tagDescriptions, st);
+            tools[idx]["function"]["description"].str, resolved, st);
 }
 
 /// Emits one broker event to the agent's monitor: the

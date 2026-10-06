@@ -146,9 +146,8 @@ struct RemoveMemoryParams {
     string topic;
 }
 
-@Function("Remove a memory that is no longer useful such as temporary notes about a topic",
-    tags:
-        ["memory"]) ExecuteFuncResult removeMemory(Context baseCtx, RemoveMemoryParams params) {
+@Function("Remove a memory that is no longer useful such as temporary notes about a topic") ExecuteFuncResult removeMemory(
+        Context baseCtx, RemoveMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 
     if (auto e = checkTopic(ctx, params.topic))

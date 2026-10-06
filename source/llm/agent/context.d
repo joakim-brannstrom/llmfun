@@ -15,7 +15,7 @@ import std.sumtype : match;
 import my.optional : Optional;
 import my.path : AbsolutePath;
 
-import llm.config : LlmConfig, ToolLimits, RagConfig;
+import llm.config : LlmConfig, ToolLimits, RagConfig, ToolBrokerConfig;
 import llm.environment.config : EnvironmentBackend;
 import llm.environment.dispatch : EnvironmentContext;
 import llm.metric.calculator : MetricsCalculator;
@@ -97,6 +97,12 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext,
         /// tag — the activation change point. Null with the broker
         /// disabled (kill switch): the tools array never changes.
         void delegate() @safe rebuildTools;
+
+        /// The resolved tool broker config for the active model: the Agent
+        /// ctor resolves it once (direct resolveToolBrokerConfig call - task
+        /// 6's per-model adjust hook re-resolves it on model switches). Bare
+        /// contexts hold the struct defaults (broker inert until set).
+        ToolBrokerConfig brokerConf;
 
         /// The owning agent's name (set by the Agent ctor): the "agent"
         /// identity of the broker JSONL events. Empty for bare
@@ -205,13 +211,6 @@ class AgentContext : Context, FileContext, RAGContext, MemoryContext,
 
         override ToolLimits getToolLimits() {
             return conf.toolLimits;
-        }
-
-        /// The tool-broker tag descriptions (toolBroker.toolTagDescriptions):
-        /// tag → human-readable description for the discovery tool's tag list
-        /// and instructive errors. A missing entry renders as a bare tag name.
-        string[string] toolTagDescriptions() @safe nothrow {
-            return conf.toolBroker.toolTagDescriptions;
         }
 
         override bool hasVisionModel() {

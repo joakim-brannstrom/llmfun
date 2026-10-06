@@ -2,7 +2,7 @@ module llm.pipeline;
 
 import logger = std.logger;
 import core.sync : Mutex, Condition;
-import std.algorithm : filter, max, map, count;
+import std.algorithm : canFind, filter, max, map, count;
 import std.array : join, appender;
 import std.conv : to, text;
 import std.datetime : Clock, SysTime, Duration, dur;
@@ -13,7 +13,7 @@ import std.json : JSONValue;
 
 import llm.agent_pool : AgentExecutionPool;
 import llm.chat : Chat, Message, Role;
-import llm.config : LlmConfig;
+import llm.config : LlmConfig, ToolBrokerConfig;
 import llm.metric.monitor : MetricMonitor;
 import llm.pipeline.graph : StopNode;
 import llm.pipeline.graph;
@@ -37,6 +37,19 @@ struct AgentName {
 
 struct NodeConfig {
     uint maxRetries = 3;
+}
+
+/// Broker adjust hook installed on the transient pipeline agents (coder,
+/// reviewer, designer, design reviewer, planner - design section 4.7): forces
+/// `pipelineOutput` visible so a pipeline agent always sees it even under an
+/// enabled broker config that hides every group it would otherwise land in.
+/// Trivial by design: captures nothing but the literal tool name, idempotent
+/// (only appends when absent).
+void delegate(ref ToolBrokerConfig) pipelineOutputAlwaysOnHook() @safe {
+    return (ref ToolBrokerConfig c) @safe {
+        if (!c.alwaysOn.canFind("pipelineOutput"))
+            c.alwaysOn ~= "pipelineOutput";
+    };
 }
 
 /// Node in the pipeline graph; wraps an agent and tracks execution state.

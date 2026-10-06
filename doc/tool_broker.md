@@ -33,21 +33,22 @@ mechanism is unit-testable without a live model.
 - **Pool construction.** The global registry is filtered by configuration
   (include/exclude name filters, plus a never-hide list that survives the
   filters) into the *pool* - the set a broker-managed agent may ever see.
-- **Selection.** The per-request array is built in a fixed order: untagged
-  (always-on) tools first in registry order, never-hidden tools forced into the
+- **Selection.** The per-request array is built in a fixed order: ungrouped
+  (alwaysOn) tools first in registry order, never-hidden tools forced into the
   head, then activated tools in activation order; deduplicated by name. The
   pool is never sorted or reshuffled - identical state emits byte-identical
   arrays (pinned by a unittest).
-- **Activation.** An agent sees the always-on head by default; tagged tools
-  activate on demand, by tag or by single tool, and activation is sticky.
-  Unknown tags and names are no-ops at this layer; the instructive message is
-  the discovery layer's. A per-tag activation counter feeds the discovery
-  tool's presentation cap (frequency then name).
+- **Activation.** An agent sees the always-on head by default; tools in hidden
+  groups activate on demand, by group name or by single tool, and activation is
+  sticky. Unknown group names and tool names are no-ops at this layer; the
+  instructive message is the discovery layer's. A per-group activation counter
+  (keyed by group name) feeds the discovery tool's presentation cap (frequency
+  then name).
 - **Instructive refusal at the dispatch site.** A tool in the pool but not
-  visible to the calling agent (tagged, never activated) refuses with
-  "discover tools with `listToolTags`" so the model recovers by itself; tools
-  excluded by configuration or absent from the registry fall through to the
-  generic executors' refusals.
+  visible to the calling agent (a member of a hidden group, never activated)
+  refuses with "discover tools with `listToolTags`" so the model recovers by
+  itself; tools excluded by configuration or absent from the registry fall
+  through to the generic executors' refusals.
 - **Compression-time pruning.** At compression change points, activated tools
   with no tool call in the intact pre-compression chat are pruned from the
   activation list - conservative: only structured tool-call names count,
@@ -108,7 +109,71 @@ the shipped Qwen and DeepSeek templates both embed tools first.
 
 ---
 
-## 5. Known Gaps & Maintenance
+## 5. Configuration & Migration
+
+The broker is configured per model through the `toolBroker` block in
+`config/*.yaml`; a fully worked example ships as `config/example.yaml`.
+
+```yaml
+toolBroker:
+  enabled: false                       # kill switch, per model overridable
+  groups:
+    workarea:
+      description: "Files in the agent workarea: read/write/list/search"
+      tools: [writeFile, readFile, editFile, listDirectory, grepFiles]
+    pipeline:
+      description: "Completion tools for agents running in a pipeline"
+      tools: [pipelineOutput]
+  hiddenTags: [workarea]               # only these groups' members start hidden
+  alwaysOn: [taskDone, listToolTags]   # tool names OR group names
+  neverHideTools: [taskDone]           # pool-membership axis, unchanged
+```
+
+**Resolution.** The effective config for a request is built in layers, each
+later layer overriding the previous one per field: the built-in struct defaults,
+then the global `toolBroker` block, then the model's own `toolBroker` block
+(inside its `codeModels` entry), then the agent's broker adjust hook - an
+internal integration point pipelines use to pin tools programmatically (it
+mutates the freshly resolved config on first use of a model and on every model
+switch; the mutation is not written back into `LlmConfig`). Within a block,
+scalar and list fields replace wholesale, while `groups` merges per entry by
+group name: a model group entry named like a global one replaces that group's
+description and tool list and keeps the other groups.
+
+**Consequence of the per-field override.** Groups are not "everything hidden by
+default": only the group names listed in `hiddenTags` hide anything. A NEW group
+inherited from the global block under a model override is therefore visible
+unless the model's own `hiddenTags` names it - and a model `hiddenTags` replaces
+the global list wholesale (no merge), so extending it means re-listing the
+groups the model wants hidden. Override what you need.
+
+**Migration (clean break; there is no deprecation shim - pre-1.0 project).**
+
+- A config that never had a `toolBroker` section keeps working unchanged:
+  tools in no group are alwaysOn before and after this change, so nothing is
+  hidden and the broker is inert (`enabled` defaults to false).
+- A config using `toolTagDescriptions` must move to `groups` entries whose
+  `description` feeds discovery; the old key is dropped with a targeted
+  startup warning pointing at the `groups` migration.
+- A config that already had a `toolBroker` block changes in three ways:
+  1. The broker starts DISABLED if it relied on the old `enabled = true`
+     default rather than an explicit `enabled: true`. This is the one visible
+     behavior change - check it first when upgrading.
+  2. `toolTagDescriptions` is dropped (the startup warning above).
+  3. The old tag categorization silently disappears unless the config migrates
+     to `groups` (there is no shim).
+
+**Mixed `alwaysOn` semantics.** `alwaysOn` entries may be tool names OR group
+names in one array: a group name un-hides the group's whole membership, a tool
+name un-hides just that tool.
+
+**All-members-alwaysOn corner.** A hidden group whose members are ALL in
+`alwaysOn` still shows up in `listToolTags`, and activating it is a no-op:
+every member was already visible, so activation changes nothing.
+
+---
+
+## 6. Known Gaps & Maintenance
 
 - **Cache-hit reporting is dropped on the floor:** the OpenAI-style and DeepSeek
   usage payloads carry per-request cache-hit fields, and llama.cpp exposes a

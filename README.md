@@ -359,6 +359,16 @@ toolFilter:
     - '.*'
   exclude: []
 
+toolBroker:
+  enabled: false # kill switch, per model overridable
+  groups:
+    workarea:
+      description: "Files in the agent workarea: read/write/list/search"
+      tools: [writeFile, readFile, editFile, listDirectory, grepFiles]
+  hiddenTags: [workarea] # only these groups' members start hidden
+  alwaysOn: [taskDone, listToolTags] # tool names or group names
+  neverHideTools: [taskDone]
+
 ragFilter:
   include:
     - '.*\.txt'
@@ -479,6 +489,7 @@ embedConfig:
 | `consolidationInterval` | uint | `10` | Memory consolidation trigger interval (sessions). 0 = disabled |
 | `ragPrimary` | object | `llmfun/data/rag.sqlite3` | Primary RAG database (read/write) |
 | `ragSecondary` | object | `{}` | Additional read-only RAG databases |
+| `toolBroker` | object | disabled | Tool visibility groups and on-demand activation (see below) |
 | `toolLimits` | object | defaults | Tool execution limits (see below) |
 | `tui` | object | no | TUI options; `maxWidth` caps rendered width in columns (0 = unlimited, default) |
 
@@ -661,6 +672,47 @@ toolFilter:
 - `include` (string[]): Regex patterns for tools to allow (default: all tools)
 - `exclude` (string[]): Regex patterns for tools to block
 
+### Tool Broker (`toolBroker`)
+
+Controls which tools each request actually carries, via named groups and
+on-demand activation. The global tool registry holds every registered tool;
+sending all of it on every request is wasteful, so the broker keeps the
+per-request `tools` array small and byte-stable between change points (see
+`doc/tool_broker.md` for the rationale). `enabled` defaults to `false`, so the
+broker is inert until switched on, and it is overridable per model.
+
+```yaml
+toolBroker:
+  enabled: false # kill switch, per model overridable
+  groups:
+    workarea:
+      description: "Files in the agent workarea: read/write/list/search"
+      tools: [writeFile, readFile, editFile, listDirectory, grepFiles]
+    pipeline:
+      description: "Completion tools for agents running in a pipeline"
+      tools: [pipelineOutput]
+  hiddenTags: [workarea] # only these groups' members start hidden
+  alwaysOn: [taskDone, listToolTags] # tool names or group names
+  neverHideTools: [taskDone] # pool-membership axis, unchanged
+```
+
+- `enabled` (bool, default `false`): kill switch; per model overridable
+- `groups` (map): named tool groups - the name is the activation key, the
+  description feeds discovery, `tools` lists member tool names; a tool may be
+  listed in several groups
+- `hiddenTags` (string[]): only these groups' members start hidden, activatable
+  via the `listToolTags` tool; omitted or empty hides nothing
+- `alwaysOn` (string[]): tool names OR group names forced visible - a group name
+  un-hides the group's whole membership
+- `neverHideTools` (string[]): tools that survive the name filters regardless of
+  visibility (pool membership, unchanged)
+
+A model overrides the global block per field with a `toolBroker` block inside
+its `codeModels` entry: present fields replace, absent fields inherit, and
+`groups` merges per entry by group name (an entry with the same name replaces
+that group wholesale). Migration from the old `toolTagDescriptions` key and the
+full design are in `doc/tool_broker.md`.
+
 ### RAG Filter (`ragFilter`)
 
 Controls which files are indexed into the RAG database.
@@ -714,6 +766,7 @@ codeModels:
 | `reasoningBudget` | long | 0 | Token budget for reasoning/thinking |
 | `preserveThinking` | bool | false | Preserve thinking tags in output |
 | `jsonFields` | string | null | a json object as a string which is merged into the chat message |
+| `toolBroker` | object | (inherit) | Per-model `toolBroker` override block; present fields replace the global values, absent fields inherit, `groups` merges per entry |
 
 ### Server Configuration (`server`)
 

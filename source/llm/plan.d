@@ -10,7 +10,8 @@ import my.filter : ReFilter;
 import llm.agent : Agent;
 import llm.config : LlmConfig;
 import llm.metric.monitor : MetricMonitor;
-import llm.pipeline : Pipeline, PipelineResult, pipelineBuilder, NodeConfig;
+import llm.pipeline : Pipeline, PipelineResult, pipelineBuilder, NodeConfig,
+    pipelineOutputAlwaysOnHook;
 import llm.rag.rag : RAG;
 import llm.skill : makeSkillManager;
 import llm.types : IStreamCallback;
@@ -39,7 +40,7 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
         "3. Follow the template steps to analyze the user's request thoroughly.\n" ~
         "4. Produce a clear, well-structured system design document.\n" ~
         "5. Save your design document to a file in the `plan/system_design.md`.\n" ~
-        "6. After saving, call 'setPipelineOutput' with 'ok' and call `taskDone` to complete your task.\n";
+        "6. After saving, call 'pipelineOutput' with 'ok' and call `taskDone` to complete your task.\n";
 
     // Agent 2: System Design reviewer
     // TODO: bullet 3 should reference a system design review template
@@ -67,23 +68,34 @@ PipelineResult runPlanPipeline(string query, LlmConfig llmConf, RAG rag, MetricM
         "3. Read the system design document from `plan/system_design.md` using `readFile`.\n" ~
         "4. Follow the template steps to break the design into concrete implementation tasks.\n" ~
         "5. Save your implementation plan to `plan/implementation_plan.md` using `writeFile`.\n" ~
-        "6. After saving, call 'setPipelineOutput' with 'done' and call `taskDone` to complete your task.\n";
+        "6. After saving, call 'pipelineOutput' with 'done' and call `taskDone` to complete your task.\n";
     // dfmt on
 
     auto tmpManager = makeSkillManager(llmConf);
 
     auto designer = new Agent("system_designer", llmConf, monitor, rag, toolFilter);
+    // Keep pipelineOutput visible under an enabled broker (design section
+    // 4.7); resetModel fires the hook for the construction-time model
+    // (design section 4.6).
+    // resetModel must not short-circuit same-model resets, or the covering
+    // call silently stops firing the hook.
+    designer.setBrokerAdjustHook(pipelineOutputAlwaysOnHook());
+    designer.resetModel(llmConf.activeCodeModel);
     designer.setSystemPrompt(llmConf.getPrompt(tmpManager));
     designer.addUserQuery(systemDesignerPrompt);
     designer.addUserQuery(query);
 
     auto designReview = new Agent("system_design_review", llmConf, monitor, rag, toolFilter);
+    designReview.setBrokerAdjustHook(pipelineOutputAlwaysOnHook());
+    designReview.resetModel(llmConf.activeCodeModel);
     designReview.setSystemPrompt(llmConf.getPrompt(tmpManager));
     designReview.addUserQuery(systemDesignerFeedbackPrompt);
     designReview.addUserQuery(i"The users task for the system_designer agent was the following:\n\n---\n\n$(
             query)\n\n---\n".text);
 
     auto planner = new Agent("implementation_planner", llmConf, monitor, rag, toolFilter);
+    planner.setBrokerAdjustHook(pipelineOutputAlwaysOnHook());
+    planner.resetModel(llmConf.activeCodeModel);
     planner.setSystemPrompt(llmConf.getPrompt(tmpManager));
     planner.addUserQuery(implPlannerPrompt);
 
