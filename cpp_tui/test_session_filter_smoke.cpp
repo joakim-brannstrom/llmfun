@@ -417,10 +417,10 @@ int statusRowY() {
 
 void clickFilter() { click(5, sepRowY() + 1); }
 
-// The main query InputTextMultiline shares its bottom row with the Send
-// field (SameLine after the multi-line input); Send/Prev/Next stack below
-// it, so the input's clickable row is three above the status row.
-void clickMainInput() { click(40, statusRowY() - 3); }
+// The status line is the input group's first row; the multi-line input
+// field spans rows statusRowY()+1 .. statusRowY()+inputHeight. The old
+// click(40, statusRowY()-3) lands inside the output child now.
+void clickMainInput() { click(40, statusRowY() + 1); }
 
 // Click the row whose title label starts at the first non-space cell.
 void clickRowByTitle(const std::string& needle) {
@@ -1312,8 +1312,11 @@ void scenario22_empty_snapshot() {
         int sy = findRow(g, "Context: 0/0 tokens");
         if (sy < 0)
             fail("S22: status line not rendered");
-        if (sy != g.ny - 1)
-            fail("S22: status line not on the last row (row " + std::to_string(sy) + ")");
+        // The status line is the input group's FIRST row: g.ny - groupH.
+        // groupH = statusRowH(1) + max(inputHeight(4), stack(3)) = 5 in the grid
+        // for the scenario's 1-line buffer -> row g.ny - 5.
+        if (sy != g.ny - 5)
+            fail("S22: status row expected at g.ny - 5 (row " + std::to_string(sy) + ")");
     }
     resetClean();
 }
@@ -1339,6 +1342,166 @@ void scenario23_log_lines() {
     }
 }
 
+// Cell-exact column of the first occurrence of an ASCII needle on row y.
+// rowText() string indices can drift from cell columns on multi-byte glyphs,
+// so column checks scan the cells directly.
+int findCol(const Grid& g, int y, const std::string& needle) {
+    if (y < 0 || y >= g.ny)
+        return -1;
+    for (int x = 0; x + (int)needle.size() <= g.nx; ++x) {
+        bool ok = true;
+        for (size_t i = 0; i < needle.size(); ++i)
+            if (g.ch[y * g.nx + x + i] != (unsigned char)needle[i]) {
+                ok = false;
+                break;
+            }
+        if (ok)
+            return x;
+    }
+    return -1;
+}
+
+// S24: the input group (status line first, field beside the Send/Prev/Next
+// stack) stays pinned to the right column in all four left-panel states and
+// tracks the buffer's ACTUAL post-frame line count (AD-2/AD-3; invariants
+// I1/I2/I3/I6). Grid pins: status row 19 for a 1-line buffer, 3 for a
+// 20-line one; Send/Prev/Next labels at column 71 in every state (frame
+// left = lpw + inputWidth = 69 for lpw 30 and 8 alike, +2 FramePadding).
+void scenario24_input_group_geometry() {
+    g_phase = "S24 input group geometry";
+    resetClean();
+
+    // Marker buffers. "zz9" occurs in no panel/status/button text, and the
+    // marker sits on LINE 1 so its glyph is visible on the field's first row
+    // in both sizes (a 19x'\n'+"x" buffer would put the only glyph on line
+    // 20 = row 23, unpainted by the display-bottom clamp).
+    const std::string buf1 = "zz9";
+    std::string buf20 = "zz9";
+    buf20 += std::string(19, '\n'); // 20 lines -> inputHeight 20, groupH 21
+
+    // External buffer replacement is only safe with the field INACTIVE: an
+    // active field's in-widget copy clobbers the user buffer on deactivation
+    // (imgui_widgets.cpp:5452-5457). Focus it, Escape (the app's clear also
+    // cancels the edit session -> deactivated), then replace.
+    auto setInputBuf = [&](const std::string& buf) {
+        clickMainInput();
+        pressKey(ImGuiKey_Escape);
+        idle(1);
+        g_state.userQuery.inputBuf = buf;
+        idle(2);
+    };
+
+    // I1/I2/I3/I6 for one (left state, buffer) cell.
+    auto checkCell = [&](const char* tag, int lpw, const std::string& buf) {
+        // One named copy: input().begin()/input().end() would pair
+        // iterators from TWO different temporaries (invalid range).
+        const std::string cur = input();
+        if (cur != buf)
+            fail(std::string(tag) + ": input buffer mangled by the widget: '" + cur + "'");
+        Grid g = grid();
+        const int newlines = (int)std::count(cur.begin(), cur.end(), '\n');
+        const int lines = std::min(20, std::max(2, newlines));
+        const int inputHeight = std::max(4, 1 + lines);  // lineH 1, FP.y 0
+        const int groupH = 1 + std::max(inputHeight, 3); // statusRowH 1, stack 3
+        const int expStatusRow = g.ny - groupH;          // group bottom == display bottom
+        const int sy = findRow(g, "Context:");
+        if (sy < 0)
+            fail(std::string(tag) + ": status row not rendered");
+        if (sy != expStatusRow)
+            fail(std::string(tag) + ": status row " + std::to_string(sy) + " != expected " +
+                 std::to_string(expStatusRow) + " (groupH " + std::to_string(groupH) + ")");
+        // I3: the field's first row is the row right below the status row.
+        const int my = findRow(g, "zz9");
+        if (my != sy + 1)
+            fail(std::string(tag) + ": marker row " + std::to_string(my) + " != statusRow+1");
+        // I1: the status text starts exactly at groupPos.x == the output
+        // child's x == rootPad.x + lpw (pins: 30 open, 8 collapsed).
+        const int sc = findCol(g, sy, "Context:");
+        if (sc != lpw)
+            fail(std::string(tag) + ": status column " + std::to_string(sc) + " != lpw " +
+                 std::to_string(lpw));
+        // I2: the typed field text starts at/inside the column boundary
+        // (grid: lpw + 1, one FramePadding cell into the borderless field).
+        const int mc = findCol(g, my, "zz9");
+        if (mc < lpw)
+            fail(std::string(tag) + ": field marker column " + std::to_string(mc) +
+                 " left of lpw " + std::to_string(lpw));
+        // I6: Send/Prev/Next visible on the three rows beside the field's
+        // first rows, labels at x >= lpw + fieldWidth (a clipped stack emits
+        // no glyphs, so presence+column is the regression catcher).
+        const int groupW = g.nx - lpw - 1;     // rootPad 0, colSlack 1
+        const int inputWidth = groupW - 9 - 1; // buttonWidth 9, ItemSpacing.x 1
+        const int rows[3] = {findRow(g, "Send"), findRow(g, "Prev"), findRow(g, "Next")};
+        const int expRows[3] = {sy + 1, sy + 2, sy + 3};
+        const char* names[3] = {"Send", "Prev", "Next"};
+        for (int k = 0; k < 3; ++k) {
+            if (rows[k] != expRows[k])
+                fail(std::string(tag) + ": " + names[k] + " row " + std::to_string(rows[k]) +
+                     " != expected " + std::to_string(expRows[k]));
+            const int lc = findCol(g, rows[k], names[k]);
+            if (lc < lpw + inputWidth)
+                fail(std::string(tag) + ": " + names[k] + " column " + std::to_string(lc) +
+                     " < lpw + fieldWidth (" + std::to_string(lpw + inputWidth) + ")");
+            if (lc != 71)
+                fail(std::string(tag) + ": " + names[k] + " column " + std::to_string(lc) +
+                     " != grid pin 71");
+        }
+        if (leftPanelWidth(g_state) != lpw)
+            fail(std::string(tag) + ": leftPanelWidth " + std::to_string(leftPanelWidth(g_state)) +
+                 " != " + std::to_string(lpw));
+    };
+
+    // State 1: session panel open (lpw 30).
+    setInputBuf(buf1);
+    checkCell("S24 open-session 1-line", 30, buf1);
+    setInputBuf(buf20);
+    checkCell("S24 open-session 20-line", 30, buf20);
+
+    // State 2: session panel collapsed (lpw 8).
+    clickRowByTitle("Close");
+    idle(1);
+    if (g_state.sessionPanel.panelOpen)
+        fail("S24: session panel not closed");
+    setInputBuf(buf1);
+    checkCell("S24 collapsed-session 1-line", 8, buf1);
+    setInputBuf(buf20);
+    checkCell("S24 collapsed-session 20-line", 8, buf20);
+
+    // State 3: pipeline open (lpw 30) - reopen the session panel first so
+    // the state is canonical, then occupy the slot with an agent.
+    clickRowByTitle("Open");
+    idle(1);
+    if (!g_state.sessionPanel.panelOpen)
+        fail("S24: session panel not reopened");
+    g_state.left.agents.push_back(AgentStream());
+    idle(2); // first frame still sees panelW 0; settles to 30
+    if (g_state.left.panelW != 30)
+        fail("S24: pipeline panel width " + std::to_string(g_state.left.panelW) + " != 30");
+    setInputBuf(buf1);
+    checkCell("S24 open-pipeline 1-line", 30, buf1);
+    setInputBuf(buf20);
+    checkCell("S24 open-pipeline 20-line", 30, buf20);
+
+    // State 4: pipeline collapsed (lpw 8) - the session panel is hidden
+    // while agents exist, so "Close" is the pipeline header button.
+    clickRowByTitle("Close");
+    idle(1);
+    if (g_state.left.panelOpen)
+        fail("S24: pipeline panel not closed");
+    setInputBuf(buf1);
+    checkCell("S24 collapsed-pipeline 1-line", 8, buf1);
+    setInputBuf(buf20);
+    checkCell("S24 collapsed-pipeline 20-line", 8, buf20);
+
+    // Restore: no agents, panel open, empty input buffer.
+    g_state.left.agents.clear();
+    resetClean();
+    clickMainInput();
+    pressKey(ImGuiKey_Escape);
+    idle(1);
+    if (!input().empty())
+        fail("S24: input buffer not empty at scenario end");
+}
 } // namespace
 
 // harness:
@@ -1408,6 +1571,7 @@ int main() {
     scenario21_pipeline_occupancy();
     scenario22_empty_snapshot();
     scenario23_log_lines();
+    scenario24_input_group_geometry();
 
     harnessShutdown();
     std::printf("OK: all session-filter scenarios passed (%d frames)\n", g_frames);

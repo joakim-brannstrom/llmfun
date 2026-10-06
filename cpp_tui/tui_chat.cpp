@@ -500,6 +500,21 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
     // imtui padding is sub-cell), so the historical formulas stay exact.
     const ImVec2 rootPad = textGrid ? ImVec2(0.0f, 0.0f) : ImGui::GetStyle().WindowPadding;
 
+    // Shared input-group geometry (chat tab): the input area is ONE group —
+    // the status row on top, then the multiline field beside the
+    // Send/Prev/Next stack — placed at the right column's bottom, never
+    // crossing into the left panel's column. This block is the single source
+    // for the group's height, position and width; the group placement and
+    // the chat-log reserve both derive from it. The input row is the taller
+    // of the field and the 3-button stack, so the group can never undersize
+    // the stack. Pure per-frame computation, no side effects.
+    const float buttonH = textGrid ? 1.0f : ImGui::GetFrameHeight();
+    const float inputRowH = std::max(inputHeight, 3.0f * buttonH + 2.0f * rowGapY);
+    const float groupH = statusRowH + rowGapY + inputRowH;
+    const float lpw = static_cast<float>(leftPanelWidth(state));
+    const ImVec2 groupPos(rootPad.x + lpw, DisplaySize.y - groupH);
+    const float groupW = DisplaySize.x - rootPad.x - lpw - colSlack;
+
     if (state.readyStatus)
         state.startProcesssingTime = std::chrono::system_clock::now();
     bool focusInput{focusInput_};
@@ -527,18 +542,17 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
             g.NavCursorVisible = false;
     };
 
-    auto outputArea = [&state, &log, &inputHeight, &DisplaySize, &focusInput, menuBarH, statusRowH,
-                       colSlack, rowGapY, rootPad]() {
+    auto outputArea = [&state, &log, &DisplaySize, &focusInput, menuBarH, groupH, colSlack,
+                       rootPad]() {
         // Clamp height to avoid negative values on very small terminals
         const int lpw = leftPanelWidth(state);
         // The child sits below the menu bar, at the same content-origin
-        // padding the flow-placed panels get; its height reserves the status
-        // row at the bottom plus the flow gap EndChild's ItemSize adds before
-        // the input area (0 in the grid, the item spacing in the GUI).
+        // padding the flow-placed panels get; its bottom reserves the whole
+        // input group (status row + input row incl. the button stack), which
+        // sits bottom-aligned at the window bottom (AD-2/AD-3).
         ImVec2 outPos(rootPad.x + static_cast<float>(lpw), rootPad.y + menuBarH);
-        ImVec2 outSize(
-            DisplaySize.x - outPos.x - colSlack,
-            std::max(1.0f, DisplaySize.y - outPos.y - statusRowH - rowGapY - inputHeight));
+        ImVec2 outSize(DisplaySize.x - outPos.x - colSlack,
+                       std::max(1.0f, DisplaySize.y - outPos.y - groupH));
         ImGui::SetCursorPos(outPos);
         // No ImGuiWindowFlags_HorizontalScrollbar: code blocks render without
         // wrapping, and any code line wider than the viewport would surface a
@@ -694,20 +708,15 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
     };
 
-    auto inputArea = [&state, &inputHeight, &inputHistory, &focusInput,
-                      &suppressInputRowNavCursor]() {
-        // audit: accepted — the input row keeps terminal parity: it
-        // spans the content width (from the root padding) exactly like the
-        // grid, so its frame overlays the sidebar's bottom band (including
-        // the lower part of the rows scrollbar; the track above stays
-        // usable). Insetting it to the output slot was considered and
-        // rejected: the grid behaves the same and the narrower input would
-        // move the Send/history group.
+    auto inputArea = [&state, &inputHeight, &inputHistory, &focusInput, &suppressInputRowNavCursor,
+                      groupPos, groupW]() {
+        // The input group insets to the output slot so nothing crosses the
+        // column boundary (the earlier decision to span the content width is
+        // overridden); the status line is the group's first item.
         float buttonWidth =
             ImGui::CalcTextSize("Send   ").x + ImGui::GetStyle().FramePadding.x * 2.0f;
 
-        float inputWidth =
-            ImGui::GetContentRegionAvail().x - buttonWidth - ImGui::GetStyle().ItemSpacing.x;
+        float inputWidth = groupW - buttonWidth - ImGui::GetStyle().ItemSpacing.x;
         inputWidth = std::max(0.0f, inputWidth);
 
         if (!state.userQuery.newInputBufString.empty()) {
@@ -726,6 +735,18 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         const bool inputActive = (ImGui::GetActiveID() == userInputId);
 
         suppressInputRowNavCursor();
+
+        // The input group: status line on top, then the field with the
+        // Send/Prev/Next stack beside it (plan/system_design.md AD-2).
+        ImGui::SetCursorPos(groupPos);
+        ImGui::BeginGroup();
+
+        static constexpr std::string_view defaultStatus =
+            "Context: 0/0 tokens | Model: none | Ready";
+        if (state.statusText.empty())
+            ImGui::TextUnformatted(defaultStatus.data());
+        else
+            ImGui::TextUnformatted(state.statusText.c_str());
 
         ImGui::InputTextMultiline(
             "##user_input", state.userQuery.inputBuf.data(), state.userQuery.inputBuf.size() + 1,
@@ -752,6 +773,8 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
 
         ImGui::SameLine();
+        // Keep the inner group: it isolates the Send/Prev/Next stack's line
+        // height from the field (load-bearing — do not remove).
         ImGui::BeginGroup();
         static std::string buttonText("Send");
         // using an InputText field to simulate a button because otherwise
@@ -767,6 +790,7 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
         bool historyPrev = ImGui::Button("Prev");
         bool historyNext = ImGui::Button("Next");
+        ImGui::EndGroup();
         ImGui::EndGroup();
         suppressInputRowNavCursor();
 
@@ -788,34 +812,11 @@ static void renderTabChat(TuiState& state, bool focusInput_, Log& log) {
         }
     };
 
-    auto statusLine = [&state, &DisplaySize, statusRowH]() {
-        static constexpr std::string_view defaultStatus =
-            "Context: 0/0 tokens | Model: none | Ready";
-
-        // Pin to the bottom-left cell. The Send/Prev/Next group is opened
-        // after a SameLine() call; on 1.92 EndGroup restores the same-line
-        // bookkeeping (window->DC.IsSameLine) along with the cursor, so the
-        // status text that follows the group is placed at the group's right
-        // edge and clipped off the terminal. Whatever cursor state the group
-        // leaves behind, the status must sit at the bottom-left cell.
-        // audit: the 1-cell reserve becomes one text line in the
-        // pixel profile (statusRowH), keeping the status flush with the
-        // window bottom instead of one pixel above it.
-        ImGui::SetCursorPos(ImVec2(0.0f, DisplaySize.y - statusRowH));
-
-        if (state.statusText.empty()) {
-            ImGui::TextUnformatted(defaultStatus.data());
-        } else {
-            ImGui::TextUnformatted(state.statusText.c_str());
-        }
-    };
-
     renderTabChatSessionPanel(state, log);
     renderTabChatLeftPanel(state.left, log);
     suppressInputRowNavCursor();
     outputArea();
     inputArea();
-    statusLine();
 }
 
 static void renderTabLog(TuiState& state, Log& log) {
