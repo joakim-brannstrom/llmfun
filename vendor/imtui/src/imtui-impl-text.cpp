@@ -215,9 +215,10 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                     // the rects/caret/hit-testing coordinate system.
                     // The dedup heuristic below
                     // landing on the same cell to lastCharX + 1 so two glyphs never
-                    // overwrite one cell. Vertices are clipped to
-                    // clip_rect.z - 1 so content can never overwrite the
-                    // scrollbar column. ch/chwidth/ch2 are taken from the
+                    // overwrite one cell. Vertices are clipped to the clip
+                    // rect below; glyph cells are additionally bound-tested
+                    // against clip_rect.z/w, so text cannot spill onto the
+                    // scrollbar column/row. ch/chwidth/ch2 are taken from the
                     // encoded vertex colors (vertex 1 = codepoint, vertex 2
                     // = cell width, vertex 3 = continuation codepoint folded
                     // into the base — decoded below, guarded by
@@ -236,12 +237,26 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                         auto pos1 = cmd_list->VtxBuffer[vidx1].pos;
                         auto pos2 = cmd_list->VtxBuffer[vidx2].pos;
 
-                        pos0.x = std::max(std::min(float(clip_rect.z - 1), pos0.x), clip_rect.x);
-                        pos1.x = std::max(std::min(float(clip_rect.z - 1), pos1.x), clip_rect.x);
-                        pos2.x = std::max(std::min(float(clip_rect.z - 1), pos2.x), clip_rect.x);
-                        pos0.y = std::max(std::min(float(clip_rect.w - 1), pos0.y), clip_rect.y);
-                        pos1.y = std::max(std::min(float(clip_rect.w - 1), pos1.y), clip_rect.y);
-                        pos2.y = std::max(std::min(float(clip_rect.w - 1), pos2.y), clip_rect.y);
+                        // LLMFUN PATCH: clip each vertex to the TRUE clip
+                        // edges. The rasterizer paints half-open cell ranges
+                        // ([nearbyint(xmin), nearbyint(xmax)) per row), so a
+                        // shape flush with the right/bottom clip edge keeps
+                        // its last cell, while a shape extending past the
+                        // edge is pulled back onto it and cannot spill into
+                        // the next cell. Clamping to clip_rect.z - 1 /
+                        // clip_rect.w - 1 instead shaved the last cell off
+                        // every shape ending exactly on a clip edge: a child
+                        // window whose bottom edge sits on the display
+                        // bottom (the bottom-aligned chat input field) lost
+                        // its last frame row even though its text still
+                        // painted there (text cells are bound-tested against
+                        // clip_rect.z/w, rect spans are half-open).
+                        pos0.x = std::max(std::min(float(clip_rect.z), pos0.x), clip_rect.x);
+                        pos1.x = std::max(std::min(float(clip_rect.z), pos1.x), clip_rect.x);
+                        pos2.x = std::max(std::min(float(clip_rect.z), pos2.x), clip_rect.x);
+                        pos0.y = std::max(std::min(float(clip_rect.w), pos0.y), clip_rect.y);
+                        pos1.y = std::max(std::min(float(clip_rect.w), pos1.y), clip_rect.y);
+                        pos2.y = std::max(std::min(float(clip_rect.w), pos2.y), clip_rect.y);
 
                         auto uv0 = cmd_list->VtxBuffer[vidx0].uv;
                         auto uv1 = cmd_list->VtxBuffer[vidx1].uv;
@@ -273,6 +288,20 @@ void ImTui_ImplText_RenderDrawData(ImDrawData * drawData, ImTui::TScreen * scree
                             auto ppos0 = cmd_list->VtxBuffer[vvidx0].pos;
                             auto ppos1 = cmd_list->VtxBuffer[vvidx1].pos;
                             auto ppos2 = cmd_list->VtxBuffer[vvidx2].pos;
+
+                            // LLMFUN PATCH: clip the second triangle's
+                            // positions too — they feed the same six-vertex
+                            // average as pos0..pos2 (which were clipped
+                            // above). Leaving them raw let a quad that
+                            // crosses the right/bottom edge drag its
+                            // average over that edge, dropping a glyph
+                            // whose cell lies inside the clip.
+                            ppos0.x = std::max(std::min(float(clip_rect.z), ppos0.x), clip_rect.x);
+                            ppos1.x = std::max(std::min(float(clip_rect.z), ppos1.x), clip_rect.x);
+                            ppos2.x = std::max(std::min(float(clip_rect.z), ppos2.x), clip_rect.x);
+                            ppos0.y = std::max(std::min(float(clip_rect.w), ppos0.y), clip_rect.y);
+                            ppos1.y = std::max(std::min(float(clip_rect.w), ppos1.y), clip_rect.y);
+                            ppos2.y = std::max(std::min(float(clip_rect.w), ppos2.y), clip_rect.y);
 
                             float x = ((pos0.x + pos1.x + pos2.x + ppos0.x + ppos1.x + ppos2.x)/6.0f);
                             float y = ((pos0.y + pos1.y + pos2.y + ppos0.y + ppos1.y + ppos2.y)/6.0f) + 0.5f;

@@ -50,13 +50,19 @@
 //       consistent even when broken; only the terminal stream diverges,
 //       which the PTY smoke test observes).
 //   (e) content cells never overwrite the scrollbar column (post-fix guard
-//       only; text is clipped to clip_rect.z - 1 by the backend).
+//       only; text cells are bound-tested against the clip rect's right edge
+//       by the backend).
 //   (f) folding mode only (LLMFUN_IMTUI_EMOJI_PRESENTATION=1,
 //       set by build_test.py's second run): row 1's 'e' cell carries
 //       ch2 == U+0301 (combining mark merged, width unchanged) and row 6's
 //       U+26A0 cell carries ch2 == U+FE0F with chwidth == 2 (VS16 promotes
 //       the text-default base to emoji presentation); the per-row extents
 //       then follow the folding-aware oracle sums.
+//   (h) a child window flush with the display's bottom-right corner paints
+//       its opaque background over its FULL rect (the backend's vertex
+//       clamp must not shave the last row/column) and its 4th text line
+//       sits on the frame's last row — the "4th input line outside the
+//       gray frame" regression.
 //
 // Exit code 0 only if every check passes. Headless: no ncurses, no PTY; safe
 // for CI. Built by llmfun/cpp_tui/CMakeLists.txt (target
@@ -781,6 +787,58 @@ int main()
                   "(g2) wrap-break fold barrier: trailing U+0301 never folds "
                   "(fails pre-fix: folded into the last wrapped row's 'a')");
         }
+    }
+    // --- (h) clip-edge flush geometry keeps its last cell -------------------
+    // Regression guard for the imtui vertex clamp. It used to clip at
+    // clip_rect.z - 1 / clip_rect.w - 1, which shaved the last cell off
+    // every shape flush with its clip edge: a child window whose bottom edge
+    // sits on the display bottom (the bottom-aligned chat input field — an
+    // opaque FrameStyle child) lost its last frame row, while its 4th text
+    // line still painted there ("line 4 outside the gray frame"). A corner
+    // child at (40,20) size (40,4) on the 80x24 screen is flush with BOTH
+    // the display's bottom and right edge: its opaque window background
+    // must cover the whole rect (rows 20..23 x cols 40..79) and its 4th
+    // text line must sit on the frame's last row.
+    {
+        screen.clear();
+        ImGuiWindowFlags rootFlagsH = ImGuiWindowFlags_NoResize |
+                                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
+                                      ImGuiWindowFlags_NoScrollbar |
+                                      ImGuiWindowFlags_NoScrollWithMouse |
+                                      ImGuiWindowFlags_NoBackground;
+        for (int frame = 0; frame < 2; ++frame)
+        {
+            ImTui_ImplText_NewFrame();
+            ImGui::NewFrame();
+            ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2((float)kScreenW, (float)kScreenH), ImGuiCond_Always);
+            ImGui::Begin("##TuiRootH", nullptr, rootFlagsH);
+            ImGui::SetCursorPos(ImVec2(40.0f, 20.0f));
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.35f, 0.35f, 0.35f, 1.0f));
+            ImGui::BeginChild("corner", ImVec2(40.0f, 4.0f), false);
+            ImGui::TextUnformatted("l1\nl2\nl3\nl4");
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            ImGui::End();
+            ImGui::Render();
+            ImTui_ImplText_RenderDrawData(ImGui::GetDrawData(), &screen);
+        }
+
+        int missing = 0;
+        for (int y = 20; y <= 23; ++y)
+            for (int x = 40; x <= 79; ++x)
+                if (screen.data[y * screen.nx + x].bg == 0)
+                    ++missing;
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "(h) bottom/right-flush window bg covers its full rect (missing "
+                 "cells: %d; fails pre-fix: last row + last column shaved)",
+                 missing);
+        check(missing == 0, msg);
+
+        const bool line4_on_frame = screen.data[23 * screen.nx + 40].ch == 'l' &&
+                                    screen.data[23 * screen.nx + 41].ch == '4';
+        check(line4_on_frame, "(h) 4th text line renders on the frame's last row (23)");
     }
     printf("\n%s (%d failure%s)\n",
            g_failures == 0 ? "ALL CHECKS PASSED" : "CHECKS FAILED",
