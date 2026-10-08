@@ -6,26 +6,20 @@ if (IMTUI_ALL_WARNINGS_3RD_PARTY)
     endif()
 endif()
 
-if (APPLE)
-    set(ADDITIONAL_LIBRARIES "-framework Cocoa")
-else (APPLE)
-    unset(ADDITIONAL_LIBRARIES)
-endif (APPLE)
-
 add_library(imgui-for-imtui STATIC
-    imgui/imgui/imgui.cpp
-    imgui/imgui/imgui_draw.cpp
-    imgui/imgui/imgui_demo.cpp
-    imgui/imgui/imgui_widgets.cpp
-    imgui/imgui/imgui_tables.cpp
+    imgui/imgui.cpp
+    imgui/imgui_draw.cpp
+    imgui/imgui_demo.cpp
+    imgui/imgui_widgets.cpp
+    imgui/imgui_tables.cpp
     )
 
 target_include_directories(imgui-for-imtui INTERFACE
-    imgui
+    ${CMAKE_CURRENT_LIST_DIR} 
     )
 
 target_include_directories(imgui-for-imtui PRIVATE
-    imgui/imgui
+    ${CMAKE_CURRENT_LIST_DIR}
     )
 
 target_compile_definitions(imgui-for-imtui PUBLIC IMGUI_USE_WCHAR32)
@@ -37,7 +31,7 @@ target_link_libraries(imgui-for-imtui PRIVATE
 
 set_property(TARGET imgui-for-imtui PROPERTY POSITION_INDEPENDENT_CODE ON)
 
-set_target_properties(imgui-for-imtui PROPERTIES PUBLIC_HEADER "imgui/imgui/imgui.h;imgui/imgui/imconfig.h")
+set_target_properties(imgui-for-imtui PROPERTIES PUBLIC_HEADER "imgui/imgui.h;imgui/imgui/imconfig.h")
 
 if (MINGW)
     set_target_properties(imgui-for-imtui PROPERTIES COMPILE_FLAGS -fno-threadsafe-statics)

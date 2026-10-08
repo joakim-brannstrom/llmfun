@@ -12,6 +12,7 @@ set(IMTUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 
 # Bring in imtui as a subdirectory — builds imtui, imtui-ncurses, imgui-for-imtui
 # imtui-ncurses transitively provides the PUBLIC include path, so no extra target_include_directories needed
+add_subdirectory(../vendor/imgui ${CMAKE_BINARY_DIR}/imgui)
 add_subdirectory(../vendor/imtui ${CMAKE_BINARY_DIR}/imtui)
 add_subdirectory(../vendor/imgui_markdown ${CMAKE_BINARY_DIR}/imgui_markdown)
 
@@ -73,7 +74,7 @@ target_link_libraries(llmfun_tui_lib
 # imgui-for-imtui and the backend files include bare "imgui.h" (upstream's
 # example build uses -I$(IMGUI_DIR) -I$(IMGUI_DIR)/backends). IMGUI_USE_WCHAR32
 # reaches these sources through imgui-for-imtui's PUBLIC usage requirement.
-set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/imtui/third-party/imgui/imgui)
+set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/imgui/imgui)
 target_sources(llmfun_tui_lib PRIVATE
     ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
     ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
