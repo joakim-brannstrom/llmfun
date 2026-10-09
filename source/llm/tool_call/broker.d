@@ -12,15 +12,16 @@ import std.sumtype : match;
 import my.filter : ReFilter;
 
 import llm.chat : Chat, ToolMessage;
+import llm.config : GroupConfig, ToolBrokerConfig;
 import llm.tool_call : RegFunction;
 
 /// Per-Agent-instance, in-memory broker state: activated tool names
 /// in activation order. alwaysOn tools are never listed here.
 struct BrokerState {
     string[] activated;
-    /// Activation count per tag, feeding the discovery-tool presentation cap
-    /// Bumped only when the tag matched at least
-    /// one pool tool; an unknown tag is a full no-op.
+    /// Activation count per group name, feeding the discovery-tool
+    /// presentation cap. Bumped only when the group matched at least
+    /// one pool tool; an unknown group is a full no-op.
     uint[string] tagActivationCount;
 }
 
@@ -69,17 +70,81 @@ JSONValue toolDescription(const RegFunction f) @safe pure {
     return jwrap;
 }
 
-/// Pure selection: untagged (tags.empty, alwaysOn) tools first
-/// in REGISTRY order with neverHide tools forced into the head, then activated
-/// tools in ACTIVATION order; deduplicated by name (first occurrence wins). A
-/// tool that is both alwaysOn and activated appears once, in the head. The
-/// pool is never sorted or reshuffled: identical state emits byte-identical
-/// arrays (pinned by the unittest below).
-JSONValue[] selectTools(RegFunction[] pool, string[] activated, string[] neverHide) @safe pure {
+/// Group membership (D9): the union of (a) the `tools` list of the resolved
+/// config's group and (b) the tool's runtime RegFunction.tags naming the
+/// group - only MCP registration writes runtime tags. A runtime tag that
+/// names no defined group contributes nothing.
+bool inGroup(const ToolBrokerConfig resolved, const RegFunction f, string group) @safe pure {
+    if (auto g = group in resolved.groups)
+        if (g.tools.canFind!(t => t == f.name))
+            return true;
+    return f.tags.canFind!(t => t == group);
+}
+
+/// The groups a tool belongs to (membership per inGroup): the config groups
+/// listing the tool first, then the tool's runtime tags that name a defined
+/// group (D9). Deduplicated; order not significant (config AA iteration order
+/// is unspecified - the only consumer, isVisible, is order-independent).
+string[] groupsOf(const ToolBrokerConfig resolved, const RegFunction f) @safe pure {
+    string[] rval;
+    foreach (name, g; resolved.groups)
+        if (g.tools.canFind!(t => t == f.name))
+            rval ~= name;
+    foreach (t; f.tags)
+        if (t in resolved.groups && !rval.canFind(t))
+            rval ~= t;
+    return rval;
+}
+
+/// Visibility predicate (design section 6) over the resolved config; the
+/// pool is the registry tools surviving the global toolFilter plus
+/// neverHideTools (the caller's concern):
+///  - the kill switch (enabled: false) leaves everything visible - all
+///    tools are treated as ungrouped (alwaysOn);
+///  - a tool in no group is alwaysOn (matches today's untagged default, D4);
+///  - a group name in alwaysOn un-hides the whole membership (D4); a tool
+///    name in alwaysOn un-hides the tool itself;
+///  - otherwise hidden iff the tool is a member of a hidden group (a group
+///    in the effective hiddenTags array). Omitted or empty hiddenTags hides
+///    nothing (D7 - no "unset means hide everything" materialization).
+bool isVisible(const ToolBrokerConfig resolved, const RegFunction f) @safe pure {
+    if (!resolved.enabled)
+        return true;
+
+    auto groups = groupsOf(resolved, f);
+    if (groups.empty)
+        return true; // a tool in no group is alwaysOn
+
+    foreach (g; groups)
+        if (resolved.alwaysOn.canFind!(a => a == g))
+            return true; // a group name in alwaysOn un-hides the membership
+    if (resolved.alwaysOn.canFind!(a => a == f.name))
+        return true;
+
+    return !groups.canFind!(g => resolved.hiddenTags.canFind!(h => h == g));
+}
+
+/// The alwaysOn set for selectTools' head: the pool tools visible under the
+/// resolved config (isVisible). Callers pass the result as selectTools'
+/// alwaysOn argument.
+string[] alwaysOnTools(const ToolBrokerConfig resolved, RegFunction[] pool) @safe pure {
+    return pool.filter!(f => isVisible(resolved, f))
+        .map!(f => f.name)
+        .array;
+}
+/// Pure selection: alwaysOn (membership-visible under the resolved config)
+/// tools first in REGISTRY order with neverHide tools forced into the head,
+/// then activated tools in ACTIVATION order; deduplicated by name (first
+/// occurrence wins). A tool that is both alwaysOn and activated appears once,
+/// in the head. The pool is never sorted or reshuffled: identical state emits
+/// byte-identical arrays (pinned by the unittest below).
+JSONValue[] selectTools(RegFunction[] pool, string[] activated,
+        string[] neverHide, string[] alwaysOn) @safe pure {
     JSONValue[] rval;
     string[] seen;
 
-    foreach (f; pool.filter!(rf => rf.tags.empty || neverHide.canFind!(n => n == rf.name))) {
+    foreach (f; pool.filter!(rf => alwaysOn.canFind!(n => n == rf.name)
+            || neverHide.canFind!(n => n == rf.name))) {
         rval ~= toolDescription(f);
         seen ~= f.name;
     }
@@ -93,21 +158,27 @@ JSONValue[] selectTools(RegFunction[] pool, string[] activated, string[] neverHi
     return rval;
 }
 
-/// Explicit activation seam: appends the tag's pool tools in
-/// activation order; deduplicated. An unknown tag (no pool tool matches) is a
-/// full no-op: the instructive message is the loadToolTag layer's,
-/// not this seam's. The activation count feeds the discovery-tool presentation
-/// cap (frequency then name).
-void activateTag(ref BrokerState st, RegFunction[] pool, string tag) @safe pure {
+/// Explicit activation seam: appends the group's visible pool tools in
+/// activation order; deduplicated. An unknown group (no pool tool is a
+/// member - neither a config `tools` entry nor a runtime tag) is a full
+/// no-op: the instructive message is the listToolTags layer's, not this
+/// seam's. Inert under the kill switch (enabled: false): no state mutation,
+/// no count bump - the broker is disabled and discovery errors before it
+/// could reach this seam. The activation count feeds the discovery-tool
+/// presentation cap (frequency then name) and is keyed by group name (D12).
+void activateTag(ref BrokerState st, RegFunction[] pool, string group,
+        const ToolBrokerConfig resolved) @safe pure {
+    if (!resolved.enabled)
+        return;
     bool anyTool;
-    foreach (f; pool.filter!(rf => rf.tags.canFind(tag))) {
+    foreach (f; pool.filter!(rf => inGroup(resolved, rf, group))) {
         anyTool = true;
         if (!st.activated.canFind!(n => n == f.name)) {
             st.activated ~= f.name;
         }
     }
     if (anyTool) {
-        st.tagActivationCount[tag]++;
+        st.tagActivationCount[group]++;
     }
 }
 
@@ -190,6 +261,18 @@ version (unittest) {
                 callback: null, tags: tags);
     }
 
+    /// Resolved-config fixture for the selectTools tests: two groups whose
+    /// members start hidden, nothing alwaysOn - the alwaysOn set the tests
+    /// pass comes from alwaysOnTools over this config.
+    private ToolBrokerConfig hiddenGroupsConfig() @safe pure {
+        ToolBrokerConfig resolved;
+        resolved.enabled = true;
+        resolved.groups["workarea"] = GroupConfig("workarea file tools", ["mid"]);
+        resolved.groups["rag"] = GroupConfig("RAG knowledge base tools", ["nh1"]);
+        resolved.hiddenTags = ["workarea", "rag"];
+        return resolved;
+    }
+
     /// Builds the toolCalls JSONValue a ToolMessage carries:
     /// [{"function": {"name": n}}, ...].
     private JSONValue toolCallsJson(in string[] names) @safe pure {
@@ -230,7 +313,11 @@ unittest {
     auto activated = ["mid", "always1", "ghost"];
     auto neverHide = ["nh1"];
 
-    auto names = selectTools(pool, activated, neverHide).map!(e => e["function"]["name"].str).array;
+    auto resolved = hiddenGroupsConfig();
+    auto alwaysOn = alwaysOnTools(resolved, pool);
+
+    auto names = selectTools(pool, activated, neverHide, alwaysOn).map!(
+            e => e["function"]["name"].str).array;
     assert(names == ["always1", "nh1", "mid"], names.to!string);
 }
 
@@ -241,7 +328,9 @@ unittest {
     import std.conv : to;
 
     auto pool = [fixtureTool("t1", []), fixtureTool("t2", ["workarea"])];
-    auto names = selectTools(pool, ["t1", "t2"], []).map!(e => e["function"]["name"].str).array;
+    auto resolved = hiddenGroupsConfig();
+    auto names = selectTools(pool, ["t1", "t2"], [], alwaysOnTools(resolved, pool)).map!(
+            e => e["function"]["name"].str).array;
     assert(names == ["t1", "t2"], names.to!string);
 }
 
@@ -252,9 +341,10 @@ unittest {
     auto pool = [fixtureTool("always1", []), fixtureTool("mid", ["workarea"])];
     auto activated = ["mid"];
     auto neverHide = ["always1"];
+    auto alwaysOn = alwaysOnTools(hiddenGroupsConfig(), pool);
 
-    auto s1 = JSONValue(selectTools(pool, activated, neverHide)).toString;
-    auto s2 = JSONValue(selectTools(pool, activated, neverHide)).toString;
+    auto s1 = JSONValue(selectTools(pool, activated, neverHide, alwaysOn)).toString;
+    auto s2 = JSONValue(selectTools(pool, activated, neverHide, alwaysOn)).toString;
     assert(s1 == s2);
     assert(s1.length > 0);
 }
@@ -266,10 +356,11 @@ unittest {
     import std.conv : to;
 
     auto pool = [fixtureTool("always1", []), fixtureTool("t2", ["workarea"])];
-    auto headOnly = selectTools(pool, [], ["taskDone"]).map!(e => e["function"]["name"].str).array;
+    auto headOnly = selectTools(pool, [], ["taskDone"], ["always1"]).map!(
+            e => e["function"]["name"].str).array;
     assert(headOnly == ["always1"], headOnly.to!string);
 
-    assert(selectTools([], ["t1"], ["taskDone"]).empty);
+    assert(selectTools([], ["t1"], ["taskDone"], []).empty);
 }
 
 @("filterRegFunctions: excluded names are gone except neverHide, registry " ~ "order kept")
@@ -340,16 +431,118 @@ unittest {
     auto pool = [
         fixtureTool("t1", ["workarea"]), fixtureTool("t2", ["workarea"])
     ];
+    auto resolved = ToolBrokerConfig.init;
+    resolved.enabled = true;
+    resolved.groups["workarea"] = GroupConfig("workarea tools", ["t1", "t2"]);
 
     BrokerState st;
-    activateTag(st, pool, "nope");
+    activateTag(st, pool, "nope", resolved);
     assert(st.activated.empty);
     assert(st.tagActivationCount.get("nope", 0) == 0);
 
-    activateTag(st, pool, "workarea");
-    activateTag(st, pool, "workarea");
+    activateTag(st, pool, "workarea", resolved);
+    activateTag(st, pool, "workarea", resolved);
     assert(st.activated == ["t1", "t2"], st.activated.to!string);
     assert(st.tagActivationCount["workarea"] == 2);
+}
+
+@("activateTag: a group with no visible pool tools is a no-op that does " ~ "not bump the count")
+unittest {
+    auto pool = [fixtureTool("t1", [])];
+    auto resolved = ToolBrokerConfig.init;
+    resolved.enabled = true;
+    resolved.groups["empty_grp"] = GroupConfig("nothing registered", [
+        "ghost_tool"
+    ]);
+
+    BrokerState st;
+    activateTag(st, pool, "empty_grp", resolved);
+    assert(st.activated.empty);
+    assert(st.tagActivationCount.empty);
+}
+
+@("inGroup/groupsOf: the config tools list UNION runtime tags matching a "
+        ~ "group name; runtime tags naming no group contribute nothing")
+unittest {
+    import std.array : empty;
+
+    auto resolved = ToolBrokerConfig.init;
+    resolved.enabled = true;
+    resolved.groups["workarea"] = GroupConfig("workarea file tools", ["wf_read"]);
+
+    auto confTool = fixtureTool("wf_read", []); // config-listed member
+    auto runtimeTool = fixtureTool("mcp_read", ["workarea"]); // runtime tag names the group
+    auto strayTool = fixtureTool("odd", ["not_a_group"]); // no defined group
+
+    assert(inGroup(resolved, confTool, "workarea"));
+    assert(!inGroup(resolved, confTool, "rag"));
+    assert(inGroup(resolved, runtimeTool, "workarea"));
+    assert(groupsOf(resolved, confTool) == ["workarea"]);
+    assert(groupsOf(resolved, runtimeTool) == ["workarea"]);
+    assert(groupsOf(resolved, strayTool).empty);
+}
+
+@("isVisible: ungrouped tool visible with and without config; hidden group "
+        ~ "hides members; alwaysOn tool or group name un-hides")
+unittest {
+    auto resolved = ToolBrokerConfig.init;
+    resolved.enabled = true;
+    resolved.groups["workarea"] = GroupConfig("workarea file tools", [
+        "wf_read", "wf_write"
+    ]);
+    resolved.groups["rag"] = GroupConfig("RAG tools", ["rag_search"]);
+    resolved.hiddenTags = ["workarea"];
+
+    auto ungrouped = fixtureTool("taskDone", []);
+    auto grouped = fixtureTool("wf_read", []);
+
+    // A tool in no group is alwaysOn - with a configured config and with the
+    // struct defaults.
+    assert(isVisible(resolved, ungrouped));
+    assert(isVisible(ToolBrokerConfig.init, ungrouped));
+
+    // A member of a hidden group is hidden; the group name in alwaysOn
+    // un-hides the whole membership; the tool name un-hides the tool itself
+    // (tool names OR group names in one array, D4).
+    assert(!isVisible(resolved, grouped), "member of a hidden group");
+    resolved.alwaysOn ~= "workarea";
+    assert(isVisible(resolved, grouped), "group name in alwaysOn un-hides");
+    resolved.alwaysOn = ["wf_read"];
+    assert(isVisible(resolved, grouped), "tool name in alwaysOn un-hides");
+}
+
+@("isVisible: the kill switch (enabled: false) leaves everything visible")
+unittest {
+    auto resolved = ToolBrokerConfig.init;
+    resolved.groups["workarea"] = GroupConfig("workarea file tools", ["wf_read"]);
+    resolved.hiddenTags = ["workarea"];
+
+    assert(isVisible(resolved, fixtureTool("wf_read", [])));
+
+    // The activation seam is inert under the kill switch too: no state
+    // mutation, no count bump.
+    BrokerState st;
+    activateTag(st, [fixtureTool("wf_read", [])], "workarea", resolved);
+    assert(st.activated.empty);
+    assert(st.tagActivationCount.empty);
+}
+
+@("selectTools: a neverHide tool in a hidden group stays in the head "
+        ~ "(isVisible says hidden; the neverHide union-back wins)")
+unittest {
+    import std.algorithm : map;
+    import std.array : array;
+    import std.conv : to;
+
+    auto resolved = ToolBrokerConfig.init;
+    resolved.enabled = true;
+    resolved.groups["rag"] = GroupConfig("RAG tools", ["nh_hidden"]);
+    resolved.hiddenTags = ["rag"];
+
+    auto pool = [fixtureTool("nh_hidden", [])];
+    auto names = selectTools(pool, [], ["nh_hidden"], alwaysOnTools(resolved, pool)).map!(
+            e => e["function"]["name"].str).array;
+    assert(names == ["nh_hidden"], names.to!string);
 }
 
 @("activateTool: activates a single tool by name; unknown name no-ops")
@@ -373,4 +566,33 @@ unittest {
     st.activated = ["t1", "t2", "t3"];
     applyPrune(st, ["t2", "ghost"]);
     assert(st.activated == ["t1", "t3"]);
+}
+
+@("an undescribed group (empty description) still governs visibility and "
+        ~ "activation - group descriptions are a discovery concern only")
+unittest {
+    import std.conv : to;
+
+    auto resolved = ToolBrokerConfig.init;
+    resolved.enabled = true;
+    resolved.groups["misc"] = GroupConfig(null, ["mem_store"]); // undescribed
+    resolved.hiddenTags = ["misc"];
+
+    auto member = fixtureTool("mem_store", []);
+    assert(!isVisible(resolved, member), "member of a hidden (undescribed) group");
+    resolved.alwaysOn ~= "misc";
+    assert(isVisible(resolved, member), "group name in alwaysOn un-hides");
+
+    // Activation: the undescribed group activates its visible members and
+    // bumps the count; a group that is not defined at all stays a no-op.
+    auto pool = [fixtureTool("mem_store", []), fixtureTool("odd", [])];
+    BrokerState st;
+    activateTag(st, pool, "misc", resolved);
+    assert(st.activated == ["mem_store"], st.activated.to!string);
+    assert(st.tagActivationCount["misc"] == 1);
+
+    BrokerState unknownSt;
+    activateTag(unknownSt, pool, "not_a_group", resolved);
+    assert(unknownSt.activated.empty);
+    assert(unknownSt.tagActivationCount.empty);
 }

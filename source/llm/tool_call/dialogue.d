@@ -54,10 +54,8 @@ struct QueryDialogueHistoryParams {
         ~ "compressed summary. Pass the user's EXACT nouns and entities in the "
         ~ "query; do not paraphrase. Supply textQuery (exact keywords), "
         ~ "vectorQuery (natural language), or both. Returns matching episodes "
-        ~ "with the session id, turn ranges, timestamp, and the matched " ~ "verbatim text.",
-    tags:
-        ["dialogue"]) ExecuteFuncResult queryDialogueHistory(Context baseCtx,
-        QueryDialogueHistoryParams params) {
+        ~ "with the session id, turn ranges, timestamp, and the matched " ~ "verbatim text.") ExecuteFuncResult queryDialogueHistory(
+        Context baseCtx, QueryDialogueHistoryParams params) {
     import llm.rag.database : cleanFts5;
 
     mixin(baseContextToSpecific!DialogueContext);

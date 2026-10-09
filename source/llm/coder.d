@@ -10,7 +10,7 @@ import my.filter : ReFilter;
 import llm.agent : Agent;
 import llm.config : LlmConfig;
 import llm.metric.monitor : MetricMonitor;
-import llm.pipeline : Pipeline, PipelineResult, pipelineBuilder;
+import llm.pipeline : Pipeline, PipelineResult, pipelineBuilder, pipelineOutputAlwaysOnHook;
 import llm.rag.rag : RAG;
 import llm.skill : makeSkillManager;
 import llm.types : IStreamCallback;
@@ -80,11 +80,20 @@ PipelineResult runCoderPipeline(string query, LlmConfig llmConf, RAG rag, Metric
     }();
 
     auto coder = new Agent("coder", llmConf, monitor, rag, toolFilter);
+    // Keep pipelineOutput visible under an enabled broker (design section
+    // 4.7); resetModel fires the hook for the construction-time model
+    // (design section 4.6).
+    // resetModel must not short-circuit same-model resets, or the covering
+    // call silently stops firing the hook.
+    coder.setBrokerAdjustHook(pipelineOutputAlwaysOnHook());
+    coder.resetModel(llmConf.activeCodeModel);
     coder.setSystemPrompt(llmConf.getPrompt(tmpManager));
     coder.addUserQuery(codeQuery);
     coder.addUserQuery(query);
 
     auto reviewer = new Agent("code_reviewer", llmConf, monitor, rag, toolFilter);
+    reviewer.setBrokerAdjustHook(pipelineOutputAlwaysOnHook());
+    reviewer.resetModel(llmConf.activeCodeModel);
     reviewer.setSystemPrompt(llmConf.getPrompt(tmpManager));
     reviewer.addUserQuery(reviewerQuery);
     reviewer.addUserQuery(i"The users task for the coder agent was the following:\n\n---\n\n$(query)\n\n---\n"

@@ -46,9 +46,8 @@ struct ListEnvironmentsParams {
 /// environment entries exposing only safe fields: tag, description, capabilities,
 /// isIsolated, and commandJoinMode. Never leaks runtimeCli, options, mounts,
 /// workingDir, or other infrastructure configuration.
-@Function("List available execution environments. Returns a JSON array of environment entries with tag, description, capabilities, isIsolated, and commandJoinMode",
-    tags:
-        ["env"]) ExecuteFuncResult listEnvironments(Context baseCtx, ListEnvironmentsParams params) nothrow {
+@Function("List available execution environments. Returns a JSON array of environment entries with tag, description, capabilities, isIsolated, and commandJoinMode") ExecuteFuncResult listEnvironments(
+        Context baseCtx, ListEnvironmentsParams params) nothrow {
     mixin(baseContextToSpecific!EnvironmentContext);
 
     try {
@@ -102,9 +101,8 @@ struct ExecuteCommandParams {
 /// executes the command, and returns the result as JSON.
 /// Supports optional environmentTag,
 /// empty command validation, and future sessionId placeholder.
-@Function("Execute a command in an execution environment. Returns JSON with exitCode, stdout, and stderr. Use environmentTag to select the environment (call listEnvironments() to see available options)",
-    tags:
-        ["env"]) ExecuteFuncResult executeCommand(Context baseCtx, ExecuteCommandParams params) nothrow {
+@Function("Execute a command in an execution environment. Returns JSON with exitCode, stdout, and stderr. Use environmentTag to select the environment (call listEnvironments() to see available options)") ExecuteFuncResult executeCommand(
+        Context baseCtx, ExecuteCommandParams params) nothrow {
     import std.datetime.stopwatch : StopWatch, AutoStart;
 
     mixin(baseContextToSpecific!EnvironmentContext);

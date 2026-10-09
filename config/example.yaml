@@ -76,27 +76,32 @@ toolFilter:
   exclude: []
 
 toolBroker:
-  # Kill switch (default true): false treats every registered tool as
-  # untagged (alwaysOn) and makes discovery inert.
-  # enabled: true
-  # Tools never hidden regardless of toolFilter (default: ["taskDone"]).
-  # A tool that is neverHide AND carries tags warns at startup
-  # (validateToolBrokerConfig)
-  # since tagging it has no hiding effect anyway.
-  neverHideTools: [taskDone, readMemory, getMemoryTopics, writeMemory]
-  # tag - human-readable description shown by listToolTags (unknown keys
-  # warn at startup).
-  toolTagDescriptions:
-    workarea: "Files in the agent workarea: read/write/list/search"
-    rag: "RAG tools: search/add/remove/list"
-    memory: "Persistent agent memory tools: list/add/edit/remove"
-    dialogue: "Agent chat history tools: search"
-    reasoning: "Agent chat reasoning history tools: search"
-    metrics: "Read agent metrics over tool use"
-    encoding: "Base64 and md5 encoding"
-    vision: "Vision model tools"
-    env: "Environment tools: execute/list"
-    pipeline: "Completion tools for agents running in a pipeline"
+  # Kill switch (default false), per model overridable. false treats every
+  # registered tool as ungrouped (alwaysOn) and makes discovery inert.
+  enabled: false
+  # Named tool groups: the name is the activation key, the description
+  # feeds discovery, and a tool may be listed in several groups.
+  groups:
+    workarea:
+      description: "Files in the agent workarea: read/write/list/search"
+      tools: [writeFile, readFile, editFile, listDirectory, grepFiles]
+    pipeline:
+      description: "Completion tools for agents running in a pipeline"
+      tools: [pipelineOutput]
+    rag:
+      description: "RAG tools: search/add/remove/list"
+      tools: [queryBestMatch, querySemantic, queryTextSearch, queryReadFile,
+              readRAGSource, listRAGSources, loadFileToRAG, loadContentToRAG,
+              removeTopicFromRAG]
+  # Only these groups' members start hidden, activatable via
+  # listToolTags; omitted or [] hides nothing.
+  hiddenTags: [workarea, rag]
+  # Tool names OR group names in one array - a group name here un-hides
+  # the whole membership (mixed semantics). Corner: a hidden group whose
+  # members are ALL in alwaysOn still shows in listToolTags; activating
+  # it is a no-op.
+  alwaysOn: [taskDone, listToolTags]
+  neverHideTools: [taskDone]   # pool-membership axis, unchanged
 
 ragFilter:
   include:
@@ -132,6 +137,13 @@ codeModels:
     temp: 0.6
     contextSize: 128000
     maxTokens: -1
+    toolBroker:            # per-field override of the global block above
+      enabled: true
+      hiddenTags: []       # large-context model: unhide everything
+      groups:              # map merged per entry: redefines 'workarea',
+        workarea:          # keeps other groups
+          description: "Fewer workarea tools for this model"
+          tools: [readFile, listDirectory]
 
 # Nudge policy: global defaults (usually all you need)
 # Model stopped generating without calling a tool (needMoreThinking).

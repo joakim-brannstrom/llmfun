@@ -657,15 +657,80 @@ struct RagFilter {
     }
 }
 
+/// A named group of tools. The group name is the activation key, the
+/// description feeds discovery, and `tools` lists the member tool names. A
+/// tool may be listed in multiple groups.
+struct GroupConfig {
+    string description;
+    string[] tools;
+}
+
 struct ToolBrokerConfig {
-    /// Kill switch: false ⇒ all tools treated as untagged (alwaysOn) and
-    /// discovery inert.
-    bool enabled = true;
-    /// tag - human-readable description. Unknown keys warn at startup (typo protection).
-    string[string] toolTagDescriptions;
+    /// Kill switch: false means all tools are treated as ungrouped
+    /// (alwaysOn) and discovery is inert.
+    bool enabled = false;
+    /// Named tool groups. The group name is the activation key, the
+    /// description feeds discovery, and `tools` lists the member tool
+    /// names. A tool may be listed in multiple groups.
+    GroupConfig[string] groups;
+    /// Group names whose members start hidden, activatable via
+    /// listToolTags. Omitted or empty hides nothing.
+    string[] hiddenTags;
+    /// Tool names or group names forced visible. A group name un-hides
+    /// the whole membership.
+    string[] alwaysOn;
     /// Tools never hidden regardless of LlmConfig.toolFilter. A neverHide tool missing
-    /// from the registry, or one that is tagged, warns at startup.
+    /// from the registry warns at startup.
     string[] neverHideTools = ["taskDone"];
+    /// Raw YAML keys inside the `toolBroker` block that named no struct member -
+    /// populated by applyConfig while parsing (the unknown-key warning loop
+    /// collects them as it warns). The removed `toolTagDescriptions` key lands
+    /// here, and the startup validator turns it into the groups migration
+    /// warning. Parser-filled, not a hand-maintained presence list.
+    string[] unknownYamlKeys;
+}
+
+/// Per-model override of the global `toolBroker` block. Null = no override
+/// for that field; non-null replaces the global value. The `groups` map is
+/// merged per entry by group name - a model entry with the same name
+/// replaces the global entry wholesale.
+struct ToolBrokerOverride {
+    Nullable!bool enabled;
+    Nullable!(string[]) hiddenTags;
+    Nullable!(string[]) alwaysOn;
+    Nullable!(GroupConfig[string]) groups;
+}
+
+/// Resolve the effective tool broker config for a model: built-in struct
+/// defaults, then the global `toolBroker` block (applyConfig already folded
+/// the global block over the defaults when parsing), then the model's
+/// `toolBroker` override. Present override fields replace the global value;
+/// absent fields keep it. The `groups` map is merged per entry by group
+/// name - a model entry with the same name replaces the global entry
+/// wholesale.
+ToolBrokerConfig resolveToolBrokerConfig(const LlmConfig conf, const CodeModelConfig model) @safe {
+    // Global layer: applyConfig parsed the global block over the built-in
+    // defaults, so conf.toolBroker already holds layers 1 + 2.
+    ToolBrokerConfig resolved;
+    resolved.enabled = conf.toolBroker.enabled;
+    resolved.hiddenTags = conf.toolBroker.hiddenTags.dup;
+    resolved.alwaysOn = conf.toolBroker.alwaysOn.dup;
+    resolved.neverHideTools = conf.toolBroker.neverHideTools.dup;
+    foreach (name, group; conf.toolBroker.groups)
+        resolved.groups[name] = GroupConfig(group.description, group.tools.dup);
+
+    // Model layer: present fields replace, absent fields keep the global value.
+    if (!model.toolBroker.enabled.isNull)
+        resolved.enabled = model.toolBroker.enabled.get;
+    if (!model.toolBroker.hiddenTags.isNull)
+        resolved.hiddenTags = model.toolBroker.hiddenTags.get.dup;
+    if (!model.toolBroker.alwaysOn.isNull)
+        resolved.alwaysOn = model.toolBroker.alwaysOn.get.dup;
+    if (!model.toolBroker.groups.isNull)
+        foreach (name, group; model.toolBroker.groups.get)
+            resolved.groups[name] = GroupConfig(group.description, group.tools.dup);
+
+    return resolved;
 }
 
 struct CodeModelConfig {
@@ -682,6 +747,10 @@ struct CodeModelConfig {
     /// back to struct defaults, NOT to the global LlmConfig.nudges.
     /// Omit the block entirely to inherit the global policy.
     Nullable!NudgeConfig nudges;
+
+    /// Per-model tool broker override (see ToolBrokerOverride). Null
+    /// fields inherit the global toolBroker block value.
+    ToolBrokerOverride toolBroker;
 }
 
 struct SummaryModelConfig {
@@ -1063,6 +1132,42 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
                             foreach (key, ref JSONValue val; json[llmMemberName].object) {
                                 __traits(getMember, conf, llmMemberName)[key] = val.str;
                             }
+                        } else static if (isNullableType!Type && is(NullableInner!Type == bool)) {
+                            // Nullable!bool (per-model toolBroker override):
+                            // present scalar replaces, absent or JSON-null
+                            // keeps the Nullable unset.
+                            auto val = json[llmMemberName];
+                            if (val.type != JSONType.NULL) {
+                                __traits(getMember, conf, llmMemberName) = Nullable!bool(
+                                        val.boolean);
+                            }
+                        } else static if (isNullableType!Type && is(NullableInner!Type : string[])) {
+                            alias InnerT = NullableInner!Type;
+                            auto val = json[llmMemberName];
+                            if (val.type != JSONType.NULL) {
+                                __traits(getMember, conf, llmMemberName) = Nullable!InnerT(val.array.map!(a => a.str)
+                                        .array);
+                            }
+                        } else static if (is(Type == GroupConfig[string])) {
+                            auto val = json[llmMemberName];
+                            if (val.type != JSONType.NULL) {
+                                __traits(getMember, conf, llmMemberName) = Type.init;
+                                foreach (key, ref JSONValue groupVal; val.object) {
+                                    __traits(getMember, conf, llmMemberName)[key] = applyConfig(GroupConfig.init,
+                                            groupVal);
+                                }
+                            }
+                        } else static if (isNullableType!Type
+                                && is(NullableInner!Type == GroupConfig[string])) {
+                            alias InnerT = NullableInner!Type;
+                            auto val = json[llmMemberName];
+                            if (val.type != JSONType.NULL) {
+                                InnerT groups;
+                                foreach (key, ref JSONValue groupVal; val.object) {
+                                    groups[key] = applyConfig(GroupConfig.init, groupVal);
+                                }
+                                __traits(getMember, conf, llmMemberName) = Nullable!InnerT(groups);
+                            }
                         } else static if (is(Type : string[])) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(a => a.str)
                                 .array;
@@ -1094,6 +1199,8 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
     }
 
     foreach (k; json.object.byKey.filter!(a => a !in used)) {
+        static if (is(typeof(conf.unknownYamlKeys)))
+            conf.unknownYamlKeys ~= k;
         logger.warningf("Unknown configuration key %s.%s", ConfigT.stringof, k);
     }
 
@@ -1262,38 +1369,120 @@ void validateConfig(LlmConfig conf) {
 }
 
 /// The discovery meta-tools (listToolTags, step 1; toolSearch,
-/// step 2). They must stay untagged (⇒ alwaysOn): tagged, they
-/// would be discovery-gated out of existence — the discovery loop would die
-/// with the very tools it is meant to reveal. The UDA-side test lives next to
-/// the tools (tool_call/discovery.d + search.d); this is the registry-side
-/// startup warning (warnings only).
+/// step 2). They must stay out of the discovery vocabulary: a group
+/// with a description that contains a meta-tool advertises it in
+/// discovery (the vocabulary is what the model sees). A meta-tool
+/// itself is infrastructure, not a capability - describing a group
+/// around it entangles the vocabulary with plumbing, and if that group
+/// is hidden the discovery tool starts hidden: the loop would die with
+/// the very tools it is meant to reveal. Undescribed (or ungrouped)
+/// meta-tool names stay silent here. The UDA-side test lives next to
+/// the tools (tool_call/discovery.d + search.d); this is the registry-
+/// side startup warning (warnings only).
 ///
-/// Takes the whole registry snapshot as name → comma-joined tags (the caller
-/// owns the RegFunction import and builds it); the two meta-tool names live
-/// ONLY here, so a third discovery meta-tool means touching one line. The
-/// helper stays import-light and trivially testable. An absent name, or one
-/// with empty tags (⇒ alwaysOn), is silent here.
-string[] discoveryMetaToolTagWarnings(const(string[string]) metaTags) @safe {
+/// Membership is checked config-side only (`g.tools`); runtime
+/// `RegFunction.tags` naming a group (the MCP fallback) is not
+/// consulted, so a runtime-tagged tool shadowing a meta-tool name
+/// inside a described group would be advertised without this warning.
+///
+/// Takes the resolved block (the caller owns it) plus the warning
+/// label ("toolBroker" for the global block, "model '<name>'
+/// toolBroker" for a model's resolved view); the two meta-tool names
+/// live ONLY here, so a third discovery meta-tool means touching one
+/// line. The helper stays import-light and trivially testable.
+string[] discoveryMetaToolTagWarnings(const ToolBrokerConfig resolved, string label) @safe {
+    import std.algorithm : canFind;
+
     string[] warnings;
     foreach (name; ["listToolTags", "toolSearch"]) {
-        if (auto tags = name in metaTags) {
-            auto tagList = *tags;
-            if (!tagList.empty)
-                warnings ~= i"discovery meta-tool '$(name)' is tagged [$(tagList)] — it would be hidden until its tag is activated, disabling discovery; keep it untagged"
-                    .text;
+        string[] described;
+        foreach (a; resolved.groups.byKeyValue.filter!(a => !a.value.description.empty
+                && a.value.tools.canFind(name)))
+            described ~= a.key;
+        if (!described.empty) {
+            auto list = described.join(", ");
+            warnings ~= i"$(label): discovery meta-tool '$(name)' is described via group(s) [$(list)] - it would be advertised in discovery; keep meta-tools ungrouped (or undescribed)"
+                .text;
         }
     }
     return warnings;
 }
 
-/// Startup validation (neverHide + typo protection). Warnings only —
-/// never fatal. Not `pure`: reads the global tool registry. Returns the
-/// warnings; the caller (Agent ctor) logs them.
+static import llm.tool_call;
+
+/// Startup validation (neverHide + group sanity + typo protection).
+/// Warnings only - never fatal. Not `pure`: reads the global tool
+/// registry. Returns the warnings; the caller (Agent ctor) logs them.
 /// Reads the tool registry (populated by shared static ctors, which run
 /// before main), so it is only meaningful after module construction.
-string[] validateToolBrokerConfig(const LlmConfig conf) @safe {
+///
+/// Per-model `toolBroker` overrides are validated too, on their RESOLVED
+/// view (global + model merged): a model entry may name a group that only
+/// the global block defines. A finding for the global block therefore
+/// repeats under each overridden model's label - the model's effective
+/// view genuinely has the issue, and fixing the global block clears it
+/// for every model. The migration warning stays global-only.
+///
+/// Duplicate group names are NOT checked - within one YAML mapping the
+/// composer collapses duplicate keys at load, and the global-vs-model
+/// merge is per entry by name, so a duplicate cannot arise. Group
+/// sanity + typo-protection rules are shared by the global `toolBroker`
+/// block and each model's resolved view. `label` prefixes each warning
+/// ("toolBroker" for the global block, "model '<name>' toolBroker" for a
+/// model's resolved view) so the user can tell which block to fix.
+private string[] brokerBlockWarnings(ToolBrokerConfig resolved,
+        llm.tool_call.RegFunction[string] registry, string label) @safe {
+    import std.algorithm : canFind, filter;
+    import llm.tool_call : RegFunction;
+
+    string[] warnings;
+
+    // Group sanity: a listed tool that is not registered cannot be
+    // grouped (a typo means it silently stays ungrouped/alwaysOn), and an
+    // empty UNDESCRIBED group is inert config - an empty DESCRIBED group is
+    // a valid runtime-vocabulary preset (MCP tools arrive via
+    // onMcpServerConnected after construction). Group names are sorted for a
+    // deterministic warning order.
+    string[] groupNames;
+    foreach (gname, _; resolved.groups)
+        groupNames ~= gname;
+    groupNames.sort;
+    foreach (gname; groupNames) {
+        auto g = resolved.groups[gname];
+        if (g.tools.empty && g.description.empty) {
+            warnings ~= i"$(label): group '$(gname)' has an empty tools list and an empty description - it is inert; give it tools or a description, or drop it"
+                .text;
+            continue;
+        }
+        foreach (tool; g.tools)
+            if (tool !in registry)
+                warnings ~= i"$(label): group '$(gname)' lists '$(tool)' which is not in the registry - a typo means it silently stays ungrouped (alwaysOn)"
+                    .text;
+    }
+
+    // A hiddenTags or alwaysOn entry that names neither a defined group
+    // nor a registered tool can never have an effect - almost certainly
+    // a misspelling.
+    foreach (entry; resolved.hiddenTags)
+        if (entry !in resolved.groups && entry !in registry)
+            warnings ~= i"$(label).hiddenTags: '$(entry)' names neither a group nor a registered tool"
+                .text;
+    foreach (entry; resolved.alwaysOn)
+        if (entry !in resolved.groups && entry !in registry)
+            warnings ~= i"$(label).alwaysOn: '$(entry)' names neither a group nor a registered tool"
+                .text;
+
+    // The discovery meta-tools must stay out of the discovery vocabulary
+    // (see discoveryMetaToolTagWarnings); a described group containing one
+    // warns.
+    warnings ~= discoveryMetaToolTagWarnings(resolved, label);
+
+    return warnings;
+}
+
+string[] validateToolBrokerConfig(LlmConfig conf) @safe {
+    import std.algorithm : canFind;
     import llm.tool_call : RegFunction, getFunctions;
-    import llm.tool_call.tags : knownToolTagNames, unknownToolTags;
 
     string[] warnings;
 
@@ -1302,41 +1491,32 @@ string[] validateToolBrokerConfig(const LlmConfig conf) @safe {
     foreach (func; getFunctions)
         registry[func.name] = func;
 
-    // A neverHide tool is too important to hide silently — a name that is
-    // not in the registry cannot be protected, so warn.
-    // A tagged neverHide tool is NOT discovery-gated (selectTools exempts
-    // neverHide names from the tag filter), so tagging it has no hiding
-    // effect — the tag is pointless; warn.
-    foreach (name; conf.toolBroker.neverHideTools) {
-        auto func = name in registry;
-        if (func is null) {
-            warnings ~= i"neverHideTools: tool '$(name)' is not in the registry — it cannot be protected from hiding"
-                .text;
-        } else if (!func.tags.empty) {
-            auto tagList = func.tags.join(", ");
-            warnings ~= i"neverHideTools: tool '$(name)' is tagged [$(tagList)] — tagging it has no hiding effect: neverHide exempts it from tag gating, so it stays always-visible"
-                .text;
-        }
+    // A neverHide tool is too important to hide silently - a name that is
+    // not in the registry cannot be protected, so warn. Global block only:
+    // a ToolBrokerOverride has no neverHideTools field.
+    foreach (name; conf.toolBroker.neverHideTools.filter!(name => name !in registry)) {
+        warnings ~= i"neverHideTools: tool '$(name)' is not in the registry - it cannot be protected from hiding"
+            .text;
     }
 
-    // Typo protection: a toolTagDescriptions key that is not
-    // a KnownToolTag member never reaches any tool — almost certainly a
-    // misspelling.
-    auto descTags = conf.toolBroker.toolTagDescriptions.byKey.array;
-    foreach (tag; unknownToolTags(descTags))
-        warnings ~= i"toolTagDescriptions: unknown tag '$(tag)' (known tags: $(knownToolTagNames()))"
-            .text;
+    // The global block's rules, then each model override's resolved view
+    // (see the per-model note in the doc). A fully-unset override resolves
+    // to the global block and is skipped.
+    warnings ~= brokerBlockWarnings(conf.toolBroker, registry, "toolBroker");
+    foreach (model; conf.codeModels) {
+        auto over = model.toolBroker;
+        if (over.enabled.isNull && over.hiddenTags.isNull
+                && over.alwaysOn.isNull && over.groups.isNull)
+            continue;
+        warnings ~= brokerBlockWarnings(resolveToolBrokerConfig(conf, model),
+                registry, "model '" ~ model.modelName ~ "' toolBroker");
+    }
 
-    // The discovery meta-tools must stay untagged — a
-    // tagged meta-tool would be discovery-gated out of existence. One
-    // name → comma-joined tags snapshot over the whole registry; the
-    // meta-tool names themselves live only inside the helper, so a
-    // third meta-tool is a one-line change there. An untagged (or absent)
-    // name joins as "" (empty) and is silent.
-    string[string] metaTags;
-    foreach (f; registry.values)
-        metaTags[f.name] = f.tags.join(", ");
-    warnings ~= discoveryMetaToolTagWarnings(metaTags);
+    // Migration: a toolBroker block still carrying the removed
+    // toolTagDescriptions key (collected by applyConfig at parse time)
+    // points at the groups replacement.
+    if (conf.toolBroker.unknownYamlKeys.canFind("toolTagDescriptions"))
+        warnings ~= "toolBroker: 'toolTagDescriptions' was removed - move each tag's description to a 'groups' entry (group name: description, tools list)";
 
     return warnings;
 }
@@ -1671,18 +1851,46 @@ unittest {
     assert(opts["06_network"] == ["--network", "none"]);
     assert(opts["entrypoint_shell"] == ["sh", "-c"]);
 
-    // The tool-broker keys shipped in the example: neverHideTools overrides
-    // the default (it un-hides the memory tools) and the tag vocabulary lists
-    // every known tool tag.
-    assert(conf.toolBroker.enabled, "toolBroker.enabled must default to true");
-    assert(conf.toolBroker.neverHideTools == [
-        "taskDone", "readMemory", "getMemoryTopics", "writeMemory"
-    ], "shipped example neverHideTools: " ~ conf.toolBroker.neverHideTools.to!string);
-    assert(conf.toolBroker.toolTagDescriptions.length == 10,
-            "shipped example tag vocabulary: " ~ conf.toolBroker.toolTagDescriptions.to!string);
-    import std.algorithm : canFind;
+    // The tool-broker keys shipped in the example: groups + hiddenTags +
+    // alwaysOn, an explicit kill switch (false, per model overridable), and
+    // neverHideTools overriding the default (it un-hides taskDone).
+    assert(!conf.toolBroker.enabled, "shipped example kill switch must be false");
+    assert(conf.toolBroker.neverHideTools == ["taskDone"],
+            "shipped example neverHideTools: " ~ conf.toolBroker.neverHideTools.to!string);
 
-    assert(conf.toolBroker.toolTagDescriptions["workarea"].canFind("workarea"));
+    // Groups: the shipped example defines workarea, pipeline, rag (the rag
+    // group exists so the hiddenTags entry below names a defined group and
+    // the example validates silently).
+    assert(conf.toolBroker.groups.length == 3,
+            "shipped example groups: " ~ conf.toolBroker.groups.keys.to!string);
+    assert(conf.toolBroker.groups["workarea"] == GroupConfig("Files in the agent workarea: read/write/list/search",
+            ["writeFile", "readFile", "editFile", "listDirectory", "grepFiles"]));
+    assert(conf.toolBroker.groups["pipeline"].tools == ["pipelineOutput"]);
+    assert(conf.toolBroker.groups["rag"].tools == [
+        "queryBestMatch", "querySemantic", "queryTextSearch", "queryReadFile",
+        "readRAGSource", "listRAGSources", "loadFileToRAG",
+        "loadContentToRAG", "removeTopicFromRAG"
+    ]);
+    assert(conf.toolBroker.hiddenTags == ["workarea", "rag"]);
+    assert(conf.toolBroker.alwaysOn == ["taskDone", "listToolTags"]);
+
+    // Resolution: the model override wins per field - enabled flips to true,
+    // the empty hiddenTags replaces the global non-empty list (unhide-all),
+    // the workarea group is replaced wholesale, the other groups inherit.
+    auto resolved = resolveToolBrokerConfig(conf, conf.codeModels[0]);
+    assert(resolved.enabled, "model enabled: true must win");
+    assert(resolved.hiddenTags.empty, "model hiddenTags: [] must replace the global list");
+    assert(resolved.groups["workarea"] == GroupConfig("Fewer workarea tools for this model",
+            ["readFile", "listDirectory"]));
+    assert(resolved.groups["pipeline"].tools == ["pipelineOutput"],
+            "groups the model does not name inherit the global entry");
+    assert(resolved.groups["rag"].description == "RAG tools: search/add/remove/list");
+    assert(resolved.alwaysOn == ["taskDone", "listToolTags"]);
+
+    // Silent-valid rule: zero warnings for the global block and the model's
+    // resolved view (per-model overrides are validated on their resolved view).
+    auto warns = validateToolBrokerConfig(conf);
+    assert(warns.empty, warns.to!string);
 }
 
 /// Test: tui.maxWidth parses from YAML into LlmConfig.tui.maxWidth.
@@ -2465,8 +2673,9 @@ codeModels:
 }
 
 /// Test: the Tool Broker config keys parse from YAML, nested under
-/// toolBroker: enabled (kill-switch, default true), toolTagDescriptions
-/// (string[string] tag -> description), neverHideTools (default ["taskDone"]).
+/// toolBroker: enabled (kill-switch, default false), groups (name ->
+/// {description, tools}), hiddenTags, alwaysOn, neverHideTools - plus a
+/// nested per-model toolBroker override block.
 @("tool broker config keys parse from YAML") unittest {
     import std.algorithm : canFind;
     import std.path : buildPath;
@@ -2479,9 +2688,15 @@ codeModels:
     auto tmpFile = buildPath(tmpDir, "test.yaml");
     string yaml = `toolBroker:
   enabled: false
-  toolTagDescriptions:
-    workarea: "Files in the agent workarea: read, write, list, search."
-    rag: "RAG knowledge base tools."
+  groups:
+    workarea:
+      description: "Files in the agent workarea: read, write, list, search."
+      tools: [writeFile, readFile, editFile, listDirectory, grepFiles]
+    rag:
+      description: "RAG knowledge base tools."
+      tools: [queryBestMatch, queryTextSearch]
+  hiddenTags: [workarea, rag]
+  alwaysOn: [taskDone, listToolTags]
   neverHideTools:
     - taskDone
     - pipelineOutput
@@ -2490,19 +2705,49 @@ codeModels:
     display: test42
     server:
       url: http://localhost:8080
+    toolBroker:
+      enabled: true
+      hiddenTags: []
+      alwaysOn: [taskDone]
+      groups:
+        workarea:
+          description: "Fewer workarea tools for this model."
+          tools: [readFile, listDirectory]
 `;
     File(tmpFile, "w").write(yaml);
     auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
     assert(!conf.toolBroker.enabled, "toolBroker.enabled: false must parse");
-    assert(conf.toolBroker.toolTagDescriptions["workarea"].canFind("workarea"),
-            "toolTagDescriptions must parse: " ~ conf.toolBroker.toolTagDescriptions.to!string);
-    assert(conf.toolBroker.toolTagDescriptions["rag"] == "RAG knowledge base tools.");
+    assert(conf.toolBroker.groups["workarea"].description.canFind("workarea"),
+            "group description must parse: " ~ conf.toolBroker.groups["workarea"].description);
+    assert(conf.toolBroker.groups["workarea"].tools == [
+        "writeFile", "readFile", "editFile", "listDirectory", "grepFiles"
+    ], "group tools must parse: " ~ conf.toolBroker.groups["workarea"].tools.to!string);
+    assert(conf.toolBroker.groups["rag"].tools == [
+        "queryBestMatch", "queryTextSearch"
+    ]);
+    assert(conf.toolBroker.hiddenTags == ["workarea", "rag"],
+            "hiddenTags must parse: " ~ conf.toolBroker.hiddenTags.to!string);
+    assert(conf.toolBroker.alwaysOn == ["taskDone", "listToolTags"],
+            "alwaysOn must parse: " ~ conf.toolBroker.alwaysOn.to!string);
     assert(conf.toolBroker.neverHideTools == ["taskDone", "pipelineOutput"],
             "explicit neverHideTools must parse: " ~ conf.toolBroker.neverHideTools.to!string);
+
+    // Per-model override block.
+    auto model = conf.codeModels[0];
+    assert(model.toolBroker.enabled.get, "model toolBroker.enabled: true must parse");
+    assert(model.toolBroker.hiddenTags.get.empty, "model-level empty hiddenTags must parse");
+    assert(model.toolBroker.alwaysOn.get == ["taskDone"]);
+    assert(
+            model.toolBroker.groups.get["workarea"].description
+            == "Fewer workarea tools for this model.");
+    assert(model.toolBroker.groups.get["workarea"].tools == [
+        "readFile", "listDirectory"
+    ], "model groups must parse: " ~ model.toolBroker.groups.get["workarea"].tools.to!string);
 }
 
-/// Test: absent keys keep the struct defaults — toolBroker.enabled true,
-/// neverHideTools ["taskDone"], toolTagDescriptions empty.
+/// Test: absent keys keep the struct defaults - toolBroker.enabled false,
+/// groups/hiddenTags/alwaysOn empty, neverHideTools ["taskDone"]; a model
+/// without a toolBroker block has an all-unset override.
 @("tool broker config defaults hold") unittest {
     import std.path : buildPath;
     import std.stdio : File;
@@ -2520,96 +2765,300 @@ codeModels:
 `;
     File(tmpFile, "w").write(yaml);
     auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
-    assert(conf.toolBroker.enabled, "default toolBroker.enabled must be true");
+    assert(!conf.toolBroker.enabled, "default toolBroker.enabled must be false");
+    assert(conf.toolBroker.groups.empty, "no groups by default");
+    assert(conf.toolBroker.hiddenTags.empty, "no hiddenTags by default");
+    assert(conf.toolBroker.alwaysOn.empty, "no alwaysOn by default");
     assert(conf.toolBroker.neverHideTools == ["taskDone"],
             "default neverHideTools must be [\"taskDone\"]");
-    assert(conf.toolBroker.toolTagDescriptions.empty, "no toolTagDescriptions by default");
+
+    auto model = conf.codeModels[0];
+    assert(model.toolBroker.enabled.isNull, "absent model toolBroker block stays unset");
+    assert(model.toolBroker.hiddenTags.isNull);
+    assert(model.toolBroker.groups.isNull);
 }
 
-/// Test: validateToolBrokerConfig — warnings only, never fatal.
+/// Test: the applyConfig parser extension for the per-model toolBroker
+/// override kinds - Nullable!bool (scalar), Nullable!(string[]) (array), and
+/// the groups map (present and absent) - each parses without an "unable to
+/// read" warning (capture the log like the nudge-validate unittest above).
+@("tool broker override kinds parse without warnings") unittest {
+    import std.path : buildPath;
+    import std.algorithm : canFind;
+
+    import llm.agent.nudges : sharedLogSwapMutex;
+
+    synchronized (sharedLogSwapMutex) {
+        auto prevLog = logger.sharedLog;
+        auto cap = cast(shared) new CfgLogCapture();
+        logger.sharedLog = cap;
+        scope (exit)
+            logger.sharedLog = prevLog;
+
+        auto tmpDir = buildPath("llmfun_test", "config_toolbroker_override_kinds");
+        mkdirRecurse(tmpDir);
+        scope (exit)
+            rmdirRecurse(tmpDir);
+
+        auto parse = (string yamlText, string name) {
+            import std.path : buildPath;
+            import std.stdio : File;
+
+            auto tmpFile = buildPath(tmpDir, name ~ ".yaml");
+            File(tmpFile, "w").write(yamlText);
+            return applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+        };
+
+        // All three Nullable kinds present, including the groups map.
+        auto conf = parse(`codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+    toolBroker:
+      enabled: true
+      hiddenTags: [rag]
+      alwaysOn: [taskDone]
+      groups:
+        workarea:
+          description: "Fewer workarea tools for this model."
+          tools: [readFile, listDirectory]
+`, "present");
+        auto model = conf.codeModels[0];
+        assert(model.toolBroker.enabled.get, "Nullable!bool must parse");
+        assert(model.toolBroker.hiddenTags.get == ["rag"], "Nullable!(string[]) must parse");
+        assert(model.toolBroker.alwaysOn.get == ["taskDone"]);
+        assert(model.toolBroker.groups.get["workarea"].tools == [
+            "readFile", "listDirectory"
+        ], "groups map must parse: " ~ model.toolBroker.groups.get.to!string);
+        assert(
+                model.toolBroker.groups.get["workarea"].description
+                == "Fewer workarea tools for this model.");
+
+        // The groups map absent: the field stays unset.
+        auto confNoGroups = parse(`codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+    toolBroker:
+      enabled: true
+`, "groups_absent");
+        assert(confNoGroups.codeModels[0].toolBroker.groups.isNull, "absent groups key stays unset");
+        assert(confNoGroups.codeModels[0].toolBroker.enabled.get);
+
+        // Every per-model override parses without an "unable to read" warning.
+        auto lines = (cast() cap).takeLines().join("\n");
+        assert(!lines.canFind("unable to read"),
+                "per-model toolBroker overrides must parse silently, got: " ~ lines);
+    }
+}
+
+/// Test: resolveToolBrokerConfig - built-in defaults <- global block <- model
+/// override, per field (absent model block, scalar/list override, empty model
+/// hiddenTags: [] unhide-all), groups merged per entry by group name with
+/// wholesale replacement on same name.
+@("resolveToolBrokerConfig merges global and per-model toolBroker") unittest {
+    LlmConfig conf;
+    conf.toolBroker.enabled = true;
+    conf.toolBroker.groups["workarea"] = GroupConfig("Files in the agent workarea.",
+            ["writeFile", "readFile", "editFile"]);
+    conf.toolBroker.groups["pipeline"] = GroupConfig("Pipeline tools.", [
+        "pipelineOutput"
+    ]);
+    conf.toolBroker.hiddenTags = ["workarea", "pipeline"];
+    conf.toolBroker.alwaysOn = ["taskDone"];
+
+    // Absent model block: the global config passes through unchanged.
+    auto resolved = resolveToolBrokerConfig(conf, CodeModelConfig.init);
+    assert(resolved.enabled);
+    assert(resolved.hiddenTags == ["workarea", "pipeline"]);
+    assert(resolved.alwaysOn == ["taskDone"]);
+    assert(resolved.groups["workarea"].tools == [
+        "writeFile", "readFile", "editFile"
+    ]);
+    assert(resolved.groups["pipeline"].tools == ["pipelineOutput"]);
+    assert(resolved.neverHideTools == ["taskDone"]);
+
+    // Per-field overrides: scalar flip + empty model hiddenTags unhide-all.
+    CodeModelConfig model;
+    model.toolBroker.enabled = Nullable!bool(false);
+    model.toolBroker.hiddenTags = Nullable!(string[])([]);
+    model.toolBroker.alwaysOn = Nullable!(string[])(["readFile"]);
+    resolved = resolveToolBrokerConfig(conf, model);
+    assert(!resolved.enabled, "model enabled: false overrides global true");
+    assert(resolved.hiddenTags.empty, "model empty hiddenTags replaces the global list");
+    assert(resolved.alwaysOn == ["readFile"]);
+    // Absent override fields keep the global value.
+    assert(resolved.neverHideTools == ["taskDone"]);
+    assert(resolved.groups["pipeline"].tools == ["pipelineOutput"]);
+
+    // Per-entry groups merge: a model entry with the same name replaces the
+    // global entry wholesale; other entries pass through.
+    GroupConfig[string] modelGroups;
+    model.toolBroker.groups = Nullable!(GroupConfig[string])(modelGroups);
+    model.toolBroker.groups.get["workarea"] = GroupConfig(
+            "Fewer workarea tools for this model.", [
+        "readFile", "listDirectory"
+    ]);
+    resolved = resolveToolBrokerConfig(conf, model);
+    assert(resolved.groups["workarea"].tools == ["readFile", "listDirectory"],
+            "model group entry replaces the global entry wholesale");
+    assert(resolved.groups["workarea"].description == "Fewer workarea tools for this model.");
+    assert(resolved.groups["pipeline"].tools == ["pipelineOutput"], "global-only entry survives");
+}
+
+/// Test: validateToolBrokerConfig - warnings only, never fatal.
 /// (1) A neverHide name missing from the registry warns (it cannot be
 ///     protected from hiding).
-/// (2) A tagged neverHide tool warns (discovery gating runs before
-///     hiding, so it can still disappear from the tool list).
-/// (3) The shipped defaults (registered, untagged names) validate silently —
-///     including the discovery meta-tools (listToolTags + toolSearch, the
-///     Guard: untagged meta-tools emit no warning).
-/// (4) A toolTagDescriptions key outside KnownToolTag warns (typo guard);
-///     known keys are silent.
+/// (2) A group listing an unregistered tool warns (the typo silently
+///     stays ungrouped/alwaysOn).
+/// (3) An empty UNdescribed group warns (it is inert config); an empty
+///     DESCRIBED group is a valid runtime-vocabulary preset (MCP) and
+///     stays silent.
+/// (6) A per-model toolBroker override is validated on its resolved view
+///     (global + model merged): an override listing an unregistered tool
+///     warns with the model's label; a fully-unset override stays silent.
+/// (4) A hiddenTags or alwaysOn entry naming neither a group nor a
+///     registered tool warns.
+/// (5) The shipped defaults (registered, untagged names) validate silently.
 @("tool broker startup validation") unittest {
     import std.algorithm : canFind;
 
-    import llm.tool_call : Context, ExecuteFuncResult, RegFunction, addFunction, toParams;
-
-    // Fixture (mirrors llm.tool_call.tests.d): an empty params struct plus a
-    // (Context, JSONValue)-shaped callback matching RegFunction.callback;
-    // static nested so &cb is a function pointer. Registered via addFunction,
-    // which dedupes by name (order-proof). The registry entry is a deliberate,
-    // benign test leak (mirrors tool_call/tests.d:56-57) — the tagged-tool
-    // tests should know it exists.
-    struct BrokerValidateParams {
-    }
-
-    static ExecuteFuncResult brokerValidateCallback(Context ctx, JSONValue args) {
-        return ExecuteFuncResult("ok", true);
-    }
-
-    addFunction(RegFunction(name: "broker_validate_tagged_fixture", desc: "validateToolBrokerConfig fixture", params: toParams!BrokerValidateParams,
-            callback: &brokerValidateCallback, tags: ["workarea"]));
-
-    // (3) Shipped defaults validate silently: taskDone is registered and
+    // (5) Shipped defaults validate silently: taskDone is registered and
     // untagged (registered by tool_call's module ctor, which runs first).
     auto conf = LlmConfig.init;
     assert(validateToolBrokerConfig(conf).empty);
 
-    // (1) An unknown neverHide name cannot be protected — warn.
+    // (1) An unknown neverHide name cannot be protected - warn.
     conf.toolBroker.neverHideTools = ["taskDone", "bogus_no_hide"];
     auto warnings = validateToolBrokerConfig(conf);
     assert(warnings.length == 1, warnings.to!string);
     assert(warnings[0].canFind("bogus_no_hide"), warnings.to!string);
 
-    // (2) A tagged neverHide tool would still be discovery-gated — warn.
-    conf.toolBroker.neverHideTools = ["broker_validate_tagged_fixture"];
-    warnings = validateToolBrokerConfig(conf);
-    assert(warnings.length == 1, warnings.to!string);
-    assert(warnings[0].canFind("broker_validate_tagged_fixture"), warnings.to!string);
-    assert(warnings[0].canFind("tagged"), warnings.to!string);
-
-    // (4) Typo guard: an unknown toolTagDescriptions key warns, known keys silent.
+    // (2) A group listing an unregistered tool warns; (3) an empty
+    // undescribed group warns; a group listing a registered tool stays
+    // silent; an empty DESCRIBED group stays silent (the MCP preset shape).
     conf = LlmConfig.init;
-    conf.toolBroker.toolTagDescriptions = [
-        "workarea": "Workarea tools.",
-        "bogusTag": "typo"
+    conf.toolBroker.groups = [
+        "workarea": GroupConfig("Workarea tools.", ["readFile", "bogus_tool"]),
+        "empty": GroupConfig("", []),
+        "preset": GroupConfig("Nothing here.", []),
+        "good": GroupConfig("Fine.", ["taskDone"]),
     ];
     warnings = validateToolBrokerConfig(conf);
-    assert(warnings.length == 1, warnings.to!string);
-    assert(warnings[0].canFind("bogusTag"), warnings.to!string);
+    assert(warnings.length == 2, warnings.to!string);
+    assert(warnings[0].canFind("empty"), warnings.to!string);
+    assert(warnings[1].canFind("workarea"), warnings.to!string);
+    assert(warnings[1].canFind("bogus_tool"), warnings.to!string);
 
-    conf.toolBroker.toolTagDescriptions = [
-        "workarea": "Workarea tools.",
-        "rag": "RAG tools."
+    // A fully valid config (groups + hiddenTags + alwaysOn + neverHide all
+    // consistent) validates silently.
+    conf = LlmConfig.init;
+    conf.toolBroker.groups = [
+        "workarea": GroupConfig("Workarea tools.", ["readFile", "taskDone"])
     ];
+    conf.toolBroker.hiddenTags = ["workarea"];
+    conf.toolBroker.alwaysOn = ["taskDone"];
+    conf.toolBroker.neverHideTools = ["taskDone", "readFile"];
     assert(validateToolBrokerConfig(conf).empty);
+
+    // (4) A hiddenTags entry that names neither a group nor a registered
+    // tool warns; alwaysOn likewise. A defined group name and a registered
+    // tool name stay silent.
+    conf = LlmConfig.init;
+    conf.toolBroker.groups["workarea"] = GroupConfig("Workarea tools.", [
+        "taskDone"
+    ]);
+    conf.toolBroker.hiddenTags = ["workarea", "ghost_group"];
+    conf.toolBroker.alwaysOn = ["taskDone", "ghost_tool"];
+    warnings = validateToolBrokerConfig(conf);
+    assert(warnings.length == 2, warnings.to!string);
+    assert(warnings[0].canFind("hiddenTags"), warnings.to!string);
+    assert(warnings[0].canFind("ghost_group"), warnings.to!string);
+    assert(warnings[1].canFind("alwaysOn"), warnings.to!string);
+    assert(warnings[1].canFind("ghost_tool"), warnings.to!string);
+
+    // (6) A per-model toolBroker override is validated on its resolved view:
+    // an override listing an unregistered tool warns with the model's label;
+    // a fully-unset override resolves to the global block and stays silent.
+    conf = LlmConfig.init;
+    conf.toolBroker.groups["workarea"] = GroupConfig("Workarea tools.", [
+        "taskDone"
+    ]);
+    conf.codeModels.length = 1;
+    conf.codeModels[0].modelName = "test";
+    conf.codeModels[0].toolBroker.groups = Nullable!(GroupConfig[string])(
+            [
+        "workarea": GroupConfig("Workarea tools.", [
+            "taskDone", "ghost_model_tool"
+        ])
+    ]);
+    warnings = validateToolBrokerConfig(conf);
+    assert(warnings.length == 1, warnings.to!string);
+    assert(warnings[0].canFind("model 'test'"), warnings.to!string);
+    assert(warnings[0].canFind("ghost_model_tool"), warnings.to!string);
+
+    // A fully-unset override resolves to the global block - no duplicate
+    // warnings, silence.
+    conf = LlmConfig.init;
+    conf.toolBroker.groups["workarea"] = GroupConfig("Workarea tools.", [
+        "taskDone"
+    ]);
+    conf.codeModels.length = 1;
+    conf.codeModels[0].modelName = "test";
+    warnings = validateToolBrokerConfig(conf);
+    assert(warnings.empty, warnings.to!string);
 }
 
-/// Test: discoveryMetaToolTagWarnings — the discovery-meta-tool guard
-/// A TAGGED meta-tool warns; untagged (empty joined tags) and
-/// registry-missing names are silent (the neverHide loop above owns
-/// registry-missing).
-@("discovery meta-tool tag guard") unittest {
+/// Test: the toolTagDescriptions migration warning - a toolBroker block
+/// still carrying the removed toolTagDescriptions key warns with a pointer
+/// to the groups replacement (the parse-driven path: the applyConfig
+/// unknown-key loop collects the orphan key into ToolBrokerConfig
+/// unknownYamlKeys, and the startup validator turns it into the warning).
+@("tool broker toolTagDescriptions migration warning") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "config_toolbroker_migration");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `toolBroker:
+  toolTagDescriptions:
+    workarea: "Files in the agent workarea."
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    auto warnings = validateToolBrokerConfig(conf);
+    assert(warnings.length == 1, warnings.to!string);
+    assert(warnings[0].canFind("toolTagDescriptions"), warnings.to!string);
+    assert(warnings[0].canFind("groups"), warnings.to!string);
+}
+
+/// Test: discoveryMetaToolTagWarnings - the discovery-meta-tool guard.
+/// A meta-tool inside a DESCRIBED group warns (it would be advertised in
+/// discovery); ungrouped meta-tools, described groups without the meta-tool,
+/// and groups whose description is empty are silent.
+@("discovery meta-tool description guard") unittest {
     import std.algorithm : canFind;
 
-    string[string] metaTags;
-    metaTags["listToolTags"] = "";
-    assert(discoveryMetaToolTagWarnings(metaTags).empty); // registered, untagged
+    // Silent: no groups at all.
+    assert(discoveryMetaToolTagWarnings(ToolBrokerConfig.init, "toolBroker").empty);
 
-    metaTags["toolSearch"] = "workarea";
-    auto warnings = discoveryMetaToolTagWarnings(metaTags);
+    // Silent: the meta-tool is ungrouped, or in a group whose description is
+    // empty. A described group without the meta-tool is silent too.
+    auto conf = ToolBrokerConfig.init;
+    conf.groups["vague"] = GroupConfig("", ["listToolTags"]);
+    conf.groups["other"] = GroupConfig("Other tools.", ["taskDone"]);
+    assert(discoveryMetaToolTagWarnings(conf, "toolBroker").empty);
+
+    // Warn: the meta-tool is a member of a described group.
+    conf.groups["vague"].description = "Tag tools.";
+    auto warnings = discoveryMetaToolTagWarnings(conf, "toolBroker");
     assert(warnings.length == 1, warnings.to!string);
-    assert(warnings[0].canFind("toolSearch"), warnings.to!string);
-    assert(warnings[0].canFind("workarea"), warnings.to!string);
-
-    // A name missing from the registry is silent here (the registry-missing
-    // warning is the neverHide loop's concern).
-    assert(discoveryMetaToolTagWarnings(["ghost": "rag"]).empty);
+    assert(warnings[0].canFind("listToolTags"), warnings.to!string);
+    assert(warnings[0].canFind("vague"), warnings.to!string);
 }

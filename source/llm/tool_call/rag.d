@@ -145,9 +145,9 @@ struct QuerySemanticParams {
     @ParamOptional string database = "*";
 }
 
-@Function("Search the RAG using semantic queries. Use listRAGDatabases to discover available database names",
-    tags:
-        ["rag"]) ExecuteFuncResult querySemantic(Context baseCtx, QuerySemanticParams params) {
+@Function(
+        "Search the RAG using semantic queries. Use listRAGDatabases to discover available database names") ExecuteFuncResult querySemantic(
+        Context baseCtx, QuerySemanticParams params) {
     mixin(baseContextToSpecific!RAGContext);
     return queryFunc(ctx, params);
 }
@@ -163,9 +163,8 @@ struct QueryTextSearchParams {
     @ParamOptional string database = "*";
 }
 
-@Function("Search RAG using FTS5 full-text search for topK relevant results. The `textQuery` is passed directly to SQLite FTS5",
-    tags:
-        ["rag"]) ExecuteFuncResult queryTextSearch(Context baseCtx, QueryTextSearchParams params) {
+@Function("Search RAG using FTS5 full-text search for topK relevant results. The `textQuery` is passed directly to SQLite FTS5") ExecuteFuncResult queryTextSearch(
+        Context baseCtx, QueryTextSearchParams params) {
     mixin(baseContextToSpecific!RAGContext);
     auto res = queryFunc(ctx, params);
     if (!res.success) {
@@ -188,9 +187,9 @@ struct QueryBestMatchParams {
     @ParamOptional string database = "*";
 }
 
-@Function("Search RAG using combined semantic and FTS5 full-text. Use `listRAGDatabases` to discover available database names",
-    tags:
-        ["rag"]) ExecuteFuncResult queryBestMatch(Context baseCtx, QueryBestMatchParams params) {
+@Function(
+        "Search RAG using combined semantic and FTS5 full-text. Use `listRAGDatabases` to discover available database names") ExecuteFuncResult queryBestMatch(
+        Context baseCtx, QueryBestMatchParams params) {
     mixin(baseContextToSpecific!RAGContext);
     auto res = queryFunc(ctx, params);
     if (!res.success) {
@@ -202,9 +201,8 @@ struct QueryBestMatchParams {
 struct ListRAGDatabasesParams {
 }
 
-@Function("List all available RAG databases with their names and file paths. Use this to discover database names for filtering queries",
-    tags:
-        ["rag"]) ExecuteFuncResult listRAGDatabases(Context baseCtx, ListRAGDatabasesParams params) {
+@Function("List all available RAG databases with their names and file paths. Use this to discover database names for filtering queries") ExecuteFuncResult listRAGDatabases(
+        Context baseCtx, ListRAGDatabasesParams params) {
     mixin(baseContextToSpecific!RAGContext);
     if (ctx.getRAG() is null) {
         return ExecuteFuncResult("error: RAG not available", success: false);
@@ -237,8 +235,8 @@ struct LoadFileToRAGParams {
     string path;
 }
 
-@Function("Load file content into RAG index", tags:
-        ["rag"]) ExecuteFuncResult loadFileToRAG(Context baseCtx, LoadFileToRAGParams params) {
+@Function("Load file content into RAG index") ExecuteFuncResult loadFileToRAG(
+        Context baseCtx, LoadFileToRAGParams params) {
     import std.path : relativePath, buildNormalizedPath;
     import llm.utility : readFileUtf8;
 
@@ -275,8 +273,8 @@ struct LoadContentToRAGParams {
     string content;
 }
 
-@Function("Load content into RAG index with a topic name", tags:
-        ["rag"]) ExecuteFuncResult loadContentToRAG(Context baseCtx, LoadContentToRAGParams params) {
+@Function("Load content into RAG index with a topic name") ExecuteFuncResult loadContentToRAG(
+        Context baseCtx, LoadContentToRAGParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
     if (ctx.getRAG() is null) {
@@ -316,9 +314,8 @@ struct RemoveTopicFromRAGParams {
     string topic;
 }
 
-@Function("Remove topic from RAG index", tags:
-        ["rag"]) ExecuteFuncResult removeTopicFromRAG(Context baseCtx,
-        RemoveTopicFromRAGParams params) {
+@Function("Remove topic from RAG index") ExecuteFuncResult removeTopicFromRAG(
+        Context baseCtx, RemoveTopicFromRAGParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
     if (ctx.getRAG() is null) {
@@ -378,9 +375,8 @@ struct QueryReadFileParams {
     @ParamOptional bool appendLoc = true;
 }
 
-@Function("Read a specific line from a file in the RAG index. Resolves bare file names. Use readRAGSource to read a whole document",
-    tags:
-        ["rag"]) ExecuteFuncResult queryReadFile(Context baseCtx, QueryReadFileParams params) {
+@Function("Read a specific line from a file in the RAG index. Resolves bare file names. Use readRAGSource to read a whole document") ExecuteFuncResult queryReadFile(
+        Context baseCtx, QueryReadFileParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
     if (ctx.getRAG() is null) {
@@ -442,9 +438,8 @@ struct ListRAGSourcesParams {
     @ParamOptional long limit = 50;
 }
 
-@Function("List documents (sources) indexed in the RAG: file paths, topics and URLs with chunk counts. Use this to resolve the exact stored path of a document, then read it with readRAGSource",
-    tags:
-        ["rag"]) ExecuteFuncResult listRAGSources(Context baseCtx, ListRAGSourcesParams params) {
+@Function("List documents (sources) indexed in the RAG: file paths, topics and URLs with chunk counts. Use this to resolve the exact stored path of a document, then read it with readRAGSource") ExecuteFuncResult listRAGSources(
+        Context baseCtx, ListRAGSourcesParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
     if (ctx.getRAG() is null) {
@@ -496,9 +491,8 @@ struct ReadRAGSourceParams {
     @ParamOptional long maxBytes = 65536;
 }
 
-@Function("Read a whole document from the RAG index by path (resolves bare file names). Use it to read a document that another result referenced",
-    tags:
-        ["rag"]) ExecuteFuncResult readRAGSource(Context baseCtx, ReadRAGSourceParams params) {
+@Function("Read a whole document from the RAG index by path (resolves bare file names). Use it to read a document that another result referenced") ExecuteFuncResult readRAGSource(
+        Context baseCtx, ReadRAGSourceParams params) {
     mixin(baseContextToSpecific!RAGContext);
 
     if (ctx.getRAG() is null) {
