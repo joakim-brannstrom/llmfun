@@ -18,6 +18,8 @@
 
 #include "tui_backend.h"
 
+#include "tui_settings.h"
+
 // Forward declaration (keeps the rich_md headers out of this header): the
 // markdown context of a TuiState, created/destroyed by the tuiInit/tuiDestroy
 // State lifecycle (tui_api.cpp, implemented in tui_chat.cpp).
@@ -275,6 +277,19 @@ struct TuiState {
     /// did not create (headless harnesses keep their own).
     ImGuiContext* ownedContext = nullptr;
 
+    /// GUI view settings (font scale, persisted window size); owned here so
+    /// the Options window and the GUI backend share one authoritative copy.
+    TuiSettings settings;
+    /// Options window open (View -> Options); guards stacking duplicates.
+    bool optionsOpen = false;
+    /// Options window: content extent measured after the last text widget in
+    /// the previous frame (window-local, title bar included). Text lines
+    /// define the width, the full-width slider only stretches.
+    ImVec2 optionsContentSize = ImVec2(0.0f, 0.0f);
+    /// Text scale the Options window was last fitted for; a differing value
+    /// triggers one re-fit (first open, then every font-scale change).
+    float optionsFitScale = 0.0f;
+
     bool readyStatus{true};
     std::chrono::system_clock::time_point startProcesssingTime;
 
@@ -362,7 +377,7 @@ void tuiSetLogging(TuiState& state, bool onOff);
 void tuiSetMaxWidth(TuiState& state, int maxWidth);
 
 /// Set the file imgui persists its settings to (io.IniFilename); the GUI
-/// backend stores the window size in `<filename>.win`.
+/// backend stores the window size in settingsPath(filename) (imgui2.ini -> imgui2.conf).
 /// Call this before the backend attach creates the ImGui context (`tuiInit`
 /// in the v4 C API flow), which captures the name; a later call has no
 /// effect. Empty disables persistence.

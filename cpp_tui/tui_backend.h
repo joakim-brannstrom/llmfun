@@ -6,6 +6,8 @@
 #include <memory>
 #include <string>
 
+#include "tui_settings.h"
+
 namespace llmfun::tui {
 
 /// Active backend kind; the v4 C API surfaces it as TuiBackendKind.
@@ -36,9 +38,10 @@ struct Backend {
 
 std::unique_ptr<Backend> makeNcursesBackend();
 std::unique_ptr<Backend> makeNullBackend();
-/// `iniFilename` is the imgui settings file (io.IniFilename); the backend
-/// persists the window size in a sibling file (<iniFilename>.win). Empty
-/// disables the persistence.
-std::unique_ptr<Backend> makeGuiBackend(const std::string& iniFilename);
+/// `iniFilename` is the imgui settings file (io.IniFilename); `settings` is the
+/// non-owning view-settings record: loaded from settingsPath(iniFilename)
+/// before the window, saved (with the final window size) at shutdown. Empty
+/// iniFilename disables persistence.
+std::unique_ptr<Backend> makeGuiBackend(const std::string& iniFilename, TuiSettings& settings);
 
 } // namespace llmfun::tui

@@ -144,7 +144,7 @@ int tuiInit(TuiState* state, TuiBackendMode mode) {
         backend = ::llmfun::tui::makeNcursesBackend();
         initialized = backend->init(error);
     } else if (mode == TuiBackendMode_Gui) {
-        backend = ::llmfun::tui::makeGuiBackend(state->inner->iniFilename);
+        backend = ::llmfun::tui::makeGuiBackend(state->inner->iniFilename, state->inner->settings);
         initialized = backend->init(error);
         if (initialized)
             ::llmfun::tui::initMarkdownGuiMode(*state->inner);
@@ -153,7 +153,11 @@ int tuiInit(TuiState* state, TuiBackendMode mode) {
         // backend first. On failure, fall back to the terminal UI iff both
         // stdio ends are TTYs — a full-screen TUI drawn into a pipe is
         // useless, so there the GUI error is the result.
-        backend = ::llmfun::tui::makeGuiBackend(state->inner->iniFilename);
+        // A failed GUI init() has already loaded the settings into the shared
+        // record (loadTuiSettings runs before window creation), so a TTY
+        // fallback inherits the loaded font scale. Harmless: text mode ignores
+        // it, and a failed init never saves.
+        backend = ::llmfun::tui::makeGuiBackend(state->inner->iniFilename, state->inner->settings);
         initialized = backend->init(error);
         if (initialized) {
             ::llmfun::tui::initMarkdownGuiMode(*state->inner);

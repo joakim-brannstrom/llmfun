@@ -283,6 +283,25 @@ glyph ranges are passed (they only matter to legacy backends); a glyph the
 font lacks renders as its fallback (`?`) glyph. Without configuration the
 rendering is exactly as before on a 1.0-scale monitor.
 
+The GUI persists view settings in `imgui2.conf`, a sibling of the imgui
+settings file `imgui2.ini`, with one key=value line per setting:
+`WindowWidth`, `WindowHeight` (clamped to [1, 32767]) and `FontScaleMain`
+(accepted range 0.5 - 3.0). Unknown keys are ignored and malformed values
+are rejected (the current value - normally the default - is kept), so a
+hand-edited or truncated file cannot break the GUI.
+
+Precedence is: environment variables, then `imgui2.conf`, then built-in
+defaults. `LLMFUN_GUI_FONT` / `LLMFUN_GUI_FONT_SIZE` pick the BASE font and
+its pixel size; the saved `FontScaleMain` multiplies on top of whichever
+base the environment chose - the two knobs compose
+(ImGui::GetFontSize() == FontSizeBase * FontScaleMain * FontScaleDpi), e.g.
+a 16 px base with a saved 1.25 scale renders 20 px. `FontScaleMain` is
+changed in the GUI under View -> Options.
+
+The old window-size sibling file `<iniFilename>.win` is gone; window size is
+now stored in `imgui2.conf` (`WindowWidth` / `WindowHeight`). The first run
+after this change starts once with the default window size.
+
 The text grid instead runs markdown at 1-cell fonts (see Markdown Support),
 with `io.FontDefault` pinned to the imtui 1 px font BY NAME after init —
 `LegacySize == 1.0f` is not a unique selector (the rich code font is also

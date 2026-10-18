@@ -908,6 +908,14 @@ void renderMainWindow(TuiState& state, Log& log) {
     ImVec2 DisplaySize = ImGui::GetIO().DisplaySize;
 
     bool activateInputField = false;
+    // GUI-only: the text-grid backend must never load a non-default scale.
+    // Clamp defends against any future writer setting NaN/out-of-range
+    // (loadTuiSettings already rejects those). Takes effect next frame for
+    // windows already Begun (FontSize is locked per-window in Begin).
+    if (!tuiIsTextGrid()) {
+        const float s = state.settings.fontScaleMain;
+        ImGui::GetStyle().FontScaleMain = (s >= 0.5f && s <= 3.0f) ? s : 1.0f;
+    }
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("Chat")) {
             activateInputField = true;
@@ -917,6 +925,16 @@ void renderMainWindow(TuiState& state, Log& log) {
         if (ImGui::BeginMenu("Log")) {
             state.activeTab = ActiveTab::log;
             ImGui::EndMenu();
+        }
+        // GUI-only: in the text grid the slider has no effect (the apply is
+        // skipped), so the menu must not offer - and silently persist - a
+        // setting the TUI itself ignores.
+        if (!tuiIsTextGrid()) {
+            if (ImGui::BeginMenu("View")) {
+                if (ImGui::MenuItem("Options", nullptr, nullptr, !state.optionsOpen))
+                    state.optionsOpen = true;
+                ImGui::EndMenu();
+            }
         }
         ImGui::EndMenuBar();
     }
@@ -929,6 +947,9 @@ void renderMainWindow(TuiState& state, Log& log) {
         renderTabLog(state, log);
         break;
     }
+
+    if (!tuiIsTextGrid())
+        renderOptionsWindow(state);
 }
 
 } // namespace llmfun::tui
