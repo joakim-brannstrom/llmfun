@@ -1288,16 +1288,4 @@ version (unittest) {
         write(buildPath(promptDir, DefaultCompressionNudge),
                 readText(buildPath(srcDir, DefaultCompressionNudge)));
     }
-    /// Test hygiene: remove the temp prompt dir; failures only log.
-    package void cleanupAgentTestDir(string dir) {
-        import std.exception : collectException;
-        import std.file : rmdirRecurse;
-
-        try {
-            if (dir.exists)
-                rmdirRecurse(dir);
-        } catch (Exception e) {
-            logger.tracef("agent turn-id test cleanup failed: %s", e.msg).collectException;
-        }
-    }
 }

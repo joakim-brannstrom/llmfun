@@ -7,21 +7,17 @@ import std.sumtype : match;
 import std.typecons : nullable;
 
 import llm.agent;
-import llm.chat : Chat, Message, turnIdOf;
+import llm.chat : Message, turnIdOf;
 import llm.metric.monitor : MetricMonitor;
 
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    // stdTime (100ns resolution) keeps two runs in the same second from colliding on the temp dir.
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_turnid_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_turnid");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -56,16 +52,13 @@ unittest {
 // produces - before any request is wasted. The override names a file that
 // exists nowhere in the fixture prompt dir.
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_nudges_missing_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_nudges_missing");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -88,21 +81,18 @@ unittest {
 // defaults, NOT to the global customization - and the model's own templates are
 // eagerly loaded from the construction prompt dir.
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.typecons : nullable;
 
     import llm.config : CodeModelConfig, NudgeConfig, NudgeKind;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_nudges_switch_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_nudges_switch");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
-    write(tmpDir ~ "/MODEL_NUDGE.md", "MODEL-NUDGE-MARKER");
+    write(tmpDir ~ "MODEL_NUDGE.md", "MODEL-NUDGE-MARKER");
 
     auto llmConf = makeAgentTestConfig(tmpDir);
     llmConf.nudges.recovery.hardStrikes = 9; // global customization the model block does NOT restate
@@ -240,16 +230,13 @@ version (unittest) {
 // are userQuery:false - invisible in the dialogue/trace projections, and they
 // never open or fragment a turn.
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_escalation_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_escalation");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto agent = new CannedProcessAgent("integration", makeAgentTestConfig(tmpDir));
@@ -290,18 +277,15 @@ unittest {
 // - everything else (hardStrikes, file lists) falls back to struct defaults, so
 // strike 1 uses the shipped soft nudge and strike 2 the shipped hard one.
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
     import llm.config : CodeModelConfig, NudgeConfig;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_escalation_model_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_escalation_model");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -341,20 +325,16 @@ unittest {
 // The fixture omits the keep-reasoning files entirely: if the disabled kind's
 // ladder were touched, the missing-key AA access would throw.
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_escalation_disabled_%d_%d",
-            now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_escalation_disabled");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
-    write(tmpDir ~ "/NUDGE_RECOVERY_SOFT.md", "soft");
-    write(tmpDir ~ "/NUDGE_RECOVERY_HARD.md", "hard");
-    write(tmpDir ~ "/NUDGE_COMPRESSION.md", "compression");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
+    write(tmpDir ~ "NUDGE_RECOVERY_SOFT.md", "soft");
+    write(tmpDir ~ "NUDGE_RECOVERY_HARD.md", "hard");
+    write(tmpDir ~ "NUDGE_COMPRESSION.md", "compression");
 
     auto llmConf = makeAgentTestConfig(tmpDir);
     llmConf.nudges.keepReasoning.enabled = false;
@@ -380,16 +360,13 @@ unittest {
 // strikes and never routes through the ladder - the retry path bypasses the
 // escalation mechanism entirely (caller-supplied text).
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_w3_bypass_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_w3_bypass");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto agent = new CannedProcessAgent("integration", makeAgentTestConfig(tmpDir));
@@ -414,16 +391,13 @@ unittest {
 // the second keep-reasoning nudge proves the reset: without it, strike 2 would
 // emit the hard template.
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_ok_toolcall_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_ok_toolcall");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto agent = new CannedProcessAgent("integration", makeAgentTestConfig(tmpDir));
@@ -453,16 +427,13 @@ unittest {
 // loop: the nudge is injected, the counter advances, and the
 // projections stay nudge-free.
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_ok_continue_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_ok_continue");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto agent = new CannedProcessAgent("integration", makeAgentTestConfig(tmpDir));
@@ -497,16 +468,13 @@ unittest {
 // silent.
 unittest {
     import std.array : replicate;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_compression_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_compression");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     // Below the threshold: no nudge.
@@ -549,18 +517,15 @@ unittest {
 // earlier than the global default would.
 unittest {
     import std.array : replicate;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
     import llm.config : CodeModelConfig, NudgeConfig;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_compression_model_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_compression_model");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -629,16 +594,13 @@ unittest {
 // guard bug could not substitute anything).
 unittest {
     import std.array : replicate;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_compression_off_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_compression_off");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -659,21 +621,18 @@ unittest {
 // regardless of minToolCalls once the interval has passed - the sentinel
 // start is SysTime.init.
 unittest {
-    import std.datetime : Clock, SysTime;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.datetime : SysTime;
+    import std.file : write;
+    import llm.test_util : testArea;
     import my.path : Path;
-    import std.path : buildPath;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_feedback_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_feedback");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
-    auto monitor = new MetricMonitor(buildPath(tmpDir, "metrics.jsonl").Path);
+    auto monitor = new MetricMonitor(tmpDir ~ "metrics.jsonl");
 
     size_t feedbackWarnings(CannedProcessAgent a) {
         size_t n;
@@ -754,19 +713,16 @@ unittest {
         ~ "- pool == registry in registry order, convenience ctor - unfiltered "
         ~ "pool, kill switch on and off")
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.range : empty;
 
     import llm.tool_call : getFunctions;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_broker_pool_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_broker_pool");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -815,19 +771,16 @@ unittest {
 unittest {
     import std.algorithm : canFind;
     import std.conv : to;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
     import llm.tool_call : getFunctions;
     import llm.tool_call.broker : hiddenNeverHideTools;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_broker_neverhide_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_broker_neverhide");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -853,17 +806,14 @@ unittest {
 @("agent owns the tools array: the listToolTags entry carries the composed description")
 unittest {
     import std.algorithm : canFind, countUntil;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.string : indexOf;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t7_composed_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t7_composed");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -907,21 +857,18 @@ unittest {
 unittest {
     import std.algorithm : canFind, map;
     import std.array : array;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : JSONValue;
     import std.range : empty;
     import std.conv : to;
 
     import llm.config : CodeModelConfig, GroupConfig, ToolBrokerConfig;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_broker_hook_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_broker_hook");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -994,16 +941,13 @@ unittest {
         "agent owns the tools array: a configured-but-empty group description is not advertised (no warning)")
 unittest {
     import std.algorithm : canFind, countUntil;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t7_emptydesc_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t7_emptydesc");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -1045,9 +989,8 @@ version (unittest) {
 
 @("tool dispatch refusals: tier-1 unknown, tier-2 config-excluded, tier-3 in-pool-not-visible is instructive, visible tool dispatches")
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.sumtype : match;
 
     import llm.chat : ToolResponse;
@@ -1055,12 +998,10 @@ unittest {
     import llm.tool_call : RegFunction, addFunction, toParams;
     import llm.tool_call.broker : activateTag;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t8_refusals_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t8_refusals");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     // Tier-3 fixture: a tagged tool registered before agent construction, so it
@@ -1244,20 +1185,17 @@ version (unittest) {
 @("compression-point pruning: a no-op compression (history not rewritten) leaves the broker state and the tools array untouched")
 unittest {
     import std.algorithm : canFind;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : JSONValue;
 
     import llm.tool_call : RegFunction, addFunction, toParams;
     import llm.tool_call.broker : activateTag;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t9_noop_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t9_noop");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     addFunction(RegFunction(name: "agent_t9_noop_fixture", desc: "t9 noop fixture", params: toParams!T9FixtureParams,
@@ -1344,21 +1282,18 @@ version (unittest) {
 @("seed-on-load: a loaded chat's structured tool call re-activates the workarea-tagged fixture and the rebuilt tools array carries it")
 unittest {
     import std.algorithm : canFind;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : JSONValue, parseJSON;
     import std.range : empty;
 
     import llm.tool_call : RegFunction, addFunction, toParams;
     import llm.tool_call.broker : BrokerState;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t11_seed_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t11_seed");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     // Workarea-tagged fixture registered BEFORE agent construction, so it is
@@ -1404,18 +1339,15 @@ unittest {
 @(
         "seed-on-load: an empty chat doc is a no-op - the activation list and the tools array stay untouched")
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : JSONValue, parseJSON;
     import std.range : empty;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t11_empty_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t11_empty");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto agent = new Agent("integration", makeAgentTestConfig(tmpDir), null, null);
@@ -1431,20 +1363,17 @@ unittest {
 
 @("seed-on-load: the kill switch off makes the seed a no-op even when the history proves a use")
 unittest {
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : JSONValue, parseJSON;
     import std.range : empty;
 
     import llm.tool_call : RegFunction, addFunction, toParams;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t11_killswitch_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t11_killswitch");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     addFunction(RegFunction(name: "agent_t11_killswitch_fixture", desc: "t11 kill-switch fixture", params: toParams!T11FixtureParams,
@@ -1476,18 +1405,15 @@ unittest {
 @("seed-on-load: only alwaysOn (untagged) calls in the history - the activation list and the tools array stay untouched")
 unittest {
     import std.algorithm : canFind;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : JSONValue, parseJSON;
     import std.range : empty;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t11_alwayson_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t11_alwayson");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     string[] namesOf(JSONValue[] ts) {
@@ -1521,20 +1447,17 @@ unittest {
 @("seed-on-load: a second seed of the same chat is a no-op - nothing newly activated, no rebuild")
 unittest {
     import std.algorithm : canFind;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : JSONValue, parseJSON;
     import std.range : empty;
 
     import llm.tool_call : RegFunction, addFunction, toParams;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t11_idem_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t11_idem");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     addFunction(RegFunction(name: "agent_t11_idem_fixture", desc: "t11 idempotency fixture", params: toParams!T11FixtureParams,
@@ -1584,21 +1507,18 @@ unittest {
 @("seed-on-load end to end: agent.loadHistory seeds the broker from the restored session file")
 unittest {
     import std.algorithm : canFind;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : JSONValue;
 
     import my.path : Path;
 
     import llm.tool_call : RegFunction, addFunction, toParams;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_t11_load_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_t11_load");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     addFunction(RegFunction(name: "agent_t11_load_fixture", desc: "t11 load fixture", params: toParams!T11FixtureParams, callback: &t11FixtureCallback,
@@ -1617,7 +1537,7 @@ unittest {
 
     // The history file in the save format, written AFTER construction (the
     // ctor does not auto-load): one structured call + tool response pair.
-    write(tmpDir ~ "/integration_history.json", `{
+    write(tmpDir ~ "integration_history.json", `{
         "messages": [
             {"role": "assistant", "content": null, "reasoning_content": "",
              "tool_calls": [{"id": "1", "type": "function",
@@ -1640,9 +1560,8 @@ unittest {
 unittest {
     import std.algorithm : canFind, filter;
     import std.array : array;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : parseJSON;
 
     import llm.config : GroupConfig;
@@ -1651,12 +1570,10 @@ unittest {
 
     enum tag = "mcp_ext_server_t12";
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_mcp_connect_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_mcp_connect");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -1703,20 +1620,17 @@ unittest {
 @("Kill switch off: the MCP connect hook rebuilds the pre-broker tools array, so an MCP tool becomes visible without activation")
 unittest {
     import std.algorithm : canFind;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
 
     import llm.mcp_server.registration : registerMcpTool;
 
     enum tag = "mcp_ext_server_t12_legacy";
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_mcp_killswitch_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_mcp_killswitch");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -1740,9 +1654,8 @@ unittest {
 unittest {
     import std.algorithm : canFind, count, map;
     import std.array : array;
-    import std.datetime : Clock;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.json : JSONValue;
     import std.range : empty;
     import std.conv : to;
@@ -1750,12 +1663,10 @@ unittest {
     import llm.config : GroupConfig;
     import llm.pipeline : pipelineOutputAlwaysOnHook;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_pipeline_hook_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_pipeline_hook");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
@@ -1805,10 +1716,9 @@ unittest {
 // wall-clock path is covered E2E. The default parameter leaves direct
 // two-arg call sites unstamped (NoProcessingTime).
 unittest {
-    import std.datetime : Clock, dur;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
-    import std.path : buildPath;
+    import std.datetime : dur;
+    import std.file : write;
+    import llm.test_util : testArea;
     import std.sumtype : has;
 
     import llm.chat : MessageTime, NoProcessingTime, ToolMessage, ToolResponse;
@@ -1816,14 +1726,12 @@ unittest {
 
     import my.path : Path;
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_stamp_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_stamp");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
-    auto monitor = new MetricMonitor(buildPath(tmpDir, "metrics.jsonl").Path);
+    auto monitor = new MetricMonitor(tmpDir ~ "metrics.jsonl");
     auto llmConf = makeAgentTestConfig(tmpDir);
     // Close the feedback gates: with a live monitor and the default config the
     // first-call sentinel would add a warning Message and shift the counts.
@@ -1886,10 +1794,9 @@ version (unittest) {
 }
 
 unittest {
-    import std.datetime : Clock, Duration;
-    import std.file : mkdirRecurse, write;
-    import std.format : format;
-    import std.path : buildPath;
+    import std.datetime : Duration;
+    import std.file : write;
+    import llm.test_util : testArea;
     import my.path : Path;
     import logger = std.logger;
 
@@ -1899,14 +1806,12 @@ unittest {
     addFunction(RegFunction(name: "agent_tooltime_sleep", desc: "tooltime sleep fixture",
             params: toParams!ToolTimeSleepParams, callback: &toolTimeSleepCallback));
 
-    auto now = Clock.currTime();
-    auto tmpDir = format("llmfun_test/agent_tooltime_%d_%d", now.toUnixTime(), now.stdTime);
-    mkdirRecurse(tmpDir);
+    auto tmpDir = testArea("agent_tooltime");
     scope (exit)
-        cleanupAgentTestDir(tmpDir);
-    write(tmpDir ~ "/SUMMARY.md", "Summarize text.");
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
-    auto monitor = new MetricMonitor(buildPath(tmpDir, "metrics.jsonl").Path);
+    auto monitor = new MetricMonitor(tmpDir ~ "metrics.jsonl");
     auto llmConf = makeAgentTestConfig(tmpDir);
     // Close the feedback gate: with a live monitor and the default config the
     // first-call sentinel would add a warning Message and shift the counts.
@@ -1956,16 +1861,16 @@ unittest {
     import std.array : replicate;
     import std.file : write;
     import std.format : format;
-    import std.path : buildPath;
 
     import llm.chat : Role;
     import llm.rag.dialogue_index : CompressionCheckpoint;
+
     import llm.test_util : testArea;
 
     auto tmpDir = testArea("agent_checkpoint_sid");
     scope (exit)
         tmpDir.cleanup;
-    write(buildPath(tmpDir, "SUMMARY.md"), "Summarize text.");
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
     writeDefaultNudgeFiles(tmpDir);
 
     auto llmConf = makeAgentTestConfig(tmpDir);
