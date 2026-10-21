@@ -421,6 +421,27 @@ dub test -- -i '.*my_experiment.*'
 
 Remove the temporary unittest when the experiment is done.
 
+### Writing test descriptions
+
+Give every unittest a string UDA description (`@("...")`). The description is what `dub test` prints for passing and failing tests, so it must let a reader tell which behavior failed without opening the source. An unnamed unittest is reported as `__unittest_L<line>_C<col>`, which says nothing at failure time.
+
+Describe the scenario: the input or condition and the expected result — "X when Y" or "condition; outcome". Do not describe the test's implementation (the functions or branches it goes through, how it obtains values): those change with refactors and tell the reader nothing when a test fails. When one test covers several cases, join them with a semicolon.
+
+Scenario-shaped:
+
+```d
+@("0/0 escalation ladder is rejected")
+@("empty file names are rejected only for enabled kinds")
+@("a valid enum member name selects that member; an invalid one keeps the default")
+```
+
+Implementation-shaped (do not):
+
+```d
+@("validateConfig calls checkNudges first")
+@("parses the value through the Nullable branch")
+```
+
 ## Agent Rules
 
 - **Always verify facts** using RAG search or memory before asserting them. Internal knowledge is not sufficient for specific names, technical details, or version-specific information.
