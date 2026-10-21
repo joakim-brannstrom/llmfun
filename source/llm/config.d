@@ -927,11 +927,6 @@ private void loadExecutionEnvironments(ref LlmConfig conf,
     }
 }
 
-// Configuration format decision (2026-08): llmfun reads ONLY YAML config
-// files (config.yaml / .llmfun.yaml / any -c path). Legacy JSON names
-// (.llmfun.json, config.json) are never read — no fallback, no deprecation
-// window, no migration. Machine-managed JSON (state.json, chat sessions,
-// monitor.jsonl, protocol payloads) is unaffected.
 /// Load the layered configuration for `path` (layer 2) over the system base
 /// config (layer 1), with the same system/user split as `readConfigInternal`.
 ///
@@ -1781,27 +1776,6 @@ unittest {
     conf = readConfigInternal(Path.init, silent: true, noCwdConfig: false, trustedConfig: true,
             userCliWorkArea: tmpDir.Path, cwd: tmpDir.Path, systemConfigPath: Path.init);
     assert(!conf.codeModels.empty, "Config should have been loaded: " ~ conf.to!string);
-}
-
-/// Test: a legacy `.llmfun.json` alone is ignored — no fallback read.
-unittest {
-    import std.path : buildPath;
-    import std.stdio : File;
-
-    auto tmpDir = buildPath("llmfun_test", "legacy_ignored_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-
-    // Only the old JSON name exists in this directory.
-    auto legacyFile = buildPath(tmpDir, ".llmfun.json");
-    string legacyJson = `{"codeModels":[{"name":"legacy","server":{"url":"http://localhost:8080"}}]}`;
-    File(legacyFile, "w").write(legacyJson);
-
-    // Even with --trusted-config, the legacy JSON file must not be loaded.
-    auto conf = readConfigInternal(Path.init, silent: true, noCwdConfig: false, trustedConfig: true,
-            userCliWorkArea: tmpDir.Path, cwd: tmpDir.Path, systemConfigPath: Path.init);
-    assert(conf.codeModels.empty, "Legacy .llmfun.json must be ignored: " ~ conf.to!string);
 }
 
 /// Test: the shipped config/example.yaml loads with a complete defaultOptions
