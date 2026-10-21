@@ -1611,41 +1611,35 @@ string[][string] replaceContainerMagicWords(string[][string] options, AbsolutePa
     return result;
 }
 
-/// Test: @{llmfun_workarea} replaced with workarea path.
-unittest {
+@("@{llmfun_workarea} in a value expands to the workarea path") unittest {
     auto result = replaceMagicWord!string("@{llmfun_workarea}/file.txt",
             AbsolutePath("/my/workarea"));
     assert(result == "/my/workarea/file.txt", result);
 }
 
-/// Test: @{llmfun} replaced with binary directory.
-unittest {
+@("@{llmfun} in a value expands to the llmfun binary directory") unittest {
     auto result = replaceMagicWord!string("@{llmfun}/bin/tool", AbsolutePath("/my/workarea"));
     assert(result == i"$(thisExePath.dirName)/bin/tool".text);
 }
 
-/// Test: both magic words in same value.
-unittest {
+@("a value with both magic words expands both") unittest {
     auto result = replaceMagicWord!string(
             "-v @{llmfun_workarea}:/work -v @{llmfun}/data:/data", AbsolutePath("/my/work"));
     assert(result == i"-v /my/work:/work -v $(thisExePath.dirName)/data:/data".text);
 }
 
-/// Test: no magic words — values unchanged.
-unittest {
+@("no magic words, values unchanged") unittest {
     auto result = replaceMagicWord!string("just a plain string", AbsolutePath("/my/workarea"));
     assert(result == "just a plain string");
 }
 
-/// Test: replaceContainerMagicWords with empty options returns empty.
-unittest {
+@("an empty options map yields an empty result") unittest {
     string[][string] options;
     auto result = replaceContainerMagicWords(options, AbsolutePath("/work"));
     assert(result.length == 0);
 }
 
-/// Test: keys are not modified in replaceContainerMagicWords.
-unittest {
+@("keys pass through unchanged; only values expand") unittest {
     string[][string] options;
     options["@{llmfun_workarea}"] = ["@{llmfun_workarea}/path"];
     auto result = replaceContainerMagicWords(options, AbsolutePath("/work"));
@@ -1653,8 +1647,7 @@ unittest {
     assert(result["@{llmfun_workarea}"][0] == "/work/path");
 }
 
-/// Test: multiple values in array each processed.
-unittest {
+@("every value in an options array expands") unittest {
     string[][string] options;
     options["mounts"] = ["-v", "@{llmfun_workarea}:/w", "@{llmfun}/data:/d"];
     auto result = replaceContainerMagicWords(options, AbsolutePath("/work"));
@@ -1663,8 +1656,7 @@ unittest {
     assert(result["mounts"][2] == i"$(thisExePath.dirName)/data:/d".text);
 }
 
-/// Test: applyConfig parses string[][string] correctly.
-unittest {
+@("a string[][string] options block loads into the options field") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -1688,9 +1680,7 @@ unittest {
     assert(conf.options["network"] == ["--network", "none"]);
 }
 
-/// Test: enum-valued config fields parse from the member name string and keep
-/// the default when the value is not a valid member.
-unittest {
+@("a valid enum member name selects that member; an invalid one keeps the default") unittest {
     auto ec = embedConfigFromValue(parseJSON(`{"type": "local", "mode": "cpu"}`));
     ec.match!((LocalEmbedConfig l) {
         assert(l.mode == EmbedMode.cpu, "mode: cpu must parse");
@@ -1713,8 +1703,7 @@ unittest {
     assert(conf.mode == EmbedMode.cpu, "invalid mode must fall back to the default");
 }
 
-/// Test: Explicit config path always loads regardless of trusted-config.
-unittest {
+@("explicit config path always loads regardless of trusted-config") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -1741,8 +1730,7 @@ codeModels:
     assert(conf.sandboxConfig.maxOutputBytes == 42);
 }
 
-/// Test: --no-cwd-config skips CWD config entirely.
-unittest {
+@("--no-cwd-config skips CWD config entirely") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -1778,10 +1766,7 @@ unittest {
     assert(!conf.codeModels.empty, "Config should have been loaded: " ~ conf.to!string);
 }
 
-/// Test: the shipped config/example.yaml loads with a complete defaultOptions
-/// map (guards the YAML quoting: unquoted "0.5"/"60" would become non-strings
-/// and the merger would silently drop the whole map, incl. 06_network).
-unittest {
+@("the shipped config/example.yaml loads with its defaultOptions map intact") unittest {
     // Parse guard: the shipped file must load, and every defaultOptions item
     // must be a string (the merger's .str access would throw otherwise).
     auto json = loadYamlValue(Path("config/example.yaml"));
@@ -1849,8 +1834,7 @@ unittest {
     assert(warns.empty, warns.to!string);
 }
 
-/// Test: tui.maxWidth parses from YAML into LlmConfig.tui.maxWidth.
-unittest {
+@("tui.maxWidth parses from YAML into LlmConfig.tui.maxWidth") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -1867,8 +1851,7 @@ unittest {
     assert(conf.tui.maxWidth == 255, "expected 255, got " ~ conf.tui.maxWidth.to!string);
 }
 
-/// Test: absent tui key keeps the default maxWidth = 0.
-unittest {
+@("absent tui key keeps the default maxWidth = 0") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -1888,8 +1871,7 @@ unittest {
     assert(conf.tui.maxWidth == 0, "expected default 0, got " ~ conf.tui.maxWidth.to!string);
 }
 
-/// Test: maxWidth below 40 is rejected by validateConfig.
-unittest {
+@("maxWidth below 40 is rejected by validateConfig") unittest {
     import std.path : buildPath;
     import std.stdio : File;
     import std.algorithm : canFind;
@@ -1922,8 +1904,7 @@ tui:
     assert(canFind(msg, "tui.maxWidth"), "unexpected error message: " ~ msg);
 }
 
-/// Test: maxWidth above 10000 is rejected by validateConfig.
-unittest {
+@("maxWidth above 10000 is rejected by validateConfig") unittest {
     import std.path : buildPath;
     import std.stdio : File;
     import std.algorithm : canFind;
@@ -1957,17 +1938,14 @@ tui:
     assert(canFind(msg, "tui.maxWidth"), "unexpected error message: " ~ msg);
 }
 
-/// Test: shipped config/example.yaml still parses; tui key absent → maxWidth 0.
-unittest {
+@("the shipped example.yaml parses without the tui key; maxWidth stays 0") unittest {
     auto json = loadYamlValue(Path("config/example.yaml"));
     auto conf = applyLlmConfig(LlmConfig.init, json);
     assert(conf.tui.maxWidth == 0,
             "shipped example.yaml must keep default 0, got " ~ conf.tui.maxWidth.to!string);
 }
 
-unittest {
-    // Round-trip: an explicit dialogueDir in YAML is preserved through
-    // applyConfig (reflection) and not overwritten by resolvePaths (it is set).
+@("an explicit dialogueDir in YAML round-trips unchanged") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -1992,8 +1970,7 @@ codeModels:
             "dialogueDir round-trip failed: " ~ conf.dialogueDir.to!string);
 }
 
-unittest {
-    // Absent key -> resolvePaths defaults dialogueDir to dataDir ~ "dialogue".
+@("absent dialogueDir key defaults to the dialogue subdirectory of dataDir") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -2018,14 +1995,11 @@ unittest {
             "dialogueDir default mismatch: " ~ conf.dialogueDir.to!string);
 }
 
-unittest {
-    // Default: the reasoning-summary prompt ships as the named file.
+@("default reasoningSummaryPrompt ships as the named file") unittest {
     assert(LlmConfig().reasoningSummaryPrompt == "REASONING_SUMMARY.md");
 }
 
-unittest {
-    // Round-trip: an explicit reasoningSummaryPrompt in YAML is preserved
-    // through applyConfig (reflection) and not overwritten by resolvePaths.
+@("an explicit reasoningSummaryPrompt in YAML round-trips unchanged") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -2051,8 +2025,7 @@ codeModels:
             "reasoningSummaryPrompt round-trip failed: " ~ conf.reasoningSummaryPrompt);
 }
 
-unittest {
-    // validateConfig accepts the default (empty) and a safe dialogueDir
+@("validateConfig accepts an empty dialogueDir and a safe explicit one") unittest {
     import std.exception : assertThrown;
 
     LlmConfig conf;
@@ -2079,10 +2052,7 @@ version (unittest) {
     }
 }
 
-/// a global default `nudges:` block parses; every field lands in
-/// LlmConfig.nudges (the config schema).
-@("global nudges block parses into LlmConfig.nudges")
-unittest {
+@("global nudges block parses into LlmConfig.nudges") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -2178,7 +2148,7 @@ codeModels:
 
 /// `nudges` absent everywhere -> readConfig still materializes the shipped
 /// default prompt files (resolvePaths), unlike the raw struct defaults above.
-@("readConfig materializes the shipped default nudge files") unittest {
+@("a config without nudges gets the shipped default nudge files") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -2243,9 +2213,6 @@ codeModels:
             "model without its own nudges block must inherit the global policy");
 }
 
-/// Test: a per-model `nudges:` block parses through the Nullable!NudgeConfig
-/// branch and is WHOLESALE: restated fields win over the global default,
-/// fields not restated fall back to struct defaults, NOT to the global values.
 @(
         "per-model nudges block parses wholesale; restated wins, missing fields fall back to struct defaults") unittest {
     import std.path : buildPath;
@@ -2296,9 +2263,6 @@ codeModels:
     assert(mn.get.feedback.minToolCalls == 50);
 }
 
-/// an unknown key inside `nudges:` logs the existing "Unknown
-/// configuration key" warning (applyConfig) instead of throwing; recognized
-/// sibling keys still land.
 @("unknown key inside nudges warns instead of throwing") unittest {
     import std.path : buildPath;
     import std.stdio : File;
@@ -2328,15 +2292,12 @@ codeModels:
     assert(conf.codeModels[0].nudges.isNull);
 }
 
-/// validateConfig accepts the default (untouched) nudge policy shape —
-/// shipped defaults 2/1, threshold 0.8, feedback 900/50, empty prompt/ladders
-/// (baseline; empty prompt = shipped default file, resolved at load time).
+/// The empty prompt means the shipped default file, resolved at load time.
 @("default nudge policy shape passes validateConfig") unittest {
     validateConfig(nudgesValidateTestConfig());
 }
 
-/// a 0/0 escalation ladder is rejected — the ladder would fail on the
-/// first strike (the math makes this a foot-gun, not a policy).
+/// A 0/0 ladder would fail on the first strike — a foot-gun, not a policy.
 @("0/0 escalation ladder is rejected") unittest {
     import std.algorithm : canFind;
 
@@ -2357,8 +2318,6 @@ codeModels:
             "error message must name the offending key path, got: " ~ msg);
 }
 
-/// negative strike counts are rejected, with the offending key path
-/// named in the message.
 @("negative strike counts are rejected with the key path named") unittest {
     import std.algorithm : canFind;
 
@@ -2391,10 +2350,8 @@ codeModels:
             "error message must name the offending key path, got: " ~ msg);
 }
 
-/// Test: user-supplied EMPTY file names are rejected only for enabled kinds;
-/// files of disabled kinds are not validated (semantics: disabled kind
-/// loads nothing and nudges nothing).
-@("empty file names rejected only for enabled kinds") unittest {
+/// Disabled kinds are not validated: a disabled kind loads nothing and nudges nothing.
+@("empty file names are rejected only for enabled kinds") unittest {
     auto conf = nudgesValidateTestConfig();
     conf.nudges.keepReasoning.enabled = false;
     conf.nudges.keepReasoning.softNudges = ["", "GARBAGE.md"];
@@ -2419,9 +2376,8 @@ codeModels:
             "error message must name the offending entry, got: " ~ msg);
 }
 
-/// compression threshold — (0.0, 0.9) valid; a value in [0.9, 1.0)
-/// elicits a warning (not a throw) that the advisory nudge can never fire
-/// before forced compression at 90%; outside (0.0, 1.0) throws.
+/// A threshold in [0.9, 1.0) only warns: the advisory nudge can never fire
+/// before forced compression at 90%.
 @("compression threshold: >= 0.9 warns, outside (0.0, 1.0) throws") unittest {
     import std.algorithm : canFind;
 
@@ -2456,8 +2412,8 @@ codeModels:
     assert(threw, "validateConfig must throw for threshold 1.0");
 }
 
-/// Test: feedback floors — 0 would warn after every tool call, so both values
-/// must be >= 1 (use `enabled: false` to turn the warning off instead).
+/// A floor of 0 would warn after every tool call; use `enabled: false` to
+/// turn the warning off instead.
 @("feedback floors of 0 are rejected") unittest {
     auto conf = nudgesValidateTestConfig();
     conf.nudges.feedback.intervalSecs = 0;
@@ -2489,11 +2445,7 @@ codeModels:
             "error message must name the offending key path, got: " ~ msg);
 }
 
-/// Test: per-model `nudges:` wholesale overrides are validated like the
-/// global block — a 0/0 ladder, a bad compression threshold, or a feedback
-/// floor violation inside a model block fails startup with the model's key
-/// path in the message.
-@("per-model nudges overrides validated with the model key path") unittest {
+@("a per-model nudges violation is reported with the model's key path") unittest {
     import std.algorithm : canFind;
 
     auto conf = nudgesValidateTestConfig();
@@ -2541,9 +2493,6 @@ codeModels:
             "error message must name the per-model key path, got: " ~ msg);
 }
 
-/// Test: a valid per-model `nudges:` override passes, and files of DISABLED
-/// kinds inside a per-model block are not validated either (same semantics as
-/// the global policy).
 @("valid per-model override passes; disabled kinds not validated") unittest {
     auto conf = nudgesValidateTestConfig();
     conf.codeModels[0].nudges = NudgeConfig(keepReasoning: EscalationConfig(softNudges: [
@@ -2557,18 +2506,11 @@ codeModels:
     validateConfig(conf); // disabled kind inside a per-model block: not validated
 }
 
-/// Test: the default (untouched) nudge policy shape validates SILENTLY - no
-/// spurious nudge warning on the shipped defaults. The warnings are data:
-/// validateNudgeConfig returns them; empty means silent.
 @("default nudge policy validates silently") unittest {
     assert(validateNudgeConfig("nudges", nudgesValidateTestConfig().nudges).empty);
 }
 
-/// Test: the Tool Broker config keys parse from YAML, nested under
-/// toolBroker: enabled (kill-switch, default false), groups (name ->
-/// {description, tools}), hiddenTags, alwaysOn, neverHideTools - plus a
-/// nested per-model toolBroker override block.
-@("tool broker config keys parse from YAML") unittest {
+@("toolBroker keys parse from YAML") unittest {
     import std.algorithm : canFind;
     import std.path : buildPath;
     import std.stdio : File;
@@ -2637,10 +2579,7 @@ codeModels:
     ], "model groups must parse: " ~ model.toolBroker.groups.get["workarea"].tools.to!string);
 }
 
-/// Test: absent keys keep the struct defaults - toolBroker.enabled false,
-/// groups/hiddenTags/alwaysOn empty, neverHideTools ["taskDone"]; a model
-/// without a toolBroker block has an all-unset override.
-@("tool broker config defaults hold") unittest {
+@("absent toolBroker keys keep the struct defaults") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -2670,11 +2609,7 @@ codeModels:
     assert(model.toolBroker.groups.isNull);
 }
 
-/// Test: the applyConfig parser extension for the per-model toolBroker
-/// override kinds - Nullable!bool (scalar), Nullable!(string[]) (array), and
-/// the groups map (present and absent) - each parses without an "unable to
-/// read" warning (capture the log like the nudge-validate unittest above).
-@("tool broker override kinds parse without warnings") unittest {
+@("per-model toolBroker overrides of any kind parse silently") unittest {
     import std.path : buildPath;
 
     // TODO: should use TestArea from test_util
@@ -2731,10 +2666,6 @@ codeModels:
     assert(confNoGroups.codeModels[0].toolBroker.enabled.get);
 }
 
-/// Test: resolveToolBrokerConfig - built-in defaults <- global block <- model
-/// override, per field (absent model block, scalar/list override, empty model
-/// hiddenTags: [] unhide-all), groups merged per entry by group name with
-/// wholesale replacement on same name.
 @("resolveToolBrokerConfig merges global and per-model toolBroker") unittest {
     LlmConfig conf;
     conf.toolBroker.enabled = true;
@@ -2785,21 +2716,7 @@ codeModels:
     assert(resolved.groups["pipeline"].tools == ["pipelineOutput"], "global-only entry survives");
 }
 
-/// Test: validateToolBrokerConfig - warnings only, never fatal.
-/// (1) A neverHide name missing from the registry warns (it cannot be
-///     protected from hiding).
-/// (2) A group listing an unregistered tool warns (the typo silently
-///     stays ungrouped/alwaysOn).
-/// (3) An empty UNdescribed group warns (it is inert config); an empty
-///     DESCRIBED group is a valid runtime-vocabulary preset (MCP) and
-///     stays silent.
-/// (6) A per-model toolBroker override is validated on its resolved view
-///     (global + model merged): an override listing an unregistered tool
-///     warns with the model's label; a fully-unset override stays silent.
-/// (4) A hiddenTags or alwaysOn entry naming neither a group nor a
-///     registered tool warns.
-/// (5) The shipped defaults (registered, untagged names) validate silently.
-@("tool broker startup validation") unittest {
+@("tool broker validation warns on invalid configs and stays silent on valid ones") unittest {
     import std.algorithm : canFind;
 
     // (5) Shipped defaults validate silently: taskDone is registered and
@@ -2888,12 +2805,10 @@ codeModels:
     assert(warnings.empty, warnings.to!string);
 }
 
-/// Test: the toolTagDescriptions migration warning - a toolBroker block
-/// still carrying the removed toolTagDescriptions key warns with a pointer
-/// to the groups replacement (the parse-driven path: the applyConfig
-/// unknown-key loop collects the orphan key into ToolBrokerConfig
-/// unknownYamlKeys, and the startup validator turns it into the warning).
-@("tool broker toolTagDescriptions migration warning") unittest {
+// The warning path: applyConfig's unknown-key loop collects the orphan key
+// into ToolBrokerConfig.unknownYamlKeys, and the startup validator turns it
+// into the warning.
+@("a leftover toolTagDescriptions key warns with a pointer to groups") unittest {
     import std.algorithm : canFind;
     import std.path : buildPath;
     import std.stdio : File;
@@ -2915,11 +2830,7 @@ codeModels:
     assert(warnings[0].canFind("groups"), warnings.to!string);
 }
 
-/// Test: discoveryMetaToolTagWarnings - the discovery-meta-tool guard.
-/// A meta-tool inside a DESCRIBED group warns (it would be advertised in
-/// discovery); ungrouped meta-tools, described groups without the meta-tool,
-/// and groups whose description is empty are silent.
-@("discovery meta-tool description guard") unittest {
+@("a meta-tool in a described group warns; ungrouped or empty-description groups stay silent") unittest {
     import std.algorithm : canFind;
 
     // Silent: no groups at all.
