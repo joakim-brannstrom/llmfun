@@ -25,7 +25,6 @@ import llm.app_config : UserConfig, userToLlmConfig, createRag;
 import llm.chat;
 import llm.config : RagConfig;
 import llm.config;
-import llm.memory;
 import llm.metric.monitor : MetricMonitor;
 import llm.query;
 import llm.rag.dialogue_index : DialogueIndex;
@@ -260,8 +259,8 @@ unittest {
 
 // Regression: every agent turn that appends persisted content (tool traffic,
 // the final taskDone answer) must be committed by processResult's per-step
-// commit - a turn after the first commit of a run used to be silently dropped
-// on session switch / app restart
+// commit - a turn after the first commit of a run is otherwise silently
+// dropped on session switch / app restart
 @("every agent turn that appends persisted content must be committed")
 unittest {
     import std.json : JSONType, JSONValue;
@@ -307,9 +306,9 @@ unittest {
     // save_data) and its ToolResponse (agent), process() reports the appended
     // slice through ProcessResult.chat (rval.chat = chat.lastResponses), and
     // runToCompletion hands it to processResult as the step hook (the
-    // &this.processResult delegate). Before the fix this turn was never
-    // persisted: the flag stayed false and the commit was a no-op, so a
-    // session switch/restart lost the final answer.
+    // &this.processResult delegate). Without the per-turn commit this turn
+    // is not persisted: the flag stays false and the commit is a no-op, so a
+    // session switch/restart loses the final answer.
     JSONValue call;
     call["id"] = "call_1";
     call["type"] = "function";
@@ -361,7 +360,7 @@ unittest {
 // and appends ONLY agent tool traffic (the taskDone ToolMessage carrying the
 // final answer) - its persistence depends entirely on processResult's per-turn
 // dirty-flag set, because the submit path never sets the flag again. That turn
-// used to be silently dropped on session switch / app restart
+// is otherwise silently dropped on session switch / app restart
 @("final-answer turn after a committed user query is persisted")
 unittest {
     import std.json : JSONType, JSONValue;
@@ -414,8 +413,8 @@ unittest {
     // &this.processResult delegate). (Turn 1 bypasses process(), so prevIndex
     // stays 0 and turn 2's lastResponses slice also replays the user message -
     // benign: printUser:false -> trace only; persistence serializes the full
-    // history regardless.) Before the fix this turn was never persisted: the
-    // flag stayed false and the commit was a no-op, so a session
+    // history regardless.) Without the per-turn commit this turn is not
+    // persisted: the flag stays false and the commit is a no-op, so a session
     // switch/restart lost the final answer. (The append + lastResponses
     // pattern is the production-exact seam; processResult only reads
     // result.chat.)
@@ -1502,15 +1501,15 @@ unittest {
 
 // Two-phase exit integration: a test AgentApp with the REAL worker (the production DialogueIndex
 // actor ctor) and the cheap-model seam (fake embedder + summarizer). The exit is driven through
-// the same phase methods the actor funnel calls: beginDispose (what startExit does for
+// the same methods the actor's funnel calls: beginDispose (what startExit does for
 // uiTerminated) must answer DiDrained within ~10 s from the real worker BEFORE finishDispose
 // (what finishExit does) truncates the session store. The full startSetup is deliberately not
 // driven: it also spawns the interactive TUI actor (terminal I/O), which is out of
 // unittest scope: the test covers the exit sequence, not full startup realism.
 // The AgentDone half runs the REAL
 // actor funnel (startExit -> finishExit -> agentDone) on its default no-drain app: the actor's
-// private app field cannot be wired without startSetup, so the funnel's phase-1/phase-2 code
-// (beginDispose/finishDispose on a live AgentApp) is proven on the real worker above, and the
+// private app field cannot be wired without startSetup, so the funnel's
+// two halves (beginDispose/finishDispose on a live AgentApp) are proven on the real worker above, and the
 // funnel's reply/cleanup/AgentDone path here.
 @("agent exit: the real worker drains before the store is truncated")
 unittest {
@@ -1584,7 +1583,7 @@ unittest {
     }
     assert(recorded, "the episode must be indexed before the drain under test");
 
-    // Phase 1 (startExit for uiTerminated): enqueue the worker's drain and wait for the reply.
+    // startExit half: enqueue the worker's drain and wait for the reply.
     auto gate = new CompletionGate;
     auto drainStart = Clock.currTime;
     assert(app.beginDispose(sup.address(), gate), "beginDispose must enqueue the drain");
@@ -1594,7 +1593,7 @@ unittest {
     assert(Clock.currTime - drainStart < 10.dur!"seconds",
             "the drain must complete within ~10 s, before the cleanup phase");
 
-    // Phase 2 (finishExit after DiDrained): cleanup runs now that the drain is done.
+    // finishExit half (after DiDrained): cleanup runs now that the drain is done.
     app.finishDispose();
 
     // Store truncation: the empty non-active session is swept, the active one is exempt, the

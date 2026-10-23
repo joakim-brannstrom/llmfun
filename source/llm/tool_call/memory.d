@@ -26,10 +26,18 @@ struct MemoryTopic {
     SysTime lastModified;
 }
 
+/// Result of a memory write: on a tier-fail (writing over an existing
+/// long-term memory) the message carries the stored content plus the
+/// replace/merge guidance instead of a bare error string.
+struct SaveMemoryResult {
+    bool success;
+    string message; // empty on success
+}
+
 interface MemoryContext : Context {
     MemoryTopic[] getMemoryFileTopics();
 
-    bool saveMemoryFile(string topic, string content);
+    SaveMemoryResult saveMemoryFile(string topic, string content);
     Optional!string readMemory(string topic);
     bool removeMemory(string topic);
 
@@ -87,6 +95,12 @@ struct WriteMemoryParams {
 }
 
 @Function(`Store content as markdown paragraph for future retrieval about a topic.
+New memories start in the short-term tier and are promoted to the long-term tier
+automatically in the background. Writing over an existing long-term memory FAILS
+and returns its stored content plus guidance, and nothing is saved - UNLESS the
+new content already includes the stored content (that write IS the replace or
+merge and lands in the short-term tier); the second write (full content again =
+replace, stored content plus additions = merge) decides.
 # What to Remember (concrete criteria)
 STORE in memory when:
 - You made a mistake that cost time to debug
@@ -108,10 +122,9 @@ ExecuteFuncResult writeMemory(Context baseCtx, WriteMemoryParams params) {
         return ExecuteFuncResult(e, success: false);
 
     try {
-        if (!ctx.saveMemoryFile(params.topic, params.content)) {
-            return ExecuteFuncResult(i"error: failed saving the memory with topic '$(params.topic)'".text,
-                    success: false);
-        }
+        auto r = ctx.saveMemoryFile(params.topic, params.content);
+        if (!r.success)
+            return ExecuteFuncResult(r.message, success: false);
     } catch (Exception e) {
         return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
     }
@@ -123,7 +136,8 @@ struct ReadMemoryParams {
     string topic;
 }
 
-@Function("Retrieve stored memory from past self about a topic")
+@Function(
+        "Retrieve stored memory from past self about a topic (both short- and long-term memories)")
 ExecuteFuncResult readMemory(Context baseCtx, ReadMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 
@@ -146,7 +160,7 @@ struct RemoveMemoryParams {
     string topic;
 }
 
-@Function("Remove a memory that is no longer useful such as temporary notes about a topic") ExecuteFuncResult removeMemory(
+@Function("Remove a memory that is no longer useful (both short- and long-term memories)") ExecuteFuncResult removeMemory(
         Context baseCtx, RemoveMemoryParams params) {
     mixin(baseContextToSpecific!MemoryContext);
 
@@ -157,8 +171,8 @@ struct RemoveMemoryParams {
         if (ctx.removeMemory(params.topic)) {
             return ExecuteFuncResult("OK", success: true);
         }
-        return ExecuteFuncResult(i"error: failed to remove memory '$(params.topic)'. The memory does not exist or is write protected"
-                .text, success: false);
+        return ExecuteFuncResult(i"error: failed to remove memory '$(params.topic)'. The memory does not exist".text,
+                success: false);
     } catch (Exception e) {
         return ExecuteFuncResult(i"error: $(e.msg)".text, success: false);
     }
@@ -167,7 +181,7 @@ struct RemoveMemoryParams {
 struct GetMemoryTopicsParams {
 }
 
-@Function("Retrieve all memory topics with summaries for each topic")
+@Function("Retrieve all short-term memory topics with summaries for each topic. Use the RAG to retrieve long-term memories (queryBestMatch/querySemantic)")
 ExecuteFuncResult getMemoryTopics(Context baseCtx, GetMemoryTopicsParams params) {
     mixin(baseContextToSpecific!MemoryContext);
     auto topics = ctx.getMemoryFileTopics;

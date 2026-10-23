@@ -18,7 +18,7 @@ import my.optional;
 import colorlog;
 
 import llm.tool_call.io : FileContext, FileDirtyTracking, ToolLimits;
-import llm.tool_call.memory : MemoryContext, MemoryTopic;
+import llm.tool_call.memory : MemoryContext, MemoryTopic, SaveMemoryResult;
 import llm.tool_call.completion : CompletionContext;
 
 /// Test stub for the func_call_print harness: FileContext/MemoryContext/
@@ -41,8 +41,8 @@ class DummyContext : FileContext, MemoryContext, CompletionContext {
         return null;
     }
 
-    override bool saveMemoryFile(string topic, string content) {
-        return false;
+    override SaveMemoryResult saveMemoryFile(string topic, string content) {
+        return SaveMemoryResult(false, "error: failed saving the memory (test stub)");
     }
 
     override Optional!string readMemory(string topic) {

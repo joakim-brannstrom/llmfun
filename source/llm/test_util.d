@@ -23,6 +23,74 @@ import std.string : indexOf, split;
 import llm.rag.database : timeout;
 
 version (unittest) {
+    import llm.common.embedder : Embedder, EmbedResult;
+
+    /// Deterministic FNV-1a fake embedder (hoisted from memory_tier.d and
+    /// agent/context.d, which had diverging copies): equal text -> equal
+    /// vector, different text -> different vector.
+    package class TestEmbedder : Embedder {
+        private int batch;
+
+        this(int batchSize = 50) {
+            this.batch = batchSize;
+        }
+
+        override string modelName() {
+            return "test";
+        }
+
+        override long dimensions() {
+            return 8;
+        }
+
+        override bool supportsTokenization() {
+            return false;
+        }
+
+        EmbedResult embed(string text) {
+            // FNV-1a 64-bit: deterministic, no imports needed
+            immutable ulong prime = 0x00000100000001B3;
+            ulong h = 0xCBF29CE484222325;
+            foreach (b; text[])
+                h = (h ^ cast(ulong) b) * prime;
+            auto vec = new float[8];
+            foreach (i; 0 .. 8)
+                vec[i] = cast(float)((h >> (8 * i)) & 0xFF) / 255.0;
+            return EmbedResult(vec);
+        }
+
+        override EmbedResult embedQuery(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedDocument(string text) {
+            return embed(text);
+        }
+
+        override EmbedResult embedQuery(int[] tokens) {
+            return embed(cast(string) tokens);
+        }
+
+        override EmbedResult embedDocument(int[] tokens) {
+            return embed(cast(string) tokens);
+        }
+
+        override int[] tokenize(string text, bool addSpecial) {
+            return null;
+        }
+
+        override string detokenize(int[] tokens) {
+            return null;
+        }
+
+        override int batchSize() {
+            return batch;
+        }
+
+        override void destroy() {
+        }
+    }
+
     /// Root of this test binary's temp dirs
     private immutable TestBaseDir = "llmfun_test";
 

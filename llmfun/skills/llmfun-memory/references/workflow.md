@@ -18,8 +18,12 @@ Do NOT store:
 
 ## Step 2: Retrieve
 
-- Call `getMemoryTopics` to list all stored topics with summaries.
-- For any topic that could be relevant, call `readMemory` to fetch its content.
+- Call `getMemoryTopics` to list SHORT-TERM topics with summaries and
+  last-modified times. Long-term topics are NOT listed — they live in `long/`
+  and are RAG-indexed, so discover them via RAG search
+  (`queryBestMatch`/`querySemantic`).
+- For any relevant topic, call `readMemory` to fetch its content. It reads a
+  topic by name from either tier (`short/` or `long/`).
 
 ## Step 3: Compare
 
@@ -49,7 +53,6 @@ Structure content per the mandatory format:
 
 ```markdown
 # [Topic Name]
-Last updated: [ISO 8601 date]
 
 ## Lessons Learned
 - **Key Point**: Concise statement of the lesson
@@ -64,7 +67,7 @@ Last updated: [ISO 8601 date]
 
 ### Format Rules
 - **Topic name**: Use `category_specifics` format (e.g., `language_d`, `tool_file_editing`, `pattern_error_handling`)
-- **Last updated**: Always include the current ISO 8601 date at the top
+- **No dates in content**: retrieval surfaces filesystem `Last modified` automatically — never write dates into memory content
 - **Lessons Learned section**: Required. Contains the positive knowledge — what to do, what works, patterns to follow
 - **Common Pitfalls section**: Include only when relevant. Contains negative knowledge — what not to do, gotchas, mistakes to avoid
 - **Bold the key term** at the start of each bullet for quick scanning
@@ -75,7 +78,6 @@ Last updated: [ISO 8601 date]
 ### Example Entry
 ```markdown
 # language_d
-Last updated: 2026-07-07
 
 ## Lessons Learned
 - **Use `immutable(T)[]` for static collections**: Allows initialization in `shared static this()` with array literals
@@ -94,6 +96,17 @@ Last updated: 2026-07-07
 
 Call `writeMemory` with the formatted content.
 
+Writes to new or short-term (`short/`) topics succeed immediately. An existing
+LONG-TERM topic takes a two-write flow:
+
+- The FIRST write FAILS — unless its content already includes the stored
+  content, in which case it IS the replace/merge write and succeeds, landing in
+  `short/` — and otherwise carries the stored content plus guidance, and nothing
+  is written. The failed topic stays in the conversation.
+- The SECOND write — including the stored content — decides the outcome: stored
+  content only (replace) or stored content plus additions (merge). It succeeds
+  and lands in `short/`.
+
 ## Step 7: Cleanup
 
 ### Remove When:
@@ -107,11 +120,13 @@ Call `writeMemory` with the formatted content.
 - Ensure related information has been moved or merged
 - Consider if the topic might be needed in future sessions
 
-Call `removeMemory` for obsolete topics.
+Call `removeMemory` for obsolete topics. It works on both tiers (`short/` and
+`long/`); archived (`archive/`) topics are unreachable and reported as
+nonexistent.
 
-## Memory Consolidation & Cleanup Protocol
+## Memory Cleanup Protocol
 
-When cleaning up or consolidating memory topics, follow this process:
+When cleaning up memory topics, follow this process:
 
 ### Categorize Each Memory Topic
 
@@ -134,19 +149,19 @@ Every memory topic falls into one of two categories:
 - Documents a completed implementation's step-by-step process
 - Contains review outcomes or approval notes
 - Describes a one-time bug fix with no generalizable lesson
-- Is a "consolidated" version of many task notes that are now done
+- Merges many task notes that are now done into one distilled entry
 
-### Consolidation Rules
+### Cleanup Rules
 
 1. **Distill, don't copy:** When recreating a memory from an ephemeral one, extract only the reusable lessons. Strip task references, review notes, and implementation specifics.
 2. **Verify before storing:** If a lesson depends on environment state (e.g., a tool bug, a broken build config), verify it's still true before storing. Stale lessons are worse than no lessons.
 3. **Merge duplicates:** If multiple memories cover the same topic, merge into one and remove the rest.
-4. **Rename for clarity:** Use `category_specifics` naming (e.g., `d_language_lessons`, `tool_usage_lessons`) instead of implementation-specific names (e.g., `io_edit_refactor_consolidated`).
+4. **Rename for clarity:** Use `category_specifics` naming (e.g., `d_language_lessons`, `tool_usage_lessons`) instead of implementation-specific names (e.g., `io_edit_refactor_notes`).
 5. **Keep it lean:** A memory should be readable in a few seconds. If it's longer than a page, it's probably too detailed.
 
 ### Verification Checklist
 
-Before storing a consolidated memory, verify:
+Before storing a rewritten memory, verify:
 - [ ] Does this lesson still apply to the current codebase/environment?
 - [ ] Would a future session actually use this information?
 - [ ] Is the lesson stated generally (not tied to a specific task)?

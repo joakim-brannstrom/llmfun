@@ -20,7 +20,6 @@ import llm.app_config : UserConfig, userToLlmConfig, createRag;
 import llm.chat;
 import llm.config : RagConfig;
 import llm.config;
-import llm.memory;
 import llm.metric.monitor : MetricMonitor;
 import llm.query;
 import llm.rag.dialogue_index : DialogueIndex;
@@ -116,7 +115,7 @@ struct AgentApp {
         return slashCommands_;
     }
 
-    /// Phase 1 of the two-phase exit: enqueue the dialogue
+    /// First half of the two-phase exit: enqueue the dialogue
     /// worker's drain and return true. Returns false when there is no
     /// dialogue index - nothing was enqueued and the caller must NOT wait
     /// for a DiDrained that will never come.
@@ -127,7 +126,7 @@ struct AgentApp {
         return true;
     }
 
-    /// Phase 2 of the two-phase exit: the dispose body minus the drain.
+    /// Second half of the two-phase exit: the dispose body minus the drain.
     /// The drain is already done by the time this runs (the caller went
     /// beginDispose -> DiDrained / drainTimeout), so the CRITICAL ORDER of
     /// the dispose holds: no embedding runs against weights being
@@ -294,8 +293,6 @@ struct AgentApp {
                     a.success ? "✅" : "❌", a.toolName, summarizeToolResponse(a, 1000));
             }
         }, (VisionMessage a) {
-            // the user never directly use an API function which produce a
-            // vision message. It is the LLM that make the call.
             this.sendPersistedChatMessage("user: %s (with image)",
                 TuiChatMessageType_Assistant, nr, MessageTime(NoProcessingTime()), a.content);
         });
@@ -304,7 +301,7 @@ struct AgentApp {
     package void processResult(ProcessResult result) {
         logger.trace(result.status != ProcessResult.Status.ok, result);
         lastServerStat = result.stat;
-        // NR offset: result.chat (Chat.lastResponses) is the contiguous tail
+        // result.chat (Chat.lastResponses) is the contiguous tail
         // of the history, so the displayable count of the history before the
         // batch is the ordinal offset. A user query in the batch was already
         // echoed with exactly its ordinal (runAgent, after the turn-start
@@ -320,21 +317,6 @@ struct AgentApp {
                 this.processChatMessage(m, 0, printUser: false);
             }
         }
-        // Append-site audit: every Agent-layer append is reported through
-        // result.chat - process() sets rval.chat = chat.lastResponses (agent)
-        // - so a non-empty turn means persisted content was appended:
-        // assistant text (parseResponse), tool traffic + feedback warnings +
-        // the taskDone ToolMessage (handleToolCalls), vision, and compression
-        // continuation (Agent.compress, appended after the previous turn's
-        // resetResponseIndex, before the next lastResponses). Not persisted
-        // content, no flag: addUserQuery (submit sets the flag itself),
-        // Chat.setSystemPrompt (history[0], stripped at commit; on the first
-        // turn of a fresh chat it can appear in the slice, benign - prevIndex
-        // defaults to 0, a nothing-appending turn returns null, and any real
-        // append sets the flag anyway), Chat.load (replay; activateSession
-        // resets the flag first), beginNewTurn (allocates a turn id, appends
-        // nothing).
-        //
         // Set the flag HERE, not in processChatMessage - that is shared with
         // the replay loop in activateSession and must keep the freshly loaded
         // chat clean (a dirty replay would rewrite the just-loaded file).
@@ -741,10 +723,10 @@ struct AgentApp {
         }
     }
 
-    /** Sidebar delete handler (TUIListener.sessionDelete): clear pending
-     * delete, validate the id, then delete. The TUI panel queues the delete
-     * single-press (no confirmation); D validates the id and delegates to
-     * doDeleteSession (active fallback incl.).
+    /** Sidebar delete handler (TUIListener.sessionDelete).
+     * Clear pending delete, validate the id, then delete. The UI panel queues
+     * the delete single-press (no confirmation); this handler validates the id
+     * and delegates to doDeleteSession (active fallback incl.).
      */
     package void doSidebarDelete(SessionId id) {
         pendingDeleteId = SessionId.init;
@@ -830,44 +812,6 @@ struct AgentApp {
     package IStreamCallback makePipelineStreamCallback() {
         return new PipelineStreamMessageUpdater(uiMsg, agent_.modelContextSize,
                 llmConf.activeModelDisplayName);
-    }
-
-    private void updateRagMemory() {
-        import llm.vfs : FlatVfs;
-        import std.path : baseName, stripExtension, dirName;
-        import llm.rag.rag : add, Document, Origin, Offset, Topic;
-        import my.set;
-        import my.path : AbsolutePath;
-
-        // do not slow down startup if the user only has an in-memory RAG:
-        // then the memory files are indexed every time the app starts
-        if (rag is null || rag.isPrimaryInMemory || llmConf.noMemory)
-            return;
-
-        auto vfs = FlatVfs(llmConf.memoryArea);
-        Set!string topics;
-        foreach (name; vfs.getAllFiles) {
-            try {
-                vfs.read(name.baseName).match!((string content) {
-                    auto res = rag.add(Document(Origin(cast(Path) name),
-                        content, Offset.init), llmConf.ragConfig);
-                    logger.infof(res.length != 0, "Add memory '%s' to RAG", name);
-                    topics.add(name);
-                }, (_) {});
-            } catch (Exception e) {
-                logger.trace(e.msg);
-            }
-        }
-        logger.trace(topics);
-
-        foreach (src; rag.db.getSources) {
-            src.origin.match!((Path a) {
-                if (a !in topics && vfs.isRoot(a.dirName.AbsolutePath)) {
-                    logger.tracef("Removing memory '%s'", a);
-                    rag.db.removeSource(src.origin);
-                }
-            }, (_) {});
-        }
     }
 
     private void setupSession(AgentMdState agentMdState) {
@@ -1068,11 +1012,10 @@ class AppAgentActor {
             return;
         }
 
-        app.updateRagMemory();
+        import llm.memory_tier : MemoryTierActor;
 
-        // When the TUI mailbox is full, sends from actor workers are dropped -
-        // never blocked - and counted in `tui_.addr.get.dropped` (blocking a
-        // pool worker is the deadlock the bound prevents); only non-actor
+        sys.spawn!MemoryTierActor(app.llmConf, app.rag);
+
         // threads, like this supervisor, may block on a full mailbox.
         // Config.detached: the TUI actor must own one FIXED thread. Its GLFW
         // window/GL context are thread-affine.
@@ -1099,12 +1042,6 @@ class AppAgentActor {
         auto helpText = app.printHelp(app.conf_);
         if (helpText !is null)
             app.sendChatMessage(helpText, TuiChatMessageType_User);
-        if (app.llmConf.beginConsolidation) {
-            logger.infof("Memory consolidation pending at session #%s",
-                    app.llmConf.sessionCount + 1);
-            runMemoryConsolidation(app.llmConf, app.rag, app.monitor,
-                    (string msg, TuiChatMessageType t) => app.sendChatMessage(msg, t));
-        }
         app.setStatusText(true);
     }
 
@@ -1185,13 +1122,6 @@ class AppAgentActor {
         startExit(1, ExitReason.kill);
     }
 
-    // Single exit funnel. Phase 1 (here): enqueue the dialogue worker's
-    // drain and arm the bounded deadline. Phase 2 (diDrained /
-    // drainTimeout): finishExit. Idempotent: every exit path funnels into
-    // this, and a second call is a no-op. An exit without a dialogue
-    // index finishes immediately - there is no drain to wait for.
-    // Unannotated (inferred @system): the no-drain path calls finishExit,
-    // which must catch Throwable below.
     void startExit(int code, ExitReason reason) {
         if (exiting_)
             return;
@@ -1223,24 +1153,10 @@ class AppAgentActor {
         finishExit();
     }
 
-    // Phase-2 trigger: the bounded deadline fires before the drain reply.
-    // Not exercised in the unittest suite: arming it needs a drain that
-    // never answers, and the worker only stops answering past its own 330 s
-    // drain deadline (this actor safety timer: 340 s) -- both too long to
-    // wait in-suite. The one-line body converges on the same finishExit as
-    // the DiDrained reply, which the exit integration test in
-    // llm.app_agent.tests pins on the real worker; this deadline stays a
-    // documented, code-reviewed hole.
     void drainTimeout() {
         diDrained(DiDrained());
     }
 
-    // Phase 2: cleanup, then die. finishDispose does file I/O
-    // (commitActiveSession/saveState) and CAN throw; a second throw here
-    // would escape the hook as a nothrow violation and silently kill the
-    // scheduler worker (TaskPool.doJob swallows the Throwable) - the
-    // exact hang class the start() guard protects against. sendExit runs
-    // ONLY here, after the cleanup.
     private void finishExit() {
         try {
             app.finishDispose();

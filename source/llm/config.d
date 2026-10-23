@@ -24,9 +24,6 @@ public import llm.common.config;
 
 immutable ProgramName = "llmfun";
 
-/// Minimum interval (in seconds) between session count increments.
-private enum SessionCountMinIntervalSec = 3 * 3600;
-
 /// RAG query instruction appended to system prompt when AGENTS.md summary is present.
 private immutable AgentMdRagInstruction = "For detailed explanations, architecture justifications, or lengthy code examples, " ~ "query your RAG knowledge base using the 'AGENTS.md' source. However, you must obey the " ~ "compressed rules listed above at all times, even if you don't retrieve the full file.";
 
@@ -193,11 +190,9 @@ struct LlmConfig {
             prioConfCwdDirs = AbsolutePath(ProgramName ~ "/config") ~ prioConfCwdDirs;
         }
 
-        // only use cwd and closest directory.
-        // This is based on the assumption that if a user create the directory
-        // "memory" on purpose in the llmfun directory they want all memories
-        // to be in that directory and not in any other writable memory
-        // directory.
+        // Use only the cwd and the closest directory: a user who creates the
+        // "memory" directory on purpose in the llmfun directory wants all
+        // memories there, not in any other writable memory directory.
         if (memoryArea.empty) {
             if (cwdConfig)
                 memoryArea ~= (ProgramName ~ "/data/memory").Path;
@@ -297,14 +292,12 @@ struct LlmConfig {
     CodeModelConfig[] codeModels;
     long activeCodeModelIndex = 0;
 
-    /// Tracks total session starts (incremented at the beginning of each session).
-    uint sessionCount = 0;
-    /// Prevents concurrent or crash-retry consolidation. Cleared on load if stale.
-    bool isConsolidating = false;
-    /// Default trigger threshold (every N sessions). 0 means disabled.
-    uint consolidationInterval = 10;
-    /// Unix epoch seconds of the last session count increment. 0 means never incremented.
-    long lastSessionCountUpdate = 0;
+    /// Short-term memory lifetime in days. Memories older than this are promoted.
+    uint shortTermDays = 7;
+    /// Long-term memory lifetime in days. Older memories are demoted to archive.
+    uint longTermDays = 100;
+    /// Hours between MemoryTierActor passes. 0 = startup-only pass.
+    uint tierPassIntervalHours = 6;
 
     SummaryModelConfig summaryModel;
 
@@ -319,6 +312,9 @@ struct LlmConfig {
                 .text);
         assert(maxAlwaysApplyTokens >= 0, i"maxAlwaysApplyTokens must be non-negative (0 = unlimited), got $(
                 maxAlwaysApplyTokens)".text);
+        assert(shortTermDays > 0, i"shortTermDays must be positive, got $(shortTermDays)".text);
+        assert(longTermDays > shortTermDays, i"longTermDays must be greater than shortTermDays (short=$(
+                shortTermDays), long=$(longTermDays))".text);
     }
 
     EmbedConfig embedConfig;
@@ -330,7 +326,7 @@ struct LlmConfig {
     /// Return: the currently active code model config (value copy, no mutex needed).
     /// Non-const on purpose: a const accessor could not return a mutable value
     /// copy once CodeModelConfig grew a member with mutable indirections
-    /// (Nullable!NudgeConfig - string[] ladders) — const(CodeModelConfig) does
+    /// (Nullable!NudgeConfig - string[] ladders) - const(CodeModelConfig) does
     /// not implicitly convert to CodeModelConfig.
     CodeModelConfig activeCodeModel() @safe {
         if (codeModels.length == 0)
@@ -430,22 +426,6 @@ struct LlmConfig {
             import llm.utility : getValue;
 
             activeChatSessionId = getValue!(string)(json, v => v["activeChatSessionId"].str, "");
-            if ("sessionCount" in json) {
-                sessionCount = cast(uint) json["sessionCount"].integer;
-            }
-            if ("isConsolidating" in json) {
-                auto val = json["isConsolidating"].boolean;
-                if (val) {
-                    logger.warning("Found stale consolidation lock - clearing");
-                }
-                isConsolidating = false; // Always clear - stale lock recovery
-            }
-            if ("consolidationInterval" in json) {
-                consolidationInterval = cast(uint) json["consolidationInterval"].integer;
-            }
-            if ("lastSessionCountUpdate" in json) {
-                lastSessionCountUpdate = cast(long) json["lastSessionCountUpdate"].integer;
-            }
         } catch (Exception e) {
             logger.tracef("Failed to load state: %s", e.msg);
         }
@@ -465,10 +445,6 @@ struct LlmConfig {
             JSONValue stateObj;
             stateObj["activeCodeModelIndex"] = activeCodeModelIndex;
             stateObj["activeChatSessionId"] = activeChatSessionId;
-            stateObj["sessionCount"] = sessionCount;
-            stateObj["isConsolidating"] = isConsolidating;
-            stateObj["consolidationInterval"] = consolidationInterval;
-            stateObj["lastSessionCountUpdate"] = lastSessionCountUpdate;
             File(tempFile, "w").writeln(stateObj.toString(JSONOptions.doNotEscapeSlashes));
             rename(tempFile, stateFile);
         } catch (Exception e) {
@@ -477,58 +453,6 @@ struct LlmConfig {
             } catch (Exception e) {
             }
         }
-    }
-
-    /// Increments session count and begins consolidation if it should trigger.
-    /// Returns true if consolidation was triggered (lock acquired).
-    /// Persists state immediately.
-    bool beginConsolidation() @safe nothrow {
-        long nowSec = Clock.currTime().toUnixTime!long;
-        long diff = nowSec - lastSessionCountUpdate;
-
-        if (diff < 0) {
-            try {
-                logger.tracef("Session count timestamp appears to be in the future (diff=%s). Resetting timer.",
-                        diff);
-            } catch (Exception e) {
-            }
-            lastSessionCountUpdate = nowSec;
-        } else if (diff >= SessionCountMinIntervalSec) {
-            sessionCount++;
-            lastSessionCountUpdate = nowSec;
-        } else {
-            try {
-                logger.tracef("Skipping session count increment: only %s seconds since last update (threshold: %s)",
-                        diff, SessionCountMinIntervalSec);
-            } catch (Exception e) {
-            }
-        }
-
-        bool trigger = shouldConsolidateInternal();
-        if (trigger) {
-            isConsolidating = true;
-        }
-        saveState();
-        return trigger;
-    }
-
-    bool shouldConsolidate() const @safe nothrow {
-        return !isConsolidating && shouldConsolidateInternal;
-    }
-
-    /// Internal check without the isConsolidating guard (used after increment).
-    private bool shouldConsolidateInternal() const @safe nothrow {
-        if (consolidationInterval == 0 || sessionCount == 0) {
-            return false;
-        }
-        return sessionCount % consolidationInterval == 0;
-    }
-
-    /// Clears consolidation lock after completion (success or failure). Persists immediately.
-    void clearConsolidationLock() @safe {
-        isConsolidating = false;
-        sessionCount++;
-        saveState();
     }
 
     RagDatabaseConfig[] getRagSecondary() @safe {
@@ -608,12 +532,19 @@ struct LlmConfig {
     }
 }
 
+/// Tier subdirectories under each memoryArea dir.
+Path memoryShortDir(Path area) => area ~ "short";
+Path memoryLongDir(Path area) => area ~ "long";
+Path memoryArchiveDir(Path area) => area ~ "archive";
+
 void makeDefaultFileStructure() {
     import std.file : mkdirRecurse;
     import my.xdg : xdgDataHome;
 
     foreach (path; [
-        (xdgDataHome ~ Path(ProgramName) ~ Path("memory")),
+        (xdgDataHome ~ Path(ProgramName) ~ memoryShortDir(Path("memory"))),
+        (xdgDataHome ~ Path(ProgramName) ~ memoryLongDir(Path("memory"))),
+        (xdgDataHome ~ Path(ProgramName) ~ memoryArchiveDir(Path("memory"))),
         (xdgDataHome ~ Path(ProgramName) ~ Path("skills")),
         (xdgDataHome ~ Path(ProgramName) ~ Path("chat")),
         (xdgDataHome ~ Path(ProgramName) ~ Path("dialogue"))
@@ -630,9 +561,11 @@ void makeDefaultFileStructure() {
 void makeLocalSetupFileStructure(LlmConfig conf) {
     import std.file : mkdirRecurse;
 
+    auto memArea = conf.dataDir ~ "memory";
     foreach (path; [
         conf.dataDir, conf.workArea, conf.dataDir ~ "chat",
-        conf.dataDir ~ "memory", conf.dataDir ~ "dialogue"
+        memoryShortDir(memArea), memoryLongDir(memArea),
+        memoryArchiveDir(memArea), conf.dataDir ~ "dialogue"
     ].filter!(a => !a.empty && !a.exists)) {
         try {
             logger.info("Creating directory ", path);
@@ -1137,8 +1070,24 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
                         } else static if (isFloatingPoint!Type) {
                             __traits(getMember, conf, llmMemberName) = json[llmMemberName].floating;
                         } else static if (isIntegral!Type) {
-                            __traits(getMember, conf, llmMemberName) = cast(Type) json[llmMemberName]
-                                .integer;
+                            auto raw = json[llmMemberName].integer;
+                            static if (is(Type : uint) && llmMemberName.among("shortTermDays",
+                                    "longTermDays", "tierPassIntervalHours")) {
+                                if (raw < 0)
+                                    throw new Exception(
+                                            "config key '" ~ llmMemberName
+                                            ~ "' must be non-negative, got " ~ raw.to!string);
+                            }
+                            import std.exception : enforce;
+
+                            static if (is(Type : uint)) {
+                                if (raw < 0) {
+                                    throw new Exception(
+                                            "config key '" ~ llmMemberName
+                                            ~ "' must be non-negative");
+                                }
+                            }
+                            __traits(getMember, conf, llmMemberName) = cast(Type) raw;
                         } else static if (is(Type == string[][string])) {
                             foreach (key, ref JSONValue valArr; json[llmMemberName].object) {
                                 string[] vals;
@@ -1276,7 +1225,7 @@ private string[] checkApiKeyWarnings(LlmConfig conf) {
 }
 
 /// Validate one escalation ladder of the nudge policy:
-/// non-negative strike counts, and — only when the kind is enabled —
+/// non-negative strike counts, and - only when the kind is enabled -
 /// non-empty user-supplied file names. Empty lists are allowed (they resolve
 /// to the kind's shipped defaults at load time); files of disabled kinds are
 /// not validated here. `keyPath` names the offending block in messages
@@ -1397,8 +1346,8 @@ void validateConfig(LlmConfig conf) {
         logger.warningf("%s", w);
 }
 
-/// The discovery meta-tools (listToolTags, step 1; toolSearch,
-/// step 2). They must stay out of the discovery vocabulary: a group
+/// The discovery meta-tools (listToolTags, then toolSearch). They
+/// must stay out of the discovery vocabulary: a group
 /// with a description that contains a meta-tool advertises it in
 /// discovery (the vocabulary is what the model sees). A meta-tool
 /// itself is infrastructure, not a capability - describing a group
@@ -2026,8 +1975,6 @@ codeModels:
 }
 
 @("validateConfig accepts an empty dialogueDir and a safe explicit one") unittest {
-    import std.exception : assertThrown;
-
     LlmConfig conf;
     conf.codeModels ~= CodeModelConfig(server: ServerConfig(url: "http://localhost:8080"),
             display: "test", modelName: "test");
@@ -2297,7 +2244,7 @@ codeModels:
     validateConfig(nudgesValidateTestConfig());
 }
 
-/// A 0/0 ladder would fail on the first strike — a foot-gun, not a policy.
+/// A 0/0 ladder would fail on the first strike - a foot-gun, not a policy.
 @("0/0 escalation ladder is rejected") unittest {
     import std.algorithm : canFind;
 
@@ -2719,18 +2666,18 @@ codeModels:
 @("tool broker validation warns on invalid configs and stays silent on valid ones") unittest {
     import std.algorithm : canFind;
 
-    // (5) Shipped defaults validate silently: taskDone is registered and
+    // Shipped defaults validate silently: taskDone is registered and
     // untagged (registered by tool_call's module ctor, which runs first).
     auto conf = LlmConfig.init;
     assert(validateToolBrokerConfig(conf).empty);
 
-    // (1) An unknown neverHide name cannot be protected - warn.
+    // An unknown neverHide name cannot be protected - warn.
     conf.toolBroker.neverHideTools = ["taskDone", "bogus_no_hide"];
     auto warnings = validateToolBrokerConfig(conf);
     assert(warnings.length == 1, warnings.to!string);
     assert(warnings[0].canFind("bogus_no_hide"), warnings.to!string);
 
-    // (2) A group listing an unregistered tool warns; (3) an empty
+    // A group listing an unregistered tool warns; an empty
     // undescribed group warns; a group listing a registered tool stays
     // silent; an empty DESCRIBED group stays silent (the MCP preset shape).
     conf = LlmConfig.init;
@@ -2757,7 +2704,7 @@ codeModels:
     conf.toolBroker.neverHideTools = ["taskDone", "readFile"];
     assert(validateToolBrokerConfig(conf).empty);
 
-    // (4) A hiddenTags entry that names neither a group nor a registered
+    // A hiddenTags entry that names neither a group nor a registered
     // tool warns; alwaysOn likewise. A defined group name and a registered
     // tool name stay silent.
     conf = LlmConfig.init;
@@ -2773,7 +2720,7 @@ codeModels:
     assert(warnings[1].canFind("alwaysOn"), warnings.to!string);
     assert(warnings[1].canFind("ghost_tool"), warnings.to!string);
 
-    // (6) A per-model toolBroker override is validated on its resolved view:
+    // A per-model toolBroker override is validated on its resolved view:
     // an override listing an unregistered tool warns with the model's label;
     // a fully-unset override resolves to the global block and stays silent.
     conf = LlmConfig.init;
@@ -2849,4 +2796,35 @@ codeModels:
     assert(warnings.length == 1, warnings.to!string);
     assert(warnings[0].canFind("listToolTags"), warnings.to!string);
     assert(warnings[0].canFind("vague"), warnings.to!string);
+}
+
+@("default LlmConfig carries the time-based tier knobs") unittest {
+    auto conf = LlmConfig.init;
+    assert(conf.shortTermDays == 7);
+    assert(conf.longTermDays == 100);
+    assert(conf.tierPassIntervalHours == 6);
+}
+
+@("memory tier dir helpers append the tier name to the area dir") unittest {
+    assert(memoryShortDir(Path("a")).toString == "a/short");
+    assert(memoryLongDir(Path("a")).toString == "a/long");
+    assert(memoryArchiveDir(Path("a")).toString == "a/archive");
+}
+
+@("makeLocalSetupFileStructure creates the tier subdirs and is idempotent") unittest {
+    import std.path : buildPath;
+
+    auto tmpDir = buildPath("llmfun_test", "config_tier_dirs");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto conf = LlmConfig.init;
+    conf.dataDir = Path(buildPath(tmpDir, "data"));
+    conf.workArea = Path(buildPath(tmpDir, "workarea"));
+    makeLocalSetupFileStructure(conf);
+    makeLocalSetupFileStructure(conf);
+
+    foreach (tier; ["short", "long", "archive"])
+        assert(buildPath(tmpDir, "data", "memory", tier).exists, tier);
 }
