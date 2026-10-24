@@ -17,7 +17,7 @@ RUN apt install -y --no-install-recommends \
         git \
         make cmake ninja-build \
         gcc g++ gdb \
-        curl \
+        curl tmux \
         xz-utils \
         libncurses-dev \
         libglfw3-dev xvfb mesa-utils pkg-config
