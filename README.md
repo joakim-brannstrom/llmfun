@@ -549,11 +549,12 @@ The environment config format is a YAML file with `version`, `defaultEnvironment
 version: 1
 environments:
   - tag: alpine
+    # command element count must be within minArgs/maxArgs (defaults 0 and 1;
+    # set maxArgs: -1 for unbounded, e.g. to run multi-argument commands)
     description: "Minimal Linux environment. **shell: sh**"
     capabilities: ["linux", "minimal"]
     isIsolated: true
     timeout: 120
-    commandJoinMode: whitespace
     config:
       type: container
       runtimeCli: docker
@@ -574,7 +575,8 @@ environments:
 | `capabilities` | string[] | no | Tags for categorization (e.g. "dev", "python", "isolated") |
 | `isIsolated` | bool | no | Whether the environment provides isolation (default: false) |
 | `timeout` | int | yes | Maximum execution time in seconds |
-| `commandJoinMode` | string | no | How command array elements are joined: `"single"` (only zero or a single argument allowed, default) `"whitespace"` (join with spaces) or `"append"` (each element as separate argument) |
+| `minArgs` | int | no | Minimum number of `command` array elements accepted (inclusive). Default `0`. |
+| `maxArgs` | int | no | Maximum number of `command` array elements accepted (inclusive); `-1` means unbounded. Default `1`. |
 | `config` | object | yes | Environment-specific configuration (see below) |
 
 **Container config** (`type: "container"`):

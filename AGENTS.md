@@ -52,7 +52,7 @@ If your identity is **llmfun**:
 
 ## Commands
 
-**Container:** use the image `llmfun/app:latest` for `execute_command`. Pass the whole command line as ONE string in a single-element array: `execute_command(environmentTag="llmfun", command=["cd llmfun && dub build --config=application"])`.
+**Container:** use the image `llmfun/app:latest` for `execute_command`. Pass the whole command line as ONE string in a single-element array: `execute_command(environmentTag="llmfun", command=["cd llmfun && dub build --config=application"])`. `command` is an array of argument elements (no whitespace joining). The element count must be within the environment's `minArgs`/`maxArgs` (defaults 0 and 1; `-1` = unbounded). The `native` environment is a (1, 1) single-command-string environment.
 
 ```bash
 dub test                                          # Unit tests (primary gate)
@@ -209,7 +209,8 @@ The runner is **nusilly** (a `silly` fork); every argument after `--` is passed 
 - `dub test` compiles and runs all inline `unittest` blocks. It is the primary gate: run it after changes to tested code.
 - A failing test exits non-zero (`Error Program exited with code 1`); a green run ends with `Summary: N passed, 0 failed in X ms`.
 - It takes about a minute (rebuild + run). Do not skip it to save time.
-- Tests run multithreaded (one worker per CPU); if a failure looks parallelism-dependent, re-run with `-t 1`.
+- Tests run multithreaded (one worker per CPU) - every test must pass in that default configuration. `-t 1` is only for diagnosing why a test fails; a test that requires single-threaded execution is wrong and must be rewritten.
+- **Tests must not swap the global logger** (`logger.sharedLog`) or assert on log output. Any thread can log during the swap, so captured output is nondeterministic. Make the tested behavior observable through return values, out-parameters, or explicitly passed collectors instead.
 - New code includes inline `unittest` blocks.
 
 Filtering (after `dub test --`): `-i <regexp>` include, `-e <regexp>` exclude (do not combine them; both match module and test names), `-t <n>` threads, `--fail-fast` (only an `Error`/`Throwable` stops the run, not an `AssertError`), `-v` verbose, `--no-colours`, `-h`.
@@ -231,6 +232,7 @@ Describe the scenario (input or condition and expected outcome), not the impleme
 `@("a valid enum member name selects that member; an invalid one keeps the default")`
 
 Not: `@("validateConfig calls checkNudges first")` or `@("parses the value through the Nullable branch")`.
+Avoid internal jargon - the description must be readable without knowing the code's internals. Not: `@("a minArgs 0 environment forwards an empty command past the arity check for both runners")` (jargon: "runners", "arity check"). Better: `@("an environment with minArgs 0 accepts an empty command instead of rejecting it")`.
 
 ## Agent Rules
 

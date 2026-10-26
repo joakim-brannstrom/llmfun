@@ -4,7 +4,7 @@ module llm.environment.backend;
 
 import logger = std.logger;
 import std.algorithm : sort;
-import std.array : appender, empty, array, join;
+import std.array : appender, empty, array;
 import std.conv : to, text;
 import std.datetime : Duration, dur;
 import std.datetime.stopwatch : StopWatch, AutoStart, dur;
@@ -17,7 +17,6 @@ import proc;
 import my.path : AbsolutePath;
 
 import llm.config : replaceContainerMagicWords, replaceMagicWord;
-import llm.environment.config : CommandJoinMode;
 
 /// Structured result from command execution.
 /// Negative exit codes (e.g., -1 for timeout) indicate errors.
@@ -104,14 +103,12 @@ interface RunnerBackend {
 }
 
 /// Container command runner implementing the RunnerBackend interface.
-/// Wraps container runtime execution with magic word substitution
-/// and configurable command joining behavior.
+/// Wraps container runtime execution with magic word substitution.
 class ContainerRunner : RunnerBackend {
     string runtimeCli_;
     string image_;
     string[][string] options_;
     AbsolutePath workArea_;
-    CommandJoinMode commandJoinMode_;
     Duration timeout;
     long maxOutputBytes_;
 
@@ -121,17 +118,15 @@ class ContainerRunner : RunnerBackend {
     ///     image = Container image name (e.g., "alpine:latest").
     ///     options = Pre-configured container options map.
     ///     workArea = Workarea path for magic word substitution.
-    ///     commandJoinMode = How to combine command elements.
     ///     timeoutSec = Execution timeout in seconds (default: 60).
     ///     maxOutputBytes = Maximum bytes per output stream (default: 1MB).
-    this(string runtimeCli, string image, string[][string] options, AbsolutePath workArea,
-            CommandJoinMode commandJoinMode, Duration timeout, long maxOutputBytes) @safe
+    this(string runtimeCli, string image, string[][string] options,
+            AbsolutePath workArea, Duration timeout, long maxOutputBytes) @safe
     in (timeout.total!"seconds" > 0, "timeout must be >0") {
         this.runtimeCli_ = runtimeCli;
         this.image_ = image;
         this.options_ = options;
         this.workArea_ = workArea;
-        this.commandJoinMode_ = commandJoinMode;
         this.timeout = timeout;
         this.maxOutputBytes_ = maxOutputBytes;
     }
@@ -146,7 +141,7 @@ class ContainerRunner : RunnerBackend {
         auto result = ExecutionResult(exitCode: -1);
         try {
             auto resolved = replaceContainerMagicWords(options_, workArea_);
-            auto args = buildCommand(resolved, command, commandJoinMode_, image: image_);
+            auto args = buildCommand(resolved, command, image: image_);
 
             return runContainerCommand(runtimeCli_, args, timeout, maxOutputBytes_, image_);
         } catch (Exception e) {
@@ -170,7 +165,6 @@ class HostRunner : RunnerBackend {
     string[][string] options_;
     AbsolutePath workingDir_;
     string[string] envVars_;
-    CommandJoinMode commandJoinMode_;
     AbsolutePath workArea_;
     Duration timeout;
     long maxOutputBytes;
@@ -180,18 +174,15 @@ class HostRunner : RunnerBackend {
     ///     options = Pre-configured host options map.
     ///     workingDir = Working directory for the subprocess (supports magic words).
     ///     envVars = Environment variables to merge into the subprocess (supports magic words in values).
-    ///     commandJoinMode = How to combine command elements.
     ///     workArea = Workarea path for magic word substitution.
     ///     timeoutSec = Execution timeout in seconds (0 means no limit, default: 60).
     ///     maxOutputBytes = Maximum bytes per output stream (default: 1MB).
     this(string[][string] options, string workingDir, string[string] envVars,
-            CommandJoinMode commandJoinMode, AbsolutePath workArea,
-            Duration timeout, long maxOutputBytes) @safe
+            AbsolutePath workArea, Duration timeout, long maxOutputBytes) @safe
     in (timeout.total!"seconds" > 0, "timeout must be >0") {
         this.options_ = replaceContainerMagicWords(options, workArea);
         this.workingDir_ = workingDir.replaceMagicWord(workArea);
         this.envVars_ = envVars;
-        this.commandJoinMode_ = commandJoinMode;
         this.workArea_ = workArea;
         this.timeout = timeout;
         this.maxOutputBytes = maxOutputBytes;
@@ -212,7 +203,7 @@ class HostRunner : RunnerBackend {
     ExecutionResult execute(string[] command) nothrow {
         auto result = ExecutionResult(exitCode: -1);
         try {
-            auto fullCmd = buildCommand(options_, command, commandJoinMode_);
+            auto fullCmd = buildCommand(options_, command);
             logger.tracef("Executing host command: %s work_dir: %s", fullCmd, workingDir_);
 
             auto p = proc.pipeProcess(fullCmd, Redirect.all, envVars_,
@@ -256,8 +247,7 @@ class HostRunner : RunnerBackend {
 }
 
 /// Pipeline: sort options by key -> extract shell (entrypoint_* keys) -> flatten -> image -> shell -> command.
-private string[] buildCommand(string[][string] options, string[] command,
-        CommandJoinMode joinMode, string image = null) {
+private string[] buildCommand(string[][string] options, string[] command, string image = null) {
     import std.string : startsWith;
 
     string[] args;
@@ -286,15 +276,7 @@ private string[] buildCommand(string[][string] options, string[] command,
 
     args ~= shell;
 
-    final switch (joinMode) {
-    case CommandJoinMode.whitespace:
-        args ~= command.join(" ");
-        break;
-    case CommandJoinMode.single:
-    case CommandJoinMode.append:
-        args ~= command;
-        break;
-    }
+    args ~= command;
 
     return args;
 }
@@ -431,7 +413,7 @@ unittest {
     assert(result.stderr.canFind("50 bytes collected"));
 }
 
-@("buildCommand whitespace mode: sorted options, then image, then shell, then the joined command")
+@("buildCommand: sorted options, then image, then shell, then separate command elements")
 unittest {
     string[][string] options;
     options["00_subcommand"] = ["run"];
@@ -439,27 +421,26 @@ unittest {
     options["02_security"] = ["--read-only"];
     options["entrypoint_00_shell"] = ["sh", "-c"];
 
-    auto args = buildCommand(options, ["echo", "hello"],
-            CommandJoinMode.whitespace, image: "alpine:latest");
+    auto args = buildCommand(options, ["echo", "hello"], image: "alpine:latest");
 
-    // Verify structure: options (sorted) -> image -> shell -> joined command
+    // Verify structure: options (sorted) -> image -> shell -> command elements
     assert(args[0] == "run");
     assert(args[1] == "--rm");
     assert(args[2] == "--read-only");
     assert(args[3] == "alpine:latest");
     assert(args[4] == "sh");
     assert(args[5] == "-c");
-    assert(args[6] == "echo hello");
+    assert(args[6] == "echo");
+    assert(args[7] == "hello");
 }
 
-@("buildCommand append mode: sorted options, then image, then separate command args")
+@("buildCommand: sorted options, then image, then separate command args")
 unittest {
     string[][string] options;
     options["00_subcommand"] = ["run"];
     options["01_cleanup"] = ["--rm"];
 
-    auto args = buildCommand(options, ["echo", "hello", "world"],
-            CommandJoinMode.append, image: "alpine:latest");
+    auto args = buildCommand(options, ["echo", "hello", "world"], image: "alpine:latest");
 
     // Verify structure: options (sorted) -> image -> separate command args
     assert(args[0] == "run");
@@ -470,15 +451,13 @@ unittest {
     assert(args[5] == "world");
 }
 
-@(
-        "buildCommand with shell and append: the shell comes after the image and each command arg stays separate")
+@("buildCommand with shell: the shell comes after the image and each command arg stays separate")
 unittest {
     string[][string] options;
     options["00_subcommand"] = ["run"];
     options["entrypoint_00_shell"] = ["sh", "-c"];
 
-    auto args = buildCommand(options, ["echo", "hello"],
-            CommandJoinMode.append, image: "alpine:latest");
+    auto args = buildCommand(options, ["echo", "hello"], image: "alpine:latest");
 
     // Shell comes after image, then each command arg separately
     assert(args[0] == "run");
@@ -498,8 +477,7 @@ unittest {
     options["invalid"] = ["--should-be-skipped"];
     options["01_cleanup"] = ["--rm"];
 
-    auto args = buildCommand(options, ["echo"], CommandJoinMode.whitespace,
-            image: "alpine:latest");
+    auto args = buildCommand(options, ["echo"], image: "alpine:latest");
 
     assert(args[0] == "run");
     assert(args[1] == "--rm");
@@ -513,12 +491,12 @@ unittest {
 unittest {
     string[][string] options;
 
-    auto args = buildCommand(options, ["echo", "hello"],
-            CommandJoinMode.whitespace, image: "alpine:latest");
+    auto args = buildCommand(options, ["echo", "hello"], image: "alpine:latest");
 
-    assert(args.length == 2);
+    assert(args.length == 3);
     assert(args[0] == "alpine:latest");
-    assert(args[1] == "echo hello");
+    assert(args[1] == "echo");
+    assert(args[2] == "hello");
 }
 
 @("ContainerRunner constructs with options containing a @{llmfun_workarea} magic-word mount")
@@ -530,7 +508,7 @@ unittest {
     options["01_mounts"] = ["-v", "@{llmfun_workarea}:/workarea"];
 
     auto runner = new ContainerRunner("docker", "alpine:latest", options,
-            AbsolutePath("/my/work"), CommandJoinMode.whitespace, 60.dur!"seconds", 1_048_576);
+            AbsolutePath("/my/work"), 60.dur!"seconds", 1_048_576);
 
     // Verify construction succeeded
     assert(runner !is null);
@@ -540,7 +518,7 @@ unittest {
 unittest {
     string[][string] options;
     auto runner = new ContainerRunner("docker", "alpine:latest", options,
-            AbsolutePath("/work"), CommandJoinMode.whitespace, 60.dur!"seconds", 1_048_576);
+            AbsolutePath("/work"), 60.dur!"seconds", 1_048_576);
 
     runner.dispose(); // Should not throw
     runner.dispose(); // Should be safe to call multiple times
@@ -557,26 +535,27 @@ unittest {
     assert(str.canFind("error"));
 }
 
-@("HostRunner buildCommand whitespace mode: sorted options followed by the joined command")
+@("HostRunner buildCommand: sorted options followed by the separate command elements")
 unittest {
     string[][string] options;
     options["00_shell"] = ["sh", "-c"];
     options["01_env"] = ["--env"];
 
-    auto args = buildCommand(options, ["echo", "hello"], CommandJoinMode.whitespace);
+    auto args = buildCommand(options, ["echo", "hello"]);
 
     assert(args[0] == "sh");
     assert(args[1] == "-c");
     assert(args[2] == "--env");
-    assert(args[3] == "echo hello");
+    assert(args[3] == "echo");
+    assert(args[4] == "hello");
 }
 
-@("HostRunner buildCommand append mode: the command args stay separate")
+@("HostRunner buildCommand: the command args stay separate")
 unittest {
     string[][string] options;
     options["00_cmd"] = ["echo"];
 
-    auto args = buildCommand(options, ["hello", "world"], CommandJoinMode.append);
+    auto args = buildCommand(options, ["hello", "world"]);
 
     assert(args[0] == "echo");
     assert(args[1] == "hello");
@@ -587,10 +566,11 @@ unittest {
 unittest {
     string[][string] options;
 
-    auto args = buildCommand(options, ["echo", "hello"], CommandJoinMode.whitespace);
+    auto args = buildCommand(options, ["echo", "hello"]);
 
-    assert(args.length == 1);
-    assert(args[0] == "echo hello");
+    assert(args.length == 2);
+    assert(args[0] == "echo");
+    assert(args[1] == "hello");
 }
 
 @("HostRunner buildCommand skips option keys without a numeric prefix")
@@ -600,7 +580,7 @@ unittest {
     options["invalid"] = ["--should-be-skipped"];
     options["01_also_valid"] = ["--also-valid"];
 
-    auto args = buildCommand(options, ["echo"], CommandJoinMode.whitespace);
+    auto args = buildCommand(options, ["echo"]);
 
     assert(args[0] == "--valid");
     assert(args[1] == "--also-valid");
@@ -613,18 +593,18 @@ unittest {
     string[string] envVars;
 
     auto runner = new HostRunner(options, AbsolutePath("/tmp"), envVars,
-            CommandJoinMode.whitespace, AbsolutePath("/workarea"), 30.dur!"seconds", 1_048_576);
+            AbsolutePath("/workarea"), 30.dur!"seconds", 1_048_576);
 
     assert(runner !is null);
     runner.dispose(); // Should not throw
     runner.dispose(); // Should be safe to call multiple times
 }
 
-@("buildCommand with empty options and append mode yields the separate command args")
+@("buildCommand with empty options yields the separate command args")
 unittest {
     string[][string] options;
 
-    auto args = buildCommand(options, ["echo", "hello"], CommandJoinMode.append);
+    auto args = buildCommand(options, ["echo", "hello"]);
 
     assert(args.length == 2, i"args.length: $(args.length), args: $(args)".text);
     assert(args[0] == "echo");

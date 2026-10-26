@@ -3,16 +3,15 @@
 module llm.environment.dispatch;
 
 import std.array : empty;
-import std.conv : text;
-import std.datetime : Duration, dur;
+import std.conv : to;
+import std.datetime : dur;
 import std.json : JSONValue, JSONOptions;
 import std.sumtype : match;
 
 import my.path : AbsolutePath;
 
-import llm.environment.config : EnvironmentBackend, CommandJoinMode,
-    ExecutionType, ContainerConfig, HostConfig, EnvironmentConfig;
-import llm.environment.backend : RunnerBackend, ContainerRunner, HostRunner, ExecutionResult;
+import llm.environment.config : EnvironmentBackend, ContainerConfig, HostConfig;
+import llm.environment.backend : RunnerBackend, ContainerRunner, HostRunner;
 import llm.tool_call;
 
 mixin RegisterLlmFunctions!();
@@ -44,9 +43,9 @@ struct ListEnvironmentsParams {
 
 /// List available execution environments. Returns a JSON array of sanitized
 /// environment entries exposing only safe fields: tag, description, capabilities,
-/// isIsolated, and commandJoinMode. Never leaks runtimeCli, options, mounts,
+/// isIsolated, minArgs, maxArgs, and timeoutSeconds. Never leaks runtimeCli, options, mounts,
 /// workingDir, or other infrastructure configuration.
-@Function("List available execution environments. Returns a JSON array of environment entries with tag, description, capabilities, isIsolated, and commandJoinMode") ExecuteFuncResult listEnvironments(
+@Function("List available execution environments. Returns a JSON array of environment entries with tag, description, capabilities, isIsolated, minArgs, maxArgs, and timeoutSeconds") ExecuteFuncResult listEnvironments(
         Context baseCtx, ListEnvironmentsParams params) nothrow {
     mixin(baseContextToSpecific!EnvironmentContext);
 
@@ -60,17 +59,8 @@ struct ListEnvironmentsParams {
             obj["description"] = env.description;
             obj["capabilities"] = JSONValue(env.capabilities);
             obj["isIsolated"] = env.isIsolated;
-            final switch (env.commandJoinMode) {
-            case CommandJoinMode.single:
-                obj["commandJoinMode"] = "one command string";
-                break;
-            case CommandJoinMode.whitespace:
-                obj["commandJoinMode"] = "whitespace, no quote";
-                break;
-            case CommandJoinMode.append:
-                obj["commandJoinMode"] = "append";
-                break;
-            }
+            obj["minArgs"] = env.minArgs;
+            obj["maxArgs"] = env.maxArgs;
             obj["timeoutSeconds"] = env.timeout.total!"seconds";
             entries ~= obj;
         }
@@ -86,8 +76,7 @@ struct ExecuteCommandParams {
     @ParamDescription("Environment tag to use for execution")
     string environmentTag;
 
-    @ParamDescription(
-            "Command or parameter for a command to execute. See environment description for details.")
+    @ParamDescription("Array of argument elements to execute. The number of elements must be within the selected environment's minArgs/maxArgs range (maxArgs of -1 means unbounded; see list_environments()).")
     string[] command;
 
     @ParamOptional @ParamDescription(
@@ -102,10 +91,6 @@ struct ExecuteCommandParams {
     mixin(baseContextToSpecific!EnvironmentContext);
 
     try {
-        if (params.command.empty) {
-            return ExecuteFuncResult("error: command must not be empty.", success: false);
-        }
-
         string tag = params.environmentTag;
         if (tag.empty) {
             return ExecuteFuncResult(
@@ -120,19 +105,21 @@ struct ExecuteCommandParams {
                     success: false);
         }
 
-        if (params.command.length > 1 && env.commandJoinMode == CommandJoinMode.single) {
-            return ExecuteFuncResult(i"error: Environment $(tag) may only be called with parameter `command` as an array of strings with one element"
-                    .text, success: false);
+        const n = params.command.length.to!long;
+
+        if (n < env.minArgs || (env.maxArgs != -1 && n > env.maxArgs)) {
+            return ExecuteFuncResult(
+                    "error: Environment '" ~ tag ~ "' expects between " ~ env.minArgs.to!string ~ " and " ~ (env.maxArgs == -1
+                    ? "unbounded" : env.maxArgs.to!string) ~ " command argument(s), got " ~ n.to!string ~ ".",
+                    success: false);
         }
 
         auto runner = env.config.match!((ContainerConfig c) {
             return cast(RunnerBackend) new ContainerRunner(c.runtimeCli, c.image, c.options,
-                ctx.workArea(), env.commandJoinMode, timeout: env.timeout,
-                maxOutputBytes: ctx.getMaxOutputBytes);
+                ctx.workArea(), timeout: env.timeout, maxOutputBytes: ctx.getMaxOutputBytes);
         }, (HostConfig h) {
             return cast(RunnerBackend) new HostRunner(h.options, h.workingDir, h.envVars,
-                env.commandJoinMode, ctx.workArea(), timeout: env.timeout,
-                maxOutputBytes: ctx.getMaxOutputBytes);
+                ctx.workArea(), timeout: env.timeout, maxOutputBytes: ctx.getMaxOutputBytes);
         });
 
         scope (exit)
@@ -184,7 +171,7 @@ version (unittest) {
 
 @("getEnvironment returns the backend for a known tag")
 unittest {
-    import llm.environment.config : ContainerConfig, EnvironmentConfig, CommandJoinMode;
+    import llm.environment.config : ContainerConfig, EnvironmentConfig;
 
     string[][string] emptyOptions;
     auto ctx = new MockEnvironmentContext();
@@ -192,7 +179,7 @@ unittest {
         EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
                 capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
                     ContainerConfig("docker", "alpine:latest", emptyOptions)),
-                commandJoinMode: CommandJoinMode.whitespace, timeout: 60.dur!"seconds")
+                timeout: 60.dur!"seconds")
     ];
 
     auto result = ctx.getEnvironment("sandbox");
@@ -212,8 +199,7 @@ unittest {
 
 @("listEnvironments returns all registered backends")
 unittest {
-    import llm.environment.config : ContainerConfig, HostConfig,
-        EnvironmentConfig, CommandJoinMode;
+    import llm.environment.config : ContainerConfig, HostConfig, EnvironmentConfig;
 
     string[][string] emptyOptions;
     string[string] emptyEnvVars;
@@ -222,12 +208,13 @@ unittest {
         EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
                 capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
                     ContainerConfig("docker", "alpine:latest", emptyOptions)),
-                commandJoinMode: CommandJoinMode.whitespace, timeout: 60.dur!"seconds"),
+                timeout: 60.dur!"seconds"),
         EnvironmentBackend(tag: "native", description: "Host execution", capabilities: [
             "host"
         ], isIsolated: false,
-        config: EnvironmentConfig(HostConfig(options: emptyOptions, workingDir: "", envVars: emptyEnvVars)),
-        commandJoinMode: CommandJoinMode.append, timeout: 30.dur!"seconds"),
+        config: EnvironmentConfig(HostConfig(options: emptyOptions,
+                workingDir: "", envVars: emptyEnvVars)),
+        timeout: 30.dur!"seconds"),
     ];
 
     auto result = ctx.listEnvironments();
@@ -256,8 +243,7 @@ unittest {
 
 @("the listEnvironments tool returns JSON with only the safe fields and no infrastructure fields")
 unittest {
-    import llm.environment.config : ContainerConfig, HostConfig,
-        EnvironmentConfig, CommandJoinMode;
+    import llm.environment.config : ContainerConfig, HostConfig, EnvironmentConfig;
     import std.json : parseJSON;
 
     string[][string] emptyOptions;
@@ -267,12 +253,13 @@ unittest {
         EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
                 capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
                     ContainerConfig("docker", "alpine:latest", emptyOptions)),
-                commandJoinMode: CommandJoinMode.whitespace, timeout: 60.dur!"seconds"),
+                timeout: 60.dur!"seconds"),
         EnvironmentBackend(tag: "native", description: "Host execution", capabilities: [
             "host"
         ], isIsolated: false,
-        config: EnvironmentConfig(HostConfig(options: emptyOptions, workingDir: "", envVars: emptyEnvVars)),
-        commandJoinMode: CommandJoinMode.append, timeout: 30.dur!"seconds"),
+        config: EnvironmentConfig(HostConfig(options: emptyOptions,
+                workingDir: "", envVars: emptyEnvVars)),
+        timeout: 30.dur!"seconds"),
     ];
 
     auto result = listEnvironments(ctx, ListEnvironmentsParams());
@@ -285,19 +272,22 @@ unittest {
     assert(json.array[0]["tag"].str == "sandbox");
     assert(json.array[0]["description"].str == "Test sandbox");
     assert(json.array[0]["isIsolated"].boolean == true);
-    assert(json.array[0]["commandJoinMode"].str == "whitespace, no quote");
+    assert(json.array[0]["minArgs"].integer == 0);
+    assert(json.array[0]["maxArgs"].integer == 1);
     assert(json.array[0]["capabilities"].array.length == 1);
     assert(json.array[0]["capabilities"].array[0].str == "container");
 
     assert(json.array[1]["tag"].str == "native");
     assert(json.array[1]["isIsolated"].boolean == false);
-    assert(json.array[1]["commandJoinMode"].str == "append");
+    assert(json.array[1]["minArgs"].integer == 0);
+    assert(json.array[1]["maxArgs"].integer == 1);
 
     // Verify infrastructure fields are NOT present
     assert("runtimeCli" !in json.array[0]);
     assert("options" !in json.array[0]);
     assert("mounts" !in json.array[0]);
     assert("config" !in json.array[0]);
+    assert("commandJoinMode" !in json.array[0]);
     assert("ttlSeconds" !in json.array[0]);
     // Verify timeoutSeconds IS present (replaces ttlSeconds)
     assert("timeoutSeconds" in json.array[0]);
@@ -319,16 +309,15 @@ unittest {
 
 @("the listEnvironments tool with a single entry reports its fields")
 unittest {
-    import llm.environment.config : ContainerConfig, EnvironmentConfig, CommandJoinMode;
+    import llm.environment.config : ContainerConfig, EnvironmentConfig;
     import std.json : parseJSON;
 
     string[][string] emptyOptions;
     auto ctx = new MockEnvironmentContext();
     ctx.envs = [
         EnvironmentBackend(tag: "only", description: "Only environment", capabilities: [
-        ], isIsolated: true, config: EnvironmentConfig(ContainerConfig("docker", "alpine:latest",
-                emptyOptions)), commandJoinMode: CommandJoinMode.whitespace,
-                timeout: 120.dur!"seconds")
+        ], isIsolated: true, config: EnvironmentConfig(ContainerConfig("docker",
+                "alpine:latest", emptyOptions)), timeout: 120.dur!"seconds")
     ];
 
     auto result = listEnvironments(ctx, ListEnvironmentsParams());
@@ -341,16 +330,170 @@ unittest {
     assert(json.array[0]["capabilities"].array.length == 0);
 }
 
-@("executeCommand with an empty command returns an error")
+@("executeCommand rejects commands outside the minArgs/maxArgs range")
 unittest {
+    import llm.environment.config : ContainerConfig, EnvironmentConfig;
+
+    string[][string] emptyOptions;
+    auto ctx = new MockEnvironmentContext();
+    ctx.workAreaPath = AbsolutePath("/workarea");
+    ctx.envs = [
+        EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
+                capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
+                    ContainerConfig("docker", "alpine:latest", emptyOptions)),
+                timeout: 60.dur!"seconds", minArgs: 1, maxArgs: 2)
+    ];
+
+    // Below the lower bound: an empty command reports got 0.
+    auto low = executeCommand(ctx, ExecuteCommandParams(environmentTag: "sandbox",
+            command: [], sessionId: ""));
+
+    assert(!low.success);
+    assert(
+            low.msg
+            == "error: Environment 'sandbox' expects between 1 and 2 command argument(s), got 0.");
+
+    // Above the upper bound: a 3-element command reports got 3.
+    auto high = executeCommand(ctx, ExecuteCommandParams(environmentTag: "sandbox",
+            command: ["a", "b", "c"], sessionId: ""));
+
+    assert(!high.success);
+    assert(
+            high.msg
+            == "error: Environment 'sandbox' expects between 1 and 2 command argument(s), got 3.");
+}
+
+@("an environment with minArgs 0 accepts an empty command instead of rejecting it")
+unittest {
+    import llm.environment.config : ContainerConfig, HostConfig, EnvironmentConfig;
+    import std.algorithm : canFind;
+    import std.json : parseJSON;
+
+    string[][string] emptyOptions;
+    string[string] emptyEnvVars;
     auto ctx = new MockEnvironmentContext();
     ctx.workAreaPath = AbsolutePath("/workarea");
 
-    auto result = executeCommand(ctx, ExecuteCommandParams(environmentTag: "sandbox",
+    ctx.envs = [
+        EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
+                capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
+                    ContainerConfig("docker", "alpine:latest", emptyOptions)),
+                timeout: 60.dur!"seconds", minArgs: 0, maxArgs: 1)
+    ];
+    auto containerResult = executeCommand(ctx,
+            ExecuteCommandParams(environmentTag: "sandbox", command: [], sessionId: ""));
+
+    assert(!containerResult.msg.canFind("expects between"),
+            "empty command must forward past the arity check, got: " ~ containerResult.msg);
+
+    ctx.envs = [
+        EnvironmentBackend(tag: "native", description: "Host execution", capabilities: [
+            "host"
+        ], isIsolated: false,
+        config: EnvironmentConfig(HostConfig(options: ["00_shell": ["sh",
+                    "-c"]], workingDir: "", envVars: emptyEnvVars)),
+        timeout: 30.dur!"seconds", minArgs: 0, maxArgs: 1)
+    ];
+    auto hostResult = executeCommand(ctx, ExecuteCommandParams(environmentTag: "native",
             command: [], sessionId: ""));
 
+    assert(!hostResult.msg.canFind("expects between"),
+            "empty command must forward past the arity check, got: " ~ hostResult.msg);
+    assert(hostResult.success);
+    auto hostJson = parseJSON(hostResult.msg);
+    assert(hostJson["exitCode"].integer != 0,
+            "empty host command must fail as a normal error result, got: " ~ hostResult.msg);
+}
+
+@("boundary counts are inclusive at both ends of the minArgs/maxArgs range")
+unittest {
+    import llm.environment.config : ContainerConfig, EnvironmentConfig;
+    import std.algorithm : canFind;
+
+    string[][string] emptyOptions;
+    auto ctx = new MockEnvironmentContext();
+    ctx.workAreaPath = AbsolutePath("/workarea");
+    ctx.envs = [
+        EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
+                capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
+                    ContainerConfig("docker", "alpine:latest", emptyOptions)),
+                timeout: 60.dur!"seconds", minArgs: 2, maxArgs: 3)
+    ];
+
+    // Inclusive at the lower end: exactly minArgs elements forwards.
+    auto atMin = executeCommand(ctx, ExecuteCommandParams(environmentTag: "sandbox",
+            command: ["a", "b"], sessionId: ""));
+    assert(!atMin.msg.canFind("expects between"),
+            "exactly minArgs elements must be accepted, got: " ~ atMin.msg);
+
+    // Inclusive at the upper end: exactly maxArgs elements forwards.
+    auto atMax = executeCommand(ctx, ExecuteCommandParams(environmentTag: "sandbox",
+            command: ["a", "b", "c"], sessionId: ""));
+    assert(!atMax.msg.canFind("expects between"),
+            "exactly maxArgs elements must be accepted, got: " ~ atMax.msg);
+
+    // One below minArgs: rejected.
+    auto below = executeCommand(ctx, ExecuteCommandParams(environmentTag: "sandbox",
+            command: ["a"], sessionId: ""));
+    assert(!below.success);
+    assert(below.msg.canFind("sandbox"), below.msg);
+    assert(below.msg.canFind("between 2 and 3"), below.msg);
+    assert(below.msg.canFind("got 1"), below.msg);
+
+    // One above maxArgs: rejected.
+    auto above = executeCommand(ctx, ExecuteCommandParams(environmentTag: "sandbox",
+            command: ["a", "b", "c", "d"], sessionId: ""));
+    assert(!above.success);
+    assert(above.msg.canFind("sandbox"), above.msg);
+    assert(above.msg.canFind("between 2 and 3"), above.msg);
+    assert(above.msg.canFind("got 4"), above.msg);
+}
+
+@("maxArgs -1 accepts a command of any length")
+unittest {
+    import llm.environment.config : ContainerConfig, EnvironmentConfig;
+    import std.algorithm : canFind;
+
+    string[][string] emptyOptions;
+    auto ctx = new MockEnvironmentContext();
+    ctx.workAreaPath = AbsolutePath("/workarea");
+    ctx.envs = [
+        EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
+                capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
+                    ContainerConfig("docker", "alpine:latest", emptyOptions)),
+                timeout: 60.dur!"seconds", minArgs: 0, maxArgs: -1)
+    ];
+
+    // A 10-element command is within the unbounded range and forwards.
+    auto result = executeCommand(ctx, ExecuteCommandParams(environmentTag: "sandbox",
+            command: ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"], sessionId: ""));
+
+    assert(!result.msg.canFind("expects between"),
+            "maxArgs -1 must be unbounded, got: " ~ result.msg);
+}
+
+@("the rejected-command error names the tag, the range, and the actual count")
+unittest {
+    import llm.environment.config : ContainerConfig, EnvironmentConfig;
+    import std.algorithm : canFind;
+
+    string[][string] emptyOptions;
+    auto ctx = new MockEnvironmentContext();
+    ctx.workAreaPath = AbsolutePath("/workarea");
+    ctx.envs = [
+        EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
+                capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
+                    ContainerConfig("docker", "alpine:latest", emptyOptions)),
+                timeout: 60.dur!"seconds", minArgs: 2, maxArgs: -1)
+    ];
+
+    auto result = executeCommand(ctx, ExecuteCommandParams(environmentTag: "sandbox",
+            command: ["a"], sessionId: ""));
+
     assert(!result.success);
-    assert(result.msg == "error: command must not be empty.");
+    assert(result.msg.canFind("sandbox"), result.msg);
+    assert(result.msg.canFind("unbounded"), result.msg);
+    assert(result.msg.canFind("got 1"), result.msg);
 }
 
 @("executeCommand with an unknown tag returns a not-found error")
@@ -369,7 +512,7 @@ unittest {
 
 @("executeCommand with an empty tag uses the default environment")
 unittest {
-    import llm.environment.config : ContainerConfig, EnvironmentConfig, CommandJoinMode;
+    import llm.environment.config : ContainerConfig, EnvironmentConfig;
     import std.algorithm : canFind;
     import std.json : parseJSON;
 
@@ -380,12 +523,12 @@ unittest {
         EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
                 capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
                     ContainerConfig("docker", "alpine:latest", emptyOptions)),
-                commandJoinMode: CommandJoinMode.whitespace, timeout: 60.dur!"seconds")
+                timeout: 60.dur!"seconds")
     ];
 
     // Empty environmentTag should use default "sandbox"
     auto result = executeCommand(ctx, ExecuteCommandParams(environmentTag: "",
-            command: ["echo", "hello"], sessionId: ""));
+            command: ["echo"], sessionId: ""));
 
     // The call should attempt to run the container (will fail without docker, but should not be a tag error)
     if (!result.success) {
@@ -422,7 +565,7 @@ unittest {
 
 @("executeCommand accepts the sessionId parameter and ignores it")
 unittest {
-    import llm.environment.config : ContainerConfig, EnvironmentConfig, CommandJoinMode;
+    import llm.environment.config : ContainerConfig, EnvironmentConfig;
     import std.algorithm : canFind;
 
     string[][string] emptyOptions;
@@ -432,7 +575,7 @@ unittest {
         EnvironmentBackend(tag: "sandbox", description: "Test sandbox",
                 capabilities: ["container"], isIsolated: true, config: EnvironmentConfig(
                     ContainerConfig("docker", "alpine:latest", emptyOptions)),
-                commandJoinMode: CommandJoinMode.whitespace, timeout: 60.dur!"seconds")
+                timeout: 60.dur!"seconds")
     ];
 
     // sessionId should be accepted but ignored
@@ -447,7 +590,7 @@ unittest {
 
 @("executeCommand with a HostConfig environment creates a HostRunner")
 unittest {
-    import llm.environment.config : HostConfig, EnvironmentConfig, CommandJoinMode;
+    import llm.environment.config : HostConfig, EnvironmentConfig;
     import std.algorithm : canFind;
 
     string[][string] emptyOptions;
@@ -458,12 +601,13 @@ unittest {
         EnvironmentBackend(tag: "native", description: "Host execution", capabilities: [
             "host"
         ], isIsolated: false,
-        config: EnvironmentConfig(HostConfig(options: emptyOptions, workingDir: "", envVars: emptyEnvVars)),
-        commandJoinMode: CommandJoinMode.whitespace, timeout: 30.dur!"seconds")
+        config: EnvironmentConfig(HostConfig(options: emptyOptions,
+                workingDir: "", envVars: emptyEnvVars)),
+        timeout: 30.dur!"seconds")
     ];
 
     auto result = executeCommand(ctx, ExecuteCommandParams(environmentTag: "native",
-            command: ["echo", "hello"], sessionId: ""));
+            command: ["echo"], sessionId: ""));
 
     // Should attempt host execution (may fail in test env, but not a tag error)
     if (!result.success) {

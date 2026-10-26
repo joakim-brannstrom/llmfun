@@ -1,5 +1,5 @@
 /// Configuration types for environment-based command execution.
-/// Defines ExecutionType, CommandJoinMode, ContainerConfig, HostConfig,
+/// Defines ExecutionType, ContainerConfig, HostConfig,
 /// and EnvironmentBackend with SumType-based config separation.
 module llm.environment.config;
 
@@ -25,16 +25,6 @@ enum ExecutionType {
     container,
     /// Execute directly on the host system via subprocess
     host
-}
-
-/// Strategy for combining the LLM's command array into the final command line.
-enum CommandJoinMode {
-    /// The argument can only be [0, 1] so no joining
-    single,
-    /// Join all elements with spaces into a single argument string.
-    whitespace,
-    /// Each element of the array is treated as a separate argument.
-    append,
 }
 
 /// Configuration for container-based execution environments.
@@ -94,12 +84,19 @@ struct EnvironmentBackend {
     /// Environment-specific configuration (container or host).
     EnvironmentConfig config;
 
-    /// How command arguments are combined
-    CommandJoinMode commandJoinMode = CommandJoinMode.single;
+    /// Minimum number of command argument elements accepted (inclusive).
+    long minArgs = 0;
+
+    /// Maximum number of command argument elements accepted (inclusive);
+    /// -1 means unbounded.
+    long maxArgs = 1;
 
     invariant {
         assert(tag.length > 0, "EnvironmentBackend tag must not be empty");
         assert(timeout.total!"seconds" >= 0, "EnvironmentBackend timeout must not be negative");
+        assert(minArgs >= 0, "EnvironmentBackend minArgs must not be negative");
+        assert(maxArgs == -1 || maxArgs >= minArgs,
+                "EnvironmentBackend maxArgs must be -1 (unbounded) or >= minArgs");
     }
 }
 
@@ -278,19 +275,20 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
 
         bool isIsolated = getValue(entry, (v) => v["isIsolated"].boolean, false);
 
-        CommandJoinMode commandJoinMode;
-        try {
-            auto s = getValue(entry, (v) => v["commandJoinMode"].str, null);
-            if (s.empty) {
-                logger.tracef("Empty commandJoinMode for environment '%s' - defaulting to '%s'",
-                        tag, commandJoinMode);
-            } else {
-                commandJoinMode = getValue(entry, (v) => v["commandJoinMode"].str, null)
-                    .to!CommandJoinMode;
-            }
-        } catch (Exception e) {
-            logger.warningf("Unknown commandJoinMode '%s' for environment '%s' - defaulting to '%s'",
-                    getValue(entry, (v) => v["commandJoinMode"].str, null), tag, commandJoinMode);
+        if ("commandJoinMode" in entry) {
+            logger.warningf(
+                    "Environment entry '%s' contains removed key 'commandJoinMode' " ~ "- ignored; use minArgs/maxArgs",
+                    tag);
+        }
+
+        long minArgs = getValue(entry, (v) => v["minArgs"].integer, 0L);
+        long maxArgs = getValue(entry, (v) => v["maxArgs"].integer, 1L);
+
+        if (minArgs < 0 || maxArgs < -1 || (maxArgs != -1 && maxArgs < minArgs)) {
+            logger.warningf("Invalid minArgs/maxArgs for environment '%s' "
+                    ~ "(minArgs=%s, maxArgs=%s; maxArgs must be -1 (unbounded) or >= minArgs; "
+                    ~ "maxArgs defaults to 1 when omitted) - skipping entry", tag, minArgs, maxArgs);
+            continue;
         }
 
         if ("config" !in entry) {
@@ -386,8 +384,8 @@ EnvironmentBackend[] loadExecutionBackends(Path filePath,
             }
         }
 
-        result ~= EnvironmentBackend(tag, description, capabilities,
-                isIsolated, timeout: timeout, config, commandJoinMode);
+        result ~= EnvironmentBackend(tag, description, capabilities, isIsolated,
+                timeout: timeout, config: config, minArgs: minArgs, maxArgs: maxArgs);
     }
 
     if (result.empty) {
@@ -435,7 +433,7 @@ environments:
     capabilities:
       - isolated
     isIsolated: true
-    commandJoinMode: whitespace
+    maxArgs: -1
     timeout: 60
     config:
       type: container
@@ -450,7 +448,8 @@ environments:
     capabilities:
       - fast
     isIsolated: false
-    commandJoinMode: append
+    minArgs: 2
+    maxArgs: 5
     timeout: 30
     config:
       type: host
@@ -481,7 +480,7 @@ environments:
     assert(result[0].tag == "sandbox");
     assert(result[0].description == "Container sandbox");
     assert(result[0].isIsolated);
-    assert(result[0].commandJoinMode == CommandJoinMode.whitespace);
+    assert(result[0].maxArgs == -1);
     assert(result[0].timeout == 60.dur!"seconds");
     assert(result[0].capabilities.length == 1);
     assert(result[0].capabilities[0] == "isolated");
@@ -492,7 +491,8 @@ environments:
     assert(result[1].tag == "native");
     assert(result[1].description == "Host execution");
     assert(!result[1].isIsolated);
-    assert(result[1].commandJoinMode == CommandJoinMode.append);
+    assert(result[1].minArgs == 2);
+    assert(result[1].maxArgs == 5);
     assert(result[1].timeout == 30.dur!"seconds");
     assert(result[1].config.match!((ContainerConfig c) => false,
             (HostConfig h) => h.workingDir == "/tmp"
@@ -501,7 +501,7 @@ environments:
     // Verify default values environment
     assert(result[2].tag == "default_value");
     assert(!result[2].isIsolated);
-    assert(result[2].commandJoinMode == CommandJoinMode.single);
+    assert(result[2].minArgs == 0 && result[2].maxArgs == 1);
     assert(result[2].timeout == 30.dur!"seconds");
     assert(result[2].config.match!((ContainerConfig c) => true, (HostConfig h) => false));
 }
@@ -578,6 +578,58 @@ unittest {
     assert(state == ExecutionConfigState.loaded);
     assert(result.length == 1);
     assert(result[0].tag == "sandbox");
+}
+
+@("invalid minArgs/maxArgs values warn and skip the entry")
+unittest {
+    import std.file : mkdirRecurse, rmdirRecurse;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "execenv_" ~ __LINE__.to!string);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "config.yaml");
+    string yaml = `environments:
+  - tag: bad_min
+    minArgs: -1
+    timeout: 30
+    config:
+      type: host
+  - tag: bad_max
+    maxArgs: -2
+    timeout: 30
+    config:
+      type: host
+  - tag: inverted
+    minArgs: 5
+    maxArgs: 2
+    timeout: 30
+    config:
+      type: host
+  - tag: unbounded
+    minArgs: 0
+    maxArgs: -1
+    timeout: 30
+    config:
+      type: host
+  - tag: good
+    timeout: 30
+    config:
+      type: host
+`;
+    File(tmpFile, "w").write(yaml);
+
+    ExecutionConfigState state;
+    string defaultTag;
+    auto result = loadExecutionBackends(tmpFile.Path, null, state, defaultTag);
+    assert(state == ExecutionConfigState.loaded);
+    assert(result.length == 2);
+    assert(result[0].tag == "unbounded");
+    assert(result[0].minArgs == 0 && result[0].maxArgs == -1);
+    assert(result[1].tag == "good");
+    assert(result[1].minArgs == 0 && result[1].maxArgs == 1);
 }
 
 @("a YAML parse error returns null with the loadFailed state")

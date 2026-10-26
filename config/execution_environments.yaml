@@ -76,11 +76,12 @@ environments:
         05_mounts: ["-v", "@{llmfun_workarea}:/workarea"]
         06_network: ["--network", "none"]
   - tag: native
-    description: "Host execution directly via subprocess. No isolation - use with caution. **shell: sh**"
+    description: "Host execution directly via subprocess. No isolation - use with caution."
     capabilities: ["host", "native"]
     isIsolated: false
     timeout: 60
-    commandJoinMode: whitespace
+    minArgs: 1
+    maxArgs: 1
     config:
       type: host
       workingDir: "@{llmfun_workarea}"
