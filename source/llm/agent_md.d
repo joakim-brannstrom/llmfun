@@ -1,44 +1,51 @@
-// AGENTS.md hybrid support module.
-// Manages AGENTS.md file detection, caching, and summary generation.
-// Uses a hybrid approach: compressed summary injected into system prompt,
-// full document stored in RAG for detailed lookups.
+// AGENTS.md handling module.
+// Manages AGENTS.md file detection, treatment selection, caching, and
+// summarization. The prompt payload follows the effective treatment: a
+// compressed summary OR the verbatim text, per the agentsMd config; the full
+// document is indexed into RAG only when ragIndex is set.
 
 module llm.agent_md;
 
 import logger = std.logger;
-import std.algorithm : startsWith, map, filter, count, canFind;
-import std.array : appender, join, array;
-import std.conv : text, to;
-import std.datetime : SysTime, Clock, Duration, dur, DateTime, UTC;
-import std.file : exists, getSize, isSymlink, readText, rename, remove;
+import std.algorithm : startsWith, map, filter, canFind;
+import std.array : join, array;
+import std.datetime : SysTime, Clock, dur, DateTime, UTC;
+import std.file : exists, readText, rename, remove;
 import std.json : JSONValue, parseJSON, JSONOptions, JSONType;
 import std.path : dirName;
 import std.range : empty;
 import std.stdio : File;
 import std.string : splitLines, strip, stripRight, indexOf;
 import std.sumtype : match;
-import std.typecons : Tuple;
 
 public import my.path : Path, AbsolutePath;
-import my.set : Set;
 
-import llm.utility : computeContentHash, isPathInsideWorkarea;
-import llm.config : LlmConfig, RagConfig;
+import llm.utility : computeContentHash;
+import llm.config : AgentsMdCompression, AgentsMdConfig, CompressionMode,
+    CodeModelConfig, LlmConfig, RagConfig, agentsMdSourceSummary, effectiveAgentsMd;
 import llm.rag.rag : RAG, Document, Origin, Topic, Offset, add, Url;
 import llm.summary_agent : SummaryChunkT;
 
 /// State representation for an AGENTS.md file.
-/// Tracks the checksum of the original content, a generated summary,
+/// Tracks the checksum of the original content, the prompt payload,
 /// and the timestamp when this state was last updated.
 struct AgentMdState {
     /// Content checksum computed via MurmurHash3-32 (matches utility.d hashing).
     long checksum;
 
-    /// Compressed summary of the AGENTS.md content (100-300 words).
+    /// Prompt payload injected into the system prompt: the generated summary
+    /// (summary/full-auto-over-threshold treatment) OR the verbatim AGENTS.md
+    /// text (full treatment). Not persisted beyond the three cache keys.
     string summary;
 
     /// Timestamp when this state was last updated.
     SysTime timestamp;
+
+    /// Exact RAG topic name (agent_md_<8-hex>) at decision time; empty when no
+    /// pointer instruction is allowed (ragIndex=false or full-text treatment).
+    /// NOT persisted (cache schema unchanged); stamped from the effective config
+    /// at every return - never read from loadAgentMdCache results.
+    string ragTopic;
 
     /// Whether this state is considered valid/current.
     bool isValid() const @safe pure nothrow @nogc {
@@ -50,168 +57,6 @@ struct AgentMdState {
         return this.checksum == other.checksum && this.summary == other.summary
             && this.timestamp == other.timestamp;
     }
-}
-
-// Maximum file size for @path-resolved files (1MB).
-private enum size_t MaxPathFileSize = 1024 * 1024;
-
-// Maximum recursion depth for nested @path references.
-private enum size_t MaxPathRecursionDepth = 5;
-
-// Check if any parent directory in the path is a symlink.
-// Walks up from the file's parent directory to the workarea root,
-// rejecting any symlinked directories.
-// Params:
-//  fullPath The full path to check
-//  workarea The workarea root path
-// Returns: true if a symlinked parent directory was found
-private bool hasSymlinkedParent(AbsolutePath fullPath, AbsolutePath workarea) @safe {
-    auto checkDir = fullPath.dirName;
-    while (!checkDir.empty && isPathInsideWorkarea(checkDir, workarea)) {
-        if (checkDir.exists && checkDir.isSymlink) {
-            return true;
-        }
-        checkDir = checkDir.dirName;
-    }
-    return false;
-}
-
-// Resolve a single @path reference to file content.
-// Params:
-//  workarea The workarea root path for path validation
-//  pathStr The path from the @path reference (without the @ prefix)
-//  depth Current recursion depth
-//  visited already-visited paths for circular reference detection
-// Returns: Tuple of (content, success). On failure, content is empty string.
-private Tuple!(string, bool) resolvePathRef(AbsolutePath workarea, Path path,
-        size_t depth, ref Set!AbsolutePath visited) @safe {
-    alias Result = Tuple!(string, bool);
-
-    if (depth > MaxPathRecursionDepth) {
-        logger.warningf("@path recursion limit exceeded (%s levels): %s",
-                MaxPathRecursionDepth, path);
-        return Result("", false);
-    }
-
-    auto fullPath = (workarea ~ path).AbsolutePath;
-
-    if (!isPathInsideWorkarea(fullPath, workarea)) {
-        logger.warningf("@path '%s' resolves outside workarea '%s': %s", path, workarea, fullPath);
-        return Result("", false);
-    }
-
-    if (visited.contains(fullPath)) {
-        logger.warningf("Circular @path reference detected: %s", fullPath);
-        return Result("", false);
-    }
-
-    // Check existence first - isSymlink can throw for non-existent files
-    if (!fullPath.exists) {
-        logger.warningf("@path file does not exist: %s", fullPath);
-        return Result("", false);
-    }
-
-    if (fullPath.isSymlink) {
-        logger.warningf("@path '%s' is a symlink. Symlinks are not allowed.", fullPath);
-        return Result("", false);
-    }
-
-    if (hasSymlinkedParent(fullPath, workarea)) {
-        logger.warningf("@path '%s' is inside a symlinked directory. Not allowed.", fullPath);
-        return Result("", false);
-    }
-
-    // File size limit check
-    // NOTE: There is a TOCTOU race between getSize and readText.
-    // In a sandboxed environment this is mitigated, but worth noting.
-    try {
-        const fileSize = fullPath.getSize;
-        if (fileSize > MaxPathFileSize) {
-            logger.warningf("@path file '%s' exceeds size limit (%s > %s bytes)",
-                    fullPath, fileSize, MaxPathFileSize);
-            return Result("", false);
-        }
-    } catch (Exception e) {
-        logger.warningf("Failed to get file size for '%s': %s", fullPath, e.msg);
-        return Result("", false);
-    }
-
-    try {
-        visited.add(fullPath);
-        string fileContent = fullPath.readText;
-        string resolvedContent = resolveAgentMdContentInternal(workarea,
-                fileContent, depth + 1, visited);
-        return Result(resolvedContent, true);
-    } catch (Exception e) {
-        logger.warningf("Failed to read @path file '%s': %s", fullPath, e.msg);
-        return Result("", false);
-    }
-}
-
-/// Resolve @path references in AGENTS.md content.
-/// Replaces @path references with the actual file content,
-/// applying security constraints (path traversal protection, size limits, etc.).
-/// Params:
-///  workarea The workarea root path for path validation
-///  content The raw AGENTS.md content potentially containing @path references
-///  depth Current recursion depth (for nested resolution)
-/// Returns: The content with @path references resolved, or original content on failure.
-string resolveAgentMdContent(AbsolutePath workarea, string content, size_t depth = 0) @safe {
-    Set!AbsolutePath visited;
-    return resolveAgentMdContentInternal(workarea, content, depth, visited);
-}
-
-// Internal version that threads the visited set through recursion.
-private string resolveAgentMdContentInternal(AbsolutePath workarea,
-        string content, size_t depth, ref Set!AbsolutePath visited) @safe {
-    string[] lines = content.splitLines;
-
-    if (lines.map!(a => a.strip)
-            .filter!(a => !a.empty)
-            .filter!(a => a.startsWith("@") && a.length > 1)
-            .count == 0) {
-        return content;
-    }
-
-    auto resultLines = appender!(string[])();
-    bool anySuccess = false;
-    bool anyFailure = false;
-
-    foreach (line; lines) {
-        auto stripped = line.strip;
-        if (stripped.startsWith("@") && stripped.length > 1) {
-            auto pathStr = stripped[1 .. $].strip;
-
-            if (pathStr.empty) {
-                // assuming an empty @ is intentional thus not adding an error
-                // message here
-                resultLines.put(line);
-                continue;
-            }
-            auto path = Path(pathStr);
-
-            auto refResult = resolvePathRef(workarea, path, depth + 1, visited);
-            if (refResult[1]) {
-                resultLines.put(refResult[0]);
-                anySuccess = true;
-            } else {
-                // Failed — insert error marker
-                resultLines.put("@@RESOLVE_ERROR: " ~ pathStr ~ " (see logs for details)");
-                anyFailure = true;
-            }
-        } else {
-            resultLines.put(line);
-        }
-    }
-
-    // Complete failure: if ALL @path references failed, treat as no AGENTS.md
-    if (anyFailure && !anySuccess) {
-        logger.warningf(
-                "All @path references in AGENTS.md failed resolution, treating as no AGENTS.md");
-        return "";
-    }
-
-    return resultLines[].join("\n");
 }
 
 // Load AGENTS.md state from disk cache.
@@ -343,7 +188,6 @@ private void reloadAgentMdToRag(RAG rag, string content, long checksum, RagConfi
 
 /// Merge multiple chunk summaries into a single, clean bullet list.
 /// deduplicates bullet points, and ensures all lines use "- " prefix.
-/// This is used as a MergeCallback for AGENTS.md summarization.
 private string bulletListMerge(SummaryChunkT[] summaries) {
     if (summaries.empty)
         return "";
@@ -354,7 +198,6 @@ private string bulletListMerge(SummaryChunkT[] summaries) {
         foreach (trimmed; text.splitLines
                 .map!(a => a.stripRight)
                 .filter!(a => !a.empty)) {
-            // Normalize: if line starts with "- " or "* ", keep as bullet; otherwise prefix with "- "
             string bullet = () {
                 if (trimmed.startsWith("- "))
                     return trimmed;
@@ -384,6 +227,82 @@ private string bulletListMerge(SummaryChunkT[] summaries) {
 private string delegate(SummaryChunkT[] summaries) bulletListMergeCallback = (SummaryChunkT[] s) => bulletListMerge(
         s);
 
+/// Whether the effective treatment needs the summary pipeline (cache read,
+/// SummaryAgent call): mode=summary always does, full never, and auto only
+/// when the raw text exceeds the threshold. enabled=false is a
+/// pure no-op and never needs a summary.
+private bool agentMdNeedsSummary(const AgentsMdConfig agentsMd, size_t rawSize) @safe pure nothrow @nogc {
+    if (!agentsMd.enabled) {
+        return false;
+    }
+    final switch (agentsMd.compression.mode) with (CompressionMode) {
+    case CompressionMode.summary:
+        return true;
+    case CompressionMode.full:
+        return false;
+    case CompressionMode.auto_:
+        if (agentsMd.compression.thresholdKb <= 0) {
+            return true; // thresholdKb: 0 = "always summary" under auto
+        }
+        return rawSize > agentMdThresholdBytes(agentsMd);
+    }
+}
+
+private size_t agentMdThresholdBytes(const AgentsMdConfig agentsMd) @safe pure nothrow @nogc {
+    return agentsMd.compression.thresholdKb > int.max / 1024 ? int.max
+        : cast(size_t) agentsMd.compression.thresholdKb * 1024;
+}
+
+/// Whether a /model-switch recompute (rebuildSystemPrompt for `model`) may run
+/// the summary pipeline (model-switch UX): the effective treatment for `model` resolves
+/// to summary, or auto with an over-threshold file whose cache does not already
+/// hold a valid summary for the current content (a cache hit makes the
+/// recompute a fast cache read - no status message needed). enabled=false
+/// never summarizes; a missing, unreadable, or whitespace-only AGENTS.md
+/// has nothing to summarize. Reads the real workarea (processAgentMd hardcodes
+/// `AbsolutePath(".")` - the dub test runner runs tests concurrently, so tests
+/// must not chdir).
+package bool agentMdSwitchMaySummarize(const LlmConfig conf, const CodeModelConfig model) @safe {
+    const agentsMd = effectiveAgentsMd(conf, model);
+    if (!agentsMd.enabled)
+        return false;
+
+    auto agentMdPath = (AbsolutePath(".") ~ "AGENTS.md").Path;
+    if (!agentMdPath.exists)
+        return false;
+
+    string rawContent;
+    try {
+        rawContent = agentMdPath.readText;
+    } catch (Exception e) {
+        return false;
+    }
+
+    import std.string : strip;
+
+    if (rawContent.strip.empty)
+        return false;
+
+    const rawSize = rawContent.length;
+    if (!agentMdNeedsSummary(agentsMd, rawSize))
+        return false;
+
+    if (agentsMd.compression.mode != CompressionMode.auto_)
+        return agentsMd.compression.mode == CompressionMode.summary;
+
+    // auto + over-threshold: skip the status message when the cache already
+    // holds a valid summary for the current content (the recompute is then a
+    // fast cache read).
+    const contentChecksum = computeContentHash(rawContent);
+    auto cachedState = loadAgentMdCache((conf.dataDir ~ "agent_md_cache.json").Path);
+    return !(cachedState.isValid() && cachedState.checksum == contentChecksum);
+}
+
+private string agentMdRagTopic(const AgentsMdConfig agentsMd, bool summaryTreatment,
+        string topicName) @safe pure nothrow @nogc {
+    return (summaryTreatment && agentsMd.ragIndex) ? topicName : "";
+}
+
 // Process an AGENTS.md file end-to-end.
 // Orchestrates the full AGENTS.md workflow: noCwdConfig handling, checksum comparison,
 // cache hit/miss logic, summarization, RAG loading, and in-memory RAG reload.
@@ -391,20 +310,21 @@ private string delegate(SummaryChunkT[] summaries) bulletListMergeCallback = (Su
 //  config The LLM configuration (provides dataDir, summaryModel, ragConfig)
 //  noCwdConfig When true, skip AGENTS.md loading and clean up existing AGENTS.md data
 //  rag The RAG instance for loading content and removing topics
+//  agentsMd The effective AgentsMd treatment for the active model, resolved by
+//           the caller via effectiveAgentsMd (defaults: struct init = built-ins).
+//  model The active model config, supplying the per-field config-source
+//        provenance for the treatment log line (defaults: struct init = no
+//        per-model overrides).
 // Returns: The current AgentMdState, or a default-constructed state if no AGENTS.md is present.
-// NOTE: Cannot be @safe because RAG operations (db.getSources, isPrimaryInMemory, add)
-// and SummaryAgent operations are @system.
-AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool forceRefresh = false) {
-    import std.datetime : Clock;
-    import std.range : empty;
+AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool forceRefresh = false,
+        AgentsMdConfig agentsMd = AgentsMdConfig.init,
+        const CodeModelConfig model = CodeModelConfig.init) {
     import llm.summary_agent : SummaryAgent;
 
-    // ---- noCwdConfig handling: skip loading, clean up, return empty ----
     if (noCwdConfig) {
         logger.info("noCwdConfig is set: skipping AGENTS.md loading and cleaning up");
         removeAgentMdTopics(rag);
 
-        // Clear cache file
         auto cachePath = (config.dataDir ~ "agent_md_cache.json").Path;
         if (cachePath.exists) {
             try {
@@ -416,7 +336,6 @@ AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool fo
         return AgentMdState.init;
     }
 
-    // ---- forceRefresh: clear cache to force re-summarization ----
     if (forceRefresh) {
         auto cachePath = (config.dataDir ~ "agent_md_cache.json").Path;
         if (cachePath.exists) {
@@ -433,7 +352,7 @@ AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool fo
     auto agentMdPath = (workarea ~ "AGENTS.md").Path;
 
     if (!agentMdPath.exists) {
-        // AGENTS.md not found — clean up any leftover cache and RAG topics
+        // AGENTS.md not found - clean up any leftover cache and RAG topics
         auto cachePath = (config.dataDir ~ "agent_md_cache.json").Path;
         auto oldCachedState = loadAgentMdCache(cachePath);
         if (oldCachedState.isValid()) {
@@ -465,58 +384,67 @@ AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool fo
     }
 
     if (rawContent.strip.empty) {
+        // Whitespace-only AGENTS.md counts as no AGENTS.md
         logger.trace("AGENTS.md is empty, skipping");
         return AgentMdState.init;
     }
 
-    string resolvedContent;
-    try {
-        resolvedContent = resolveAgentMdContent(workarea, rawContent);
-    } catch (Exception e) {
-        // Non-fatal — log warning and continue
-        logger.warningf("Failed to resolve @path references in AGENTS.md: %s", e.msg);
-    }
+    string resolvedContent = rawContent;
 
-    if (resolvedContent.empty) {
-        logger.info("AGENTS.md content is empty after @path resolution, treating as no AGENTS.md");
+    if (!agentsMd.enabled) {
         return AgentMdState.init;
     }
 
+    const size_t rawSize = rawContent.length;
     const contentChecksum = computeContentHash(resolvedContent);
+    const topicName = makeAgentMdTopicName(contentChecksum);
+    const bool summaryTreatment = agentMdNeedsSummary(agentsMd, rawSize);
+
+    logger.infof("AGENTS.md treatment: %s; file is %s bytes vs thresholdKb=%s KB",
+            agentsMdSourceSummary(config, model), rawSize, agentsMd.compression.thresholdKb);
+
+    if (!summaryTreatment) {
+        if (rawSize > agentMdThresholdBytes(agentsMd)) {
+            logger.infof(
+                    "AGENTS.md is %s KB, exceeding compression.thresholdKb (%s KB); injecting verbatim by configuration",
+                    rawSize / 1024, agentsMd.compression.thresholdKb);
+        }
+        if (agentsMd.ragIndex) {
+            reloadAgentMdToRag(rag, resolvedContent, contentChecksum, config.ragConfig);
+        }
+        return AgentMdState(checksum: contentChecksum, summary: rawContent,
+                timestamp: Clock.currTime()); // ragTopic stays empty (init)
+    }
 
     auto cachePath = (config.dataDir ~ "agent_md_cache.json").Path;
     auto cachedState = loadAgentMdCache(cachePath);
 
     bool isCacheHit = cachedState.isValid() && (cachedState.checksum == contentChecksum);
 
-    // In-memory RAG: always reload regardless of cache state
     bool forceReload = (rag !is null) && rag.isPrimaryInMemory();
     logger.trace(forceReload, "In-memory RAG detected: forcing AGENTS.md load");
 
-    // return cached state (still ensure RAG has the topic for in-memory)
     if (isCacheHit) {
         logger.tracef("AGENTS.md cache hit (checksum: %s)", contentChecksum);
 
-        // For in-memory RAG, reload the topic to ensure it exists in ephemeral storage
-        if (forceReload) {
+        // For in-memory RAG, reload the topic to ensure it exists in ephemeral storage.
+        if (agentsMd.ragIndex && agentsMd.enabled && forceReload) {
             reloadAgentMdToRag(rag, resolvedContent, contentChecksum, config.ragConfig);
         }
 
+        cachedState.ragTopic = agentMdRagTopic(agentsMd, true, topicName);
         return cachedState;
     }
 
-    // ---- Cache miss: clean up old topic, summarize, load to RAG, save cache ----
     logger.infof("AGENTS.md cache miss (checksum: %s), generating summary", contentChecksum);
 
-    // Remove old AGENTS.md topic from RAG if content has changed
-    if (cachedState.isValid()) {
+    if (agentsMd.ragIndex && cachedState.isValid()) {
         removeAgentMdTopic(rag, cachedState.checksum);
     }
 
     string summary;
     try {
         auto sumAgent = SummaryAgent(config.summaryModel);
-        // Summary agent doesn't need skill context, use summary model's prompt
         sumAgent.setSystemPrompt(config.getPrompt(skillManager: null,
                 promptName: config.summaryModel.prompt, addSkills: false));
         summary = sumAgent.summarizeText(resolvedContent, 200, bulletListMergeCallback);
@@ -524,10 +452,12 @@ AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool fo
         logger.warningf("Failed to generate AGENTS.md summary: %s", e.msg);
         if (cachedState.isValid()) {
             logger.info("Using cached AGENTS.md summary after summarization failure");
-            // For in-memory RAG, ensure cached topic is reloaded
-            if (forceReload) {
+            if (agentsMd.ragIndex && agentsMd.enabled && forceReload) {
                 reloadAgentMdToRag(rag, resolvedContent, cachedState.checksum, config.ragConfig);
             }
+            // Stamp the pointer topic for the cached summary (its own checksum).
+            cachedState.ragTopic = agentMdRagTopic(agentsMd, true,
+                    makeAgentMdTopicName(cachedState.checksum));
             return cachedState;
         }
         return AgentMdState.init;
@@ -537,22 +467,23 @@ AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool fo
         logger.warning("AGENTS.md summary is empty");
         if (cachedState.isValid()) {
             logger.info("Using cached AGENTS.md summary after empty summary");
-            if (forceReload) {
+            if (agentsMd.ragIndex && agentsMd.enabled && forceReload) {
                 reloadAgentMdToRag(rag, resolvedContent, cachedState.checksum, config.ragConfig);
             }
+            cachedState.ragTopic = agentMdRagTopic(agentsMd, true,
+                    makeAgentMdTopicName(cachedState.checksum));
             return cachedState;
         }
         return AgentMdState.init;
     }
 
-    // ---- Load full content into RAG ----
-    if (rag !is null) {
+    if (rag !is null && agentsMd.ragIndex && agentsMd.enabled) {
         reloadAgentMdToRag(rag, resolvedContent, contentChecksum, config.ragConfig);
     }
 
-    // ---- Build and save new state ----
     auto newState = AgentMdState(checksum: contentChecksum, summary: summary,
             timestamp: Clock.currTime());
+    newState.ragTopic = agentMdRagTopic(agentsMd, true, topicName);
 
     if (saveAgentMdCache(cachePath, newState)) {
         logger.infof("Saved AGENTS.md cache (summary: %s chars)", summary.length);
@@ -563,382 +494,17 @@ AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool fo
     return newState;
 }
 
-// Unit Tests: @path resolution and security
-
-// Helper: safely remove a directory in scope(exit)
-private void safeRmdirRecurse(string path) @safe {
-    import std.file : rmdirRecurse;
-
-    try {
-        rmdirRecurse(path);
-    } catch (Exception) {
-    }
-}
-
-// C symlink function for creating symlinks in tests
-extern (C) int symlink(const(char)*, const(char)*);
-
-// Unified helper: creates a temporary test directory with cleanup support.
-// Supports both workarea-style (with AbsolutePath + createFile) and
-// dataDir-style (with Path) access patterns.
-private struct TestWorkarea {
-    import std.file : mkdirRecurse;
-
-    string path;
-    AbsolutePath workarea;
-
-    this(string name) {
-        this("", name);
-    }
-
-    this(string prefix, string name) {
-        path = "./llmfun_test/" ~ prefix ~ name ~ "_" ~ Clock.currTime.toString;
-        mkdirRecurse(path);
-        workarea = path.AbsolutePath;
-    }
-
-    void cleanup() @safe {
-        safeRmdirRecurse(path);
-    }
-
-    Path dirPath() @safe {
-        return Path(path);
-    }
-
-    // Create a file with given content relative to the temp directory
-    void createFile(string relPath, string content) @safe {
-        import std.file : mkdirRecurse;
-
-        auto fullPath = (workarea ~ relPath).AbsolutePath;
-        mkdirRecurse(fullPath.dirName.toString);
-        auto f = File(fullPath.toString, "w");
-        f.write(content);
-    }
-}
-
-@("direct AGENTS.md content without @path references passes through unchanged")
-unittest {
-    // Test: Direct AGENTS.md content (no @path) passes through unchanged
-    auto tw = TestWorkarea("path_direct");
-    scope (exit)
-        tw.cleanup();
-
-    string content = "# My Project\n\nThis is a regular AGENTS.md with no @path references.\n\n- Rule 1: Be helpful\n- Rule 2: Be concise";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == content, "Content without @path should pass through unchanged");
-}
-
-@("@path to a valid workarea file resolves to the referenced content")
-unittest {
-    // Test: @path to valid workarea file resolves correctly
-    auto tw = TestWorkarea("path_valid");
-    scope (exit)
-        tw.cleanup();
-
-    string refContent = "This is the referenced file content.\nIt has multiple lines.\nAnd more content.";
-    tw.createFile("rules.md", refContent);
-
-    string content = "@rules.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == refContent, "Expected resolved content to match referenced file");
-}
-
-@("@path to a non-existent file fails completely and returns the empty string")
-unittest {
-    // Test: @path to non-existent file produces empty result (complete failure)
-    auto tw = TestWorkarea("path_missing");
-    scope (exit)
-        tw.cleanup();
-
-    string content = "@nonexistent.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == "", "Complete @path failure should return empty string");
-}
-
-@("nested @path references resolve through the chain to the final content")
-unittest {
-    // Test: Nested @path references resolve correctly
-    auto tw = TestWorkarea("path_nested");
-    scope (exit)
-        tw.cleanup();
-
-    // Create inner referenced file
-    string innerContent = "Inner file content.";
-    tw.createFile("inner.md", innerContent);
-
-    // Create outer file that references inner
-    tw.createFile("outer.md", "@inner.md");
-
-    // AGENTS.md references outer.md, which references inner.md
-    string content = "@outer.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == innerContent, "Nested @path should resolve to final content");
-}
-
-@("@path with a ../ reference escaping the workarea is rejected")
-unittest {
-    // Test: Path traversal attacks (../) are rejected
-    auto tw = TestWorkarea("path_traversal");
-    scope (exit)
-        tw.cleanup();
-    // Try to escape workarea with ../
-    string content = "@../outside.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == "", "Path traversal should be rejected (complete failure returns empty)");
-}
-
-@("isPathInsideWorkarea allows inside and exact paths and rejects the prefix-spoof path")
-unittest {
-    // Test: isPathInsideWorkarea prefix attack prevention
-    auto workarea = "/workarea".AbsolutePath;
-    auto safePath = "/workarea/subdir/file.md".AbsolutePath;
-    auto evilPath = "/workarea_evil/file.md".AbsolutePath;
-    auto exactMatch = "/workarea".AbsolutePath;
-    assert(isPathInsideWorkarea(safePath, workarea), "Path inside workarea should be allowed");
-    assert(!isPathInsideWorkarea(evilPath, workarea), "Prefix attack path should be rejected");
-    assert(isPathInsideWorkarea(exactMatch, workarea), "Exact workarea match should be allowed");
-}
-
-@("@path to a symlinked file is rejected")
-unittest {
-    // Test: Symlinks are rejected
-    import std.file : mkdirRecurse;
-
-    string tmpDir = "./llmfun_test/path_symlink_" ~ Clock.currTime.toString;
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        safeRmdirRecurse(tmpDir);
-
-    auto workarea = tmpDir.AbsolutePath;
-
-    // Create a real file
-    {
-        auto f = File(((workarea ~ "real.md").AbsolutePath).toString, "w");
-        f.write("Real file content");
-    }
-    // Create a symlink to the real file using C's symlink function
-    symlink(((workarea ~ "real.md").AbsolutePath).toString.ptr,
-            ((workarea ~ "link.md").AbsolutePath).toString.ptr);
-
-    string content = "@link.md";
-    auto result = resolveAgentMdContent(workarea, content);
-    assert(result == "", "Symlink @path should be rejected (complete failure returns empty)");
-}
-
-@("@path to a file over 1MB is rejected")
-unittest {
-    // Test: File size limit enforcement (> 1MB rejected)
-    auto tw = TestWorkarea("path_size");
-    scope (exit)
-        tw.cleanup();
-
-    // Create a file larger than 1MB
-    import std.array : appender, replicate;
-
-    auto bigContent = appender!string();
-    auto line = "x".replicate(1024);
-    foreach (i; 0 .. 1100) {
-        bigContent.put(line);
-        bigContent.put('\n');
-    }
-    tw.createFile("big.md", bigContent.data);
-
-    string content = "@big.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == "", "Oversized file should be rejected (complete failure returns empty)");
-}
-
-@("@path chains deeper than 5 levels are rejected")
-unittest {
-    // Test: Recursion limit enforcement (> 5 levels rejected)
-    auto tw = TestWorkarea("path_recursion");
-    scope (exit)
-        tw.cleanup();
-
-    // Create a chain of files: level1 -> level2 -> level3 -> level4 -> level5 -> level6
-    // This exceeds the max recursion depth of 5
-    tw.createFile("level6.md", "Final content");
-
-    // Build chain: each file references the next
-    string[] levels = [
-        "level1.md", "level2.md", "level3.md", "level4.md", "level5.md"
-    ];
-    foreach (i, level; levels) {
-        string nextRef;
-        if (i == levels.length - 1) {
-            nextRef = "level6.md";
-        } else {
-            nextRef = levels[i + 1];
-        }
-        tw.createFile(level, "@" ~ nextRef);
-    }
-
-    string content = "@level1.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == "",
-            "Recursion depth limit should be exceeded (complete failure returns empty)");
-}
-
-@("@path chains within the 5-level recursion limit resolve successfully")
-unittest {
-    // Test: Recursion boundary - should succeed within limit
-    auto tw = TestWorkarea("path_recursion_boundary");
-    scope (exit)
-        tw.cleanup();
-
-    // Create a chain that stays within the 5-level depth limit:
-    // level1 -> level2 -> final (depths 1, 3, 5)
-    tw.createFile("final.md", "Final content reached");
-    tw.createFile("level2.md", "@final.md");
-    tw.createFile("level1.md", "@level2.md");
-
-    string content = "@level1.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == "Final content reached", "Boundary recursion should succeed");
-}
-
-@("circular @path references (A to B to A) are detected and rejected")
-unittest {
-    // Test: Circular @path reference detection
-    auto tw = TestWorkarea("path_circular");
-    scope (exit)
-        tw.cleanup();
-
-    // Create circular reference: A -> B -> A
-    tw.createFile("fileA.md", "@fileB.md");
-    tw.createFile("fileB.md", "@fileA.md");
-
-    string content = "@fileA.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == "", "Circular @path reference should be detected and rejected");
-}
-
-@("partial @path failure keeps the successful resolutions and marks the failed references")
-unittest {
-    // Test: Partial @path failure handling (some succeed, some fail)
-    auto tw = TestWorkarea("path_partial");
-    scope (exit)
-        tw.cleanup();
-
-    // Create one valid file
-    string validContent = "This content is valid.";
-    tw.createFile("valid.md", validContent);
-
-    // Reference both valid and invalid files
-    string content = "@valid.md\n@nonexistent.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(!result.empty, "Partial failure should not return empty");
-    assert(result.canFind(validContent), "Partial failure should include successful resolutions");
-    assert(result.canFind("@@RESOLVE_ERROR"), "Partial failure should include error markers");
-}
-
-@("complete @path failure (all references missing) returns the empty string")
-unittest {
-    // Test: Complete @path failure handling (all fail, returns empty)
-    auto tw = TestWorkarea("path_completefail");
-    scope (exit)
-        tw.cleanup();
-
-    // Reference multiple non-existent files
-    string content = "@missing1.md\n@missing2.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == "", "Complete @path failure should return empty string");
-}
-
-@("mixed regular text and @path references: the text is preserved and the references resolved")
-unittest {
-    // Test: Mixed content with @path references and regular text
-    auto tw = TestWorkarea("path_mixed");
-    scope (exit)
-        tw.cleanup();
-
-    string refContent = "Referenced rules:\n- Always be polite";
-    tw.createFile("rules.md", refContent);
-
-    string content = "# Agent Instructions\n\n@rules.md\n\nAdditional instructions here.";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result.canFind("# Agent Instructions"), "Regular text should be preserved");
-    assert(result.canFind("Referenced rules"), "@path content should be resolved");
-    assert(result.canFind("Additional instructions here."), "Text after @path should be preserved");
-}
-
-@("@path with a subdirectory prefix resolves the file")
-unittest {
-    // Test: @path with subdirectory resolution
-    auto tw = TestWorkarea("path_subdir");
-    scope (exit)
-        tw.cleanup();
-
-    string refContent = "Documentation content from subdirectory.";
-    tw.createFile("docs/guide.md", refContent);
-
-    string content = "@docs/guide.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == refContent, "Subdirectory @path should resolve correctly");
-}
-
-@("a bare @ line passes through without being treated as an @path reference")
-unittest {
-    // Test: Empty @ line is passed through (not treated as @path)
-    auto tw = TestWorkarea("path_empty");
-    scope (exit)
-        tw.cleanup();
-
-    string content = "Some text\n@\nMore text";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == content, "Empty @ line should pass through unchanged");
-}
-
-@("a self-referencing @path is detected as circular and rejected")
-unittest {
-    // Test: Self-referencing @path (file references itself)
-    auto tw = TestWorkarea("path_selfref");
-    scope (exit)
-        tw.cleanup();
-
-    // Create a file that references itself
-    tw.createFile("self.md", "@self.md");
-
-    string content = "@self.md";
-    auto result = resolveAgentMdContent(tw.workarea, content);
-    assert(result == "", "Self-referencing @path should be detected as circular");
-}
-
-// ----------------------------------------------------------------------------
-// Unit Tests: Integration tests for AGENTS.md workflow
-// ----------------------------------------------------------------------------
-
-// Helper wrapper for cache test data directories
-private struct TestDataDir {
-    TestWorkarea inner;
-
-    string path() @safe @property {
-        return inner.path;
-    }
-
-    Path dataDir() @safe @property {
-        return inner.dirPath;
-    }
-
-    this(string name) {
-        inner = TestWorkarea("data_", name);
-    }
-
-    void cleanup() @safe {
-        inner.cleanup();
-    }
-}
-
 @("agent-md cache round trip: save writes the file and load returns the same state")
 unittest {
     // Integration Test: Cache file creation, persistence, and round-trip
-    auto td = TestDataDir("cache_roundtrip");
+    import llm.test_util : testArea;
+
+    auto td = testArea("cache_roundtrip");
     scope (exit)
-        td.cleanup();
+        td.cleanup;
 
-    auto cachePath = (td.dataDir ~ "agent_md_cache.json").Path;
+    auto cachePath = td.workArea ~ "agent_md_cache.json";
 
-    // Verify cache doesn't exist initially
     assert(!cachePath.exists, "Cache file should not exist initially");
 
     // Load non-existent cache returns default state
@@ -947,13 +513,11 @@ unittest {
     assert(emptyState.checksum == 0, "Empty cache checksum should be 0");
     assert(emptyState.summary.empty, "Empty cache summary should be empty");
 
-    // Save a state
     auto testState = AgentMdState(checksum: 12345678, summary: "- Rule 1: Be helpful\n- Rule 2: Be concise\n",
             timestamp: Clock.currTime());
     assert(saveAgentMdCache(cachePath, testState), "Cache save should succeed");
     assert(cachePath.exists, "Cache file should exist after save");
 
-    // Load and verify round-trip
     auto loadedState = loadAgentMdCache(cachePath);
     assert(loadedState.isValid(), "Loaded state should be valid");
     assert(loadedState.checksum == testState.checksum, "Checksum should match after round-trip");
@@ -962,53 +526,49 @@ unittest {
 
 @("a corrupted cache JSON loads as an invalid state without throwing")
 unittest {
-    // Integration Test: Cache file corruption handling
-    auto td = TestDataDir("cache_corrupt");
+    import llm.test_util : testArea;
+
+    auto td = testArea("cache_corrupt");
     scope (exit)
-        td.cleanup();
+        td.cleanup;
 
-    auto cachePath = (td.dataDir ~ "agent_md_cache.json").Path;
+    auto cachePath = td.createFile("agent_md_cache.json", "{ corrupted json !!! }");
 
-    // Write corrupted JSON
-    File(cachePath.toString, "w").writeln("{ corrupted json !!! }");
-
-    // Should handle gracefully and return empty state
     auto state = loadAgentMdCache(cachePath);
     assert(!state.isValid(), "Corrupted cache should return invalid state");
 }
 
 @("removing the cache file clears the state; loading the removed cache is invalid")
 unittest {
-    // Integration Test: Cache clearing (file removal)
-    auto td = TestDataDir("cache_clear");
+    import llm.test_util : testArea;
+
+    auto td = testArea("cache_clear");
     scope (exit)
-        td.cleanup();
+        td.cleanup;
 
-    auto cachePath = (td.dataDir ~ "agent_md_cache.json").Path;
+    auto cachePath = td.workArea ~ "agent_md_cache.json";
 
-    // Create and save cache
     auto testState = AgentMdState(checksum: 99999, summary: "- Some rule\n",
             timestamp: Clock.currTime());
     saveAgentMdCache(cachePath, testState);
     assert(cachePath.exists, "Cache should exist");
 
-    // Clear cache by removing file
     remove(cachePath);
     assert(!cachePath.exists, "Cache should be removed");
 
-    // Loading removed cache returns empty state
     auto state = loadAgentMdCache(cachePath);
     assert(!state.isValid(), "Removed cache should return invalid state");
 }
 
 @("a full AgentMdState (multi-line summary, non-init timestamp) survives serialization")
 unittest {
-    // Integration Test: AgentMdState serialization with all fields
-    auto td = TestDataDir("cache_fullserial");
-    scope (exit)
-        td.cleanup();
+    import llm.test_util : testArea;
 
-    auto cachePath = (td.dataDir ~ "agent_md_cache.json").Path;
+    auto td = testArea("cache_fullserial");
+    scope (exit)
+        td.cleanup;
+
+    auto cachePath = td.workArea ~ "agent_md_cache.json";
 
     // Save a state with positive checksum (negative checksums may cause JSON issues)
     AgentMdState original;
@@ -1024,19 +584,15 @@ unittest {
 
 @("makeAgentMdTopicName yields the agent_md_ prefix with 8 hex chars, 16 for negative checksums, distinct per checksum")
 unittest {
-    // Integration Test: RAG topic naming convention
-    // Verify makeAgentMdTopicName produces correct format
     long checksum1 = 12345678;
     string topic1 = makeAgentMdTopicName(checksum1);
     assert(topic1.startsWith("agent_md_"), "Topic should start with agent_md_ prefix");
     auto hexPart1 = topic1["agent_md_".length .. $];
     assert(hexPart1.length == 8, "Hex portion should be 8 characters");
-    // Verify different checksums produce different topics
     long checksum2 = 87654321;
     string topic2 = makeAgentMdTopicName(checksum2);
     assert(topic1 != topic2, "Different checksums should produce different topic names");
 
-    // Verify negative checksums are handled (64-bit hex, so 16 chars for -1)
     long checksumNeg = -1;
     string topicNeg = makeAgentMdTopicName(checksumNeg);
     assert(topicNeg.startsWith("agent_md_"), "Negative checksum topic should have correct prefix");
@@ -1047,7 +603,6 @@ unittest {
 
 @("bulletListMerge combines chunks and deduplicates identical bullet lines")
 unittest {
-    // Integration Test: Bullet list merge with multiple chunks
     SummaryChunkT[] chunks;
     chunks ~= SummaryChunkT("Some summary text from chunk 1\n- Point A\n- Point B",
             size_t(0), size_t(50));
@@ -1061,7 +616,6 @@ unittest {
     assert(result.canFind("Point B"), "Should contain Point B");
     assert(result.canFind("Point C"), "Should contain Point C");
 
-    // Verify deduplication: Point A appears only once
     auto lines = result.splitLines.filter!(a => !a.empty).array;
     auto pointALines = lines.filter!(a => a == "- Point A").array;
     assert(pointALines.length == 1, "Duplicate bullets should be deduplicated");
@@ -1069,7 +623,6 @@ unittest {
 
 @("bulletListMerge over empty chunks returns an empty result")
 unittest {
-    // Integration Test: Bullet list merge with empty chunks
     SummaryChunkT[] emptyChunks;
     auto result = bulletListMerge(emptyChunks);
     assert(result.empty, "Empty chunks should produce empty result");
@@ -1077,7 +630,6 @@ unittest {
 
 @("bulletListMerge normalizes star bullets to dashes and prefixes plain lines with a bullet")
 unittest {
-    // Integration Test: Bullet list merge normalizes bullet prefixes
     SummaryChunkT[] chunks;
     chunks ~= SummaryChunkT("- Normal bullet\n* Star bullet\nPlain text line",
             size_t(0), size_t(40));
@@ -1091,7 +643,6 @@ unittest {
 
 @("AgentMdState equality compares all fields: same fields equal, different checksum not")
 unittest {
-    // Integration Test: AgentMdState equality comparison
     SysTime fixedTime = SysTime(DateTime(2024, 1, 1, 0, 0, 0), UTC());
 
     auto state1 = AgentMdState(checksum: 100, summary: "- Rule 1\n", timestamp: fixedTime);
@@ -1106,7 +657,6 @@ unittest {
 
 @("AgentMdState.isValid requires a non-zero checksum and a non-empty summary")
 unittest {
-    // Integration Test: AgentMdState isValid checks
     auto validState = AgentMdState(checksum: 1, summary: "- Rule\n", timestamp: SysTime.init);
     assert(validState.isValid(),
             "State with non-zero checksum and non-empty summary should be valid");
@@ -1123,58 +673,56 @@ unittest {
 
 @("end-to-end cache workflow: first-run miss, second-run hit, content-change miss, cache update")
 unittest {
-    // Integration Test: End-to-end workflow simulation (cache + state management)
-    // Simulates the key steps of processAgentMd without RAG/LLM dependencies
-    auto td = TestDataDir("workflow_sim");
+    import llm.test_util : testArea;
+
+    auto td = testArea("workflow_sim");
     scope (exit)
-        td.cleanup();
+        td.cleanup;
 
-    auto cachePath = (td.dataDir ~ "agent_md_cache.json").Path;
-    auto workarea = td.path.AbsolutePath;
+    auto cachePath = td.workArea ~ "agent_md_cache.json";
 
-    // Step 1: Simulate first run - no cache exists
+    // Simulate first run - no cache exists
     auto cachedState = loadAgentMdCache(cachePath);
     assert(!cachedState.isValid(), "First run: no cache should exist");
 
-    // Step 2: Create AGENTS.md content and compute hash
+    // Create AGENTS.md content and compute hash
     string agentContent = "# Project Agent\n\n- Always use D programming language\n- Follow the coding standards\n- Write tests for all new code\n";
     long contentChecksum = computeContentHash(agentContent);
     assert(contentChecksum != 0, "Content hash should be non-zero");
 
-    // Step 3: Simulate summary generation (in real code, this comes from LLM)
+    // Simulate summary generation (in real code, this comes from LLM)
     string mockSummary = "- Always use D programming language\n- Follow the coding standards\n- Write tests for all new code\n";
 
-    // Step 4: Save cache (simulating successful first run)
+    // Save cache (simulating successful first run)
     auto newState = AgentMdState(contentChecksum, mockSummary, Clock.currTime());
     assert(saveAgentMdCache(cachePath, newState), "Cache save should succeed on first run");
 
-    // Step 5: Simulate second run - cache hit
+    // Simulate second run - cache hit
     cachedState = loadAgentMdCache(cachePath);
     assert(cachedState.isValid(), "Second run: cache should be valid");
     assert(cachedState.checksum == contentChecksum, "Second run: checksum should match");
     assert(cachedState.summary == mockSummary, "Second run: summary should match");
 
-    // Step 6: Simulate content change - cache miss
+    // Simulate content change - cache miss
     string modifiedContent = agentContent ~ "- New rule added\n";
     long newChecksum = computeContentHash(modifiedContent);
     assert(newChecksum != contentChecksum, "Modified content should have different hash");
 
     // In real code, this would trigger re-summarization
-    // Verify the cache still has old data (simulating cache miss detection)
     cachedState = loadAgentMdCache(cachePath);
     assert(cachedState.checksum != newChecksum, "Cache miss: old checksum differs from new");
 
-    // Step 7: Update cache with new state
+    // Update cache with new state
     string newMockSummary = mockSummary ~ "- New rule added\n";
     auto updatedState = AgentMdState(newChecksum, newMockSummary, Clock.currTime());
     assert(saveAgentMdCache(cachePath, updatedState), "Cache update should succeed");
 
-    // Step 8: Verify updated cache
+    // Verify updated cache
     cachedState = loadAgentMdCache(cachePath);
     assert(cachedState.checksum == newChecksum, "Updated cache should have new checksum");
     assert(cachedState.summary == newMockSummary, "Updated cache should have new summary");
 
-    // Step 9: Verify topic naming for both checksums
+    // Verify topic naming for both checksums
     string oldTopic = makeAgentMdTopicName(contentChecksum);
     string newTopic = makeAgentMdTopicName(newChecksum);
     assert(oldTopic.startsWith("agent_md_"), "Old topic should have correct prefix");
@@ -1184,13 +732,13 @@ unittest {
 
 @("noCwdConfig cleanup removes the cache; the state is invalid afterwards")
 unittest {
-    // Integration Test: noCwdConfig cleanup simulation
-    // Simulates the cleanup path when noCwdConfig is true
-    auto td = TestDataDir("nocwdconfig");
-    scope (exit)
-        td.cleanup();
+    import llm.test_util : testArea;
 
-    auto cachePath = (td.dataDir ~ "agent_md_cache.json").Path;
+    auto td = testArea("nocwdconfig");
+    scope (exit)
+        td.cleanup;
+
+    auto cachePath = td.workArea ~ "agent_md_cache.json";
 
     // Pre-condition: cache exists with valid data
     auto oldState = AgentMdState(checksum: 12345, summary: "- Old rule\n",
@@ -1198,77 +746,66 @@ unittest {
     saveAgentMdCache(cachePath, oldState);
     assert(cachePath.exists, "Cache should exist before cleanup");
 
-    // Simulate noCwdConfig cleanup: remove cache
     remove(cachePath);
     assert(!cachePath.exists, "Cache should be removed during noCwdConfig cleanup");
 
-    // Verify state after cleanup
     auto state = loadAgentMdCache(cachePath);
     assert(!state.isValid(), "State should be invalid after noCwdConfig cleanup");
 }
 
 @(
-        "prompt composition order: base prompt precedes the AGENTS.md summary, which precedes the RAG instruction")
+        "prompt composition order: base prompt precedes the AGENTS.md payload, which precedes the RAG pointer instruction")
 unittest {
-    // Integration Test: Prompt composition order specification
-    // 1. basePrompt, 2. alwaysApplyBlock, 3. agentMdSummary, 4. manifestXml,
-    // 5. ragInstruction, 6. memory, 7. timestamp
-    // This test verifies the relative ordering of key components.
-    // Note: Full getPrompt() integration testing requires LlmConfig setup.
     string basePrompt = "You are an AI assistant.";
-    string agentMdSummary = "# AGENTS.md Rules\n- Rule 1\n- Rule 2";
-    string ragInstruction = "For detailed explanations, query your RAG knowledge base.";
+    string agentsMdPayload = "# AGENTS.md Rules\n- Rule 1\n- Rule 2";
+    string agentsMdInstruction = "For detailed explanations, query your RAG knowledge base.";
 
-    // Simulate prompt composition order
-    string composed = basePrompt ~ "\n\n" ~ agentMdSummary ~ "\n\n" ~ ragInstruction;
+    string composed = basePrompt ~ "\n\n" ~ agentsMdPayload ~ "\n\n" ~ agentsMdInstruction;
 
     assert(composed.canFind(basePrompt), "Composed prompt should contain base prompt");
-    assert(composed.canFind(agentMdSummary), "Composed prompt should contain AGENTS.md summary");
-    assert(composed.canFind(ragInstruction), "Composed prompt should contain RAG instruction");
+    assert(composed.canFind(agentsMdPayload),
+            "Composed prompt should contain the AGENTS.md payload");
+    assert(composed.canFind(agentsMdInstruction),
+            "Composed prompt should contain the RAG pointer instruction");
 
-    // Verify order: basePrompt comes before summary, summary comes before ragInstruction
     size_t basePos = indexOf(composed, basePrompt);
-    size_t summaryPos = indexOf(composed, agentMdSummary);
-    size_t ragPos = indexOf(composed, ragInstruction);
-    assert(basePos < summaryPos, "Base prompt should come before AGENTS.md summary");
-    assert(summaryPos < ragPos, "AGENTS.md summary should come before RAG instruction");
+    size_t payloadPos = indexOf(composed, agentsMdPayload);
+    size_t instructionPos = indexOf(composed, agentsMdInstruction);
+    assert(basePos < payloadPos, "Base prompt should come before the AGENTS.md payload");
+    assert(payloadPos < instructionPos,
+            "AGENTS.md payload should come before the RAG pointer instruction");
 }
 
 @(
         "forceRefresh clears the stale cache before re-summarization; the new cache holds the new checksum")
 unittest {
-    // Integration Test: forceRefresh workflow simulation
-    // Simulates processAgentMd's forceRefresh path: the stale cache is
-    // cleared before re-summarization.
-    auto td = TestDataDir("forcerefresh");
-    scope (exit)
-        td.cleanup();
+    import llm.test_util : testArea;
 
-    auto cachePath = (td.dataDir ~ "agent_md_cache.json").Path;
+    auto td = testArea("forcerefresh");
+    scope (exit)
+        td.cleanup;
+
+    auto cachePath = td.workArea ~ "agent_md_cache.json";
 
     // Pre-condition: cache exists
     auto oldState = AgentMdState(checksum: 11111, summary: "- Old summary\n",
             timestamp: Clock.currTime());
     saveAgentMdCache(cachePath, oldState);
 
-    // Simulate forceRefresh: clear cache
     if (cachePath.exists) {
         remove(cachePath);
     }
 
-    // Verify cache was cleared
     auto state = loadAgentMdCache(cachePath);
     assert(!state.isValid(), "Cache should be invalid after forceRefresh");
 
     // In real code, processAgentMd would now re-summarize
-    // Simulate the re-summarization with new checksum
     string content = "# Updated Agent\n- New rules\n";
     long newChecksum = computeContentHash(content);
     auto newState = AgentMdState(checksum: newChecksum, summary: "- New summary\n",
             timestamp: Clock.currTime());
     saveAgentMdCache(cachePath, newState);
 
-    // Verify new cache was created
     state = loadAgentMdCache(cachePath);
     assert(state.isValid(), "Cache should be valid after refresh");
     assert(state.checksum == newChecksum, "Cache should have new checksum after refresh");
@@ -1276,13 +813,13 @@ unittest {
 
 @("AGENTS.md removal invalidates the cached state")
 unittest {
-    // Integration Test: AGENTS.md removal workflow
-    // Simulates when AGENTS.md file is deleted after being cached
-    auto td = TestDataDir("agentremoval");
-    scope (exit)
-        td.cleanup();
+    import llm.test_util : testArea;
 
-    auto cachePath = (td.dataDir ~ "agent_md_cache.json").Path;
+    auto td = testArea("agentremoval");
+    scope (exit)
+        td.cleanup;
+
+    auto cachePath = td.workArea ~ "agent_md_cache.json";
 
     // Pre-condition: cache exists with valid data
     auto oldState = AgentMdState(checksum: 55555, summary: "- Cached rule\n",
@@ -1290,8 +827,6 @@ unittest {
     saveAgentMdCache(cachePath, oldState);
     assert(loadAgentMdCache(cachePath).isValid(), "Cache should be valid before removal");
 
-    // Simulate AGENTS.md removal: clean up cache and RAG topics
-    // (In real code, removeAgentMdTopics(rag) would also be called)
     // Simulate AGENTS.md removal: clean up cache and RAG topics
     // NOTE: In real code, removeAgentMdTopics(rag) would also be called to clean
     // up RAG entries. This test cannot verify RAG topic removal without a RAG
@@ -1301,34 +836,8 @@ unittest {
     assert(!state.isValid(), "Cache should be invalid after AGENTS.md removal");
 }
 
-@(
-        "mixed content resolution keeps the header and surrounding text while inlining the referenced file")
-unittest {
-    // Integration Test: resolveAgentMdContent with mixed content
-    // Verify that regular text and @path references work together
-    auto tw = TestWorkarea("integration_mixed");
-    scope (exit)
-        tw.cleanup();
-
-    // Create a referenced file
-    tw.createFile("standards.md",
-            "## Coding Standards\n- Use 4-space indentation\n- Follow D style guide");
-
-    // AGENTS.md with both text and @path
-    string content = "# Project Agent\n\n## General Rules\n- Be helpful and concise\n\n## Standards\n@standards.md\n\n## Additional Notes\nRemember to write tests.";
-
-    auto result = resolveAgentMdContent(tw.workarea, content);
-
-    assert(result.canFind("# Project Agent"), "Header should be preserved");
-    assert(result.canFind("Be helpful and concise"), "Regular text should be preserved");
-    assert(result.canFind("Coding Standards"), "Referenced content should be included");
-    assert(result.canFind("Remember to write tests"), "Text after @path should be preserved");
-}
-
 @("computeContentHash is deterministic, distinct for different content, and non-zero")
 unittest {
-    // Integration Test: computeContentHash consistency
-    // Verify that the same content always produces the same hash
     string content1 = "Some content to hash";
     string content2 = "Some content to hash";
     string content3 = "Different content";
@@ -1340,4 +849,345 @@ unittest {
     assert(hash1 == hash2, "Same content should produce same hash");
     assert(hash1 != hash3, "Different content should produce different hash");
     assert(hash1 != 0, "Hash should not be zero for non-empty content");
+}
+
+@(
+        "agentMdNeedsSummary decision table: enabled x mode x size, threshold boundary at thresholdKb*1024")
+unittest {
+    auto summaryCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.summary, 20), true);
+    auto fullCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.full, 20), true);
+    auto autoCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.auto_, 20), true);
+    auto disabledCfg = AgentsMdConfig(false, AgentsMdCompression(CompressionMode.summary, 20), true);
+
+    // mode=summary always summarizes (when enabled)
+    assert(agentMdNeedsSummary(summaryCfg, 0));
+    assert(agentMdNeedsSummary(summaryCfg, 21 * 1024));
+
+    // mode=full never summarizes
+    assert(!agentMdNeedsSummary(fullCfg, 0));
+    assert(!agentMdNeedsSummary(fullCfg, 21 * 1024));
+
+    // mode=auto: within the threshold -> full treatment, over -> summary.
+    // Boundary: size == thresholdKb*1024 stays full, size == thresholdKb*1024+1
+    // needs the summary treatment.
+    assert(!agentMdNeedsSummary(autoCfg, 20 * 1024),
+            "size == thresholdKb*1024 stays on the full treatment");
+    assert(agentMdNeedsSummary(autoCfg, 20 * 1024 + 1),
+            "size == thresholdKb*1024+1 needs the summary treatment");
+
+    // enabled=false is a pure no-op regardless of mode or size.
+    assert(!agentMdNeedsSummary(disabledCfg, 0));
+    assert(!agentMdNeedsSummary(disabledCfg, 100 * 1024));
+
+    // The threshold bytes are clamped to int.max for an unrepresentable
+    // thresholdKb, so the boundary stays representable instead of wrapping.
+    auto absurdCfg = AgentsMdConfig(true,
+            AgentsMdCompression(CompressionMode.auto_, long.max), true);
+    assert(!agentMdNeedsSummary(absurdCfg, int.max),
+            "size == clamped int.max boundary stays on the full treatment");
+    assert(agentMdNeedsSummary(absurdCfg, size_t.max),
+            "a size above the clamped int.max boundary needs the summary treatment");
+}
+
+@("agentMdRagTopic: pointer topic only for the summary treatment with ragIndex on")
+unittest {
+    auto onCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.auto_, 20), true);
+    auto offCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.auto_, 20), false);
+
+    assert(agentMdRagTopic(onCfg, true, "agent_md_1a2b3c4d") == "agent_md_1a2b3c4d");
+    assert(agentMdRagTopic(onCfg, false, "agent_md_1a2b3c4d").empty,
+            "full-text treatment: no pointer (the model already holds the text)");
+    assert(agentMdRagTopic(offCfg, true, "agent_md_1a2b3c4d").empty,
+            "ragIndex=false: nothing to point at");
+}
+
+/// The test helpers. The real processAgentMd hardcodes its workarea
+/// to AbsolutePath(".") and the dub test runner executes tests concurrently,
+/// so tests must not touch the process cwd; the re-index and topic-removal
+/// mechanics are covered at the reloadAgentMdToRag / removeAgentMdTopic level
+/// instead, leaving the inline gate wiring to the integration tests.
+version (unittest) {
+    import std.conv : to;
+
+    import llm.config : RagConfig, RagDatabaseConfig;
+    import llm.rag : RAG;
+    import llm.test_util : TestArea, TestEmbedder, testArea;
+
+    RAG makeInMemoryAgentMdRag(ref TestArea td) {
+        auto rag = new RAG(new TestEmbedder(),
+                RagDatabaseConfig(Path("/nonexistent_dir/agent_md_test.db"), "agent_md test rag"),
+                null);
+        td.addRag(rag);
+        return rag;
+    }
+
+    struct CacheFixture {
+        LlmConfig conf;
+        Path cachePath;
+    }
+
+    CacheFixture cacheFixture(ref TestArea td) {
+        CacheFixture f;
+        f.conf = LlmConfig();
+        f.conf.dataDir = td.workArea;
+        f.cachePath = td.workArea ~ "agent_md_cache.json";
+        return f;
+    }
+
+    struct RawAgentsMd {
+        string text;
+        long checksum;
+    }
+
+    RawAgentsMd readRawAgentsMd() {
+        immutable rawContent = (AbsolutePath(".") ~ "AGENTS.md").Path;
+        assert(rawContent.exists, "the repo AGENTS.md must exist for this matrix");
+        immutable rawText = rawContent.readText;
+        assert(!rawText.strip.empty,
+                "this matrix needs a non-whitespace repo AGENTS.md (whitespace-only counts as no AGENTS.md)");
+        return RawAgentsMd(rawText, computeContentHash(rawText));
+    }
+}
+
+@("reloadAgentMdToRag: re-indexing is idempotent - same content re-adds nothing, changed content lands under a fresh topic")
+unittest {
+    auto td = testArea("agent_md_reload_idempotent");
+    scope (exit)
+        td.cleanup();
+
+    auto rag = makeInMemoryAgentMdRag(td);
+    immutable ragConf = RagConfig.init;
+
+    immutable content = "# Project rules\n\n- Keep the build green\n"
+        ~ "- Prefer small, focused modules\n";
+    immutable checksum = computeContentHash(content);
+
+    // First index: exactly one source under the checksum-derived topic.
+    reloadAgentMdToRag(rag, content, checksum, ragConf);
+    auto sources = rag.db.getSources;
+    assert(sources.length == 1, "exactly one RAG source expected, got " ~ sources.length.to!string);
+    bool sawTopic;
+    foreach (immutable source; sources)
+        source.origin.match!((Topic t) {
+            if (t.name == makeAgentMdTopicName(checksum))
+                sawTopic = true;
+        }, (_) {});
+    assert(sawTopic, "the topic must be checksum-derived");
+
+    // Re-index with the same content and checksum (the cache-free full path
+    // does this on every run): the same topic name, the dedup no-ops, still
+    // one source.
+    reloadAgentMdToRag(rag, content, checksum, ragConf);
+    assert(rag.db.getSources.length == 1,
+            "re-indexing the same content must not duplicate the topic, got "
+            ~ rag.db.getSources.length.to!string ~ " sources");
+    sawTopic = false;
+    foreach (immutable source; rag.db.getSources)
+        source.origin.match!((Topic t) {
+            if (t.name == makeAgentMdTopicName(checksum))
+                sawTopic = true;
+        }, (_) {});
+    assert(sawTopic, "the surviving topic must be the checksum-derived one");
+
+    // Re-index with changed content under a new checksum: a second,
+    // checksum-derived topic appears (the full path relies on add()'s dedup,
+    // never on removal, so stale topics stay until the cache-miss sweep).
+    immutable newContent = "# Other rules\n\n- Be concise\n- Verify before asserting\n";
+    immutable newChecksum = computeContentHash(newContent);
+    reloadAgentMdToRag(rag, newContent, newChecksum, ragConf);
+    assert(rag.db.getSources.length == 2,
+            "changed content must land under a fresh topic, got "
+            ~ rag.db.getSources.length.to!string ~ " sources");
+    bool sawNew;
+    foreach (immutable source; rag.db.getSources)
+        source.origin.match!((Topic t) {
+            if (t.name == makeAgentMdTopicName(newChecksum))
+                sawNew = true;
+        }, (_) {});
+    assert(sawNew, "the new content's topic must be indexed");
+}
+
+@("removeAgentMdTopic: removes the checksum's topic and tolerates a missing one")
+unittest {
+    auto td = testArea("agent_md_remove_topic");
+    scope (exit)
+        td.cleanup();
+
+    auto rag = makeInMemoryAgentMdRag(td);
+    immutable ragConf = RagConfig.init;
+
+    immutable content = "# Stale topic rules\n\n- rule one\n- rule two\n";
+    immutable checksum = computeContentHash(content);
+    reloadAgentMdToRag(rag, content, checksum, ragConf);
+    assert(rag.db.getSources.length == 1,
+            "the seed must index the topic first, got "
+            ~ rag.db.getSources.length.to!string ~ " sources");
+
+    // The removal the gated cache-miss branch performs: the checksum's topic
+    // is gone, the source count drops to zero.
+    removeAgentMdTopic(rag, checksum);
+    assert(rag.db.getSources.length == 0, "the topic must be removed");
+
+    // Removing an absent topic (a second sweep, or the ragIndex=false cache
+    // miss skipping the first one) is a no-op, not an error.
+    removeAgentMdTopic(rag, checksum);
+    assert(rag.db.getSources.length == 0, "removing an absent topic must stay a no-op");
+}
+
+// ---- Cache-rule verification matrix ----
+// These tests prove the cache rules end-to-end against a real
+// agent_md_cache.json in a temp data dir (TestArea). The summarize step is
+// stubbed by pre-seeding the cache (the deterministic approach of the
+// forceRefresh test above): processAgentMd hardcodes its workarea to
+// AbsolutePath(".") and the dub test runner executes tests concurrently, so
+// no test may chdir and no test may drive the network SummaryAgent. The
+// fixture wiring lives in cacheFixture / readRawAgentsMd (version (unittest)
+// block above).
+
+@("cache hit: the summary is generated once per content - the second run with the same content and mode is a checksum hit returning the cached summary without a second summarize")
+unittest {
+    import llm.test_util : testArea;
+
+    auto td = testArea("cache_hit_once");
+    scope (exit)
+        td.cleanup;
+    auto fx = cacheFixture(td);
+
+    // The real workarea AGENTS.md is the content under test (read-only).
+    immutable agentMd = readRawAgentsMd();
+
+    // First run: summarize (stubbed) + cache write.
+    immutable generatedSummary = "- stubbed AGENTS.md summary: generated once\n";
+    assert(saveAgentMdCache(fx.cachePath, AgentMdState(agentMd.checksum,
+            generatedSummary, Clock.currTime())));
+    immutable cacheBefore = fx.cachePath.readText;
+
+    // Second run with the same content and mode: a checksum cache hit returns
+    // the stored summary - the network SummaryAgent is never constructed.
+    auto summaryCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.summary, 20), false);
+    auto state = processAgentMd(fx.conf, false, null, false, summaryCfg);
+    assert(state.checksum == agentMd.checksum, "the hit must carry the cached checksum");
+    assert(state.summary == generatedSummary,
+            "the cache hit must hand back the stored summary without a second summarize");
+    assert(fx.cachePath.readText == cacheBefore, "a cache hit must not rewrite the cache file");
+}
+
+@("mode toggle reuses the cached summary: summary run writes the cache, full run leaves it untouched, summary run hits it again without re-summarizing")
+unittest {
+    import llm.test_util : testArea;
+
+    auto td = testArea("cache_mode_toggle");
+    scope (exit)
+        td.cleanup;
+    auto fx = cacheFixture(td);
+
+    immutable agentMd = readRawAgentsMd();
+
+    // First run, summary mode: summarize (stubbed) + cache write.
+    immutable generatedSummary = "- stubbed AGENTS.md summary: generated once\n";
+    assert(saveAgentMdCache(fx.cachePath, AgentMdState(agentMd.checksum,
+            generatedSummary, Clock.currTime())));
+
+    // Switch to full: verbatim payload, and the cache file must stay
+    // untouched (no cache activity on the full path).
+    auto fullCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.full, 20), false);
+    immutable cacheBefore = fx.cachePath.readText;
+    auto fullState = processAgentMd(fx.conf, false, null, false, fullCfg);
+    assert(fullState.summary == agentMd.text,
+            "the full treatment must inject the verbatim raw text");
+    assert(fullState.checksum == agentMd.checksum, "the checksum is the raw text's");
+    assert(fx.cachePath.readText == cacheBefore, "the full treatment must perform no cache write");
+
+    // Switch back to summary: the cached summary is reused - no
+    // re-summarize even though the mode changed twice in between.
+    auto summaryCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.summary, 20), false);
+    auto hitState = processAgentMd(fx.conf, false, null, false, summaryCfg);
+    assert(hitState.checksum == agentMd.checksum, "the hit must carry the cached checksum");
+    assert(hitState.summary == generatedSummary,
+            "toggling modes must reuse the cached summary without a re-summarize");
+    assert(fx.cachePath.readText == cacheBefore, "a cache hit must not rewrite the cache file");
+}
+
+@("full treatment performs no cache activity: an absent cache file stays absent, a pre-seeded one stays byte-identical")
+unittest {
+    import llm.test_util : testArea;
+
+    auto td = testArea("cache_full_no_activity");
+    scope (exit)
+        td.cleanup;
+    auto fx = cacheFixture(td);
+    auto fullCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.full, 20), false);
+
+    // (a) Absent cache file: a full-treatment run must not create one.
+    assert(!fx.cachePath.exists, "pre-condition: no cache file");
+    processAgentMd(fx.conf, false, null, false, fullCfg);
+    assert(!fx.cachePath.exists, "the full treatment must not write the cache file");
+
+    // (b) Pre-seeded cache file: a full-treatment run must leave it
+    // byte-identical (no read-driven rewrite either).
+    assert(saveAgentMdCache(fx.cachePath, AgentMdState(checksum: 424242,
+            summary: "- seeded summary\n", timestamp: Clock.currTime())));
+    immutable cacheBefore = fx.cachePath.readText;
+    processAgentMd(fx.conf, false, null, false, fullCfg);
+    assert(fx.cachePath.readText == cacheBefore,
+            "the full treatment must not rewrite the cache file");
+}
+
+@(
+        "cache file schema unchanged: the written file has exactly the checksum, summary and timestamp keys")
+unittest {
+    import llm.test_util : testArea;
+
+    auto td = testArea("cache_schema");
+    scope (exit)
+        td.cleanup;
+    auto fx = cacheFixture(td);
+
+    assert(saveAgentMdCache(fx.cachePath, AgentMdState(checksum: 12345678,
+            summary: "- Rule\n", timestamp: Clock.currTime())));
+
+    auto json = fx.cachePath.readText.parseJSON;
+    assert(json.type == JSONType.object, "the cache file must be a JSON object");
+    auto keys = json.object.keys;
+    assert(keys.length == 3, "exactly three keys expected, got " ~ keys.length.to!string);
+    foreach (immutable key; ["checksum", "summary", "timestamp"])
+        assert(canFind(keys, key), "missing cache key: " ~ key);
+}
+
+@("atomic write intact: saveAgentMdCache still writes tmp+rename and leaves no .tmp leftover")
+unittest {
+    import llm.test_util : testArea;
+
+    auto td = testArea("cache_atomic_write");
+    scope (exit)
+        td.cleanup;
+    auto fx = cacheFixture(td);
+
+    assert(saveAgentMdCache(fx.cachePath, AgentMdState(checksum: 555, summary: "- Rule\n",
+            timestamp: Clock.currTime())), "the save must succeed");
+    assert(fx.cachePath.exists, "the rename must have landed the cache file");
+    auto leftover = (fx.cachePath.toString ~ ".tmp").Path;
+    assert(!leftover.exists, "the tmp file must be renamed away, not left behind");
+
+    // The landed file is the parseable cache payload, not an empty tmp shell.
+    auto json = fx.cachePath.readText.parseJSON;
+    assert(json["checksum"].integer == 555, "the renamed file must hold the saved state");
+}
+
+@(
+        "checksum input is the raw AGENTS.md text: a full-treatment run reports computeContentHash of the raw file content")
+unittest {
+    import llm.test_util : testArea;
+
+    auto td = testArea("cache_checksum_raw_text");
+    scope (exit)
+        td.cleanup;
+    auto fx = cacheFixture(td);
+
+    immutable agentMd = readRawAgentsMd();
+
+    auto fullCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.full, 20), false);
+    auto state = processAgentMd(fx.conf, false, null, false, fullCfg);
+    assert(state.checksum == agentMd.checksum,
+            "the checksum must be computed over the raw AGENTS.md text (no @path resolution remains)");
 }

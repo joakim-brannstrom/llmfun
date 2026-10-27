@@ -503,6 +503,7 @@ embedConfig:
 | `ragSecondary` | object | `{}` | Additional read-only RAG databases |
 | `toolBroker` | object | disabled | Tool visibility groups and on-demand activation (see below) |
 | `toolLimits` | object | defaults | Tool execution limits (see below) |
+| `agentsMd` | object | auto / 20 KB / ragIndex on | Adaptive AGENTS.md handling (see `doc/agents_md.md`) |
 | `tui` | object | no | TUI options; `maxWidth` caps rendered width in columns (0 = unlimited, default) |
 
 ### Sandbox Configuration (`sandboxConfig`)

@@ -1,5 +1,5 @@
 /// Model-selection slash command: /model.
-/// Self-contained model selection logic. ArgMode is `optional` — NOT `none`: the empty-arg form must
+/// Self-contained model selection logic. ArgMode is `optional` - NOT `none`: the empty-arg form must
 /// dispatch to the handler to list the available models.
 module llm.app_agent.slash_model;
 
@@ -11,6 +11,7 @@ import std.string : strip;
 
 import llm.app_agent; // AgentApp (cyclic package import, same pattern as slash.d)
 import llm.app_agent.slash;
+import llm.agent_md : agentMdSwitchMaySummarize;
 import llmfun_tui; // TuiChatMessageType_* (C binding)
 
 package void registerModelCommands(ref SlashCommandRegistry registry) {
@@ -25,7 +26,7 @@ package void registerModelCommands(ref SlashCommandRegistry registry) {
 /// `/model [arg]`: no arg lists the available models; an index selects by
 /// position, anything else is tried as an exact (case-insensitive) name.
 /// The index is parsed into a signed `long` so a non-numeric arg (a model
-/// name) routes to the name-match branch — an unsigned index would make
+/// name) routes to the name-match branch - an unsigned index would make
 /// `idx >= 0` always true and leave `/model <name>` unreachable.
 private AgentStatus modelHandler(ref AgentApp app, string arg) {
     arg = arg.strip;
@@ -41,7 +42,7 @@ private AgentStatus modelHandler(ref AgentApp app, string arg) {
     } else {
         const oldModel = app.llmConf.activeCodeModel.display;
         bool switched;
-        long idx = ifThrown(arg.to!long, -1); // signed: -1 routes to name match
+        long idx = ifThrown(arg.to!long, -1);
         if (idx >= 0) {
             switched = app.llmConf.selectModelByIndex(idx);
             if (!switched) {
@@ -58,8 +59,13 @@ private AgentStatus modelHandler(ref AgentApp app, string arg) {
                         TuiChatMessageType_Assistant, result);
         }
         if (switched) {
-            app.agent_.resetModel(app.llmConf.activeCodeModel());
+            auto newModel = app.llmConf.activeCodeModel();
+            app.agent_.resetModel(newModel);
             app.agent_.setStreamUpdate(app.makeStreamCallback);
+            if (agentMdSwitchMaySummarize(app.llmConf, newModel)) {
+                app.sendChatMessage("recomputing system prompt…", TuiChatMessageType_Assistant);
+            }
+            app.rebuildSystemPrompt();
             app.sendChatMessage("switched agent model: %s -> %s context: %s", TuiChatMessageType_Assistant, oldModel,
                     app.llmConf.activeModelDisplayName(), app.agent_.modelContextSize);
         }
@@ -81,7 +87,7 @@ unittest {
     registerModelCommands(reg);
 
     // SlashArgMode.optional: bare /model dispatches to the handler (lists
-    // models) — the empty-arg form must NOT take the unknown-command path.
+    // models) - the empty-arg form must NOT take the unknown-command path.
     // The default LlmConfig has an empty codeModels list, so the list branch
     // runs without dereferencing agent_ (only created in run()).
     assert(reg.execute(app, "/model") == AgentStatus.active);
@@ -101,10 +107,7 @@ unittest {
 
 @("a non-numeric /model arg takes the name-match branch and an out-of-range index takes the error branch without touching the agent")
 unittest {
-    // The signed `long idx` makes the name-match branch reachable. A
-    // non-numeric arg (e.g. a model name) must take the `selectModelByName`
-    // path — not the index path — and the failure branches must not
-    // dereference `agent_` (null outside run()).
+    // The failure branches must not dereference `agent_` (null outside run()).
     import llm.app_config : UserConfig;
     import llm.config : CodeModelConfig;
     import llm.common.config : ServerConfig;
@@ -126,8 +129,4 @@ unittest {
 
     // Numeric but out-of-range -> index branch error, no agent_ deref.
     assert(reg.execute(app, "/model 99") == AgentStatus.active);
-
-    // Verify the name-match path is actually taken (not the index path):
-    // "99" is numeric -> index branch; "nosuchmodel" is not numeric ->
-    // name branch. Both stay on the !switched path (safe in tests).
 }

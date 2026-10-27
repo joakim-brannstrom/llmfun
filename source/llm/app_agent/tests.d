@@ -1728,7 +1728,7 @@ unittest {
     assert(sink.stamps[0].nr == 7 && sink.stamps[1].nr == 7); // same ordinal
     assert(sink.stamps[1].time == sink.stamps[0].time);
 
-    // 4. /clear: history truncated to the system prompt → next is [1]
+    // 4. /clear: history truncated to the system prompt -> next is [1]
     app.agent_.chat.clear;
     ProcessResult r3;
     r3.chat = [Chat.MessageT(Message(Role.assistant, false, "fresh", null))];
@@ -2165,4 +2165,473 @@ unittest {
     assert(sink.stamps[0].nr == 4, "next batch continues contiguously");
     assert(sink.stamps[0].time.match!((Duration d) { return d == 432.dur!"msecs"; },
             (NoProcessingTime) { return false; }));
+}
+
+version (unittest) {
+    static import llm.test_util;
+
+    /// Wire an AgentApp the way AppAgentActor.startSetup does for the fields
+    /// rebuildSystemPrompt needs: test llmConf over `td` (including a base
+    /// AGENT.md prompt file - getPrompt throws when it is missing), a live
+    /// agent_, a skill manager, and an in-memory primary RAG (registered in
+    /// the TestArea so cleanup destroys it before the dir is removed).
+    private void wireRebuildTestApp(ref AgentApp app, ref llm.test_util.TestArea td) {
+        import std.file : write;
+        import std.path : buildPath;
+
+        import my.filter : ReFilter;
+        import llm.rag : RAG;
+        import llm.test_util : TestArea, TestEmbedder;
+
+        app.llmConf = testLlmConfig(td);
+        // getPrompt(promptName: agentPrompt) reads promptDir/AGENT.md; the
+        // startup prompt dir in production carries it.
+        write(buildPath(app.llmConf.promptDir[0].toString, "AGENT.md"), "test agent prompt");
+        app.skillManager_ = makeSkillManager(app.llmConf);
+        app.noCwdConfig_ = false;
+        // The AgentApp ctor leaves agent_ null (production creates it in
+        // startSetup); the sibling tests assign it manually.
+        app.agent_ = new Agent("main", app.llmConf, null, null, null, ReFilter.init);
+        // A nonexistent primary dir makes openDatabase fall back to an
+        // in-memory RAG (isPrimaryInMemory true) - the same gating fixture
+        // pattern as llm.memory_tier. A literal ":memory:" path would be
+        // mangled by AbsolutePath (resolved against the CWD) into a real,
+        // process-wide shared file.
+        auto rag = new RAG(new TestEmbedder(), RagDatabaseConfig(Path(buildPath(td,
+                "no_such_dir", "agent_md_test.db")), "rebuild test rag"), null);
+        td.addRag(rag);
+        app.rag = rag;
+    }
+
+    // The system prompt at `history[0]` of a chat, or empty when the first
+    // entry is not a system Message (loaded docs carry none before startup).
+    // Shared by the lifecycle tests below; a unittest-local declaration would
+    // not be visible across unittests.
+    private string systemPromptOf(Chat.MessageT[] msgs) {
+        import std.sumtype : match;
+
+        import llm.chat : Message, Role, ToolMessage, ToolResponse, VisionMessage;
+
+        string found;
+        if (msgs.length == 0)
+            return found;
+        msgs[0].match!((Message a) {
+            if (a.role == Role.system)
+                found = a.content;
+        }, (ToolMessage _) {}, (ToolResponse _) {}, (VisionMessage _) {});
+        return found;
+    }
+}
+
+@(
+        "rebuildSystemPrompt rebuilds the startup prompt through the shared path (full treatment under the defaults)")
+unittest {
+    import std.file : readText;
+
+    auto td = testArea("app_agent_rebuild_full");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+
+    // The verbatim-injection tests assert AGENTS.md injection, which the
+    // full treatment only does while the repo AGENTS.md is under the
+    // compression threshold; guard against the repo file growing past it.
+    assert(readText("AGENTS.md").length <= 20 * 1024,
+            "repo AGENTS.md exceeds the default 20 KB full-treatment threshold; these tests assume verbatim injection");
+
+    app.rebuildSystemPrompt();
+
+    // The real workarea AGENTS.md (20087 bytes, within the default 20 KB
+    // threshold) rides along verbatim under the full treatment.
+    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "full treatment injects the AGENTS.md payload verbatim");
+    assert(app.systemPrompt_.canFind("test agent prompt"), "the base prompt file is still composed");
+    assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
+            "no RAG pointer under the full treatment");
+    assert(app.rag.db.getSources.length == 1,
+            "ragIndex indexes the document into the in-memory RAG");
+    app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@("rebuildSystemPrompt defers while an agent run is in flight and applies at the next safe point")
+unittest {
+    import std.file : readText;
+
+    auto td = testArea("app_agent_rebuild_defer");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+
+    app.agentRunInFlight_ = true;
+    app.rebuildSystemPrompt();
+    assert(app.agentMdRebuildPending_, "the rebuild is parked");
+    assert(app.systemPrompt_.empty, "no prompt is composed while in flight");
+    assert(app.rag.db.getSources.length == 0, "no AGENTS.md processing ran");
+
+    app.agentRunInFlight_ = false;
+    app.rebuildSystemPrompt();
+    assert(!app.agentMdRebuildPending_, "the parked rebuild is applied");
+    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "the applied rebuild injects the AGENTS.md payload");
+    app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@(
+        "rebuildSystemPrompt with agentsMd.enabled=false recomposes without the payload and without RAG interaction")
+unittest {
+    import std.file : readText;
+
+    auto td = testArea("app_agent_rebuild_disabled");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+
+    app.llmConf.agentsMd.enabled = false;
+    app.rebuildSystemPrompt();
+
+    assert(app.systemPrompt_.canFind("test agent prompt"),
+            "base prompt and manifest are still composed");
+    assert(!app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "no AGENTS.md payload under enabled=false");
+    assert(app.rag.db.getSources.length == 0, "no indexing runs");
+    app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@("rebuildSystemPrompt with mode=full and ragIndex=false never touches the RAG")
+unittest {
+    import std.file : readText;
+
+    auto td = testArea("app_agent_rebuild_no_rag");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+
+    app.llmConf.agentsMd.ragIndex = false;
+    app.rebuildSystemPrompt();
+
+    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "the payload is still injected under the full treatment");
+    assert(app.rag.db.getSources.length == 0, "no RAG interaction at all");
+}
+
+@(
+        "/refresh-agent-md with agentsMd.enabled=false reports the disabled status and performs no processing")
+unittest {
+    auto td = testArea("app_agent_refresh_disabled");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+
+    app.llmConf.agentsMd.enabled = false;
+    SlashCommandRegistry reg;
+    registerBuiltinCommands(reg);
+    assert(reg.execute(app, "/refresh-agent-md") == AgentStatus.active);
+
+    assert(app.rag.db.getSources.length == 0, "no processing runs under enabled=false");
+    assert(!app.agentMdRebuildPending_, "no rebuild is parked");
+    assert(app.systemPrompt_.empty, "the startup prompt is not composed");
+
+    app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@("startup lifecycle: rebuildSystemPrompt composes the AGENTS.md payload through the shared startup path and installs it in the chat history")
+unittest {
+    import std.file : readText;
+
+    auto td = testArea("app_agent_lifecycle_startup");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+
+    // This and the other lifecycle tests assert verbatim AGENTS.md injection,
+    // which the full treatment only does while the repo AGENTS.md is under the
+    // compression threshold; guard against the repo file growing past it.
+    assert(readText("AGENTS.md").length <= 20 * 1024,
+            "repo AGENTS.md exceeds the default 20 KB full-treatment threshold; these tests assume verbatim injection");
+
+    app.rebuildSystemPrompt();
+
+    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "the startup build injects the AGENTS.md payload verbatim");
+    assert(app.systemPrompt_.canFind("test agent prompt"), "the base prompt file is still composed");
+    assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
+            "no RAG pointer under the full treatment");
+    assert(systemPromptOf(app.agent_.chat.getMessages()) == app.systemPrompt_,
+            "the composed prompt is installed at history[0]");
+    size_t systemCount;
+    foreach (m; app.agent_.chat.getMessages())
+        m.match!((Message a) {
+            if (a.role == Role.system)
+                systemCount++;
+        }, (ToolMessage _) {}, (ToolResponse _) {}, (VisionMessage _) {});
+    assert(systemCount == 1, "exactly one system message");
+    app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@("model-switch lifecycle: /model recomputes the prompt through the real dispatch path")
+unittest {
+    import std.file : readText;
+    import std.typecons : Nullable;
+
+    auto td = testArea("app_agent_lifecycle_model_switch");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+
+    // Model B opts out of AGENTS.md handling entirely (per-model override).
+    app.llmConf.codeModels ~= CodeModelConfig(ServerConfig.init, "model-b", "model-b");
+    AgentsMdOverride bOverride;
+    bOverride.enabled = Nullable!bool(false);
+    app.llmConf.codeModels[1].agentsMd = bOverride;
+
+    app.rebuildSystemPrompt();
+    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "setup: model A's full treatment injects the AGENTS.md payload");
+
+    // Drive the REAL /model dispatch path: the registry routes the command to
+    // modelHandler -> resetModel -> rebuildSystemPrompt.
+    assert(app.slashCommands_.execute(app, "/model model-b") == AgentStatus.active,
+            "/model <name> must dispatch as an in-session command");
+    assert(app.llmConf.activeCodeModelIndex == 1, "the active model is now model-b");
+
+    // The recomputed prompt applies model B's treatment: disabled -> no payload.
+    assert(!app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "the recomputed prompt has no AGENTS.md payload under model B's disabled treatment");
+    assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
+            "no RAG pointer without a payload");
+    assert(app.systemPrompt_.canFind("test agent prompt"), "the base prompt file is still composed");
+    assert(systemPromptOf(app.agent_.chat.getMessages()) == app.systemPrompt_,
+            "the recomputed prompt is installed in the chat history");
+    app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@("refresh-agent-md lifecycle: the disabled path reports and does nothing; the enabled path clears the cache and reprocesses")
+unittest {
+    import std.file : exists, readText, write;
+
+    auto td = testArea("app_agent_lifecycle_refresh");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+    app.llmConf.dataDir = td.workArea; // the cache lives in the workarea
+    auto cachePath = td.workArea ~ "agent_md_cache.json";
+    SlashCommandRegistry reg;
+    registerBuiltinCommands(reg);
+
+    // First the disabled path: a pure no-op that reports a status message.
+    app.llmConf.agentsMd.enabled = false;
+    assert(reg.execute(app, "/refresh-agent-md") == AgentStatus.active,
+            "/refresh-agent-md must dispatch as an in-session command");
+    assert(app.rag.db.getSources.length == 0, "no processing runs under enabled=false");
+    assert(!app.agentMdRebuildPending_, "no rebuild is parked");
+    assert(app.systemPrompt_.empty, "the startup prompt is not composed");
+    assert(!cachePath.exists, "no cache file is created under enabled=false");
+
+    // Then re-enable, force the full treatment, and seed a stale cache
+    // entry so the refresh has something to clear.
+    app.llmConf.agentsMd.enabled = true;
+    app.llmConf.agentsMd.compression.mode = CompressionMode.full;
+    write(cachePath.toString, `{"checksum":1,"summary":"- stale cached summary\n","timestamp":1}`);
+    assert(reg.execute(app, "/refresh-agent-md") == AgentStatus.active);
+
+    // forceRefresh clears the cache file up front, whatever the treatment;
+    // mode=full then injects the payload verbatim and indexes it into the
+    // in-memory RAG (ragIndex=true).
+    assert(!cachePath.exists, "the forced refresh clears the cache file");
+    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "the forced refresh injects the AGENTS.md payload verbatim");
+    assert(!app.systemPrompt_.canFind("- stale cached summary"),
+            "no stale cached summary survives the refresh");
+    assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
+            "no RAG pointer under the full treatment");
+    assert(app.systemPrompt_.canFind("test agent prompt"), "the base prompt file is still composed");
+    assert(app.rag.db.getSources.length == 1,
+            "mode=full indexes the verbatim payload into the in-memory RAG");
+    app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@("session-switch lifecycle: switchToSession re-applies the current prompt after the chat drifted")
+unittest {
+    import std.sumtype : match;
+
+    import llm.chat : Message, Role, ToolMessage, ToolResponse, VisionMessage;
+
+    auto td = testArea("app_agent_lifecycle_session_switch");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+    app.rebuildSystemPrompt();
+    immutable recomputed = app.systemPrompt_;
+    assert(systemPromptOf(app.agent_.chat.getMessages()) == recomputed,
+            "setup: the startup prompt is installed in the chat history");
+
+    // A real SessionStore over a directory inside the test area, so the
+    // session switch persists and loads through the store like production.
+    app.sessionStore = new SessionStore((td.workArea ~ "chat").Path);
+
+    auto metaA = app.sessionStore.create();
+    app.switchToSession(metaA.id);
+    assert(systemPromptOf(app.agent_.chat.getMessages()) == recomputed,
+            "setup: activating session A keeps the startup prompt");
+
+    // The chat drifts off the startup prompt before the switch.
+    app.agent_.setSystemPrompt("stale session prompt");
+    assert(systemPromptOf(app.agent_.chat.getMessages()) == "stale session prompt",
+            "setup: the prompt at history[0] must be stale before the switch");
+
+    auto metaB = app.sessionStore.create();
+    app.switchToSession(metaB.id);
+    assert(systemPromptOf(app.agent_.chat.getMessages()) == recomputed,
+            "activating session B must restore the startup prompt");
+
+    app.switchToSession(metaA.id);
+    assert(systemPromptOf(app.agent_.chat.getMessages()) == recomputed,
+            "activating session A again must restore the startup prompt");
+    assert(systemPromptOf(app.agent_.chat.getMessages()) != "stale session prompt",
+            "the stale prompt must not survive the switch");
+
+    // Exactly one system message: the re-apply must not duplicate prompts.
+    size_t systemCount;
+    foreach (m; app.agent_.chat.getMessages())
+        m.match!((Message a) {
+            if (a.role == Role.system)
+                systemCount++;
+        }, (ToolMessage _) {}, (ToolResponse _) {}, (VisionMessage _) {});
+    assert(systemCount == 1, "the re-apply must not add a second system message");
+
+    app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@("injection rows end-to-end: the real path produces each payload/instruction combination")
+unittest {
+    import std.datetime.systime : Clock;
+    import std.file : exists, readText, remove;
+    import std.string : format, indexOf;
+
+    auto td = testArea("app_agent_lifecycle_rows");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+    // The cache and the summary prompt both live in the test area: dataDir
+    // selects the cache file, and removing SUMMARY.md forces the summarization
+    // failure deterministically (no LLM endpoint is contacted).
+    app.llmConf.dataDir = td.workArea;
+    auto cachePath = td.workArea ~ "agent_md_cache.json";
+    const rawChecksum = computeContentHash(readText("AGENTS.md"));
+    const topicName = format!"agent_md_%08x"(rawChecksum);
+    const generatedSummary = "- stubbed AGENTS.md summary for the lifecycle rows\n";
+
+    // Row A: summary treatment + ragIndex=true -> payload (the generated
+    // summary) plus the RAG pointer instruction naming the raw checksum topic.
+    app.llmConf.agentsMd.compression.mode = CompressionMode.summary;
+    AgentMdState seeded;
+    seeded.checksum = rawChecksum;
+    seeded.summary = generatedSummary;
+    seeded.timestamp = Clock.currTime();
+    assert(saveAgentMdCache(cachePath, seeded), "setup: the cache file must be seeded");
+    app.rebuildSystemPrompt();
+    assert(app.systemPrompt_.canFind(generatedSummary),
+            "row A: the summary treatment injects the cached summary");
+    assert(app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
+            "row A: the RAG pointer instruction rides along");
+    assert(app.systemPrompt_.canFind("query your RAG knowledge base for topic `" ~ topicName ~ "`"),
+            "row A: the pointer names the raw checksum topic");
+    assert(app.systemPrompt_.indexOf(generatedSummary) < app.systemPrompt_.indexOf(
+            "For detailed explanations, architecture justifications"),
+            "row A: the payload precedes the pointer instruction");
+    assert(app.rag.db.getSources.length == 1,
+            "row A: the pointer's topic is reloaded into the in-memory RAG");
+
+    // Row B: summary treatment + ragIndex=false -> payload without pointer.
+    app.llmConf.agentsMd.ragIndex = false;
+    app.rebuildSystemPrompt();
+    assert(app.systemPrompt_.canFind(generatedSummary),
+            "row B: the cached summary is still the payload");
+    assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
+            "row B: no RAG pointer under ragIndex=false");
+    // The reload is gated on ragIndex (agent_md.d), so the row-A topic
+    // simply persists in the ephemeral RAG - no new interaction, none
+    // removed.
+    assert(app.rag.db.getSources.length == 1,
+            "row B: ragIndex=false adds no topic and removes none");
+
+    // Row C: summarization fails with no valid cache -> empty payload.
+    remove(cachePath.toString);
+    remove((app.llmConf.promptDir[0] ~ "SUMMARY.md").toString);
+    app.rebuildSystemPrompt();
+    assert(app.systemPrompt_.canFind("test agent prompt"),
+            "row C: the base prompt file is still composed");
+    assert(!app.systemPrompt_.canFind(generatedSummary),
+            "row C: no payload after the summarization failure");
+    assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
+            "row C: no pointer without a payload");
+    assert(!cachePath.exists, "row C: the failure path saves no cache file");
+    app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@("rebuild deferral lifecycle: a rebuild requested while an agent run is in flight is parked and applied by the next safe point after the run")
+unittest {
+    import std.file : readText;
+    import std.typecons : Nullable;
+
+    auto td = testArea("app_agent_lifecycle_defer");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+
+    // Model B opts out of AGENTS.md handling entirely (per-model override).
+    app.llmConf.codeModels ~= CodeModelConfig(ServerConfig.init, "model-b", "model-b");
+    AgentsMdOverride bOverride;
+    bOverride.enabled = Nullable!bool(false);
+    app.llmConf.codeModels[1].agentsMd = bOverride;
+
+    assert(readText("AGENTS.md").length <= 20 * 1024,
+            "repo AGENTS.md exceeds the default 20 KB full-treatment threshold; these tests assume verbatim injection");
+
+    app.rebuildSystemPrompt();
+    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "setup: model A's full treatment injects the AGENTS.md payload");
+
+    // Park a rebuild the way the in-flight guard does: the production safe
+    // point (runAgent's post-run block) clears the in-flight flag and calls
+    // rebuildSystemPrompt; the guard itself only parks.
+    app.agentRunInFlight_ = true;
+    assert(app.slashCommands_.execute(app, "/model model-b") == AgentStatus.active,
+            "/model must dispatch as an in-session command");
+    assert(app.agentMdRebuildPending_, "the rebuild is parked while the run is in flight");
+    assert(app.llmConf.activeCodeModelIndex == 1, "the model switch itself is not deferred");
+    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "model A's payload is still applied while the rebuild is parked");
+
+    // The next safe point applies the parked rebuild.
+    app.agentRunInFlight_ = false;
+    app.rebuildSystemPrompt();
+    assert(!app.agentMdRebuildPending_, "the parked rebuild is applied");
+    assert(!app.systemPrompt_.canFind(readText("AGENTS.md")),
+            "the applied rebuild switches to model B's disabled treatment");
+    assert(systemPromptOf(app.agent_.chat.getMessages()) == app.systemPrompt_,
+            "the recomputed prompt is installed in the chat history");
+    app.rag = null; // release app's reference so the TestArea owns the RAG
 }

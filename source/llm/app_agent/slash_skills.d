@@ -11,19 +11,23 @@ import llm.app_agent; // AgentApp (cyclic package import, same pattern as slash.
 import llm.app_agent.slash;
 import llmfun_tui; // TuiChatMessageType_* (C binding)
 
+import llm.config : effectiveAgentsMd;
+
 package void registerSkillsCommands(ref SlashCommandRegistry registry) {
     auto ignore = registry.register(SlashCommand("skills", [],
             ["   /skills            List available skills"], SlashArgMode.none,
             150, toDelegate(&skillsHandler)));
+    ignore = registry.register(SlashCommand("refresh-agent-md", [],
+            ["   /refresh-agent-md  Force re-summarize AGENTS.md"],
+            SlashArgMode.none, 160, toDelegate(&refreshAgentMdHandler)));
 }
 
-/// `/skills`: list the loaded skills (uses the `formatSkillsList` helper).
+/// `/skills`: list the loaded skills.
 private AgentStatus skillsHandler(ref AgentApp app, string arg) {
     app.sendChatMessage(formatSkillsList(app), TuiChatMessageType_Assistant);
     return AgentStatus.active;
 }
 
-/// Format the loaded-skill list for `/skills`.
 private string formatSkillsList(ref AgentApp app) {
     if (app.skillManager_ is null) {
         return "No skill manager initialized.";
@@ -51,6 +55,17 @@ private string formatSkillsList(ref AgentApp app) {
     return lines[].join("\n");
 }
 
+private AgentStatus refreshAgentMdHandler(ref AgentApp app, string arg) {
+    const activeModel = app.llmConf.codeModels[app.llmConf.activeCodeModelIndex];
+    if (!effectiveAgentsMd(app.llmConf, activeModel).enabled) {
+        app.sendChatMessage("AGENTS.md handling is disabled; nothing to refresh",
+                TuiChatMessageType_Assistant);
+        return AgentStatus.active;
+    }
+    app.rebuildSystemPrompt(true); // forceRefresh: clear the cache, re-summarize
+    return AgentStatus.active;
+}
+
 @("bare /skills dispatches to the handler with a null skill manager, and the help line renders")
 unittest {
     import llm.app_config : UserConfig;
@@ -62,18 +77,27 @@ unittest {
     SlashCommandRegistry reg;
     registerSkillsCommands(reg);
 
-    // SlashArgMode.none is asserted directly via the registry getter — the
+    // SlashArgMode.none is asserted directly via the registry getter - the
     // primary guard. execute() with an arg would NOT discriminate here:
     // the handler ignores its arg, so both the handler path and the
-    // unknown-command path return AgentStatus.active (the none-with-arg →
+    // unknown-command path return AgentStatus.active (the none-with-arg ->
     // unknown rule itself is pinned by slash.d's stub registry test).
     // Bare /skills IS dispatched as a smoke test: it exercises the handler,
     // formatSkillsList's null-manager early return, and the blocked
-    // messenger (no agent_/rag dependency).
+    // messenger (no agent_/rag dependency). Bare /refresh-agent-md is NOT:
+    // its handler calls rebuildSystemPrompt, which needs a live agent_, rag
+    // and skill manager.
     assert(reg.argModeOf("skills") == SlashArgMode.none);
+    assert(reg.argModeOf("refresh-agent-md") == SlashArgMode.none);
     assert(reg.execute(app, "/skills") == AgentStatus.active);
 
-    // Help line is the verbatim string
+    // Help lines are the verbatim strings
     auto help = reg.helpText();
     assert(help.canFind("   /skills            List available skills"));
+    assert(help.canFind("   /refresh-agent-md  Force re-summarize AGENTS.md"));
+
+    // Help ordering is (order asc, registration index asc): 150, 160
+    import std.string : indexOf;
+
+    assert(help.indexOf("   /skills") < help.indexOf("   /refresh-agent-md"));
 }

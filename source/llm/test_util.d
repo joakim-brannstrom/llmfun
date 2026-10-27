@@ -16,7 +16,7 @@ import std.file : SpanMode, dirEntries, exists, FileException, isDir,
     mkdirRecurse, readText, rmdirRecurse;
 import std.logger : FileLogger, LogLevel, logf, sharedLog;
 import std.path : buildPath;
-import std.stdio : stderr;
+import std.stdio : File, stderr;
 import std.string : indexOf, split;
 
 import llm.rag.database : timeout;
@@ -47,7 +47,7 @@ version (unittest) {
         }
 
         EmbedResult embed(string text) {
-            // FNV-1a 64-bit: deterministic, no imports needed
+            // FNV-1a 64-bit; constants inline, no hash imports needed
             immutable ulong prime = 0x00000100000001B3;
             ulong h = 0xCBF29CE484222325;
             foreach (b; text[])
@@ -121,6 +121,12 @@ version (unittest) {
         /// be left to the GC.
         void addRag(RAG r) {
             rags ~= r;
+        }
+
+        Path createFile(string name, string content = "") @safe {
+            auto p = workArea ~ name;
+            File(p.toString, "w").write(content);
+            return p;
         }
 
         void cleanup() {
@@ -198,7 +204,7 @@ unittest {
     // Instantiates retrySql so the template body is compile-checked by THIS
     // task's build (template bodies are only type-checked when instantiated;
     // without an in-module instantiation, a body error - e.g. a duration
-    // literal under a qualified import - surfaces only at the first task-02
+    // literal under a qualified import - surfaces only at the first real
     // call site). Under version(unittest) this takes the bounded branch:
     // the query succeeds on the first attempt, so this returns immediately.
     assert(retrySql!(() => true)());

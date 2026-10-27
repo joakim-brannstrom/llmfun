@@ -67,14 +67,8 @@ struct AgentApp {
         bool chatDirty;
 
         // The startup system prompt, cached exactly where startup computes it
-        // (setupSession's setSystemPrompt call site). activateSession
-        // re-applies it on every session switch: Chat.clear keeps history[0]
-        // and loaded docs carry no system entries, so without the re-apply the
-        // previous chat's prompt would survive the switch. Written only at the
-        // startup call site; empty until it runs - an early activation then
-        // re-applies nothing (a harmless no-op; the startup call still sets
-        // the real prompt).
         string systemPrompt_;
+
         ServerStat lastServerStat;
         bool debugMode;
         UserConfig.AgentChatConfig conf_;
@@ -85,6 +79,14 @@ struct AgentApp {
         // The agent loop is commanded to continue.
         // Cleared after it has successfully started working.
         bool forceRunAgentLoop;
+
+        // From LlmConfig so model switch and /refresh-agent-md honor the config
+        bool noCwdConfig_;
+        // gates the deferral in rebuildSystemPrompt
+        bool agentRunInFlight_;
+        // latches a rebuild requested while a run was in flight, applied at
+        // the next safe point after the run completes.
+        bool agentMdRebuildPending_;
     }
 
     private bool oneShotQuery;
@@ -778,6 +780,9 @@ struct AgentApp {
         }
 
         if (runAgentLoop) {
+            agentRunInFlight_ = true;
+            scope (exit)
+                agentRunInFlight_ = false; // the loop is done: next safe point
             this.doCompress(false);
             // User-query echo, sent AFTER the turn-start doCompress: the
             // query (if any) is the last entry in the possibly-compressed
@@ -801,6 +806,20 @@ struct AgentApp {
             }
         }
 
+        // TODO: considering where agentRunInFlight_ is set I do not think
+        // there is ever a case where it is true in this if-statement.
+        // A rebuild requested while a run was in flight is applied here,
+        // at the next safe point after the run completes (the scope (exit)
+        // above has already cleared the in-flight flag). In production the
+        // pending flag can only be set through the in-flight guard inside
+        // rebuildSystemPrompt - slash commands dispatch exclusively from the
+        // branch above (between runs, one mailbox message at a time), so the
+        // guard is defensive; tests take it by setting the flags directly.
+        if (agentMdRebuildPending_ && !agentRunInFlight_) {
+            agentMdRebuildPending_ = false;
+            rebuildSystemPrompt();
+        }
+
         return rval;
     }
 
@@ -814,7 +833,12 @@ struct AgentApp {
                 llmConf.activeModelDisplayName);
     }
 
-    private void setupSession(AgentMdState agentMdState) {
+    /// Load the active session into the chat. The system prompt is NOT built
+    /// here: startup builds it through the shared rebuildSystemPrompt() before
+    /// this runs (setSystemPrompt before chat.load is order-insensitive;
+    /// loaded docs carry no system entries, so exactly one system message
+    /// results).
+    private void setupSession() {
         sessionStore = new SessionStore(llmConf.chatDir);
         auto sessions = sessionStore.list();
 
@@ -845,14 +869,38 @@ struct AgentApp {
         agent_.syncContextFromChat(); // set prevStat.context from the loaded chat
         agent_.seedBrokerFromChat(); // re-activate tools the loaded history proves were used
 
-        agent_.setSystemPrompt(systemPrompt_ = llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf
-                .agentPrompt, addSkills: true, agentMdSummary: agentMdState.summary));
-
         // Persist active session id (covers "fresh session created" path)
         llmConf.activeChatSessionId = activeSession.id.get;
         llmConf.saveState();
 
         lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
+    }
+
+    /// Rebuild the system prompt for the active model: resolve its effective
+    /// AgentsMd config, reprocess AGENTS.md, recompose, re-apply. Safe while an
+    /// agent run is in flight: the rebuild is DEFERRED (pending flag), applied
+    /// at the next safe point after the run completes, so setSystemPrompt
+    /// never rewrites history[0] under a running loop.
+    ///
+    /// Reachability note: in production the guard below is DEFENSIVE ONLY.
+    /// Slash commands dispatch exclusively from runAgent's slash branch, which
+    /// runs between agent runs (the single-threaded AppAgentActor mailbox
+    /// handles one userQuery at a time), so /model can never execute while
+    /// runToCompletion is on the stack. The guard is exercised by tests that
+    /// set agentRunInFlight_ directly.
+    package void rebuildSystemPrompt(bool forceRefresh = false) {
+        if (agentRunInFlight_) {
+            agentMdRebuildPending_ = true;
+            return;
+        }
+        auto agentsMd = effectiveAgentsMd(llmConf, llmConf.codeModels[llmConf.activeCodeModelIndex]);
+        auto state = processAgentMd(llmConf, noCwdConfig_, rag, forceRefresh,
+                agentsMd, llmConf.codeModels[llmConf.activeCodeModelIndex]);
+        agent_.setSystemPrompt(systemPrompt_ = llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf
+                .agentPrompt, addSkills: true, agentsMd: AgentsMdPrompt(state.summary,
+                state.ragTopic)));
+        if (agentMdRebuildPending_)
+            agentMdRebuildPending_ = false;
     }
 
     package void continueAgent() {
@@ -978,9 +1026,8 @@ class AppAgentActor {
             return;
         }
         app.skillManager_ = makeSkillManager(app.llmConf);
-        auto agentMdState = processAgentMd(app.llmConf, uconf.noCwdConfig, app.rag);
-        if (agentMdState.isValid())
-            logger.tracef("AGENTS.md processed, summary length: %s", agentMdState.summary.length);
+        // The /model and /refresh-agent-md rebuilds reuse the startup input.
+        app.noCwdConfig_ = uconf.noCwdConfig;
         app.monitor = new MetricMonitor(app.llmConf.dataDir ~ "monitor.jsonl");
         app.agent_ = new Agent("main", app.llmConf, app.skillManager_,
                 app.monitor, app.rag, app.llmConf.toolFilter.to());
@@ -1003,7 +1050,8 @@ class AppAgentActor {
         app.agent_.addCompressionCheckpointListener(&app.reasoningIndex.onCheckpoint);
         app.agent_.toolContext().setReasoningIndex(app.reasoningIndex);
 
-        app.setupSession(agentMdState);
+        app.rebuildSystemPrompt();
+        app.setupSession();
         app.oneShotQuery = !app.conf_.prompt.empty;
         if (app.oneShotQuery) {
             app.runAgent(app.conf_.prompt);

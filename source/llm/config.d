@@ -7,6 +7,7 @@ import std.conv : to, text;
 import std.datetime : Clock;
 import std.file : readText, exists, mkdirRecurse, rename, rmdirRecurse, thisExePath, isDir;
 import std.format : format;
+import std.functional : toDelegate;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
 import std.path : dirName;
 import std.string : toLower, startsWith, indexOf;
@@ -24,8 +25,25 @@ public import llm.common.config;
 
 immutable ProgramName = "llmfun";
 
-/// RAG query instruction appended to system prompt when AGENTS.md summary is present.
-private immutable AgentMdRagInstruction = "For detailed explanations, architecture justifications, or lengthy code examples, " ~ "query your RAG knowledge base using the 'AGENTS.md' source. However, you must obey the " ~ "compressed rules listed above at all times, even if you don't retrieve the full file.";
+/// AGENTS.md prompt payload handed to the composer. payload empty (or
+/// whitespace-only) = no AGENTS.md treatment (no injection, no instruction).
+/// ragTopic empty = no pointer instruction (ragIndex=false, or full-text
+/// treatment). New fields must be appended at the end: positional
+/// constructions elsewhere rely on the field order.
+struct AgentsMdPrompt {
+    string payload; /// summary OR verbatim text (see AgentMdState.summary)
+    string ragTopic; /// exact RAG topic name (agent_md_<8-hex>); empty = no pointer
+}
+
+/// RAG pointer instruction composed at build time with the exact topic name.
+/// Retires the static AgentMdRagInstruction constant: the pointer now embeds
+/// the checksum-derived topic name (agent_md_<8-hex>) instead of the
+/// inaccurate "'AGENTS.md' source" wording.
+private string composeAgentMdRagPointer(string topic) @safe pure {
+    return "For detailed explanations, architecture justifications, or lengthy code "
+        ~ "examples, query your RAG knowledge base for topic `"
+        ~ topic ~ "`; however, you must obey the summarized rules listed above at all times.";
+}
 
 struct RagDatabaseConfig {
     Path path;
@@ -283,6 +301,9 @@ struct LlmConfig {
 
     RagConfig ragConfig;
 
+    /// AGENTS.md prompt treatment: compression mode, threshold, RAG indexing.
+    AgentsMdConfig agentsMd;
+
     /// Agent prompt filename searched for in promptDir.
     string agentPrompt = "AGENT.md";
 
@@ -489,9 +510,10 @@ struct LlmConfig {
         });
     }
 
-    /// Compose system prompt: basePrompt → alwaysApplyBlock → agentMdSummary → ragInstruction → manifestXml.
+    /// Compose system prompt: basePrompt -> alwaysApplyBlock -> agentsMd payload
+    /// -> agentsMd instruction (pointer iff payload && ragTopic non-empty) -> manifestXml.
     string getPrompt(SkillManager skillManager, string promptName = null,
-            bool addSkills = true, string agentMdSummary = null) {
+            bool addSkills = true, AgentsMdPrompt agentsMd = AgentsMdPrompt.init) {
         import std.string : strip;
         import llm.skill : buildAlwaysApplyBlock;
 
@@ -509,8 +531,10 @@ struct LlmConfig {
             manifestXml = skillManager.getManifestXml(maxManifestSkills);
         }
 
-        bool hasAgentMd = !agentMdSummary.empty;
-        string ragInstruction = hasAgentMd ? AgentMdRagInstruction : "";
+        const hasAgentMd = !agentsMd.payload.strip.empty;
+        string agentMdInstruction;
+        if (hasAgentMd && !agentsMd.ragTopic.empty)
+            agentMdInstruction = composeAgentMdRagPointer(agentsMd.ragTopic);
 
         if (hasAgentMd || !alwaysApplyBlock.empty || !manifestXml.empty) {
             string[] parts;
@@ -518,9 +542,9 @@ struct LlmConfig {
             if (!alwaysApplyBlock.empty)
                 parts ~= alwaysApplyBlock;
             if (hasAgentMd)
-                parts ~= agentMdSummary;
-            if (hasAgentMd)
-                parts ~= ragInstruction;
+                parts ~= agentsMd.payload;
+            if (!agentMdInstruction.empty)
+                parts ~= agentMdInstruction;
             if (!manifestXml.empty)
                 parts ~= manifestXml;
 
@@ -716,6 +740,47 @@ struct ToolBrokerConfig {
     string[] unknownYamlKeys;
 }
 
+/// AGENTS.md compression treatment under `mode: auto`. `auto` adapts to the
+/// document size: verbatim injection when it fits the model's context window,
+/// summary when it does not.
+enum CompressionMode {
+    /// Verbatim when size <= thresholdKb, summary when larger (the default).
+    auto_,
+    /// Never compress; verbatim injection regardless of size.
+    full,
+    /// Always compress (the old unconditional behavior).
+    summary,
+}
+
+struct AgentsMdCompression {
+    /// Auto = verbatim when size <= thresholdKb, summary when larger.
+    CompressionMode mode = CompressionMode.auto_;
+    /// kbyte threshold for the auto boundary (size <= thresholdKb*1024 -> full);
+    /// also consulted by the over-size warning on the full path. 0 = legal
+    /// (always-summary under auto); negative is a parse error.
+    long thresholdKb = 20;
+}
+
+struct AgentsMdConfig {
+    /// Master switch. False = complete opt-out: no injection, no RAG indexing,
+    /// no cache activity; overrides ragIndex and everything else.
+    bool enabled = true;
+    AgentsMdCompression compression;
+    /// Index the full doc into RAG regardless of prompt treatment.
+    bool ragIndex = true;
+}
+
+/// Per-model override of the global `AgentsMd` block. Null = inherit the
+/// global value; non-null replaces it. Per-model entries only restate keys
+/// they want to differ - absent fields fall back to the global section
+/// (per-field semantics, not whole-block).
+struct AgentsMdOverride {
+    Nullable!bool enabled;
+    Nullable!CompressionMode mode;
+    Nullable!long thresholdKb;
+    Nullable!bool ragIndex;
+}
+
 /// Per-model override of the global `toolBroker` block. Null = no override
 /// for that field; non-null replaces the global value. The `groups` map is
 /// merged per entry by group name - a model entry with the same name
@@ -755,8 +820,75 @@ ToolBrokerConfig resolveToolBrokerConfig(const LlmConfig conf, const CodeModelCo
     if (!model.toolBroker.groups.isNull)
         foreach (name, group; model.toolBroker.groups.get)
             resolved.groups[name] = GroupConfig(group.description, group.tools.dup);
+    return resolved;
+}
+
+/// Effective AGENTS.md treatment for a model: built-in struct defaults, then the
+/// global `agentsMd` block (applyConfig already folded the global block over the
+/// defaults when parsing), then the model's `agentsMd` override. Present override
+/// fields replace the global value; absent fields keep it.
+AgentsMdConfig effectiveAgentsMd(const LlmConfig conf, const CodeModelConfig model) @safe {
+    // Global layer: applyConfig parsed the global block over the built-in
+    // defaults, so conf.agentsMd already holds layers 1 + 2.
+    AgentsMdConfig resolved;
+    resolved.enabled = conf.agentsMd.enabled;
+    resolved.compression.mode = conf.agentsMd.compression.mode;
+    resolved.compression.thresholdKb = conf.agentsMd.compression.thresholdKb;
+    resolved.ragIndex = conf.agentsMd.ragIndex;
+
+    // Model layer: present fields replace, absent fields keep the global value.
+    if (!model.agentsMd.enabled.isNull)
+        resolved.enabled = model.agentsMd.enabled.get;
+    if (!model.agentsMd.mode.isNull)
+        resolved.compression.mode = model.agentsMd.mode.get;
+    if (!model.agentsMd.thresholdKb.isNull)
+        resolved.compression.thresholdKb = model.agentsMd.thresholdKb.get;
+    if (!model.agentsMd.ragIndex.isNull)
+        resolved.ragIndex = model.agentsMd.ragIndex.get;
 
     return resolved;
+}
+
+/// Inverse of compressionModeFromYaml: the YAML spelling of a CompressionMode
+/// (`auto` is a D keyword, so the member is `auto_`). Used by the treatment
+/// log's provenance summary.
+private string compressionModeToYaml(CompressionMode mode) @safe pure nothrow {
+    final switch (mode) with (CompressionMode) {
+    case CompressionMode.auto_:
+        return "auto";
+    case CompressionMode.full:
+        return "full";
+    case CompressionMode.summary:
+        return "summary";
+    }
+}
+
+/// One-line provenance of the effective AGENTS.md treatment for a model: each
+/// field's value with the config layer that supplied it (built-in default /
+/// global `agentsMd` block / per-model override). A global-block value equal to
+/// the built-in default is reported as "default" (the layers are value-identical
+/// there). Feeds the treatment log line
+/// in processAgentMd; the resolver effectiveAgentsMd itself stays silent
+/// because it also runs on hot paths like model listings.
+string agentsMdSourceSummary(const LlmConfig conf, const CodeModelConfig model) @safe {
+    const resolved = effectiveAgentsMd(conf, model);
+    const globalBlock = conf.agentsMd;
+    const defaults = AgentsMdConfig.init;
+
+    static string layer(bool perModel, bool restatedGlobal) @safe pure nothrow {
+        return perModel ? "per-model" : restatedGlobal ? "global" : "default";
+    }
+
+    import std.string : format;
+
+    return format!"enabled=%s (%s), mode=%s (%s), thresholdKb=%s (%s), ragIndex=%s (%s)"(
+            resolved.enabled, layer(!model.agentsMd.enabled.isNull,
+            globalBlock.enabled != defaults.enabled), compressionModeToYaml(resolved.compression.mode),
+            layer(!model.agentsMd.mode.isNull,
+                globalBlock.compression.mode != defaults.compression.mode),
+            resolved.compression.thresholdKb, layer(!model.agentsMd.thresholdKb.isNull,
+                globalBlock.compression.thresholdKb != defaults.compression.thresholdKb), resolved.ragIndex,
+            layer(!model.agentsMd.ragIndex.isNull, globalBlock.ragIndex != defaults.ragIndex));
 }
 
 struct CodeModelConfig {
@@ -774,9 +906,11 @@ struct CodeModelConfig {
     /// Omit the block entirely to inherit the global policy.
     Nullable!NudgeConfig nudges;
 
-    /// Per-model tool broker override (see ToolBrokerOverride). Null
-    /// fields inherit the global toolBroker block value.
+    /// Per-model tool broker override (see ToolBrokerOverride)
     ToolBrokerOverride toolBroker;
+
+    /// Per-model AGENTS.md override (see AgentsMdOverride).
+    AgentsMdOverride agentsMd;
 }
 
 struct SummaryModelConfig {
@@ -1048,7 +1182,8 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
     return conf;
 }
 
-private EmbedConfig embedConfigFromValue(JSONValue json) {
+private EmbedConfig embedConfigFromValue(JSONValue json,
+        void delegate(logger.LogLevel, string) warn = toDelegate(&defaultConfigWarnSink)) {
     import std.exception : enforce;
 
     if ("type" !in json) {
@@ -1058,15 +1193,38 @@ private EmbedConfig embedConfigFromValue(JSONValue json) {
     string type = json["type"].str;
     json.object.remove("type");
     if (type == "remote") {
-        return EmbedConfig(applyConfig!(RemoteEmbedConfig)(RemoteEmbedConfig.init, json));
+        return EmbedConfig(applyConfig!(RemoteEmbedConfig)(RemoteEmbedConfig.init, json, warn));
     }
     if (type == "local") {
-        return EmbedConfig(applyConfig!(LocalEmbedConfig)(LocalEmbedConfig.init, json));
+        return EmbedConfig(applyConfig!(LocalEmbedConfig)(LocalEmbedConfig.init, json, warn));
     }
     throw new Exception("embedConfig: unknown type '" ~ type ~ "', expected 'remote' or 'local'");
 }
 
-auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
+/// Map a YAML `compression.mode` spelling to CompressionMode. The YAML
+/// spellings match the member names except `auto`: it is a D keyword, so the
+/// member is `auto_`. Unknown spellings are a parse error naming the valid
+/// values.
+private CompressionMode compressionModeFromYaml(string spelling) @safe {
+    switch (spelling) {
+    case "auto":
+        return CompressionMode.auto_;
+    case "full":
+        return CompressionMode.full;
+    case "summary":
+        return CompressionMode.summary;
+    default:
+        throw new Exception(
+                "invalid compression.mode '" ~ spelling ~ "' (valid: auto | full | summary)");
+    }
+}
+
+private void defaultConfigWarnSink(logger.LogLevel lvl, string msg) {
+    logger.logf(lvl, "%s", msg);
+}
+
+auto applyConfig(ConfigT)(ConfigT conf, JSONValue json,
+        void delegate(logger.LogLevel, string) warn = toDelegate(&defaultConfigWarnSink)) {
     import std.traits;
 
     template NullableInner(T) {
@@ -1105,23 +1263,27 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
             alias member = __traits(getMember, conf, llmMemberName);
             static if (!isType!member) {
                 alias Type = typeof(member);
-                if (llmMemberName in json) {
+
+                // The YAML key for this member: the member name itself.
+                enum yamlKey = llmMemberName;
+
+                if (yamlKey in json) {
                     try {
                         logger.tracef("using config value for %s:%s - %s",
-                                ConfigT.stringof, llmMemberName, json[llmMemberName]);
+                                ConfigT.stringof, llmMemberName, json[yamlKey]);
 
-                        used[llmMemberName] = true;
+                        used[yamlKey] = true;
                         static if (is(Type : Path)) {
-                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].str.Path;
+                            __traits(getMember, conf, llmMemberName) = json[yamlKey].str.Path;
                         } else static if (is(Type == RagDatabaseConfig)) {
-                            auto elem = json[llmMemberName];
+                            auto elem = json[yamlKey];
                             validateRagDatabase(elem);
                             string path = elem["path"].str;
                             string desc = elem["description"].str;
                             __traits(getMember, conf, llmMemberName) = RagDatabaseConfig(path.Path,
                                     desc);
                         } else static if (is(Type == RagDatabaseConfig[][string])) {
-                            foreach (key, ref JSONValue dbs; json[llmMemberName].object) {
+                            foreach (key, ref JSONValue dbs; json[yamlKey].object) {
                                 RagDatabaseConfig[] configs;
                                 foreach (db; dbs.array) {
                                     validateRagDatabase(db);
@@ -1132,7 +1294,7 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
                                 __traits(getMember, conf, llmMemberName)[key] = configs;
                             }
                         } else static if (is(Type == Path[])) {
-                            auto val = json[llmMemberName];
+                            auto val = json[yamlKey];
                             if (val.type == JSONType.STRING) {
                                 __traits(getMember, conf, llmMemberName) = [
                                     val.str.Path
@@ -1142,22 +1304,44 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
                                     .array;
                             }
                         } else static if (is(Type == CodeModelConfig[])) {
-                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(
-                                    a => applyConfig(CodeModelConfig.init, a)).array;
+                            __traits(getMember, conf, llmMemberName) = json[yamlKey].array.map!(
+                                    a => applyConfig(CodeModelConfig.init, a, warn)).array;
                         } else static if (is(Type : string)) {
-                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].str;
+                            __traits(getMember, conf, llmMemberName) = json[yamlKey].str;
                         } else static if (is(Type : bool)) {
-                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].boolean;
+                            __traits(getMember, conf, llmMemberName) = json[yamlKey].boolean;
+                        } else static if (is(Type == CompressionMode)) {
+                            // `auto` is a D keyword, so the member is `auto_`
+                            // while the YAML spelling stays `auto`: map
+                            // explicitly and reject unknown spellings naming
+                            // the valid values.
+                            __traits(getMember, conf, llmMemberName) = compressionModeFromYaml(
+                                    json[yamlKey].str);
                         } else static if (is(Type == enum)) {
                             // Enum fields are configured by member name, e.g. `mode: mixed`.
-                            __traits(getMember, conf, llmMemberName) = json[llmMemberName]
-                                .str.to!Type;
+                            __traits(getMember, conf, llmMemberName) = json[yamlKey].str.to!Type;
+                        } else static if (isNullableType!Type && is(NullableInner!Type == long)) {
+                            // Per-model AgentsMd override (Nullable!long
+                            // thresholdKb): present scalar replaces, absent or
+                            // JSON-null keeps the Nullable unset. Negative
+                            // values are a parse error.
+                            auto val = json[yamlKey];
+                            if (val.type != JSONType.NULL) {
+                                auto raw = val.integer;
+                                static if (llmMemberName.among("thresholdKb")) {
+                                    if (raw < 0)
+                                        throw new Exception("config key '" ~ llmMemberName
+                                                ~ "' must be non-negative, got " ~ raw.to!string);
+                                }
+                                __traits(getMember, conf, llmMemberName) = Nullable!long(raw);
+                            }
                         } else static if (isFloatingPoint!Type) {
-                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].floating;
+                            __traits(getMember, conf, llmMemberName) = json[yamlKey].floating;
                         } else static if (isIntegral!Type) {
-                            auto raw = json[llmMemberName].integer;
-                            static if (is(Type : uint) && llmMemberName.among("shortTermDays",
-                                    "longTermDays", "tierPassIntervalHours")) {
+                            auto raw = json[yamlKey].integer;
+                            static if ((is(Type : uint) && llmMemberName.among("shortTermDays", "longTermDays",
+                                    "tierPassIntervalHours")) || (is(Type == long)
+                                    && llmMemberName.among("thresholdKb"))) {
                                 if (raw < 0)
                                     throw new Exception(
                                             "config key '" ~ llmMemberName
@@ -1174,7 +1358,7 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
                             }
                             __traits(getMember, conf, llmMemberName) = cast(Type) raw;
                         } else static if (is(Type == string[][string])) {
-                            foreach (key, ref JSONValue valArr; json[llmMemberName].object) {
+                            foreach (key, ref JSONValue valArr; json[yamlKey].object) {
                                 string[] vals;
                                 foreach (v; valArr.array) {
                                     vals ~= v.str;
@@ -1182,67 +1366,78 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
                                 __traits(getMember, conf, llmMemberName)[key] = vals;
                             }
                         } else static if (is(Type == string[string])) {
-                            foreach (key, ref JSONValue val; json[llmMemberName].object) {
+                            foreach (key, ref JSONValue val; json[yamlKey].object) {
                                 __traits(getMember, conf, llmMemberName)[key] = val.str;
                             }
                         } else static if (isNullableType!Type && is(NullableInner!Type == bool)) {
                             // Nullable!bool (per-model toolBroker override):
                             // present scalar replaces, absent or JSON-null
                             // keeps the Nullable unset.
-                            auto val = json[llmMemberName];
+                            auto val = json[yamlKey];
                             if (val.type != JSONType.NULL) {
                                 __traits(getMember, conf, llmMemberName) = Nullable!bool(
                                         val.boolean);
                             }
+                        } else static if (isNullableType!Type
+                                && is(NullableInner!Type == CompressionMode)) {
+                            // Per-model AgentsMd override (Nullable!CompressionMode):
+                            // present spelling replaces, absent or JSON-null
+                            // keeps the Nullable unset.
+                            auto val = json[yamlKey];
+                            if (val.type != JSONType.NULL) {
+                                __traits(getMember, conf, llmMemberName) = Nullable!CompressionMode(
+                                        compressionModeFromYaml(val.str));
+                            }
                         } else static if (isNullableType!Type && is(NullableInner!Type : string[])) {
                             alias InnerT = NullableInner!Type;
-                            auto val = json[llmMemberName];
+                            auto val = json[yamlKey];
                             if (val.type != JSONType.NULL) {
                                 __traits(getMember, conf, llmMemberName) = Nullable!InnerT(val.array.map!(a => a.str)
                                         .array);
                             }
                         } else static if (is(Type == GroupConfig[string])) {
-                            auto val = json[llmMemberName];
+                            auto val = json[yamlKey];
                             if (val.type != JSONType.NULL) {
                                 __traits(getMember, conf, llmMemberName) = Type.init;
                                 foreach (key, ref JSONValue groupVal; val.object) {
                                     __traits(getMember, conf, llmMemberName)[key] = applyConfig(GroupConfig.init,
-                                            groupVal);
+                                            groupVal, warn);
                                 }
                             }
                         } else static if (isNullableType!Type
                                 && is(NullableInner!Type == GroupConfig[string])) {
                             alias InnerT = NullableInner!Type;
-                            auto val = json[llmMemberName];
+                            auto val = json[yamlKey];
                             if (val.type != JSONType.NULL) {
                                 InnerT groups;
                                 foreach (key, ref JSONValue groupVal; val.object) {
-                                    groups[key] = applyConfig(GroupConfig.init, groupVal);
+                                    groups[key] = applyConfig(GroupConfig.init, groupVal, warn);
                                 }
                                 __traits(getMember, conf, llmMemberName) = Nullable!InnerT(groups);
                             }
                         } else static if (is(Type : string[])) {
-                            __traits(getMember, conf, llmMemberName) = json[llmMemberName].array.map!(a => a.str)
+                            __traits(getMember, conf, llmMemberName) = json[yamlKey].array.map!(a => a.str)
                                 .array;
                         } else static if (is(Type : EmbedConfig)) {
-                            __traits(getMember, conf, llmMemberName) = embedConfigFromValue(
-                                    json[llmMemberName]);
+                            __traits(getMember, conf, llmMemberName) = embedConfigFromValue(json[yamlKey],
+                                    warn);
                         } else static if (isNullableType!Type
                                 && isAggregateType!(NullableInner!Type)) {
                             // Handle Nullable!T for aggregate types (e.g., Nullable!VisionModelConfig)
                             alias InnerT = NullableInner!Type;
-                            auto val = json[llmMemberName];
+                            auto val = json[yamlKey];
                             if (val.type != JSONType.NULL) {
                                 auto innerConf = InnerT.init;
                                 __traits(getMember, conf, llmMemberName) = Nullable!InnerT(applyConfig(innerConf,
-                                        val));
+                                        val, warn));
                             }
                         } else static if (isAggregateType!Type) {
                             __traits(getMember, conf, llmMemberName) = applyConfig(__traits(getMember,
-                                    conf, llmMemberName), *(llmMemberName in json));
+                                    conf, llmMemberName), *(yamlKey in json), warn);
                         }
                     } catch (Exception e) {
-                        logger.warningf("unable to read '%s': %s", llmMemberName, e.msg);
+                        warn(logger.LogLevel.warning,
+                                format!"unable to read '%s': %s"(llmMemberName, e.msg));
                     }
                 } else {
                     logger.tracef("using default value for %s:%s", ConfigT.stringof, llmMemberName);
@@ -1254,7 +1449,8 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json) {
     foreach (k; json.object.byKey.filter!(a => a !in used)) {
         static if (is(typeof(conf.unknownYamlKeys)))
             conf.unknownYamlKeys ~= k;
-        logger.warningf("Unknown configuration key %s.%s", ConfigT.stringof, k);
+        warn(logger.LogLevel.warning,
+                format!"Unknown configuration key %s.%s"(ConfigT.stringof, k));
     }
 
     logger.trace("apply config done: " ~ ConfigT.stringof);
@@ -1586,7 +1782,7 @@ string[] validateToolBrokerConfig(LlmConfig conf) @safe {
 
 alias applyLlmConfig = applyConfig!LlmConfig;
 
-/// Returns the key from the enviroment variable, or "" if not set.
+/// Returns the key from the environment variable, or "" if not set.
 string getEnvApiKey(string envVariable) {
     import std.process : environment;
 
@@ -2141,7 +2337,7 @@ codeModels:
     assert(n.feedback.minToolCalls == 50);
 }
 
-/// `nudges` absent everywhere → the struct defaults survive.
+/// `nudges` absent everywhere -> the struct defaults survive.
 @("nudges absent everywhere keeps the struct defaults") unittest {
     import std.path : buildPath;
     import std.stdio : File;
@@ -2748,6 +2944,251 @@ codeModels:
     assert(resolved.groups["pipeline"].tools == ["pipelineOutput"], "global-only entry survives");
 }
 
+@("AgentsMd global block parses; absent block keeps the built-in defaults") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "config_agentsmd_globals");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+
+    // Absent block: the built-in defaults survive.
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.agentsMd == AgentsMdConfig.init, "absent AgentsMd keeps the defaults");
+    assert(conf.agentsMd.enabled);
+    assert(conf.agentsMd.compression.mode == CompressionMode.auto_);
+    assert(conf.agentsMd.compression.thresholdKb == 20);
+    assert(conf.agentsMd.ragIndex);
+
+    // Full explicit block: every field applies; thresholdKb: 0 is legal.
+    yaml = `agentsMd:
+  enabled: false
+  compression:
+    mode: full
+    thresholdKb: 0
+  ragIndex: false
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+    conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(!conf.agentsMd.enabled);
+    assert(conf.agentsMd.compression.mode == CompressionMode.full);
+    assert(conf.agentsMd.compression.thresholdKb == 0,
+            "thresholdKb: 0 must parse (always-summary under auto), got "
+            ~ conf.agentsMd.compression.thresholdKb.to!string);
+    assert(!conf.agentsMd.ragIndex);
+}
+
+@("effectiveAgentsMd resolves per-field: restated keys win, absent inherit global") unittest {
+    import std.typecons : Nullable;
+
+    // Absent global block: the built-in defaults are the base layer.
+    auto conf = LlmConfig.init;
+    auto resolved = effectiveAgentsMd(conf, CodeModelConfig.init);
+    assert(resolved.enabled);
+    assert(resolved.compression.mode == CompressionMode.auto_);
+    assert(resolved.compression.thresholdKb == 20);
+    assert(resolved.ragIndex);
+
+    // Global block set + absent model block: the global passes through.
+    conf.agentsMd.enabled = false;
+    conf.agentsMd.compression.mode = CompressionMode.summary;
+    conf.agentsMd.compression.thresholdKb = 100;
+    conf.agentsMd.ragIndex = false;
+    resolved = effectiveAgentsMd(conf, CodeModelConfig.init);
+    assert(!resolved.enabled);
+    assert(resolved.compression.mode == CompressionMode.summary);
+    assert(resolved.compression.thresholdKb == 100);
+    assert(!resolved.ragIndex);
+
+    // Per-field overrides: restated keys replace the global value,
+    // unspecified keys inherit it.
+    CodeModelConfig model;
+    model.agentsMd.mode = Nullable!CompressionMode(CompressionMode.full);
+    model.agentsMd.thresholdKb = Nullable!long(5);
+    resolved = effectiveAgentsMd(conf, model);
+    assert(!resolved.enabled, "absent model enabled inherits the global false");
+    assert(resolved.compression.mode == CompressionMode.full, "restated mode wins");
+    assert(resolved.compression.thresholdKb == 5, "restated thresholdKb wins");
+    assert(!resolved.ragIndex, "absent model ragIndex inherits the global false");
+}
+
+@("unknown AgentsMd keys warn via the existing unknown-key loop") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("config_agentsmd_unknown");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `agentsMd:
+  enabled: true
+  bogusKey: 1
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+
+    // Explicit collector instead of a sharedLog swap (AGENTS.md Testing rule).
+    string[] warnings;
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)),
+            (logger.LogLevel lvl, string msg) { warnings ~= msg; });
+    assert(conf.agentsMd.enabled, "the known key still parsed");
+    assert(warnings.canFind!(w => w.canFind("bogusKey")), warnings.to!string);
+    assert(warnings.canFind!(w => w.canFind("Unknown configuration key AgentsMdConfig.bogusKey")),
+            warnings.to!string);
+
+}
+
+@("thresholdKb: -1 is a parse error; thresholdKb: 0 is legal") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("config_agentsmd_threshold");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+
+    // Explicit collector instead of a sharedLog swap (AGENTS.md Testing rule).
+    string[] warnings;
+
+    // Negative: parse error - the invalid value is not applied and the
+    // warning names the key; the field keeps its default.
+    string yaml = `agentsMd:
+  compression:
+    mode: summary
+    thresholdKb: -1
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)),
+            (logger.LogLevel lvl, string msg) { warnings ~= msg; });
+    assert(conf.agentsMd.compression.thresholdKb == 20,
+            "the rejected value must not be applied, got "
+            ~ conf.agentsMd.compression.thresholdKb.to!string);
+    assert(warnings.canFind!(w => w.canFind("thresholdKb") && w.canFind("-1")), warnings.to!string);
+    assert(warnings.canFind!(w => w.canFind("non-negative")), warnings.to!string);
+
+    // Zero is legal (always-summary under auto).
+    yaml = `agentsMd:
+  compression:
+    thresholdKb: 0
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+    warnings = null;
+    conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)),
+            (logger.LogLevel lvl, string msg) { warnings ~= msg; });
+    assert(conf.agentsMd.compression.thresholdKb == 0,
+            "thresholdKb: 0 must parse, got " ~ conf.agentsMd.compression.thresholdKb.to!string);
+}
+
+@("unknown compression.mode is a parse error naming the valid values") unittest {
+    import std.algorithm : canFind;
+    import std.exception : collectException;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    // The mapping helper rejects unknown spellings naming the valid values.
+    auto e = collectException(compressionModeFromYaml("bogus"));
+    assert(e !is null, "unknown compression.mode must be a parse error");
+    assert(e.msg.canFind("auto | full | summary"), e.msg);
+
+    auto tmpDir = testArea("config_agentsmd_mode");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+
+    // Explicit collector instead of a sharedLog swap (AGENTS.md Testing rule).
+    string[] warnings;
+
+    // End to end: the bad spelling is a per-field parse error - the mode
+    // field keeps its enum default, the sibling keys still apply, and the
+    // warning names the valid values.
+    string yaml = `agentsMd:
+  enabled: false
+  compression:
+    mode: bogus
+    thresholdKb: 7
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)),
+            (logger.LogLevel lvl, string msg) { warnings ~= msg; });
+    assert(!conf.agentsMd.enabled, "AgentsMd-level siblings still parse");
+    assert(conf.agentsMd.compression.mode == CompressionMode.auto_,
+            "the rejected field keeps its default");
+    assert(conf.agentsMd.compression.thresholdKb == 7,
+            "sibling keys still parse, got " ~ conf.agentsMd.compression.thresholdKb.to!string);
+    assert(warnings.canFind!(w => w.canFind("auto | full | summary")), warnings.to!string);
+}
+
+/// Regression: a YAML float whose value differs from the struct default must
+/// actually apply - the duplicate empty isFloatingPoint branch used to make
+/// the assignment unreachable (silently keeping the default).
+@("a YAML float value that differs from the struct default is applied") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "config_float_applies");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `nudges:
+  compression:
+    threshold: 0.75
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.nudges.compression.threshold == 0.75,
+            "float config value must override the struct default, got "
+            ~ conf.nudges.compression.threshold.to!string);
+}
+
 @("tool broker validation warns on invalid configs and stays silent on valid ones") unittest {
     import std.algorithm : canFind;
 
@@ -2936,4 +3377,261 @@ codeModels:
     foreach (area; areas)
         foreach (tier; ["short", "long", "archive"])
             assert((area ~ tier).exists, area.toString ~ "/" ~ tier);
+}
+
+@("per-model compression.mode: bogus is a parse error naming the valid values") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("config_agentsmd_bogus_mode");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+
+    // Explicit collector instead of a sharedLog swap (AGENTS.md Testing rule).
+    string[] warnings;
+
+    // Per-model block: the bogus mode spelling is rejected with a warning, so
+    // that Nullable override field stays unset and the model inherits the
+    // global value. (The global-block half of this scenario is covered by the
+    // existing `unknown compression.mode` unittest above.)
+    string yaml = `agentsMd:
+  compression:
+    mode: summary
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+    agentsMd:
+      mode: bogus
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)),
+            (logger.LogLevel lvl, string msg) { warnings ~= msg; });
+    assert(conf.agentsMd.compression.mode == CompressionMode.summary);
+    assert(conf.codeModels[0].agentsMd.mode.isNull,
+            "the rejected override must not be applied, got "
+            ~ conf.codeModels[0].agentsMd.mode.to!string);
+    assert(warnings.canFind!(w => w.canFind("bogus")
+            && w.canFind("auto | full | summary")), warnings.to!string);
+}
+
+@("per-model agentsMd YAML block parses; effectiveAgentsMd layers it over the global") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "config_agentsmd_model");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+
+    // Global block + per-model per-field override: restated keys win,
+    // unspecified keys inherit the global block.
+    string yaml = `agentsMd:
+  enabled: false
+  compression:
+    mode: summary
+    thresholdKb: 100
+  ragIndex: false
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+    agentsMd:
+      mode: full
+      thresholdKb: 5
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    auto resolved = effectiveAgentsMd(conf, conf.codeModels[0]);
+    assert(!resolved.enabled, "absent model enabled inherits the global false");
+    assert(resolved.compression.mode == CompressionMode.full, "restated mode wins");
+    assert(resolved.compression.thresholdKb == 5, "restated thresholdKb wins");
+    assert(!resolved.ragIndex, "absent model ragIndex inherits the global false");
+
+    // A model without an agentsMd block inherits the global as-is.
+    resolved = effectiveAgentsMd(conf, CodeModelConfig.init);
+    assert(!resolved.enabled);
+    assert(resolved.compression.mode == CompressionMode.summary);
+    assert(resolved.compression.thresholdKb == 100);
+    assert(!resolved.ragIndex);
+
+    // Absent global block: the built-in defaults are the base layer.
+    yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+    agentsMd:
+      enabled: true
+`;
+    File(tmpFile, "w").write(yaml);
+    conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    resolved = effectiveAgentsMd(conf, conf.codeModels[0]);
+    assert(resolved.enabled, "restated model enabled wins over the built-in default");
+    assert(resolved.compression.mode == CompressionMode.auto_);
+    assert(resolved.compression.thresholdKb == 20);
+    assert(resolved.ragIndex);
+}
+
+@("agentsMdSourceSummary reports per-field provenance: per-model, global, default") unittest {
+    import std.algorithm.searching : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "config_agentsmd_source");
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+
+    // Global block restates mode (global layer), per-model restates thresholdKb
+    // (per-model layer); enabled and ragIndex come from the built-in defaults.
+    string yaml = `agentsMd:
+  compression:
+    mode: summary
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+    agentsMd:
+      thresholdKb: 5
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+
+    auto source = agentsMdSourceSummary(conf, conf.codeModels[0]);
+    assert(source.canFind("mode=summary (global)"), source);
+    assert(source.canFind("thresholdKb=5 (per-model)"), source);
+    assert(source.canFind("enabled=true (default)"), source);
+    assert(source.canFind("ragIndex=true (default)"), source);
+
+    // No agentsMd anywhere: everything reports the built-in default layer.
+    yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+    conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    source = agentsMdSourceSummary(conf, conf.codeModels[0]);
+    assert(source == "enabled=true (default), mode=auto (default), "
+            ~ "thresholdKb=20 (default), ragIndex=true (default)", source);
+}
+
+version (unittest) {
+    /// Minimal LlmConfig whose promptDir holds only AGENT.md, with skills
+    /// disabled so getPrompt never touches the (null) skill manager.
+    private LlmConfig agentMdComposeTestConfig(string promptDir) {
+        LlmConfig conf;
+        conf.disableSkills = true;
+        conf.promptDir = [promptDir.Path];
+        return conf;
+    }
+}
+
+@("getPrompt with an empty payload injects nothing") unittest {
+    import std.file : write;
+
+    import llm.test_util : testArea;
+
+    auto td = testArea("getprompt_empty_payload");
+    scope (exit)
+        td.cleanup;
+    write(td.workArea ~ "AGENT.md", "Base prompt.");
+    auto conf = agentMdComposeTestConfig(td.workArea);
+
+    auto prompt = conf.getPrompt(null, "AGENT.md", addSkills: true, agentsMd: AgentsMdPrompt.init);
+    assert(prompt == "Base prompt.", "empty payload must inject nothing");
+}
+
+@("getPrompt with a whitespace-only payload injects nothing") unittest {
+    import std.file : write;
+
+    import llm.test_util : testArea;
+
+    auto td = testArea("getprompt_whitespace_payload");
+    scope (exit)
+        td.cleanup;
+    write(td.workArea ~ "AGENT.md", "Base prompt.");
+    auto conf = agentMdComposeTestConfig(td.workArea);
+
+    auto prompt = conf.getPrompt(null, "AGENT.md", addSkills: true, agentsMd: AgentsMdPrompt("  \n\t",
+            "agent_md_0a1b2c3d"));
+    assert(prompt == "Base prompt.", "whitespace-only payload counts as absent");
+}
+
+@("getPrompt injects the summary payload and a pointer instruction naming the exact RAG topic") unittest {
+    import std.algorithm : canFind;
+    import std.file : write;
+
+    import llm.test_util : testArea;
+
+    auto td = testArea("getprompt_summary_pointer");
+    scope (exit)
+        td.cleanup;
+    write(td.workArea ~ "AGENT.md", "Base prompt.");
+    auto conf = agentMdComposeTestConfig(td.workArea);
+
+    auto prompt = conf.getPrompt(null, "AGENT.md", addSkills: true, agentsMd: AgentsMdPrompt(
+            "# AGENTS.md Rules\n- Rule 1", "agent_md_0a1b2c3d"));
+
+    assert(prompt.canFind("# AGENTS.md Rules"), "summary payload injected");
+    assert(prompt.canFind("query your RAG knowledge base for topic `agent_md_0a1b2c3d`"),
+            "pointer instruction must embed the exact RAG topic name");
+    assert(indexOf(prompt, "Base prompt.") < indexOf(prompt, "# AGENTS.md Rules")
+            && indexOf(prompt, "# AGENTS.md Rules") < indexOf(prompt,
+                "query your RAG knowledge base"), "order: base → payload → pointer instruction");
+}
+
+@("getPrompt with an empty ragTopic emits no pointer instruction") unittest {
+    import std.algorithm : canFind;
+    import std.file : write;
+
+    import llm.test_util : testArea;
+
+    auto td = testArea("getprompt_summary_no_pointer");
+    scope (exit)
+        td.cleanup;
+    write(td.workArea ~ "AGENT.md", "Base prompt.");
+    auto conf = agentMdComposeTestConfig(td.workArea);
+
+    auto prompt = conf.getPrompt(null, "AGENT.md", addSkills: true, agentsMd: AgentsMdPrompt(
+            "# AGENTS.md Rules", ""));
+
+    assert(prompt.canFind("# AGENTS.md Rules"), "payload still injected");
+    assert(!prompt.canFind("query your RAG knowledge base"),
+            "no pointer instruction without a ragTopic");
+}
+
+@("getPrompt with an empty payload injects nothing even with a ragTopic set") unittest {
+    import std.file : write;
+
+    import llm.test_util : testArea;
+
+    auto td = testArea("getprompt_empty_payload_ragtopic");
+    scope (exit)
+        td.cleanup;
+    write(td.workArea ~ "AGENT.md", "Base prompt.");
+    auto conf = agentMdComposeTestConfig(td.workArea);
+
+    auto prompt = conf.getPrompt(null, "AGENT.md", addSkills: true, agentsMd: AgentsMdPrompt("",
+            "agent_md_0a1b2c3d"));
+
+    assert(prompt == "Base prompt.", "empty payload wins: no injection, no instruction");
+}
+
+@("composeAgentMdRagPointer embeds the topic name in the pointer wording") unittest {
+    const instruction = composeAgentMdRagPointer("agent_md_0a1b2c3d");
+    assert(instruction == "For detailed explanations, architecture justifications, or lengthy code examples, "
+            ~ "query your RAG knowledge base for topic `agent_md_0a1b2c3d`; however, you must obey the "
+            ~ "summarized rules listed above at all times.");
 }
