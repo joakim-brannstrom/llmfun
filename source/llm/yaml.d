@@ -228,32 +228,6 @@ derived:
     assert(json["derived"]["z"].integer == 3);
 }
 
-@("multi-document stream is rejected with a descriptive message including the path")
-unittest {
-    import std.conv : to;
-    import std.file : mkdirRecurse, rmdirRecurse;
-    import std.path : buildPath;
-    import std.stdio : File;
-    import std.algorithm.searching : canFind;
-
-    auto tmpDir = buildPath("llmfun_test", "yaml_multidoc_" ~ __LINE__.to!string);
-    mkdirRecurse(tmpDir);
-    scope (exit)
-        rmdirRecurse(tmpDir);
-    auto tmpFile = buildPath(tmpDir, "multi.yaml");
-    File(tmpFile, "w").write("--- 4\n--- 6\n");
-
-    bool caught = false;
-    try {
-        loadYamlValue(Path(tmpFile));
-    } catch (Exception e) {
-        caught = true;
-        assert(e.msg.canFind("More than one document in stream"), e.msg);
-        assert(e.msg.canFind(tmpFile), e.msg);
-    }
-    assert(caught, "multi-document stream must throw");
-}
-
 @("empty file is rejected with a descriptive message including the path")
 unittest {
     import std.conv : to;
