@@ -5,7 +5,8 @@ import std.algorithm : map, filter, startsWith, count, joiner, endsWith, splitte
 import std.array : empty, appender, array, join;
 import std.conv : to, text;
 import std.exception : enforce;
-import std.file : readText, exists, mkdirRecurse, getSize, remove, dirEntries, SpanMode;
+import std.file : readText, exists, mkdirRecurse, getSize, remove, isDir,
+    rmdirRecurse, dirEntries, SpanMode;
 import std.json : JSONValue, parseJSON, JSONOptions, JSONType;
 import std.path : relativePath;
 import std.process : execute;
@@ -29,9 +30,18 @@ mixin RegisterLlmFunctions!();
 immutable MaxLines = 20;
 
 struct RemoveFileParams {
+    @ParamDescription("Path to the file (relative to workarea)")
     string path;
+
+    @ParamDescription("Set to true to delete a directory tree. On a regular file, recursive is unnecessary and has no effect (the file is deleted either way); it exists so one call shape works for both files and directories.")
+    @ParamOptional bool recursive;
 }
 
+/// Remove a file, or with recursive=true a whole directory tree.
+/// Symlink safety: rmdirRecurse never follows symlinks (a top-level symlink
+/// path is rejected by pathToWorkarea; symlinks inside the tree are unlinked,
+/// never recursed into), so a recursive delete cannot escape the workarea
+/// through a symlink.
 @Function("Remove file") ExecuteFuncResult removeFile(Context baseCtx, RemoveFileParams params) {
     mixin(baseContextToSpecific!FileContext);
 
@@ -41,7 +51,14 @@ struct RemoveFileParams {
     }
 
     try {
-        remove(path_);
+        if (path_.path.isDir) { // explicit alias-this target; std.file.isDir via UFCS
+            if (!params.recursive)
+                return ExecuteFuncResult("error: path is a directory; remove_file deletes files only — pass recursive=true to delete the directory tree",
+                        success: false);
+            rmdirRecurse(path_);
+        } else {
+            remove(path_); // existing behavior, recursive or not
+        }
         return ExecuteFuncResult("OK", success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(i"error: failed to remove file '$(params.path)': $(e.msg)".text,

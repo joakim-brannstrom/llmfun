@@ -55,8 +55,15 @@ PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path, bool che
         return PathCheckResult(path_, false, i"error: path '$(path)' is a symlink. Symlinks are not allowed to be read/write."
                 .text);
     }
-    auto checkPath = path.dirName;
-    while (!checkPath.empty && checkPath.startsWith(ctx.workArea.toString)) {
+    // a symlinked directory component silently redirects the operation outside
+    // the workarea and lexical checks cannot see it, so walk the real components
+    auto checkPath = path_.dirName.toString;
+    while (checkPath.startsWith(ctx.workArea.toString)
+            && checkPath.length > ctx.workArea.toString.length) {
+        // exists first: isSymlink throws for a component that does not exist
+        // (new parent dirs are legal - e.g. writeFile mkdirRecurse later), and
+        // a nonexistent component cannot be a symlink anyway. exists is true
+        // for dangling symlinks here (lstat), so those are still rejected.
         if (checkPath.exists && checkPath.isSymlink) {
             logger.trace(checkPath);
             return PathCheckResult(path_, false, i"error: path '$(checkPath)' is a symlink. Read/write is not allowed from inside a symlink."

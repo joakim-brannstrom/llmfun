@@ -187,7 +187,7 @@ private void reloadAgentMdToRag(RAG rag, string content, long checksum, RagConfi
 }
 
 /// Merge multiple chunk summaries into a single, clean bullet list.
-/// deduplicates bullet points, and ensures all lines use "- " prefix.
+/// Deduplicates bullet points and ensures all lines use "- " prefix.
 private string bulletListMerge(SummaryChunkT[] summaries) {
     if (summaries.empty)
         return "";
@@ -259,15 +259,16 @@ private size_t agentMdThresholdBytes(const AgentsMdConfig agentsMd) @safe pure n
 /// hold a valid summary for the current content (a cache hit makes the
 /// recompute a fast cache read - no status message needed). enabled=false
 /// never summarizes; a missing, unreadable, or whitespace-only AGENTS.md
-/// has nothing to summarize. Reads the real workarea (processAgentMd hardcodes
-/// `AbsolutePath(".")` - the dub test runner runs tests concurrently, so tests
-/// must not chdir).
-package bool agentMdSwitchMaySummarize(const LlmConfig conf, const CodeModelConfig model) @safe {
+/// has nothing to summarize. The AGENTS.md location is injectable (empty
+/// resolves to the process CWD's AGENTS.md - the dub test runner runs tests
+/// concurrently, so tests must not chdir; tests inject a fixture path).
+package bool agentMdSwitchMaySummarize(const LlmConfig conf,
+        const CodeModelConfig model, Path agentsMdFile = Path.init) @safe {
     const agentsMd = effectiveAgentsMd(conf, model);
     if (!agentsMd.enabled)
         return false;
 
-    auto agentMdPath = (AbsolutePath(".") ~ "AGENTS.md").Path;
+    auto agentMdPath = agentsMdFile.empty ? AbsolutePath(".") ~ "AGENTS.md" : agentsMdFile;
     if (!agentMdPath.exists)
         return false;
 
@@ -315,10 +316,13 @@ private string agentMdRagTopic(const AgentsMdConfig agentsMd, bool summaryTreatm
 //  model The active model config, supplying the per-field config-source
 //        provenance for the treatment log line (defaults: struct init = no
 //        per-model overrides).
+//  agentsMdFile Injectable AGENTS.md location: empty resolves to the process
+//        CWD's AGENTS.md; tests inject a fixture file so they never depend on
+//        the repo's real AGENTS.md.
 // Returns: The current AgentMdState, or a default-constructed state if no AGENTS.md is present.
 AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool forceRefresh = false,
         AgentsMdConfig agentsMd = AgentsMdConfig.init,
-        const CodeModelConfig model = CodeModelConfig.init) {
+        const CodeModelConfig model = CodeModelConfig.init, Path agentsMdFile = Path.init) {
     import llm.summary_agent : SummaryAgent;
 
     if (noCwdConfig) {
@@ -349,7 +353,7 @@ AgentMdState processAgentMd(LlmConfig config, bool noCwdConfig, RAG rag, bool fo
     }
 
     auto workarea = AbsolutePath(".");
-    auto agentMdPath = (workarea ~ "AGENTS.md").Path;
+    auto agentMdPath = agentsMdFile.empty ? workarea ~ "AGENTS.md" : agentsMdFile;
 
     if (!agentMdPath.exists) {
         // AGENTS.md not found - clean up any leftover cache and RAG topics
@@ -901,9 +905,10 @@ unittest {
             "ragIndex=false: nothing to point at");
 }
 
-/// The test helpers. The real processAgentMd hardcodes its workarea
-/// to AbsolutePath(".") and the dub test runner executes tests concurrently,
-/// so tests must not touch the process cwd; the re-index and topic-removal
+/// The test helpers. processAgentMd reads the injectable AGENTS.md location
+/// (empty = the process CWD's AGENTS.md, and the dub test runner executes
+/// tests concurrently, so tests must not chdir); the cache-matrix tests point
+/// the injectable path at a fixture file. The re-index and topic-removal
 /// mechanics are covered at the reloadAgentMdToRag / removeAgentMdTopic level
 /// instead, leaving the inline gate wiring to the integration tests.
 version (unittest) {
@@ -912,6 +917,17 @@ version (unittest) {
     import llm.config : RagConfig, RagDatabaseConfig;
     import llm.rag : RAG;
     import llm.test_util : TestArea, TestEmbedder, testArea;
+
+    /// Stand-in for the repo's real AGENTS.md: the cache-matrix tests process
+    /// this fixture through the injectable agentsMdFile path, so they never
+    /// depend on the repo file's existence or size.
+    immutable fixtureAgentsMdText = "# Fixture project rules\n\n- keep the tests hermetic\n- no repo artifacts in unittests\n";
+
+    /// A raw read of the injectable AGENTS.md fixture: text plus its checksum.
+    struct RawAgentsMd {
+        string text;
+        size_t checksum;
+    }
 
     RAG makeInMemoryAgentMdRag(ref TestArea td) {
         auto rag = new RAG(new TestEmbedder(),
@@ -924,28 +940,21 @@ version (unittest) {
     struct CacheFixture {
         LlmConfig conf;
         Path cachePath;
+        Path mdPath;
     }
 
     CacheFixture cacheFixture(ref TestArea td) {
+        import std.file : write;
+
         CacheFixture f;
         f.conf = LlmConfig();
         f.conf.dataDir = td.workArea;
         f.cachePath = td.workArea ~ "agent_md_cache.json";
+        // The fixture AGENTS.md stands in for the repo file; the matrix tests
+        // hand its path to processAgentMd, so they never read the real file.
+        f.mdPath = td.workArea ~ "AGENTS.md";
+        write(f.mdPath.toString, fixtureAgentsMdText);
         return f;
-    }
-
-    struct RawAgentsMd {
-        string text;
-        long checksum;
-    }
-
-    RawAgentsMd readRawAgentsMd() {
-        immutable rawContent = (AbsolutePath(".") ~ "AGENTS.md").Path;
-        assert(rawContent.exists, "the repo AGENTS.md must exist for this matrix");
-        immutable rawText = rawContent.readText;
-        assert(!rawText.strip.empty,
-                "this matrix needs a non-whitespace repo AGENTS.md (whitespace-only counts as no AGENTS.md)");
-        return RawAgentsMd(rawText, computeContentHash(rawText));
     }
 }
 
@@ -1034,15 +1043,13 @@ unittest {
     assert(rag.db.getSources.length == 0, "removing an absent topic must stay a no-op");
 }
 
-// ---- Cache-rule verification matrix ----
 // These tests prove the cache rules end-to-end against a real
 // agent_md_cache.json in a temp data dir (TestArea). The summarize step is
 // stubbed by pre-seeding the cache (the deterministic approach of the
-// forceRefresh test above): processAgentMd hardcodes its workarea to
-// AbsolutePath(".") and the dub test runner executes tests concurrently, so
-// no test may chdir and no test may drive the network SummaryAgent. The
-// fixture wiring lives in cacheFixture / readRawAgentsMd (version (unittest)
-// block above).
+// forceRefresh test above): the AGENTS.md source is the injectable agentsMdFile
+// param, pointed at the fixture file written by cacheFixture - no test may
+// chdir and no test may drive the network SummaryAgent. The fixture wiring
+// lives in cacheFixture / fixtureAgentsMdText (version (unittest) block above).
 
 @("cache hit: the summary is generated once per content - the second run with the same content and mode is a checksum hit returning the cached summary without a second summarize")
 unittest {
@@ -1053,8 +1060,8 @@ unittest {
         td.cleanup;
     auto fx = cacheFixture(td);
 
-    // The real workarea AGENTS.md is the content under test (read-only).
-    immutable agentMd = readRawAgentsMd();
+    // The fixture AGENTS.md is the content under test (read-only).
+    immutable agentMd = RawAgentsMd(fixtureAgentsMdText, computeContentHash(fixtureAgentsMdText));
 
     // First run: summarize (stubbed) + cache write.
     immutable generatedSummary = "- stubbed AGENTS.md summary: generated once\n";
@@ -1065,7 +1072,7 @@ unittest {
     // Second run with the same content and mode: a checksum cache hit returns
     // the stored summary - the network SummaryAgent is never constructed.
     auto summaryCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.summary, 20), false);
-    auto state = processAgentMd(fx.conf, false, null, false, summaryCfg);
+    auto state = processAgentMd(fx.conf, false, null, false, summaryCfg, agentsMdFile: fx.mdPath);
     assert(state.checksum == agentMd.checksum, "the hit must carry the cached checksum");
     assert(state.summary == generatedSummary,
             "the cache hit must hand back the stored summary without a second summarize");
@@ -1081,7 +1088,7 @@ unittest {
         td.cleanup;
     auto fx = cacheFixture(td);
 
-    immutable agentMd = readRawAgentsMd();
+    immutable agentMd = RawAgentsMd(fixtureAgentsMdText, computeContentHash(fixtureAgentsMdText));
 
     // First run, summary mode: summarize (stubbed) + cache write.
     immutable generatedSummary = "- stubbed AGENTS.md summary: generated once\n";
@@ -1092,7 +1099,7 @@ unittest {
     // untouched (no cache activity on the full path).
     auto fullCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.full, 20), false);
     immutable cacheBefore = fx.cachePath.readText;
-    auto fullState = processAgentMd(fx.conf, false, null, false, fullCfg);
+    auto fullState = processAgentMd(fx.conf, false, null, false, fullCfg, agentsMdFile: fx.mdPath);
     assert(fullState.summary == agentMd.text,
             "the full treatment must inject the verbatim raw text");
     assert(fullState.checksum == agentMd.checksum, "the checksum is the raw text's");
@@ -1101,7 +1108,8 @@ unittest {
     // Switch back to summary: the cached summary is reused - no
     // re-summarize even though the mode changed twice in between.
     auto summaryCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.summary, 20), false);
-    auto hitState = processAgentMd(fx.conf, false, null, false, summaryCfg);
+    auto hitState = processAgentMd(fx.conf, false, null, false, summaryCfg,
+            agentsMdFile: fx.mdPath);
     assert(hitState.checksum == agentMd.checksum, "the hit must carry the cached checksum");
     assert(hitState.summary == generatedSummary,
             "toggling modes must reuse the cached summary without a re-summarize");
@@ -1120,7 +1128,7 @@ unittest {
 
     // (a) Absent cache file: a full-treatment run must not create one.
     assert(!fx.cachePath.exists, "pre-condition: no cache file");
-    processAgentMd(fx.conf, false, null, false, fullCfg);
+    processAgentMd(fx.conf, false, null, false, fullCfg, agentsMdFile: fx.mdPath);
     assert(!fx.cachePath.exists, "the full treatment must not write the cache file");
 
     // (b) Pre-seeded cache file: a full-treatment run must leave it
@@ -1128,7 +1136,7 @@ unittest {
     assert(saveAgentMdCache(fx.cachePath, AgentMdState(checksum: 424242,
             summary: "- seeded summary\n", timestamp: Clock.currTime())));
     immutable cacheBefore = fx.cachePath.readText;
-    processAgentMd(fx.conf, false, null, false, fullCfg);
+    processAgentMd(fx.conf, false, null, false, fullCfg, agentsMdFile: fx.mdPath);
     assert(fx.cachePath.readText == cacheBefore,
             "the full treatment must not rewrite the cache file");
 }
@@ -1184,10 +1192,10 @@ unittest {
         td.cleanup;
     auto fx = cacheFixture(td);
 
-    immutable agentMd = readRawAgentsMd();
+    immutable agentMd = RawAgentsMd(fixtureAgentsMdText, computeContentHash(fixtureAgentsMdText));
 
     auto fullCfg = AgentsMdConfig(true, AgentsMdCompression(CompressionMode.full, 20), false);
-    auto state = processAgentMd(fx.conf, false, null, false, fullCfg);
+    auto state = processAgentMd(fx.conf, false, null, false, fullCfg, agentsMdFile: fx.mdPath);
     assert(state.checksum == agentMd.checksum,
             "the checksum must be computed over the raw AGENTS.md text (no @path resolution remains)");
 }

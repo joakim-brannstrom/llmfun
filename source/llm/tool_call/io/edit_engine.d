@@ -154,6 +154,14 @@ package string[] editContentLines(string content) @safe {
     return contentLines;
 }
 
+/// True when the composed result is element-wise (sequence) identical to
+/// the input lines. Deliberately NOT a net-line-count check: replacing 2
+/// lines with 2 DIFFERENT lines has a zero delta (linesChanged == 0) but is
+/// a real change, so linesChanged can never decide this.
+package bool isNoOpEdit(const(string[]) oldLines, const(string[]) newLines) @safe {
+    return oldLines == newLines;
+}
+
 /// Outcome of an in-memory unified edit.
 package struct EditFileOutcome {
     /// Resulting file lines after the edit
@@ -164,8 +172,30 @@ package struct EditFileOutcome {
     long linesChanged;
     /// Number of edit operations performed (>1 only with replaceAll)
     long operations;
-    /// True when count was auto-derived from the content line count
+    /// True when count was auto-derived (multi-line byMarker: marker line count;
+    /// byContent: matched block size)
     bool autoCountUsed;
     /// Human-readable note describing the auto-count derivation (empty when not auto-derived)
     string note;
+    /// Count of matched lines strictly longer than their marker lines
+    /// (SUMMED across occurrences for replaceAll; 0 when absent/not byMarker)
+    long fragmentLinesReplaced = 0;
+    /// The exact pre-edit target lines consumed by replace/remove modes.
+    /// Empty for insert modes and the no-targeting append-at-EOF shape.
+    string[] replacedLines;
+    /// Total consumed line count (equals replacedLines.length before any elision;
+    /// elision is a render concern in edit_tool, so the full lines travel intact)
+    long replacedTotal = 0;
+    /// True when the composed result is element-wise identical to the input
+    /// lines (an exact no-op). Never derived from linesChanged (net delta):
+    /// replacing N lines with N different lines has a zero delta but is a
+    /// real change. Set only for replace/remove modes; insert modes with
+    /// empty content are excluded (nothing is consumed, so there is no
+    /// old-vs-new text pair to compare).
+    bool noOp = false;
+    /// True when the content's first (insert_after) or last (insert_before)
+    /// line duplicates the anchored line/block (trimmed equality on both
+    /// sides, matching the targeting semantics). Warn only: the edit itself
+    /// is never mutated (no magic stripping of the duplicated line).
+    bool anchorDuplicate = false;
 }

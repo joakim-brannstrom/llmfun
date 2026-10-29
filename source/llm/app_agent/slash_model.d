@@ -62,7 +62,7 @@ private AgentStatus modelHandler(ref AgentApp app, string arg) {
             auto newModel = app.llmConf.activeCodeModel();
             app.agent_.resetModel(newModel);
             app.agent_.setStreamUpdate(app.makeStreamCallback);
-            if (agentMdSwitchMaySummarize(app.llmConf, newModel)) {
+            if (agentMdSwitchMaySummarize(app.llmConf, newModel, app.agentsMdFile_)) {
                 app.sendChatMessage("recomputing system prompt…", TuiChatMessageType_Assistant);
             }
             app.rebuildSystemPrompt();

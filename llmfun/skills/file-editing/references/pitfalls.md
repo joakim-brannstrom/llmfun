@@ -17,13 +17,17 @@ An edit may look correct in your diff but fail at the tool level. Always verify:
 ### Successive byLine edits corrupt files silently
 When making multiple byLine edits from a single read_file, the first edit shifts line numbers — subsequent edits target wrong content without any error. **Always re-read the file between byLine edits**, or better: **use byMarker or byContent** which search for content, not line numbers. If you must use byLine for successive edits, use the `verifyContent` parameter as a safety guard.
 
-## byMarker + Multi-line Content (Auto-Count)
+## byMarker Count Rules (one auto-count rule)
 
-### Auto-derived count from content lines
-When using `byMarker` targeting with `replace` mode and multi-line content, the tool auto-derives `count` from the number of content lines. If your replacement has 3 lines, it replaces 3 lines starting at the marker.
+### The single auto-count rule
+With `byMarker` range modes (`replace`/`remove`) and no explicit `count`:
+- Multi-line markers auto-derive `count` from the marker's line count (the result says `autoCountUsed=true` with a note).
+- A single-line marker with multi-line replace content REQUIRES an explicit `count` — the edit is refused with an error telling you to pass `count=N` or use a multi-line marker to auto-size the target. The old auto-derive from the content line count is gone: it silently over-consumed lines (it once replaced 41 lines from the anchor).
+- `remove` with a single-line marker auto-derives `count=1` (only the marker line is removed).
+- `byContent` auto-derives `count` from the matched block size. Insert modes ignore `count`.
 
 ### If you want ONLY the marker line replaced
-Set `count=1` explicitly when using multi-line content with `byMarker`:
+A single-line marker with multi-line content is refused, so pass `count=1` explicitly:
 ```
 edit_file(path="file.txt", mode="replace", marker="the line", count=1,
          content="replacement line 1\nreplacement line 2")
@@ -31,9 +35,15 @@ edit_file(path="file.txt", mode="replace", marker="the line", count=1,
 This replaces only 1 line (the marker line) with your multi-line content.
 
 ### If the original block is larger than your replacement
-If the original block has 10 lines but your replacement has 3, auto-count will only replace 3 lines. To replace the full original block, either:
-- Set `count` explicitly to the original block size
-- Use `byContent` targeting, which auto-derives count from the matched block size
+Set `count` explicitly to the original block size, or use `byContent` targeting, which auto-derives count from the matched block size.
+
+## Fragment Markers Are Refused (fragmentOk)
+
+### byMarker replace/replaceAll refuses fragment markers
+A marker matching as a strict substring INSIDE a longer line replaces the WHOLE line, destroying the text outside the match. To prevent silent destruction, `replace`/`replaceAll` with `byMarker` is refused when any matched line is strictly longer than its marker line (single-line marker: the matched line itself; multi-line marker: any verified marker line strictly contained in its file line). The error lists the affected 1-based line numbers with their full text. Pass a longer marker covering the full line(s), or `fragmentOk=true` to replace whole lines deliberately.
+
+### fragmentOk constraints and reporting
+`fragmentOk` is valid only with `byMarker` `replace`/`replaceAll` — providing it with `byLine`/`byContent` targeting, or with `remove`/insert modes, is an error. With `fragmentOk=true` the result includes `fragmentLinesReplaced` (count of matched lines strictly longer than their marker lines, summed across all occurrences with replaceAll) so the granularity stays visible in the success path. The guard fires identically under `dryRun=true`.
 
 ## byContent Matching Rules
 
@@ -59,13 +69,24 @@ If all lines in your search content are empty or whitespace-only, the tool rejec
 `replaceAll` only works with `byContent` and `byMarker` targeting. Using it with `byLine` returns an error.
 
 ### replaceAll with byMarker
-Only replaces lines where the marker substring appears. Consider `byContent` for more precise multi-line targeting.
+Line-granular: replaces each ENTIRE line containing the marker substring with the content lines (the fragment guard still applies — see "Fragment Markers Are Refused (fragmentOk)"). Consider `byContent` for more precise multi-line targeting.
 
 ### replaceAll is non-overlapping
 After replacing one occurrence, search resumes from the line after the replacement. Replacements cannot overlap with previously replaced content.
 
 ### matchIndex and replaceAll conflict
 `replaceAll=true` with `matchIndex > 1` returns an error. Use either `replaceAll=true` (all occurrences) or `matchIndex=N` (single occurrence), not both.
+
+## Result-Report Fields Worth Checking
+
+### replace/remove echo the consumed lines
+Replace/remove edits that consume lines echo the exact pre-edit target lines in the `replaced` field (elided when more than 11 lines: first 5 + "… (N lines replaced; first 5 and last 5 shown)" marker + last 5, with `replacedTotal` and `replacedTruncated=true`). Check `replaced` against what you intended to consume — a fragment marker that replaced whole lines used to look exactly like a benign swap in the report.
+
+### no-op edits are flagged
+When the composed result is element-wise identical to the input lines, the result includes `noOp=true` and a note ("the edit produced no change (new content identical to the replaced text); if you intended a change, the content equals the search text"). A zero `linesChanged` is neither necessary nor sufficient for a no-op: replacing 2 lines with 2 DIFFERENT lines has `linesChanged == 0` but is a real change. If you get `noOp=true` but wanted a change, your content equals the search block (or the target lines).
+
+### Insert modes keep the anchor — watch for anchorDuplicate
+Insert modes (`append`/its alias `insert_after`, and `insert_before`) KEEP the targeted block and insert the content adjacent to it — do not repeat the targeted text in content. When the content's boundary line duplicates the kept anchor line/block, the result includes `anchorDuplicate=true` and a note telling you which boundary line to drop. The tool warns, never mutates: the anchor is not auto-stripped. Anchoring is at the FIRST occurrence when the block repeats.
 
 ## apply_diff Behavior
 
@@ -110,6 +131,9 @@ When a `byMarker` or `byContent` search fails, the error includes a `diagnostic`
 - Details about what didn't match
 
 Use this information to adjust your search — the closest match often reveals a typo or whitespace difference.
+
+### Invisible-character-only mismatches
+When a `byMarker`/`byContent` search (or a `verifyContent` check) fails and the diagnostic's closest match looks VISUALLY IDENTICAL to what you sent, do not retry identically: the contents likely differ only by invisible characters (NBSP, tabs, zero-width, control chars). The diagnostic/error now says "differ only by invisible characters" and renders both contents escaped (`\t` for tabs, `\uXXXX` for other invisibles; the plain space stays raw) — compare the escaped renderings, strip or retype the invisible characters, then retry.
 
 ### Ambiguous targeting error
 If you provide multiple targeting methods (e.g., both `startLine` and `marker`), the tool returns an error. Provide exactly one targeting method.
@@ -163,7 +187,7 @@ edit_file(path="big.c", mode="replace", marker="target",
 Either or both bounds may be given. `scopeStart` alone searches from that line to EOF; `scopeEnd` alone searches from line 1 to that line.
 
 ### Scope constrains the anchor, not the whole match
-Only the **first line** of a match must be inside the range. A byContent block whose anchor is in scope may extend past `scopeEnd`. The same applies to byMarker: with `count > 1` (or auto-count from multi-line content), the replaced region may extend past `scopeEnd`. If you need the whole replaced region inside the range, widen `scopeEnd`.
+Only the **first line** of a match must be inside the range. A byContent block whose anchor is in scope may extend past `scopeEnd`. The same applies to byMarker: with `count > 1` (or auto-count from multi-line markers), the replaced region may extend past `scopeEnd`. If you need the whole replaced region inside the range, widen `scopeEnd`.
 
 ### Not-found errors mention the scope
 When a marker/block is outside the scope, the error says e.g. `marker 'X' not found in file within scope [10, 20]` and the `diagnostic` includes a `scope` field (`start`/`end`). The error message echoes the range you requested; the `diagnostic.scope` field reports the **effective** (clamped to the file) range. If you didn't intend a scope, you passed the wrong `scopeStart`/`scopeEnd` — widen or remove it.

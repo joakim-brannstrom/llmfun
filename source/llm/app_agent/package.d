@@ -84,6 +84,10 @@ struct AgentApp {
         bool noCwdConfig_;
         // gates the deferral in rebuildSystemPrompt
         bool agentRunInFlight_;
+        // Injectable AGENTS.md location for rebuildSystemPrompt: empty
+        // resolves to the process CWD's AGENTS.md (production); tests point it
+        // at a fixture file so they never depend on the repo's real AGENTS.md.
+        Path agentsMdFile_;
         // latches a rebuild requested while a run was in flight, applied at
         // the next safe point after the run completes.
         bool agentMdRebuildPending_;
@@ -911,7 +915,7 @@ struct AgentApp {
         }
         auto agentsMd = effectiveAgentsMd(llmConf, llmConf.codeModels[llmConf.activeCodeModelIndex]);
         auto state = processAgentMd(llmConf, noCwdConfig_, rag, forceRefresh,
-                agentsMd, llmConf.codeModels[llmConf.activeCodeModelIndex]);
+                agentsMd, llmConf.codeModels[llmConf.activeCodeModelIndex], agentsMdFile_);
         agent_.setSystemPrompt(systemPrompt_ = llmConf.getPrompt(skillManager: skillManager_, promptName: llmConf
                 .agentPrompt, addSkills: true, agentsMd: AgentsMdPrompt(state.summary,
                 state.ragTopic)));

@@ -1,16 +1,16 @@
 /// Targeting resolution and dispatch for the unified in-memory edit engine.
 module llm.tool_call.io.edit_dispatch;
 
-import std.algorithm : any, canFind;
+import std.algorithm : any, canFind, min;
 import std.array : appender, join;
 import std.conv : text;
 import std.exception : enforce;
 import std.string : chomp, splitLines, strip;
 
 import llm.tool_call.io : EditMode;
-import llm.tool_call.io.diagnostic : appendScope;
+import llm.tool_call.io.diagnostic : appendScope, invisibleCharMismatchNote;
 import llm.tool_call.io.edit_engine : EditTarget, EditFileOutcome,
-    editContentLines, editFileInMemory;
+    editContentLines, editFileInMemory, isNoOpEdit;
 import llm.tool_call.io.search : CodeBlockRange, findMarkerLine, findNthMarkerLine,
     countMarkerOccurrences, findMultiLineMarkerLine, findNthMultiLineMarkerLine,
     countMultiLineMarkerOccurrences, findCodeBlock,
@@ -50,10 +50,13 @@ package EditFileOutcome executeByLine(string[] fileLines, EditMode mode, string 
             if (startLine - 1 < endIdxCheck)
                 actualContent = fileLines[startLine - 1 .. endIdxCheck].join("\n");
         }
-        if (actualContent.strip != verifyContent.strip)
-            throw new Exception(i"byLine verifyContent mismatch: expected target lines to match verifyContent, but found different content. Actual content:\n$(
+        if (actualContent.strip != verifyContent.strip) {
+            auto msg = i"byLine verifyContent mismatch: expected target lines to match verifyContent, but found different content. Actual content:\n$(
                     actualContent)\n\nExpected verifyContent:\n$(verifyContent)\n\nSuggestion: re-read the file to get current line numbers, or use byMarker/byContent targeting which searches for content rather than relying on line numbers."
-                    .text);
+                .text;
+            msg ~= invisibleCharMismatchNote(verifyContent, actualContent);
+            throw new Exception(msg);
+        }
     }
 
     const startIdx = startLine - 1;
@@ -61,16 +64,85 @@ package EditFileOutcome executeByLine(string[] fileLines, EditMode mode, string 
     const matchedLines = isRangeMode ? count : 1;
     auto res = editFileInMemory(fileLines, mode, content, EditTarget(startIdx,
             endIdx, startLine, matchedLines));
-    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, false, "");
+    string[] replaced = isRangeMode ? fileLines[startIdx .. endIdx].dup : [];
+    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, false,
+            "", 0, replaced, cast(long) replaced.length, isRangeMode
+            && isNoOpEdit(fileLines, res.lines));
+}
+
+/// One fragment match: a file line verified to contain a marker line yet
+/// strictly longer than it (1-based line number + full text). Replacing such a
+/// line wholesale destroys the text outside the marker match.
+package struct FragmentLine {
+    /// 1-based file line number of the offending line
+    long lineNum;
+    /// Full text of the offending line
+    string text;
+}
+
+/// Find the lines of one byMarker match that were verified to contain a
+/// marker line yet are strictly longer than it. matchLines are the file lines
+/// of the match, verifiedMarkerLines the marker lines they were verified
+/// against (same length: for a single-line marker that is the matched line
+/// itself; for a multi-line marker the first min(replacedCount,
+/// markerLines.length) marker lines starting at the anchor). Substring
+/// verification guarantees each marker line is a substring of the
+/// corresponding match line, so a difference is exactly a strict lengthening.
+/// firstLineNum is the 1-based number of the match's first line. Returns the
+/// offending lines in match order.
+package FragmentLine[] findFragmentLines(string[] matchLines,
+        string[] verifiedMarkerLines, long firstLineNum) @safe {
+    // TODO: is this an in-contract and thus a validation that should be done
+    // only during testing, an invariant, or is this a sanitizer check of user
+    // input? Isn't it better to return a SumType instead of an exception with a magic string?
+    enforce(matchLines.length == verifiedMarkerLines.length,
+            i"findFragmentLines: $(matchLines.length) match lines but $(verifiedMarkerLines.length) verified marker lines"
+                .text);
+    FragmentLine[] fragments;
+    // TODO: rewrite using ranges. This should be possible to replace with enumerate, filter, array
+    foreach (i, l; matchLines)
+        if (l.length > verifiedMarkerLines[i].length)
+            fragments ~= FragmentLine(firstLineNum + cast(long) i, l);
+    return fragments;
+}
+
+/// byMarker fragment-guard refusal message: the marker matched as a strict
+/// substring inside longer file line(s), so a whole-line replace would destroy
+/// the text outside the marker match. The whole edit is refused before any
+/// change.
+package string fragmentGuardError(string markerDisplay, const(FragmentLine)[] fragments) @safe {
+    string affected;
+    foreach (i, f; fragments)
+        affected ~= (i > 0 ? "; " : "") ~ i"line $(f.lineNum): '$(f.text)'".text;
+    return i"marker $(markerDisplay) matched as a strict substring inside longer line(s); the edit was refused before any change. Matched lines longer than the marker: $(
+            affected). Pass a longer marker that covers the full line(s), or pass fragmentOk=true to replace whole lines deliberately."
+        .text;
+}
+
+/// Task 1 fragment guard shared by the replaceAll loop and the
+/// single-occurrence path: refuse replace-mode edits whose matched line(s) are
+/// strictly longer than the marker lines they were verified to contain (a
+/// whole-line replace would destroy the text outside the marker match), before
+/// any mutation, unless the caller acknowledged it with fragmentOk. verified
+/// lines are the marker lines the match was verified against, already truncated
+/// to the lines actually being replaced; firstLineNum is the 1-based number of
+/// the match's first line. Returns the fragment count for the outcome echo (0
+/// when refused).
+package long checkFragmentGuard(string[] matchLines, string[] verifiedLines,
+        long firstLineNum, string markerDisplay, bool fragmentOk) @safe {
+    const frags = findFragmentLines(matchLines, verifiedLines, firstLineNum);
+    if (frags.length > 0 && !fragmentOk)
+        throw new Exception(fragmentGuardError(markerDisplay, frags));
+    return cast(long) frags.length;
 }
 
 /// byMarker targeting: search, auto-count, replaceAll with scope. Supports
 /// single-line markers (substring match on one line) and multi-line markers
 /// (first line as anchor, subsequent lines verified as substrings of
 /// consecutive file lines).
-package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, string content,
-        const(string[]) contentLines, long contentLineCount, string marker, long count, bool replaceAll, long matchIndex,
-        size_t scopeBegin, size_t scopeEndExclusive, long scopeStart, long scopeEnd) @safe {
+package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, string content, string[] contentLines,
+        long contentLineCount, string marker, long count, bool replaceAll, long matchIndex, size_t scopeBegin,
+        size_t scopeEndExclusive, long scopeStart, long scopeEnd, bool fragmentOk = false) @safe {
     const isMultiLine = marker.canFind("\n");
     string[] markerLines;
     if (isMultiLine) {
@@ -86,8 +158,9 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
             targetCount = cast(long) markerLines.length;
             autoCount = true;
         } else if (mode == EditMode.replace && contentLineCount > 1) {
-            targetCount = contentLineCount;
-            autoCount = true;
+            enforce(false, i"marker matches 1 line but content has $(contentLineCount) lines; pass count=$(
+                    contentLineCount) to replace $(contentLineCount) lines starting at the marker, or use a multi-line marker to auto-size the target"
+                    .text);
         } else {
             targetCount = 1;
         }
@@ -96,12 +169,8 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
         targetCount = 1;
 
     string note;
-    if (autoCount) {
-        if (isMultiLine)
-            note = i"count was auto-derived as $(targetCount) from marker line count".text;
-        else
-            note = i"count was auto-derived as $(targetCount) from content line count".text;
-    }
+    if (autoCount)
+        note = i"count was auto-derived as $(targetCount) from marker line count".text;
 
     const scopeActive = scopeStart != -1 || scopeEnd != -1;
     // Truncate multi-line markers in error messages for readability.
@@ -116,6 +185,10 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
             app.put(fileLines[0 .. scopeBegin]);
         size_t pos = scopeBegin;
         long ops = 0;
+        // matched lines strictly longer than their marker lines, SUMMED across
+        // occurrences for the success JSON
+        long fragLong = 0;
+        auto repl = appender!(string[])();
         EditTarget firstMatch;
         bool first = true;
         while (pos < scopeEndExclusive && pos < fileLines.length) {
@@ -130,8 +203,21 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
             const absEnd = idx + targetCount;
             enforce(absEnd <= cast(long) fileLines.length, i"marker at line $(idx + 1) with count $(
                     targetCount) exceeds file length".text);
+            // A marker line matching as a strict substring inside a longer
+            // file line replaces the WHOLE line, refuse the whole edit on the
+            // first offending match, before any mutation, unless the caller
+            // acknowledged it with fragmentOk. Only the replaced lines
+            // verified to contain a marker line count.
+            if (mode == EditMode.replace) {
+                const verifiedOverlap = min(cast(size_t) targetCount,
+                        isMultiLine ? markerLines.length : 1);
+                fragLong += checkFragmentGuard(fileLines[idx .. idx + verifiedOverlap], isMultiLine
+                        ? markerLines[0 .. verifiedOverlap] : [marker], idx + 1,
+                        markerDisplay, fragmentOk);
+            }
             app.put(fileLines[pos .. cast(size_t) idx]);
             app.put(contentLines);
+            repl.put(fileLines[idx .. absEnd]);
             if (first) {
                 firstMatch = EditTarget(idx, absEnd, idx + 1, targetCount);
                 first = false;
@@ -143,7 +229,9 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
             throw new Exception(markerNotFound);
         app.put(fileLines[pos .. $]);
         return EditFileOutcome(app[], firstMatch,
-                cast(long) app[].length - cast(long) fileLines.length, ops, autoCount, note);
+                cast(long) app[].length - cast(long) fileLines.length, ops,
+                autoCount, note, fragLong, repl[], cast(long) repl[].length,
+                isRangeMode && isNoOpEdit(fileLines, app[]));
     }
 
     long markerIdx;
@@ -177,9 +265,36 @@ package EditFileOutcome executeByMarker(string[] fileLines, EditMode mode, strin
     const absEnd = markerIdx + targetCount;
     enforce(absEnd <= cast(long) fileLines.length, i"marker at line $(markerIdx + 1) with count $(
             targetCount) exceeds file length".text);
+    // fragment guard, single-occurrence path (shared with the
+    // replaceAll loop via checkFragmentGuard above): refuse replace-mode edits
+    // whose matched line(s) are strictly longer than their marker lines,
+    // before any mutation.
+    long fragLong = 0;
+    if (mode == EditMode.replace) {
+        const verifiedOverlap = min(cast(size_t) targetCount, isMultiLine ? markerLines.length : 1);
+        fragLong = checkFragmentGuard(fileLines[markerIdx .. markerIdx + verifiedOverlap], isMultiLine
+                ? markerLines[0 .. verifiedOverlap] : [marker], markerIdx + 1,
+                markerDisplay, fragmentOk);
+    }
     auto res = editFileInMemory(fileLines, mode, content, EditTarget(markerIdx,
             isRangeMode ? absEnd : markerIdx, markerIdx + 1, isRangeMode ? targetCount : 1));
-    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, autoCount, note);
+    string[] replaced = isRangeMode ? fileLines[markerIdx .. absEnd].dup : [];
+
+    // Insert modes keep the anchor marker line: warn when the content's
+    // boundary line duplicates it (trimmed equality on both sides, matching
+    // the targeting semantics). append is insert_after's alias, so it warns
+    // the same way.
+    bool anchorDuplicate = false;
+    if (mode == EditMode.insert_after || mode == EditMode.append) {
+        anchorDuplicate = contentLines.length > 0
+            && contentLines[0].strip == fileLines[markerIdx].strip;
+    } else if (mode == EditMode.insert_before) {
+        anchorDuplicate = contentLines.length > 0
+            && contentLines[$ - 1].strip == fileLines[markerIdx].strip;
+    }
+    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, autoCount,
+            note, fragLong, replaced, cast(long) replaced.length, isRangeMode
+            && isNoOpEdit(fileLines, res.lines), anchorDuplicate);
 }
 
 /// byContent targeting: block search, replaceAll loop, matchIndex, insert anchor.
@@ -210,6 +325,7 @@ package EditFileOutcome executeByContent(string[] fileLines, EditMode mode, stri
             app.put(fileLines[0 .. scopeBegin]);
         size_t pos = scopeBegin;
         long ops = 0;
+        auto repl = appender!(string[])();
         EditTarget firstMatch;
         bool first = true;
         while (pos < scopeEndExclusive && pos < fileLines.length) {
@@ -221,6 +337,7 @@ package EditFileOutcome executeByContent(string[] fileLines, EditMode mode, stri
             enforce(absEnd > pos, "findCodeBlock returned zero-length match");
             app.put(fileLines[pos .. absStart]);
             app.put(contentLines);
+            repl.put(fileLines[absStart .. absEnd]);
             if (first) {
                 firstMatch = EditTarget(cast(long) absStart, cast(long) absEnd,
                         cast(long) absStart + 1, cast(long)(absEnd - absStart));
@@ -233,7 +350,8 @@ package EditFileOutcome executeByContent(string[] fileLines, EditMode mode, stri
             throw new Exception(blockNotFound);
         app.put(fileLines[pos .. $]);
         return EditFileOutcome(app[], firstMatch, cast(long) app[].length - cast(long) fileLines.length,
-                ops, true, "count auto-derived from matched block size (replaceAll)");
+                ops, true, "count auto-derived from matched block size (replaceAll)", 0, repl[],
+                cast(long) repl[].length, isRangeMode && isNoOpEdit(fileLines, app[]));
     }
 
     CodeBlockRange range;
@@ -274,19 +392,39 @@ package EditFileOutcome executeByContent(string[] fileLines, EditMode mode, stri
     // append/insert_after anchor on the LAST line of the block; insert_before
     // anchors on the first line (content before the block).
     const insertAnchor = isRangeMode || mode == EditMode.insert_before ? absStart : absEnd - 1;
+
+    // Insert modes keep the anchored line/block: warn when the content's
+    // boundary line duplicates it (trimmed equality on both sides, matching
+    // the targeting semantics). append is insert_after's alias, so it warns
+    // the same way.
+    bool anchorDuplicate = false;
+    if (mode == EditMode.insert_after || mode == EditMode.append) {
+        anchorDuplicate = contentLines.length > 0
+            && contentLines[0].strip == fileLines[absEnd - 1].strip;
+    } else if (mode == EditMode.insert_before) {
+        anchorDuplicate = contentLines.length > 0
+            && contentLines[$ - 1].strip == fileLines[absStart].strip;
+    }
     auto res = editFileInMemory(fileLines, mode, content, EditTarget(insertAnchor, isRangeMode
             ? absEnd : insertAnchor, absStart + 1, isRangeMode ? targetCount
             : cast(long)(range.end - range.start)));
-    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1, autoCount, note);
+    string[] replaced = isRangeMode ? fileLines[absStart .. absEnd].dup : [];
+    return EditFileOutcome(res.lines, res.matched, res.linesChanged, 1,
+            autoCount, note, 0, replaced, cast(long) replaced.length,
+            isRangeMode && isNoOpEdit(fileLines, res.lines), anchorDuplicate);
 }
 
 /// Validate the targeting method combination and the replaceAll/matchIndex
 /// combos. Zero targeting parameters are allowed only for mode=append (pure
 /// insertion at the end of the file); every other mode requires exactly one.
 package void resolveTargeting(long startLine, string marker, string searchContent,
-        bool replaceAll, long matchIndex, EditMode mode) @safe {
+        bool replaceAll, long matchIndex, EditMode mode, bool fragmentOk = false) @safe {
     // -1 is the "not provided" sentinel (the params struct defaults to it);
     // an explicit 0 or negative startLine is a validation error, not "absent".
+    // The replace-mode-only check comes first: fragmentOk with a pure EOF
+    // append (zero targeting) would otherwise slip past all later checks.
+    if (fragmentOk && mode != EditMode.replace)
+        throw new Exception("fragmentOk is only valid with replace mode (replace or replaceAll); it has no effect with remove (whole lines are deleted) or insert modes (the marker line is kept)");
     const hasStartLine = startLine != -1;
     const hasMarker = marker.length > 0;
     const hasSearch = searchContent.length > 0;
@@ -311,11 +449,19 @@ package void resolveTargeting(long startLine, string marker, string searchConten
                 names.join(", "))). Use exactly one of: startLine (byLine), marker (byMarker), or searchContent (byContent)."
                 .text);
     }
-    // Checked after targeting resolution so byLine-specific errors (e.g.
-    // "replaceAll is not supported with byLine targeting") take precedence;
-    // matchIndex is documented as ignored by byLine.
+    // Checked after targeting resolution so targeting-specific contradictions
+    // (e.g. "replaceAll is not supported with byLine targeting") take
+    // precedence; matchIndex is documented as ignored by byLine.
+    if (replaceAll && hasStartLine)
+        throw new Exception(
+                "replaceAll is not supported with byLine targeting (there is no search pattern)");
     if (replaceAll && matchIndex > 1 && !hasStartLine)
         throw new Exception("matchIndex > 1 cannot be combined with replaceAll; replaceAll already targets every occurrence (omit matchIndex to replace all, or use matchIndex=N to target a single occurrence)");
+    // fragmentOk guard last: it acknowledges a byMarker replace-only hazard,
+    // so targeting-specific contradictions (replaceAll with byLine,
+    // matchIndex > 1 with replaceAll) take precedence over it.
+    if (fragmentOk && !hasMarker)
+        throw new Exception("fragmentOk is only valid with marker (byMarker) targeting; it has no effect with startLine (byLine) or searchContent (byContent) targeting");
 }
 
 /// Resolve the target and apply the edit entirely in memory. Single entry
@@ -330,7 +476,7 @@ package void resolveTargeting(long startLine, string marker, string searchConten
 package EditFileOutcome editFileUnifiedMemory(string[] fileLines, EditMode mode, string content,
         long startLine = -1, long count = 0, string marker = null, string searchContent = null,
         bool replaceAll = false, long matchIndex = 1, long scopeStart = -1,
-        long scopeEnd = -1, string verifyContent = null) @safe {
+        long scopeEnd = -1, string verifyContent = null, bool fragmentOk = false) @safe {
     enforce(matchIndex >= 1, i"parameter matchIndex $(matchIndex) must be >= 1".text);
     enforce(!(mode == EditMode.remove && content.length > 0),
             "parameter mode is 'remove' but content is not empty");
@@ -340,12 +486,12 @@ package EditFileOutcome editFileUnifiedMemory(string[] fileLines, EditMode mode,
     // Scope is validated even when byLine would ignore it, so bad
     // parameters are always rejected.
     const scopeWindow = resolveScope(scopeStart, scopeEnd, fileLines.length);
-    const contentLines = editContentLines(content);
+    auto contentLines = editContentLines(content);
     const contentLineCount = cast(long) contentLines.length;
     const hasStartLine = startLine != -1;
     const hasMarker = marker.length > 0;
     const hasSearch = searchContent.length > 0;
-    resolveTargeting(startLine, marker, searchContent, replaceAll, matchIndex, mode);
+    resolveTargeting(startLine, marker, searchContent, replaceAll, matchIndex, mode, fragmentOk);
     if (!hasStartLine && !hasMarker && !hasSearch) {
         // mode == append here (guaranteed by resolveTargeting): zero targeting
         // means a pure insertion one past the last line; editFileInMemory
@@ -359,8 +505,9 @@ package EditFileOutcome editFileUnifiedMemory(string[] fileLines, EditMode mode,
         return executeByLine(fileLines, mode, content, startLine, count,
                 replaceAll, verifyContent);
     if (hasMarker)
-        return executeByMarker(fileLines, mode, content, contentLines, contentLineCount, marker, count, replaceAll,
-                matchIndex, scopeWindow.begin, scopeWindow.endExclusive, scopeStart, scopeEnd);
+        return executeByMarker(fileLines, mode, content, contentLines,
+                contentLineCount, marker, count, replaceAll, matchIndex,
+                scopeWindow.begin, scopeWindow.endExclusive, scopeStart, scopeEnd, fragmentOk);
     // Reaching here means searchContent was non-empty (required by targeting
     // resolution above), so no empty-check is needed.
     return executeByContent(fileLines, mode, content, contentLines, searchContent, count, replaceAll,

@@ -3,10 +3,12 @@
 module llm.tool_call.io.diagnostic;
 
 import std.algorithm : min;
-import std.array : empty;
+import std.array : Appender, empty;
 import std.conv : text;
+import std.format : formattedWrite;
 import std.json : JSONValue;
 import std.string : chomp, splitLines, strip;
+import std.uni : isWhite;
 
 /// Longest common substring between two strings (byte-level, sufficient for
 /// diagnostics). Returns the best-matching substring of `a`, or null.
@@ -119,6 +121,56 @@ package size_t commonPrefixLength(string a, string b) @safe {
     return i;
 }
 
+/// True when a code point is invisible for diagnostics purposes: whitespace
+/// (std.uni.isWhite), control (< 0x20 or 0x7F), NBSP, zero-width space and
+/// joiners/marks (U+200B..U+200F), or BOM (U+FEFF).
+private bool isInvisibleChar(dchar c) @safe pure nothrow {
+    return isWhite(c) || c < 0x20 || c == 0x7F || c == '\u00A0' || (c >= '\u200B'
+            && c <= '\u200F') || c == '\uFEFF';
+}
+
+/// Strip every invisible character (see isInvisibleChar) from s.
+private string stripInvisibleChars(string s) @safe {
+    Appender!(string) result;
+    foreach (dchar c; s)
+        if (!isInvisibleChar(c))
+            result ~= c;
+    return result.data;
+}
+
+/// True when a and b differ only by invisible characters: unequal as-is but
+/// equal after stripping all invisible characters.
+package bool differOnlyByInvisibleChars(string a, string b) @safe {
+    return a != b && stripInvisibleChars(a) == stripInvisibleChars(b);
+}
+
+/// Render a line with invisible characters escaped ('\t' becomes "\\t",
+/// every other invisible code point except the plain space becomes \uXXXX)
+/// so NBSP, zero-width and control characters become visible. The plain
+/// space (0x20) stays raw: it is part of ordinary visible text.
+package string escapeInvisibleChars(string line) @safe {
+    Appender!(string) result;
+    foreach (dchar c; line) {
+        if (c == '\t')
+            result ~= "\\t";
+        else if (c != 0x20 && isInvisibleChar(c))
+            formattedWrite(result, "\\u%04x", c);
+        else
+            result ~= c;
+    }
+    return result.data;
+}
+
+/// Note for a mismatch whose expected and actual contents differ only by
+/// invisible characters: the verbatim phrase plus escaped renderings of both
+/// contents, or "" when the difference involves visible characters.
+package string invisibleCharMismatchNote(string expected, string actual) @safe {
+    if (!differOnlyByInvisibleChars(expected, actual))
+        return "";
+    return i"\n\nNote: the expected and actual contents differ only by invisible characters (whitespace/control/zero-width). Expected: '$(
+            escapeInvisibleChars(expected))'\nActual:   '$(escapeInvisibleChars(actual))'".text;
+}
+
 /// Closest-match diagnostic when a byContent search fails.
 ///
 /// Reports the search lines, the file line closest to the anchor (first
@@ -175,8 +227,13 @@ package JSONValue buildBlockDiagnostic(string[] fileLines, string searchContent,
         size_t matchedCount = 0;
         string mismatch;
         if (score < anchorStripped.length) {
-            mismatch = i"line $(anchorIdx + 1) (file line $(i + 1)): expected '$(anchorStripped)' but found '$(
-                    fileLine.strip)'".text;
+            if (differOnlyByInvisibleChars(anchorStripped, fileLine.strip))
+                mismatch = i"line $(anchorIdx + 1) (file line $(i + 1)): lines differ only by invisible characters: expected '$(
+                        escapeInvisibleChars(anchorStripped))' but found '$(
+                        escapeInvisibleChars(fileLine.strip))'".text;
+            else
+                mismatch = i"line $(anchorIdx + 1) (file line $(i + 1)): expected '$(anchorStripped)' but found '$(
+                        fileLine.strip)'".text;
         }
         foreach (searchIdx; anchorIdx + 1 .. searchLines.length) {
             const ss = searchLines[searchIdx].strip;
@@ -187,8 +244,13 @@ package JSONValue buildBlockDiagnostic(string[] fileLines, string searchContent,
                 break;
             }
             if (fileLines[filePos].strip != ss) {
-                mismatch = i"line $(searchIdx + 1) (file line $(filePos + 1)): expected '$(ss)' but found '$(
-                        fileLines[filePos])'".text;
+                if (differOnlyByInvisibleChars(ss, fileLines[filePos]))
+                    mismatch = i"line $(searchIdx + 1) (file line $(filePos + 1)): lines differ only by invisible characters: expected '$(
+                            escapeInvisibleChars(ss))' but found '$(
+                            escapeInvisibleChars(fileLines[filePos]))'".text;
+                else
+                    mismatch = i"line $(searchIdx + 1) (file line $(filePos + 1)): expected '$(ss)' but found '$(
+                            fileLines[filePos])'".text;
                 break;
             }
             filePos++;
