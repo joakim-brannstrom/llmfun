@@ -5,8 +5,9 @@ version (unittest) {
     import std.stdio : File;
     import std.conv : to;
     import std.algorithm : canFind, startsWith;
-    import std.array : empty;
+    import std.array : empty, join;
     import std.json : parseJSON, JSONType;
+    import std.string : splitLines;
     import std.typecons : Nullable;
 
     import my.path : AbsolutePath;
@@ -649,6 +650,90 @@ unittest {
     }
 }
 
+@("edit dispatch echoes the exact consumed pre-edit target lines in replacedLines")
+unittest {
+    // === full echo: byLine replace consumes exactly the 3 old lines ===
+    {
+        string[] fileLines = ["a", "b", "c", "d", "e", "f"];
+        auto outcome = executeByLine(fileLines, EditMode.replace, "x\ny", 3, 3, false);
+        assert(outcome.replacedLines == ["c", "d", "e"], outcome.replacedLines.to!string);
+        assert(outcome.replacedTotal == 3, outcome.replacedTotal.to!string);
+    }
+
+    // === byMarker single occurrence with count=2 consumes marker + next line ===
+    {
+        string[] fileLines = ["head", "m", "old1", "tail"];
+        auto outcome = executeByMarker(fileLines, EditMode.replace, "X", ["X"],
+                1, "m", 2, false, 1, 0, fileLines.length, -1, -1);
+        assert(outcome.replacedLines == ["m", "old1"], outcome.replacedLines.to!string);
+        assert(outcome.replacedTotal == 2, outcome.replacedTotal.to!string);
+    }
+
+    // === byContent single occurrence consumes the full matched block ===
+    {
+        string[] fileLines = ["head", "b", "c", "tail"];
+        auto outcome = executeByContent(fileLines, EditMode.replace, "X",
+                ["X"], "b\nc", 0, false, 1, 0, fileLines.length, -1, -1);
+        assert(outcome.replacedLines == ["b", "c"], outcome.replacedLines.to!string);
+        assert(outcome.replacedTotal == 2, outcome.replacedTotal.to!string);
+    }
+
+    // === replaceAll over 2 byMarker occurrences accumulates both blocks in order ===
+    {
+        string[] fileLines = ["m", "old1", "m", "old2", "tail"];
+        auto outcome = executeByMarker(fileLines, EditMode.replace, "X", ["X"],
+                1, "m", 2, true, 1, 0, fileLines.length, -1, -1);
+        assert(outcome.replacedLines == ["m", "old1", "m", "old2"],
+                outcome.replacedLines.to!string);
+        assert(outcome.replacedTotal == 4, outcome.replacedTotal.to!string);
+    }
+
+    // === replaceAll over 2 byContent blocks accumulates both blocks in order ===
+    {
+        string[] fileLines = ["head", "b", "c", "mid", "b", "c", "tail"];
+        auto outcome = executeByContent(fileLines, EditMode.replace, "X",
+                ["X"], "b\nc", 0, true, 1, 0, fileLines.length, -1, -1);
+        assert(outcome.replacedLines == ["b", "c", "b", "c"], outcome.replacedLines.to!string);
+        assert(outcome.replacedTotal == 4, outcome.replacedTotal.to!string);
+    }
+
+    // === insert modes consume nothing ===
+    {
+        string[] fileLines = ["a", "b", "c"];
+        auto ins = executeByLine(fileLines, EditMode.insert_after, "x", 2, 0, false);
+        assert(ins.replacedLines.empty, ins.replacedLines.to!string);
+        assert(ins.replacedTotal == 0, ins.replacedTotal.to!string);
+    }
+
+    // === no-targeting append-at-EOF shape consumes nothing ===
+    {
+        string[] fileLines = ["a", "b"];
+        auto outcome = editFileUnifiedMemory(fileLines, EditMode.append, "x");
+        assert(outcome.replacedLines.empty, outcome.replacedLines.to!string);
+        assert(outcome.replacedTotal == 0, outcome.replacedTotal.to!string);
+    }
+
+    // === byLine off-by-one over-consumption is visible in replacedLines ===
+    // (the struct-closing brace was eaten)
+    {
+        string[] fileLines = ["a", "b", "c", "d", "}"];
+        auto outcome = executeByLine(fileLines, EditMode.replace, "REPL", 4, 2, false);
+        assert(outcome.replacedLines == ["d", "}"], outcome.replacedLines.to!string);
+        assert(outcome.replacedTotal == 2, outcome.replacedTotal.to!string);
+    }
+
+    // === dispatch carries the FULL lines; elision is a tool render concern ===
+    {
+        string[] fileLines = [
+            "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10",
+            "l11", "l12", "l13", "l14"
+        ];
+        auto outcome = executeByLine(fileLines, EditMode.replace, "x", 2, 12, false);
+        assert(outcome.replacedLines.length == 12, outcome.replacedLines.length.to!string);
+        assert(outcome.replacedTotal == 12, outcome.replacedTotal.to!string);
+    }
+}
+
 @(
         "log helpers sanitize paths, classify edit error strings, extract hunk numbers, and format scope text")
 unittest {
@@ -692,6 +777,9 @@ unittest {
     assert(classifyEditError(
             "parameter scopeStart (20) must be <= scopeEnd (10)") == "invalid_parameter");
 
+    assert(classifyEditError("marker 'm' matched as a strict substring inside longer line(s); the edit was refused before any change. Matched lines longer than the marker: line 2: 'target'. Pass a longer marker that covers the full line(s), or pass fragmentOk=true to replace whole lines deliberately.") == "fragment_guard");
+    assert(classifyEditError("marker matches 1 line but content has 3 lines; pass count=3 to replace 3 lines starting at the marker, or use a multi-line marker to auto-size the target") == "auto_count_required");
+
     assert(hunkNumberFrom("Hunk 2: Context mismatch at line 5: expected 'x' but found 'y'") == 2);
     assert(hunkNumberFrom("Hunk 12: Unexpected end of file at line 4 (hunk context)") == 12);
     assert(hunkNumberFrom("Hunk 2: Hunk tries to go backward (oldStart=3)") == 2);
@@ -728,6 +816,42 @@ unittest {
     assert(scopeLogValue(-1, -1) == "none");
 }
 
+@("editFile @ParamDescription texts state the actual line-granular semantics")
+unittest {
+    import std.algorithm : canFind;
+    import llm.tool_call : ParamDescription;
+
+    string descOf(string member)() {
+        foreach (a; __traits(getAttributes, __traits(getMember, UnifiedEditFileParams, member)))
+            static if (is(typeof(a) == ParamDescription))
+                return a.value;
+        assert(false, "no @ParamDescription on " ~ member);
+    }
+
+    assert(descOf!"marker".canFind("line-granular"));
+    assert(descOf!"searchContent".canFind("trimmed equality"));
+    assert(descOf!"mode".canFind("KEPT"));
+    assert(descOf!"count".canFind("pass count=") && descOf!"count".canFind("multi-line marker"));
+    assert(descOf!"replaceAll".canFind("line-granular"));
+}
+
+@(
+        "integration: editFile byMarker replace with a multi-line marker behaves identically (texts changed, semantics not)")
+unittest {
+    auto ctx = makeTestContext("edit_marker_multiline_nf1");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "begin\nend\nafter\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
+            content: "X\nY", mode: "replace", marker: "begin\nend"));
+    assert(result.success, result.msg);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "X\nY\nafter\n", content);
+}
+
 @("byLine replace replaces the correct lines with correct match metadata")
 unittest {
     // === byLine + replace: replaces correct lines, returns correct metadata ===
@@ -741,15 +865,189 @@ unittest {
     assert(!res.autoCountUsed);
 }
 
-@("byMarker replace with multi-line content and no count auto-counts the content lines")
+@("byLine replace with identical content is an exact no-op (noOp + note)")
 unittest {
-    // === byMarker + replace + multi-line content + no count → auto-count ===
+    // === byLine + replace where the new content equals the replaced text: the
+    // composed result is element-wise identical to the input, so it is an
+    // exact no-op. Detection is sequence equality on the composed lines,
+    // never the linesChanged net delta (which is 0 for real changes too:
+    // replacing N lines with N different lines). ===
+    string[] fileLines = ["a", "b", "c"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.replace, "b", startLine: 2, count: 1);
+    assert(res.lines == ["a", "b", "c"], res.lines.to!string);
+    assert(res.linesChanged == 0, res.linesChanged.to!string);
+    assert(res.noOp, "identical-content replace must set noOp");
+}
+
+@("replace with equal line count but DIFFERENT lines has linesChanged == 0 without noOp")
+unittest {
+    // === counterexample: the net line-count delta is neither necessary nor
+    // sufficient for a no-op. ===
+    string[] fileLines = ["a", "b", "c"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.replace, "x\ny", startLine: 1, count: 2);
+    assert(res.lines == ["x", "y", "c"], res.lines.to!string);
+    assert(res.linesChanged == 0, res.linesChanged.to!string);
+    assert(!res.noOp, "a real change must never be flagged as a no-op");
+}
+
+@("remove of consumed lines is not flagged as a no-op")
+unittest {
+    // A remove that consumes lines is never element-wise equal to the input.
+    string[] fileLines = ["a", "b", "c", "d"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.remove, "", startLine: 2, count: 2);
+    assert(res.lines == ["a", "d"], res.lines.to!string);
+    assert(res.linesChanged == -2, res.linesChanged.to!string);
+    assert(!res.noOp);
+}
+
+@("insert modes never set noOp, even when nothing is inserted (empty content)")
+unittest {
+    // Insert with empty content consumes nothing (no old-vs-new text pair to
+    // compare), so it is excluded from no-op detection: nothing is consumed
+    // and the no-op is self-evident from linesChanged == 0. A flag there
+    // would be a special case with no audit value.
+    string[] fileLines = ["a", "b"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.append, "");
+    assert(res.lines == ["a", "b"], res.lines.to!string);
+    assert(res.linesChanged == 0, res.linesChanged.to!string);
+    assert(!res.noOp, "insert with empty content is excluded from noOp");
+
+    auto res2 = editFileUnifiedMemory(fileLines, EditMode.insert_before, "", startLine: 1);
+    assert(res2.lines == ["a", "b"], res2.lines.to!string);
+    assert(!res2.noOp, "insert with empty content is excluded from noOp");
+
+    auto res3 = editFileUnifiedMemory(fileLines, EditMode.insert_after, "X", startLine: 1);
+    assert(res3.lines == ["a", "X", "b"], res3.lines.to!string);
+    assert(!res3.noOp, "insert modes never set noOp");
+}
+
+@("insert_after content's first line duplicating the kept anchor warns (anchorDuplicate)")
+unittest {
+    // === byMarker insert_after keeps the marker line as the anchor; when the
+    // content's FIRST line equals it, the anchor text appears twice. Warn
+    // only: the edit is never mutated (no magic stripping). ===
+    string[] fileLines = ["m", "b"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.insert_after, " m\nX", marker: "m");
+    // Trimmed equality on both sides: content " m" matches anchor "m".
+    assert(res.anchorDuplicate, "boundary duplication must warn");
+    // The composed lines keep the raw content lines (only the comparison
+    // trims): content " m" stays " m" in the result.
+    // The composed lines keep the raw content lines (only the comparison
+    // trims): content " m" stays " m" in the result.
+    assert(res.lines == ["m", " m", "X", "b"], res.lines.to!string);
+    assert(!res.noOp, "insert modes never set noOp");
+}
+
+@("insert_before content's last line duplicating the kept anchor warns (anchorDuplicate)")
+unittest {
+    // === byMarker insert_before mirror: the content's LAST line is compared
+    // against the kept anchor line. ===
+    string[] fileLines = ["a", "m"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.insert_before, "X\nm", marker: "m");
+    assert(res.anchorDuplicate, "boundary duplication must warn");
+    assert(res.lines == ["a", "X", "m", "m"], res.lines.to!string);
+    assert(!res.noOp, "insert modes never set noOp");
+}
+
+@("byContent insert_after content's first line duplicating the block's last line warns")
+unittest {
+    // === byContent insert_after anchors on the matched block's LAST line; a
+    // duplicated content first line warns the same way as byMarker. ===
+    string[] fileLines = ["head", "foo", "bar", "tail"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.insert_after,
+            "bar\nbaz", searchContent: "foo\nbar");
+    assert(res.anchorDuplicate, "boundary duplication must warn");
+    assert(res.lines == ["head", "foo", "bar", "bar", "baz", "tail"], res.lines.to!string);
+}
+
+@("byContent insert_before content's last line duplicating the block's first line warns")
+unittest {
+    // === byContent insert_before mirror: anchors on the block's FIRST line. ===
+    string[] fileLines = ["head", "foo", "bar", "tail"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.insert_before,
+            "baz\nfoo", searchContent: "foo\nbar");
+    assert(res.anchorDuplicate, "boundary duplication must warn");
+    assert(res.lines == ["head", "baz", "foo", "foo", "bar", "tail"], res.lines.to!string);
+}
+
+@("non-duplicating inserts stay silent (no anchorDuplicate flag or note)")
+unittest {
+    // === Only the content's boundary line is compared against the anchor:
+    // a later interior duplicate does NOT warn, and ordinary inserts are
+    // never flagged. ===
+    string[] fileLines = ["m", "b"];
+
+    // Interior duplication: content's SECOND line equals the anchor — the
+    // first line does not, so no warning.
+    auto res = editFileUnifiedMemory(fileLines, EditMode.insert_after, "X\nm", marker: "m");
+    assert(!res.anchorDuplicate, "only the boundary line is compared");
+    assert(res.lines == ["m", "X", "m", "b"], res.lines.to!string);
+
+    // Ordinary insert, nothing in common with the anchor.
+    auto res2 = editFileUnifiedMemory(fileLines, EditMode.insert_after, "X", marker: "m");
+    assert(!res2.anchorDuplicate, "ordinary inserts must stay silent");
+    assert(res2.lines == ["m", "X", "b"], res2.lines.to!string);
+
+    // byContent insert with no boundary duplication.
+    string[] fileLines2 = ["head", "foo", "bar"];
+    auto res3 = editFileUnifiedMemory(fileLines2, EditMode.insert_after,
+            "new\nlines", searchContent: "foo\nbar");
+    assert(!res3.anchorDuplicate, "ordinary inserts must stay silent");
+    assert(res3.lines == ["head", "foo", "bar", "new", "lines"], res3.lines.to!string);
+}
+
+@("targeted append (insert_after's alias) warns on anchor duplication like insert_after")
+unittest {
+    // === append shares the engine's insert_after case, so a marker-anchored
+    // append with a duplicating content boundary line warns the same way. ===
+    string[] fileLines = ["m", "b"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.append, "m\nX", marker: "m");
+    assert(res.anchorDuplicate, "append is insert_after's alias and must warn");
+    assert(res.lines == ["m", "m", "X", "b"], res.lines.to!string);
+    assert(!res.noOp, "insert modes never set noOp");
+}
+
+@("byMarker replaceAll with identical content at every occurrence is an exact no-op")
+unittest {
+    // The replaceAll loop's composed result must be compared against the
+    // ORIGINAL lines (the appender output), not just per occurrence.
+    string[] fileLines = ["m", "keep", "m"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.replace, "m", marker: "m",
+            replaceAll: true);
+    assert(res.lines == ["m", "keep", "m"], res.lines.to!string);
+    assert(res.linesChanged == 0, res.linesChanged.to!string);
+    assert(res.operations == 2, res.operations.to!string);
+    assert(res.noOp, "replaceAll composing an identical file must set noOp");
+}
+
+@("byContent replace with count omitted and identical content: noOp coexists with autoCount")
+unittest {
+    // autoCount (count auto-derived from the matched block size) and noOp CAN
+    // coexist: a byContent replace with count omitted whose content equals the
+    // matched block. Both flags are set; the shared `note` slot is combined at
+    // the tool layer (engine-level note stays the autoCount derivation note).
+    string[] fileLines = ["head", "foo", "bar", "tail"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.replace, "foo\nbar",
+            searchContent: "foo\nbar");
+    assert(res.lines == ["head", "foo", "bar", "tail"], res.lines.to!string);
+    assert(res.linesChanged == 0, res.linesChanged.to!string);
+    assert(res.autoCountUsed, "count auto-derived from the matched block size");
+    assert(res.noOp, "identical-content replace must set noOp");
+}
+
+@("byMarker replace with multi-line content and explicit count replaces that many lines")
+unittest {
+    // === byMarker + replace + multi-line content + explicit count: the
+    // content-line-count auto-derive was removed (over-consumption hole), so
+    // multi-line-content shapes now require an explicit count. ===
     string[] fileLines = ["a", "marker", "b", "c", "d"];
-    auto res = editFileUnifiedMemory(fileLines, EditMode.replace, "X\nY\nZ", marker: "marker");
+    auto res = editFileUnifiedMemory(fileLines, EditMode.replace, "X\nY\nZ",
+            marker: "marker", count: 3);
     assert(res.lines == ["a", "X", "Y", "Z", "d"], res.lines.to!string);
     assert(res.matched.matchedAt == 2);
     assert(res.matched.matchedLines == 3, res.matched.matchedLines.to!string);
-    assert(res.autoCountUsed);
+    assert(!res.autoCountUsed);
+    assert(res.note.empty);
     assert(res.linesChanged == 0, res.linesChanged.to!string);
 }
 
@@ -784,17 +1082,20 @@ unittest {
     assert(res.matched.matchedLines == 3);
 }
 
-@("byMarker auto-count exceeding the file length errors out")
+@("byMarker replace with multi-line content and no count errors with auto-count guidance")
 unittest {
-    // === byMarker + auto-count exceeds file length → error ===
+    // === The over-consumption shape (single-line marker + multi-line
+    // content + count<1) used to auto-derive count from the CONTENT line
+    // count; it now hard-errors with guidance before any EOF check. ===
     bool threw = false;
     try {
-        editFileUnifiedMemory(["a", "marker"], EditMode.replace, "X\nY\nZ", marker: "marker");
+        editFileUnifiedMemory(["a", "marker", "b"], EditMode.replace, "X\nY\nZ", marker: "marker");
     } catch (Exception e) {
         threw = true;
-        assert(e.msg.canFind("exceeds file length"), e.msg);
+        assert(e.msg.canFind("marker matches 1 line but content has 3 lines"), e.msg);
+        assert(e.msg.canFind("pass count=3"), e.msg);
     }
-    assert(threw, "auto-count beyond EOF must error");
+    assert(threw, "over-consumption shape must hard-error");
 }
 
 @("byContent replace finds the block by trimmed equality")
@@ -839,6 +1140,217 @@ unittest {
     assert(res.lines == ["a", "X", "b", "X", "c"], res.lines.to!string);
     assert(res.operations == 2);
     assert(res.matched.matchedAt == 2);
+}
+
+@("byMarker replace with a single-line fragment marker is refused without fragmentOk and reports the replaced lines with it")
+unittest {
+    // === byMarker + replace: the marker matched as a strict substring inside
+    // a longer line, so a whole-line replace would destroy the rest of that
+    // line (13-line config.d incident). Refused before any change by default;
+    // with fragmentOk=true the WHOLE line is replaced and the count is echoed. ===
+    string[] fileLines = ["int config = compute(a, b, c, d);", "end"];
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(fileLines, EditMode.replace,
+                "int config = compute(x, y);", marker: "compute(a, b, c, d)");
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("matched as a strict substring inside longer line"), e.msg);
+        assert(e.msg.canFind("line 1: 'int config = compute(a, b, c, d);'"), e.msg);
+        assert(e.msg.canFind("fragmentOk=true"), e.msg);
+    }
+    assert(threw, "fragment marker replace must be refused by default");
+
+    auto res = editFileUnifiedMemory(fileLines, EditMode.replace,
+            "int config = compute(x, y);", marker: "compute(a, b, c, d)", fragmentOk: true);
+    assert(res.lines == ["int config = compute(x, y);", "end"], res.lines.to!string);
+    assert(res.fragmentLinesReplaced == 1, res.fragmentLinesReplaced.to!string);
+}
+
+@("byMarker replace with a multi-line marker whose verified trailing line strictly contains its marker line is refused")
+unittest {
+    // === multi-line marker: both lines are verified as substrings; the
+    // trailing file line is strictly longer than its marker line, so the text
+    // outside the trailing match is destroyed by the replace. Exact equality
+    // (anchor and trailing line) is NOT a fragment: the edit proceeds. ===
+    string[] fileLines = ["begin foo bar", "end baz qux", "after"];
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(fileLines, EditMode.replace, "X\nY", marker: "foo\nend");
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("matched as a strict substring inside longer line"), e.msg);
+        assert(e.msg.canFind("line 1: 'begin foo bar'"), e.msg);
+        assert(e.msg.canFind("line 2: 'end baz qux'"), e.msg); // both offending lines listed
+    }
+    assert(threw, "multi-line fragment marker replace must be refused");
+
+    auto res = editFileUnifiedMemory(["foo", "end", "after"], EditMode.replace,
+            "X\nY", marker: "foo\nend");
+    assert(res.lines == ["X", "Y", "after"], res.lines.to!string);
+    assert(res.fragmentLinesReplaced == 0, res.fragmentLinesReplaced.to!string);
+}
+
+@("fragmentOk with byContent, byLine, or non-replace modes errors as invalid")
+unittest {
+    // === Validity mirror of resolveTargeting: fragmentOk acknowledges a
+    // byMarker replace-only hazard, so it must be rejected with the other
+    // targeting methods and with the modes it has no effect in. ===
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(["a", "b"], EditMode.replace, "x", searchContent: "b",
+                fragmentOk: true);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("fragmentOk"), e.msg);
+        assert(e.msg.canFind("byContent"), e.msg);
+    }
+    assert(threw, "fragmentOk with byContent must error");
+
+    threw = false;
+    try {
+        editFileUnifiedMemory(["a", "b"], EditMode.replace, "x", startLine: 1, fragmentOk: true);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("fragmentOk"), e.msg);
+        assert(e.msg.canFind("byLine"), e.msg);
+    }
+    assert(threw, "fragmentOk with byLine must error");
+
+    threw = false;
+    try {
+        editFileUnifiedMemory(["a", "b"], EditMode.append, "x", marker: "b", fragmentOk: true);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("fragmentOk"), e.msg);
+        assert(e.msg.canFind("replace mode"), e.msg);
+    }
+}
+
+@("fragmentOk with append and no targeting is rejected instead of silently appending")
+unittest {
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(["a", "b"], EditMode.append, "x", fragmentOk: true);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("fragmentOk is only valid with replace mode"), e.msg);
+    }
+    assert(threw, "fragmentOk with append and no targeting must error");
+}
+
+@(
+        "byLine + replaceAll + fragmentOk surfaces the replaceAll contradiction, not the fragmentOk error")
+unittest {
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(["a", "b"], EditMode.replace, "x", startLine: 1,
+                count: 1, replaceAll: true, fragmentOk: true);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("replaceAll is not supported with byLine"), e.msg);
+    }
+    assert(threw, "byLine + replaceAll + fragmentOk must surface the replaceAll error");
+}
+
+@("fragmentOk with replace and no targeting keeps the no-targeting error")
+unittest {
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(["a", "b"], EditMode.replace, "x", fragmentOk: true);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("no targeting method specified"), e.msg);
+    }
+    assert(threw, "fragmentOk with replace and no targeting must keep the no-targeting error");
+}
+
+@("byMarker matchIndex=2 refused when the targeted occurrence is a fragment")
+unittest {
+    // === Single-occurrence path with matchIndex > 1: occurrence 1 is an exact
+    // match, occurrence 2 is a fragment - the guard refuses and reports the
+    // occurrence-2 line (the replaceAll variant is covered above). ===
+    string[] fileLines = ["foo", "pre foo post"];
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(fileLines, EditMode.replace, "X", marker: "foo", matchIndex: 2);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("matched as a strict substring inside longer line"), e.msg);
+        assert(e.msg.canFind("line 2: 'pre foo post'"), e.msg);
+    }
+    assert(threw, "matchIndex=2 onto a fragment occurrence must be refused");
+}
+
+@("byMarker replaceAll sums fragmentLinesReplaced and refuses on the first offending occurrence")
+unittest {
+    // === replaceAll with fragmentOk=true: the guard is checked per occurrence
+    // and the per-match counts are SUMMED into the echo. The guard fires on the
+    // FIRST offending match: occurrence 1 is an exact match, occurrence 2 is a
+    // fragment - the whole edit is still refused. ===
+    string[] fileLines = ["pre foo post", "mid", "pre foo again post"];
+    auto res = editFileUnifiedMemory(fileLines, EditMode.replace, "X", marker: "foo",
+            replaceAll: true, fragmentOk: true);
+    assert(res.lines == ["X", "mid", "X"], res.lines.to!string);
+    assert(res.operations == 2, res.operations.to!string);
+    assert(res.fragmentLinesReplaced == 2, res.fragmentLinesReplaced.to!string);
+
+    string[] mixed = ["foo", "pre foo post"];
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(mixed, EditMode.replace, "X", marker: "foo", replaceAll: true);
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("line 2: 'pre foo post'"), e.msg);
+    }
+    assert(threw, "replaceAll must refuse on the first offending occurrence");
+}
+
+@("integration: the config.d-style fragment incident is refused without fragmentOk and the whole line is replaced with it")
+unittest {
+    // === 13-line config.d incident end-to-end: marker "computeValue" matched
+    // as a strict substring inside the long signature line; count=13 would
+    // replace the whole file from that line down. Refused without fragmentOk
+    // (nothing written); with it the WHOLE line is replaced and the remainder
+    // is intact. dryRun previews get the same refusal. ===
+    auto ctx = makeTestContext("fragment_incident");
+    scope (exit)
+        ctx.teardown;
+
+    string[] configLines = [
+        "module my.config;", "import std.stdio;",
+        "int computeValue(int alpha, int beta, int gamma, int delta) {",
+        "    return alpha + beta + gamma + delta;", "}", "", "void main() {",
+        "    import std.conv : to;", "    const total = computeValue(1, 2, 3, 4);",
+        "    writeln(total.to!string);", "}", "", "int helper(int a, int b) {",
+        "    return a * b;", "}", "// end of file",
+    ];
+    createTestFile(ctx, "config.d", configLines.join("\n") ~ "\n");
+
+    auto refused = editFile(ctx, UnifiedEditFileParams(path: "config.d", content: "int computeValue(int x, int y) {",
+            mode: "replace", marker: "computeValue", count: 13));
+    assert(!refused.success, refused.msg);
+    assert(refused.msg.canFind("matched as a strict substring inside longer line"), refused.msg);
+    assert(refused.msg.canFind("line 3: 'int computeValue(int alpha"), refused.msg);
+    assert(refused.msg.canFind("fragmentOk=true"), refused.msg);
+    assert(readTestFile(ctx, "config.d") == configLines.join("\n") ~ "\n",
+            "refused edit must not write");
+
+    auto dryRun = editFile(ctx, UnifiedEditFileParams(path: "config.d", content: "int computeValue(int x, int y) {",
+            mode: "replace", marker: "computeValue", count: 13, dryRun: true));
+    assert(!dryRun.success, dryRun.msg);
+    assert(dryRun.msg.canFind("matched as a strict substring inside longer line"), dryRun.msg);
+    assert(readTestFile(ctx, "config.d") == configLines.join("\n") ~ "\n",
+            "dryRun refusal must not write");
+
+    auto ok = editFile(ctx, UnifiedEditFileParams(path: "config.d", content: "int computeValue(int x, int y) {",
+            mode: "replace", marker: "computeValue", count: 13, fragmentOk: true));
+    assert(ok.success, ok.msg);
+    auto json = parseJSON(ok.msg);
+    assert(json["fragmentLinesReplaced"].integer == 1, ok.msg);
+    assert(readTestFile(ctx,
+            "config.d") == "module my.config;\nimport std.stdio;\nint computeValue(int x, int y) {\n// end of file\n",
+            readTestFile(ctx, "config.d"));
 }
 
 @("append with byMarker keeps the marker line and inserts after it")
@@ -1371,16 +1883,20 @@ unittest {
     assert(res.matched.matchedAt == 2, res.matched.matchedAt.to!string);
 }
 
-@("byMarker with count greater than 1 may extend past scopeEnd per the anchor rule")
+@("byMarker with explicit count greater than 1 may extend past scopeEnd per the anchor rule")
 unittest {
     // The marker is at line 2 (in scope [2,2]) but targetCount=3 replaces
-    // lines 2-4, which reach beyond the scope end. ===
+    // lines 2-4, which reach beyond the scope end. The content-line-count
+    // auto-derive was removed (over-consumption hole), so multi-line-content
+    // shapes pass an explicit count; the anchor rule (count extends past the
+    // scope end) is unchanged. ===
     string[] fileLines = ["a", "target", "c", "d", "e"];
     auto res = editFileUnifiedMemory(fileLines, EditMode.replace, "x\ny\nz",
-            marker: "target", scopeStart: 2, scopeEnd: 2);
+            marker: "target", scopeStart: 2, scopeEnd: 2, count: 3);
     assert(res.lines == ["a", "x", "y", "z", "e"], res.lines.to!string);
     assert(res.matched.matchedAt == 2, res.matched.matchedAt.to!string);
     assert(res.matched.matchedLines == 3, res.matched.matchedLines.to!string);
+    assert(!res.autoCountUsed);
 }
 
 @("matchIndex with append mode targets the nth occurrence")
@@ -1477,6 +1993,45 @@ unittest {
     assert(diag["searchedLines"].integer == 2, diag.toString);
     // No closestMatch: the anchor "foo" is not inside the scope
     assert(!("closestMatch" in diag), diag.toString);
+}
+
+@("escapeInvisibleChars renders tab as \\t and NBSP/BOM as \\uXXXX, leaving plain text raw")
+unittest {
+    assert(escapeInvisibleChars("a\tb") == "a\\tb");
+    assert(escapeInvisibleChars("a\u00a0b") == "a\\u00a0b");
+    assert(escapeInvisibleChars("\ufeffBOM") == "\\ufeffBOM");
+    assert(escapeInvisibleChars("plain text") == "plain text");
+    assert(escapeInvisibleChars("") == "");
+}
+
+@(
+        "differOnlyByInvisibleChars is false for equal strings and visible differences, true for invisible-only ones")
+unittest {
+    assert(!differOnlyByInvisibleChars("same", "same"));
+    assert(!differOnlyByInvisibleChars("alpha", "beta"));
+    assert(!differOnlyByInvisibleChars("a\tb", "a\tc"));
+    assert(differOnlyByInvisibleChars("x\u00a0y", "xy")); // NBSP-only
+    assert(differOnlyByInvisibleChars("x\u200by", "xy")); // zero-width space
+}
+
+@("block diagnostics flag NBSP-only mismatches with the invisible-characters phrase")
+unittest {
+    auto diag = buildBlockDiagnostic(["a", "int total = x\u00a0+ y;", "b"], "int total = x + y;");
+    const m = diag["closestMatch"]["mismatchAt"].str;
+    assert(m.canFind("differ only by invisible characters"), diag.toString);
+    assert(m.canFind("\\u00a0"), diag.toString); // escaped rendering
+    assert(m.canFind("expected 'int total = x + y;'"), diag.toString);
+    assert(m.canFind("but found 'int total = x\\u00a0+ y;'"), diag.toString);
+}
+
+@("block diagnostics for a real text mismatch carry no invisible-characters phrase")
+unittest {
+    auto diag = buildBlockDiagnostic([
+        "int total = x + y;", "int avg = total / 2;"
+    ], "int total = x + y;\nint avg = total / 3;");
+    const m = diag["closestMatch"]["mismatchAt"].str;
+    assert(m.canFind("expected"), diag.toString);
+    assert(!m.canFind("invisible"), diag.toString);
 }
 
 @("byContent append anchors after the matched block")
@@ -1595,14 +2150,21 @@ unittest {
     assert(res.matched.matchedAt == 2);
 }
 
-@("byMarker remove deletes the marker line")
+@(
+        "byMarker remove with a single-line marker and no count auto-derives to 1 without the auto-count flag")
 unittest {
+    // === REMOVE mode is unchanged by the auto-count rule: it has no
+    // content-line-count auto-derive branch (and requires empty content), so a
+    // single-line marker with remove and count<1 falls through to targetCount=1
+    // without setting autoCountUsed. ===
     string[] fileLines = ["a", "marker", "b"];
     auto res = editFileUnifiedMemory(fileLines, EditMode.remove, "", marker: "marker");
     assert(res.lines == ["a", "b"], res.lines.to!string);
     assert(res.linesChanged == -1, res.linesChanged.to!string);
     assert(res.matched.matchedAt == 2);
     assert(res.matched.matchedLines == 1);
+    assert(!res.autoCountUsed);
+    assert(res.note.empty);
 }
 
 @("byMarker insert_before inserts content before the marker line")
@@ -1678,16 +2240,20 @@ unittest {
     assert(res.matched.matchedAt == 1);
 }
 
-@("single-line file byMarker replace with multi-line content errors past EOF")
+@(
+        "single-line file byMarker replace with multi-line content and no count errors with auto-count guidance")
 unittest {
+    // === Same hard-error as the larger files: the auto-count block runs
+    // before the EOF check, so the guidance fires on a single-line file too. ===
     bool threw = false;
     try {
         editFileUnifiedMemory(["only"], EditMode.replace, "X\nY", marker: "only");
     } catch (Exception e) {
         threw = true;
-        assert(e.msg.canFind("exceeds file length"), e.msg);
+        assert(e.msg.canFind("marker matches 1 line but content has 2 lines"), e.msg);
+        assert(e.msg.canFind("pass count=2"), e.msg);
     }
-    assert(threw, "auto-count beyond EOF on a single-line file must error");
+    assert(threw, "over-consumption shape must hard-error");
 }
 
 @("single-line file byContent replace works")
@@ -2096,6 +2662,114 @@ unittest {
     assert(res.warnings.empty, res.warnings.to!string);
 }
 
+@("unifiedDiffLines produces the exact golden diff for a fixed replacement")
+unittest {
+    // dfmt off
+    const oldLines = ["a", "b", "c", "d", "e", ""];
+    const newLines = ["a", "b", "c", "d", "e", "f"];
+    assert(unifiedDiffLines(oldLines, newLines) == q{@@ -3,4 +3,4 @@
+ c
+ d
+ e
+-
++f}, unifiedDiffLines(oldLines, newLines));
+    // dfmt on
+}
+
+@("unifiedDiffLines for a new file shows an empty old range in the header")
+unittest {
+    // dfmt off
+    assert(unifiedDiffLines([], ["one", "two"]) == q{@@ -0,0 +1,2 @@
++one
++two}, unifiedDiffLines([], ["one", "two"]));
+    // dfmt on
+}
+
+@("unifiedDiffLines for an emptied file shows an empty new range in the header")
+unittest {
+    // dfmt off
+    assert(unifiedDiffLines(["one", "two"], []) == q{@@ -1,2 +0,0 @@
+-one
+-two}, unifiedDiffLines(["one", "two"], []));
+    // dfmt on
+}
+
+@("unifiedDiffLines splits changes separated by a long common run into two hunks")
+unittest {
+    // dfmt off
+    const oldLines = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
+    const newLines = ["a", "B", "c", "d", "e", "f", "g", "h", "i", "J", "k", "l"];
+    assert(unifiedDiffLines(oldLines, newLines) == q{@@ -1,5 +1,5 @@
+ a
+-b
++B
+ c
+ d
+ e
+@@ -7,6 +7,6 @@
+ g
+ h
+ i
+-j
++J
+ k
+ l}, unifiedDiffLines(oldLines, newLines));
+    // dfmt on
+}
+
+@("unifiedDiffLines output round-trips through applyDiffMemory for one hunk")
+unittest {
+    const oldLines = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    const newLines = ["a", "X", "Y", "d", "e", "f", "g", "Z"];
+    const diffText = unifiedDiffLines(oldLines, newLines);
+    const result = applyDiffMemory(oldLines.dup, diffText.splitLines);
+    assert(result.warnings.empty, result.warnings.to!string);
+    assert(result.lines == newLines, result.lines.to!string);
+}
+
+@("unifiedDiffLines output round-trips through applyDiffMemory for two hunks")
+unittest {
+    const oldLines = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"
+    ];
+    const newLines = [
+        "a", "B", "c", "d", "e", "f", "g", "h", "i", "J", "k", "l"
+    ];
+    const diffText = unifiedDiffLines(oldLines, newLines);
+    const result = applyDiffMemory(oldLines.dup, diffText.splitLines);
+    assert(result.warnings.empty, result.warnings.to!string);
+    assert(result.lines == newLines, result.lines.to!string);
+}
+
+@("unifiedDiffLines output round-trips with empty removed and added lines")
+unittest {
+    const oldLines = ["a", "", "b"];
+    const newLines = ["a", "", "c"];
+    const diffText = unifiedDiffLines(oldLines, newLines);
+    const result = applyDiffMemory(oldLines.dup, diffText.splitLines);
+    assert(result.warnings.empty, result.warnings.to!string);
+    assert(result.lines == newLines, result.lines.to!string);
+}
+
+@("unifiedDiffLines new-file hunk is not accepted by applyDiffMemory")
+unittest {
+    // The @@ -0,0 form describes a file with no pre-edit lines; applyDiffMemory
+    // requires at least one pre-edit line, so it throws instead of accepting it.
+    const diffText = unifiedDiffLines([], ["one", "two"]);
+    assert(diffText == "@@ -0,0 +1,2 @@\n+one\n+two", diffText);
+    import std.exception : collectException;
+
+    const ex = collectException(applyDiffMemory([], diffText.splitLines));
+    assert(ex !is null, "expected applyDiffMemory to reject a new-file hunk");
+}
+
+@("unifiedDiffLines is deterministic")
+unittest {
+    const oldLines = ["x", "y", "z"];
+    const newLines = ["x", "w", "z"];
+    assert(unifiedDiffLines(oldLines, newLines) == unifiedDiffLines(oldLines, newLines));
+}
+
 @("integration: editFile byLine replace writes the file and returns match metadata")
 unittest {
     auto ctx = makeTestContext("edit_byline_replace");
@@ -2183,16 +2857,19 @@ unittest {
     assert(content == "line1\nhello world\ninserted\nline3\n", content);
 }
 
-@("integration: editFile byMarker auto-count replaces the marker plus following lines")
+@("integration: editFile byMarker with multi-line content requires an explicit count")
 unittest {
+    // === The content-line-count auto-derive was removed (over-consumption
+    // hole): a single-line marker with multi-line replace content and no
+    // count now errors at the tool level with auto-count guidance. ===
     auto ctx = makeTestContext("edit_marker_autocount");
     scope (exit)
         ctx.teardown;
 
     createTestFile(ctx, "test.txt", "line1\nmarker\nline3\nline4\nline5\n");
 
-    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
-            content: "newA\nnewB\nnewC", mode: "replace", marker: "marker"));
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt", content: "newA\nnewB\nnewC",
+            mode: "replace", marker: "marker", count: 3));
     assert(result.success, result.msg);
 
     auto json = parseJSON(result.msg);
@@ -2218,8 +2895,12 @@ unittest {
     assert(content == "line1\nnewA\nnewB\nnewC\nline3\n", content);
 }
 
-@("integration: editFile byMarker auto-count past EOF fails with a clear error")
+@(
+        "integration: editFile byMarker with multi-line content and no count errors with auto-count guidance")
 unittest {
+    // === Tool-level mirror of the engine-level hard-error: the auto-count
+    // block runs before any EOF check, so the guidance fires instead of a
+    // generic exceeds-file-length error. ===
     auto ctx = makeTestContext("edit_marker_autocount_oob");
     scope (exit)
         ctx.teardown;
@@ -2229,7 +2910,8 @@ unittest {
     auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
             content: "newA\nnewB\nnewC", mode: "replace", marker: "marker"));
     assert(!result.success, result.msg);
-    assert(result.msg.canFind("exceeds file length"), result.msg);
+    assert(result.msg.canFind("marker matches 1 line but content has 3 lines"), result.msg);
+    assert(result.msg.canFind("pass count=3"), result.msg);
 }
 
 @("integration: editFile byMarker not found returns a failure JSON with diagnostic")
@@ -2477,6 +3159,84 @@ unittest {
 
     auto content = readTestFile(ctx, "test.txt");
     assert(content == "a\nb\nc\n", content);
+}
+
+@("integration: editFile includeDiff returns a unified diff of the edit")
+unittest {
+    auto ctx = makeTestContext("edit_includediff");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "a\nb\nc\nd\ne\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt", content: "X",
+            mode: "replace", startLine: 2, count: 1, includeDiff: true));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["ok"].boolean, result.msg);
+    const diff = json["diff"].str;
+    assert(diff.canFind("@@"), result.msg);
+    assert(diff.canFind("-b"), result.msg);
+    assert(diff.canFind("+X"), result.msg);
+}
+
+@("integration: editFile includeDiff with dryRun previews the same diff")
+unittest {
+    auto ctx = makeTestContext("edit_includediff_dryrun");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "a\nb\nc\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt", content: "X",
+            mode: "replace", startLine: 2, count: 1, includeDiff: true, dryRun: true));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["diff"].str == "@@ -1,3 +1,3 @@\n a\n-b\n+X\n c", json["diff"].str);
+
+    auto content = readTestFile(ctx, "test.txt");
+    assert(content == "a\nb\nc\n", content);
+}
+
+@("integration: editFile without includeDiff has no diff field in the result")
+unittest {
+    auto ctx = makeTestContext("edit_no_includediff");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "a\nb\nc\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
+            content: "X", mode: "replace", startLine: 2, count: 1));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["ok"].boolean, result.msg);
+    assert("diff" !in json, result.msg);
+}
+
+@("integration: editFile noOp with includeDiff returns an empty diff string")
+unittest {
+    // A no-op edit has no changed lines, so the unified diff is empty even
+    // when includeDiff asks for one; the field is still present.
+    auto ctx = makeTestContext("edit_noop_includediff");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "a\nb\nc\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt", content: "b\n",
+            mode: "replace", startLine: 2, count: 1, includeDiff: true));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["ok"].boolean, json.toString);
+    assert(json["noOp"].boolean, json.toString);
+    assert("diff" in json, json.toString);
+    assert(json["diff"].str == "", json.toString);
+    assert(readTestFile(ctx, "test.txt") == "a\nb\nc\n", "no-op never writes");
 }
 
 @("integration: editFile byLine append inserts after the line")
@@ -3125,6 +3885,36 @@ unittest {
     assert(threw);
 }
 
+@(
+        "byLine verifyContent mismatch differing only by invisible characters appends the invisible-char note")
+unittest {
+    string[] fileLines = ["header", "li\u00a0ne1", "line2", "line3", "footer"];
+    bool threw = false;
+    try {
+        executeByLine(fileLines, EditMode.replace, "new", 2, 1, false, "line1");
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("verifyContent mismatch"), e.msg);
+        assert(e.msg.canFind("differ only by invisible characters"), e.msg);
+        assert(e.msg.canFind("\\u00a0"), e.msg); // escaped rendering in the note
+    }
+    assert(threw);
+}
+
+@("byLine verifyContent mismatch with visible differences has no invisible-char note")
+unittest {
+    string[] fileLines = ["header", "line1", "line2", "line3", "footer"];
+    bool threw = false;
+    try {
+        executeByLine(fileLines, EditMode.replace, "new", 2, 1, false, "wrong content");
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("verifyContent mismatch"), e.msg);
+        assert(!e.msg.canFind("invisible"), e.msg);
+    }
+    assert(threw);
+}
+
 @("byLine verifyContent with startLine past the file end throws beyond end of file")
 unittest {
     string[] fileLines = ["header"];
@@ -3305,14 +4095,24 @@ unittest {
     assert(outcome.matched.matchedLines == 2);
 }
 
-@("auto-count note describes the content line count auto-count")
+@(
+        "byMarker replace with single-line marker and multi-line content without count errors with auto-count guidance")
 unittest {
+    // === The over-consumption shape (single-line marker + multi-line
+    // content + count<1) used to auto-derive count from the CONTENT line
+    // count, consuming lines the agent never targeted; it now hard-errors
+    // with guidance to pass an explicit count or use a multi-line marker. ===
     string[] fileLines = ["a", "marker", "old1", "old2", "b"];
-    auto outcome = editFileUnifiedMemory(fileLines, EditMode.replace,
-            "new1\nnew2", marker: "marker");
-    assert(outcome.autoCountUsed);
-    assert(outcome.note.canFind("content line count"), outcome.note);
-    assert(outcome.matched.matchedLines == 2);
+    bool threw = false;
+    try {
+        editFileUnifiedMemory(fileLines, EditMode.replace, "new1\nnew2", marker: "marker");
+    } catch (Exception e) {
+        threw = true;
+        assert(e.msg.canFind("marker matches 1 line but content has 2 lines"), e.msg);
+        assert(e.msg.canFind("pass count=2"), e.msg);
+        assert(e.msg.canFind("multi-line marker"), e.msg);
+    }
+    assert(threw, "over-consumption shape must hard-error");
 }
 
 @("byLine without count errors with a suggestion to use byMarker or byContent")
@@ -3451,6 +4251,188 @@ unittest {
     }
 }
 
+@("integration: removeFile on a directory without recursive fails with the directory error")
+unittest {
+    import llm.tool_call.io.functions : RemoveFileParams, removeFile;
+
+    auto ctx = makeTestContext("remove_dir_no_recursive");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "nested/inner/file.txt", "x\n");
+
+    auto result = removeFile(ctx, RemoveFileParams(path: "nested"));
+    assert(!result.success);
+    assert(result.msg == "error: path is a directory; remove_file deletes files only — pass recursive=true to delete the directory tree",
+            result.msg);
+}
+
+@("integration: removeFile with recursive removes a nested directory tree")
+unittest {
+    import llm.tool_call.io.functions : RemoveFileParams, removeFile;
+    import std.file : exists;
+
+    auto ctx = makeTestContext("remove_dir_recursive");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "nested/inner/file.txt", "x\n");
+    auto dir = (ctx.workArea ~ "nested").AbsolutePath;
+    assert(dir.exists);
+
+    auto result = removeFile(ctx, RemoveFileParams(path: "nested", recursive: true));
+    assert(result.success, result.msg);
+    assert(result.msg == "OK", result.msg);
+    assert(!dir.exists, "tree gone");
+}
+
+@("integration: removeFile with recursive=true on a regular file still deletes the file")
+unittest {
+    import llm.tool_call.io.functions : RemoveFileParams, removeFile;
+    import std.file : exists;
+
+    auto ctx = makeTestContext("remove_file_recursive");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "x\n");
+    auto f = (ctx.workArea ~ "test.txt").AbsolutePath;
+
+    auto result = removeFile(ctx, RemoveFileParams(path: "test.txt", recursive: true));
+    assert(result.success, result.msg);
+    assert(!f.exists, "file deleted either way");
+}
+
+@("integration: removeFile on a regular file deletes it (no regression)")
+unittest {
+    import llm.tool_call.io.functions : RemoveFileParams, removeFile;
+    import std.file : exists;
+
+    auto ctx = makeTestContext("remove_file_plain");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "x\n");
+    auto f = (ctx.workArea ~ "test.txt").AbsolutePath;
+
+    auto result = removeFile(ctx, RemoveFileParams(path: "test.txt"));
+    assert(result.success, result.msg);
+    assert(result.msg == "OK", result.msg);
+    assert(!f.exists, "file deleted");
+}
+
+@("integration: removeFile nonexistent-path error unchanged")
+unittest {
+    import llm.tool_call.io.functions : RemoveFileParams, removeFile;
+
+    auto ctx = makeTestContext("remove_nonexistent");
+    scope (exit)
+        ctx.teardown;
+
+    auto result = removeFile(ctx, RemoveFileParams(path: "missing.txt"));
+    assert(!result.success);
+    assert(result.msg.canFind("missing.txt") && result.msg.canFind("do not exist"), result.msg);
+}
+
+@(
+        "integration: removeFile with recursive unlinks a symlink inside the tree and the outside target survives")
+unittest {
+    import llm.tool_call.io.functions : RemoveFileParams, removeFile;
+    import std.file : exists, mkdirRecurse, rmdirRecurse, symlink, write;
+
+    auto ctx = makeTestContext("remove_tree_inner_symlink");
+    scope (exit)
+        ctx.teardown;
+
+    // target the tree's symlink points at; not under workArea, so only the
+    // test itself may clean it up
+    auto outsideDir = ctx.workArea.toString ~ "_outside";
+    mkdirRecurse(outsideDir);
+    scope (exit)
+        rmdirRecurse(outsideDir);
+    write(outsideDir ~ "/canary.txt", "keep");
+
+    createTestFile(ctx, "nested/inner.txt", "x\n");
+    symlink(outsideDir, (ctx.workArea ~ "nested/link").toString);
+
+    auto result = removeFile(ctx, RemoveFileParams(path: "nested", recursive: true));
+    assert(result.success, result.msg);
+    assert(!exists((ctx.workArea ~ "nested").toString), "tree gone");
+    assert(exists(outsideDir ~ "/canary.txt"), "rmdirRecurse must not follow the symlink");
+}
+
+@("integration: removeFile on a symlink path fails and the outside target survives")
+unittest {
+    import llm.tool_call.io.functions : RemoveFileParams, removeFile;
+    import std.file : exists, mkdirRecurse, rmdirRecurse, symlink, write;
+
+    auto ctx = makeTestContext("remove_symlink_path");
+    scope (exit)
+        ctx.teardown;
+
+    auto outsideDir = ctx.workArea.toString ~ "_outside";
+    mkdirRecurse(outsideDir);
+    scope (exit)
+        rmdirRecurse(outsideDir);
+    write(outsideDir ~ "/canary.txt", "keep");
+    symlink(outsideDir ~ "/canary.txt", (ctx.workArea ~ "link.txt").toString);
+
+    auto result = removeFile(ctx, RemoveFileParams(path: "link.txt"));
+    assert(!result.success);
+    assert(result.msg.canFind("symlink"), result.msg);
+    assert(exists(outsideDir ~ "/canary.txt"), "target file must survive");
+    assert(exists((ctx.workArea ~ "link.txt").toString), "the link itself stays");
+}
+
+@(
+        "integration: removeFile through a symlinked directory component is rejected and the outside target survives")
+unittest {
+    import llm.tool_call.io.functions : RemoveFileParams, removeFile;
+    import std.file : exists, mkdirRecurse, rmdirRecurse, symlink, write;
+
+    auto ctx = makeTestContext("remove_symlink_component");
+    scope (exit)
+        ctx.teardown;
+
+    auto outsideDir = ctx.workArea.toString ~ "_outside";
+    mkdirRecurse(outsideDir);
+    scope (exit)
+        rmdirRecurse(outsideDir);
+    write(outsideDir ~ "/canary.txt", "keep");
+    write(outsideDir ~ "/real.txt", "x\n"); // the file visible through the link
+    symlink(outsideDir, (ctx.workArea ~ "dlink").toString);
+
+    auto result = removeFile(ctx, RemoveFileParams(path: "dlink/real.txt"));
+    assert(!result.success);
+    assert(result.msg.canFind("symlink"), result.msg);
+    assert(exists(outsideDir ~ "/real.txt"), "the outside target must survive");
+    assert(exists(outsideDir ~ "/canary.txt"), "untouched sibling must survive");
+    assert(exists((ctx.workArea ~ "dlink").toString), "the symlink itself stays");
+}
+
+@("pathToWorkarea rejects a dangling symlinked directory component with the clean error, and accepts a path whose parent directories do not exist yet")
+unittest {
+    import llm.tool_call.utility : pathToWorkarea;
+    import std.file : exists, rmdirRecurse, symlink;
+
+    auto ctx = makeTestContext("pathtoworkarea_dangling_and_new_dirs");
+    scope (exit)
+        ctx.teardown;
+
+    // A dangling symlinked component (link exists, target does not) must get
+    // the clean PathCheckResult error, not an isSymlink FileException.
+    symlink(ctx.workArea.toString ~ "_no_such_dir", (ctx.workArea ~ "dlink").toString);
+    auto rejected = pathToWorkarea(ctx, "dlink/real.txt");
+    assert(!rejected.valid);
+    assert(rejected.errorMsg.canFind("symlink"), rejected.errorMsg);
+
+    // A path whose parent directories do not exist yet is accepted - writeFile
+    // relies on this and mkdirRecurse creates them after the guard.
+    auto fresh = pathToWorkarea(ctx, "newdir/sub/file.txt");
+    assert(fresh.valid, fresh.errorMsg);
+    assert(!exists((ctx.workArea ~ "newdir").toString), "pre-condition: parents absent");
+}
+
 @(
         "end-to-end: a successful edit marks dirty, a stale byLine fails with re-read guidance, readFile clears it")
 unittest {
@@ -3574,4 +4556,201 @@ unittest {
 @("classifyEditError maps the stale byLine target message to stale_byline_target")
 unittest {
     assert(classifyEditError("Path 'a.md' was modified by a successful edit earlier in this session; line numbers may be stale — re-read it with readFile, then retry with fresh startLine/count, or switch to byMarker/byContent targeting.") == "stale_byline_target");
+}
+
+@(
+        "integration: editFile echoes replaced lines elided past 11 (11 lines render untruncated), identically under dryRun")
+unittest {
+    auto ctx = makeTestContext("editreplaced");
+    scope (exit)
+        ctx.teardown;
+
+    string content;
+    for (int i = 1; i <= 12; i++)
+        content ~= "old" ~ i.to!string ~ "\n";
+    content ~= "tail\n";
+    createTestFile(ctx, "test.txt", content);
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt", content: "new1\nnew2\n",
+            mode: "replace", startLine: 1, count: 12, dryRun: true));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["replacedTruncated"].boolean, json.toString);
+    assert(json["replacedTotal"].integer == 12, json.toString);
+    auto rep = json["replaced"].array;
+    assert(rep.length == 11, json.toString); // first 5 + marker + last 5
+    assert(rep[0].str == "old1", json.toString);
+    assert(rep[4].str == "old5", json.toString);
+    assert(rep[5].str == "… (12 lines replaced; first 5 and last 5 shown)", json.toString);
+    assert(rep[10].str == "old12", json.toString);
+}
+
+@(
+        "integration: editFile reports noOp for an identical-content replace under dryRun, file untouched")
+unittest {
+    // The no-op detection compares the composed preview against the original
+    // lines in memory, so it behaves identically with dryRun=true (nothing is
+    // written either way).
+    auto ctx = makeTestContext("editnoop");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "a\nb\nc\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
+            content: "b\n", mode: "replace", startLine: 2, count: 1, dryRun: true));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["ok"].boolean, json.toString);
+    assert(json["noOp"].boolean, json.toString);
+    assert(json["note"].str.canFind("no change"), json.toString);
+    assert(json["linesChanged"].integer == 0, json.toString);
+    assert(readTestFile(ctx, "test.txt") == "a\nb\nc\n", "dryRun never writes");
+}
+
+@("integration: editFile combines the noOp note with the autoCount note when both apply")
+unittest {
+    // byContent replace with count omitted whose content equals the matched
+    // block: autoCountUsed=true AND noOp=true. The shared `note` slot must
+    // carry BOTH messages (auto-count derivation first, no-op explanation
+    // appended), never clobber one with the other.
+    auto ctx = makeTestContext("editnoopnote");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "head\nfoo\nbar\ntail\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
+            content: "foo\nbar\n", mode: "replace", searchContent: "foo\nbar"));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["ok"].boolean, json.toString);
+    assert(json["noOp"].boolean, json.toString);
+    assert(json["autoCountUsed"].boolean, json.toString);
+    const note = json["note"].str;
+    assert(note.canFind("auto-derived"), note);
+    assert(note.canFind("no change"), note);
+}
+
+@(
+        "integration: editFile warns on insert-mode anchor duplication (byMarker insert_after), file shows the duplication")
+unittest {
+    auto ctx = makeTestContext("editanchordup");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "m\nb\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
+            content: "m\nX", mode: "insert_after", marker: "m"));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["ok"].boolean, json.toString);
+    assert(json["anchorDuplicate"].boolean, json.toString);
+    const note = json["note"].str;
+    assert(note.canFind("appears twice"), note);
+    assert(note.canFind("duplicates"), note);
+    {
+        import std.array : replace;
+
+        const actual = readTestFile(ctx, "test.txt");
+        assert(actual == "m\nm\nX\nb\n", actual.replace("\n", "<NL>"));
+    }
+}
+
+@("integration: editFile warns on insert-mode anchor duplication under dryRun without writing")
+unittest {
+    auto ctx = makeTestContext("editanchordupdry");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "m\nb\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
+            content: "X\nm", mode: "insert_before", marker: "m", dryRun: true));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["ok"].boolean, json.toString);
+    assert(json["anchorDuplicate"].boolean, json.toString);
+    assert(json["note"].str.canFind("appears twice"), json.toString);
+    assert(readTestFile(ctx, "test.txt") == "m\nb\n", "dryRun never writes");
+}
+
+@("integration: editFile echoes replaced lines untruncated at 11 or fewer, absent for insert")
+unittest {
+    auto ctx = makeTestContext("editreplacedsmall");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "a\nb\nc\nd\ne\nf\n");
+
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
+            content: "X\nY\n", mode: "replace", startLine: 3, count: 3));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    auto rep = json["replaced"].array;
+    assert(rep.length == 3, json.toString); // no elision at <= 11 lines
+    assert(rep[0].str == "c", json.toString);
+    assert(rep[2].str == "e", json.toString);
+    assert("replacedTotal" !in json, json.toString); // replacedTotal only with elision
+    assert("replacedTruncated" !in json, json.toString); // no elision at <= 11 lines
+
+    // Boundary: exactly 11 replaced lines render untruncated (11 rendered
+    // entries are not fewer than the total, so there is nothing to elide)
+    createTestFile(ctx, "test11.txt", "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\n");
+    auto r11 = editFile(ctx, UnifiedEditFileParams(path: "test11.txt", content: "n1\nn2\nn3\nn4\nn5\nn6\nn7\nn8\nn9\nn10\nn11\n",
+            mode: "replace", startLine: 1, count: 11));
+    assert(r11.success, r11.msg);
+    auto j11 = parseJSON(r11.msg);
+    auto rep11 = j11["replaced"].array;
+    assert(rep11.length == 11, j11.toString);
+    assert(rep11[0].str == "l1", j11.toString);
+    assert(rep11[10].str == "l11", j11.toString);
+    assert("replacedTotal" !in j11, j11.toString);
+    assert("replacedTruncated" !in j11, j11.toString);
+
+    // Refresh the stale-byLine snapshot: the replace above marked the file dirty
+    readFile(ctx, ReadFileParams(path: "test.txt", startLine: 1, count: 5));
+
+    // Insert modes consume nothing: no replaced field at all
+    auto ins = editFile(ctx, UnifiedEditFileParams(path: "test.txt", content: "Z\n",
+            mode: "insert_after", startLine: 1));
+    assert(ins.success, ins.msg);
+    auto insJson = parseJSON(ins.msg);
+    assert("replaced" !in insJson, ins.msg);
+    assert("replacedTotal" !in insJson, ins.msg);
+    assert("replacedTruncated" !in insJson, ins.msg);
+}
+
+@(
+        "integration: byContent insert with duplication combines the autoCount note with the anchorDuplicate note")
+unittest {
+    auto ctx = makeTestContext("editanchordupbycontent");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "test.txt", "head\nfoo\nbar\ntail\n");
+
+    // byContent insert_after with count omitted: autoCountUsed=true (the count
+    // is auto-derived from the matched block) AND anchorDuplicate=true (the
+    // content's first line "bar" equals the matched block's last line "bar").
+    // The shared `note` slot must carry BOTH messages (auto-count derivation
+    // first, anchor-duplication appended), never clobber one with the other.
+    auto result = editFile(ctx, UnifiedEditFileParams(path: "test.txt",
+            content: "bar\nbaz", mode: "insert_after", searchContent: "foo\nbar"));
+    assert(result.success, result.msg);
+
+    auto json = parseJSON(result.msg);
+    assert(json["ok"].boolean, json.toString);
+    assert(json["autoCountUsed"].boolean, json.toString);
+    assert(json["anchorDuplicate"].boolean, json.toString);
+    const note = json["note"].str;
+    assert(note.canFind("auto-derived"), note);
+    assert(note.canFind("appears twice"), note);
 }

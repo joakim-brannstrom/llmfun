@@ -134,6 +134,10 @@ string sanitizeLogPath(string path) @safe {
 // custom Exception with an enum. A change to the error message will lead to
 // "other".
 string classifyEditError(string msg) @safe {
+    if (msg.canFind("the edit was refused before any change"))
+        return "fragment_guard";
+    if (msg.canFind("pass count="))
+        return "auto_count_required";
     if (msg.canFind("ambiguous targeting"))
         return "ambiguous_targeting";
     if (msg.canFind("no targeting method specified"))

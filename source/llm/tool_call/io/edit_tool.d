@@ -15,6 +15,7 @@ import llm.tool_call.io : classifyEditError, FileContext, sanitizeLogPath,
     fileEndsWithNewline, writeLines, EditMode, parseEditMode;
 import llm.tool_call.io.diagnostic : buildMarkerDiagnostic, buildBlockDiagnostic;
 import llm.tool_call.io.edit_dispatch : editFileUnifiedMemory;
+import llm.tool_call.io.diff : unifiedDiffLines;
 import llm.utility : computeContentHash;
 
 mixin RegisterLlmFunctions!();
@@ -31,24 +32,23 @@ struct UnifiedEditFileParams {
     @ParamDescription("Content to insert or replace with; must be empty string for remove mode")
     string content;
 
-    @ParamDescription(`Edit mode: "replace", "remove", "append", "insert_before", or "insert_after" (alias for append). Insert modes anchor at the FIRST occurrence of the targeted block/marker; when the search repeats (e.g. identical per-section footers) placement is ambiguous: use a unique end marker per section, or append without targeting (no targeting appends at end of file)`)
+    @ParamDescription(`Edit mode: "replace", "remove", "append", "insert_before", or "insert_after" (alias for append). Insert modes: the targeted block/marker line is KEPT and the content is added adjacent to it — do not repeat the targeted text in content. Insert modes anchor at the FIRST occurrence of the targeted block/marker; when the search repeats (e.g. identical per-section footers) placement is ambiguous: use a unique end marker per section, or append without targeting (no targeting appends at end of file)`)
     string mode;
 
     @ParamDescription(
             "byLine targeting: first line of the range (1-based, must be >= 1; omitted by default)")
     @ParamOptional long startLine = -1;
 
-    @ParamDescription("Number of lines to replace/remove from the target. byLine: required for replace/remove. byMarker: default 1, auto-derived from content line count when replacing with multi-line content; for multi-line markers, count auto-derives from the marker line count; set count=1 to replace only the marker line; empty content replaces exactly the marker line. byContent: auto-derived from matched block size (explicit count overrides for single edits; not supported with replaceAll). Ignored for insert modes.")
+    @ParamDescription("Number of lines to replace/remove from the target. byLine: required for replace/remove. byMarker: a single-line marker with multi-line replace content requires an explicit count (pass count=N to replace N lines starting at the marker); multi-line markers auto-derive the target from the marker line count; remove with a single-line marker auto-derives to 1. byContent: auto-derives from the matched block size; not supported with replaceAll. Insert modes ignore count.")
     @ParamOptional long count;
 
-    @ParamDescription("byMarker targeting: case-sensitive substring to find; multi-line markers (up to 20 lines) are also supported — the first line is used as an anchor and subsequent lines are verified as substrings of consecutive file lines. Insert modes anchor at the FIRST occurrence when the marker repeats (see mode)")
+    @ParamDescription("byMarker targeting: case-sensitive substring to find, matched per line (line-granular: each line containing the marker is a target line, and the marker text itself is not preserved unless the content re-includes it). Multi-line markers (up to 20 lines) are also supported: the first line is an anchor and subsequent lines are verified as substrings of consecutive file lines. A marker matching as a strict substring inside a longer line replaces the WHOLE line, destroying the text outside the match, unless fragmentOk is set (replace/byMarker only)")
     @ParamOptional string marker;
 
-    @ParamDescription("byContent targeting: code block to find using trimmed equality matching (multi-line allowed). byContent append/insert_after inserts content after the matched block; insert_before inserts before it. Insert modes anchor at the FIRST occurrence when the block repeats (see mode)")
+    @ParamDescription("byContent targeting: code block to find using whole-line trimmed equality matching (multi-line allowed; a substring of a longer line never matches). Replace swaps the matched lines for the content lines, so the content must carry the full replacement text of any lines to keep. append/insert_after insert the content after the matched block; insert_before inserts before it. Insert modes anchor at the FIRST occurrence when the block repeats (see mode)")
     @ParamOptional string searchContent;
 
-    @ParamDescription(
-            "Replace all non-overlapping occurrences (byContent and byMarker only; not supported with byLine)")
+    @ParamDescription("Replace every line containing the marker / every matched search block with the content lines (line-granular, not fragment-level). byContent and byMarker only; not supported with byLine")
     @ParamOptional bool replaceAll;
 
     @ParamDescription("Preview the result without writing to disk")
@@ -65,6 +65,13 @@ struct UnifiedEditFileParams {
 
     @ParamDescription("byLine guard: verify that the target lines match this content before editing. When non-empty, the lines at [startLine, startLine+count) are compared (trimmed equality) against verifyContent. Mismatch throws an error with the actual content found, preventing silent corruption from stale line numbers after successive edits. Only valid with byLine targeting.")
     @ParamOptional string verifyContent;
+
+    @ParamDescription("byMarker replace/replaceAll only: acknowledge that markers matching as strict substrings inside longer lines replace those WHOLE lines (the text outside the marker match is destroyed). Default false: the edit is refused when any matched line is strictly longer than its marker line. Providing fragmentOk with startLine (byLine), searchContent (byContent), or with remove/insert modes is an error.")
+    @ParamOptional bool fragmentOk;
+
+    @ParamDescription(
+            "Include a unified diff of the edit in the result (pre-edit vs post-edit lines)")
+    @ParamOptional bool includeDiff;
 }
 
 /// Resolve the targeting method of the unified editFile params for logging.
@@ -117,7 +124,7 @@ package string staleBylineTargetError(string path) @safe {
         .text;
 }
 
-@Function("Edit a file by applying a change to a target. " ~ "Target the file with exactly one method: startLine+count (byLine, 1-based), " ~ "marker (byMarker, substring to find), or searchContent (byContent, code block matched by trimmed equality). " ~ "The file's trailing-newline state is preserved, and the dryRun preview matches the exact bytes that would be written. " ~ "Returns a JSON object with fields: ok (bool), matchedAt (1-based line; for a mode=append call with no targeting, the line where the new content starts, which is one past the last line for a non-empty file), matchedLines (int), linesChanged (int, signed: new total line count minus old total line count), operations (int). " ~ "When auto-count is used, also includes: autoCountUsed (true) and note (string). " ~ "When dryRun is true, also includes: preview (string). " ~ "On failure returns JSON with ok=false, an error string, and a diagnostic field with closest-match details. " ~ "byLine edits on a path modified by a successful edit earlier in this session are rejected until the file is re-read with read_file; files modified by other processes between turns are caught only by a best-effort content-hash cross-check.") ExecuteFuncResult editFile(
+@Function("Edit a file by applying a change to a target. " ~ "Target the file with exactly one method: startLine+count (byLine, 1-based), " ~ "marker (byMarker, substring to find), or searchContent (byContent, code block matched by trimmed equality). " ~ "The file's trailing-newline state is preserved, and the dryRun preview matches the exact bytes that would be written. " ~ "Returns a JSON object with fields: ok (bool), matchedAt (1-based line; for a mode=append call with no targeting, the line where the new content starts, which is one past the last line for a non-empty file), matchedLines (int), linesChanged (int, signed: new total line count minus old total line count), operations (int). " ~ "When a fragment marker replaced whole line(s) with fragmentOk, also includes: fragmentLinesReplaced (int). " ~ "Replace/remove edits that consume lines also include: replaced (the consumed lines; elided when more than 10: first 5 + last 5 + an ellipsis marker), replacedTotal (int), replacedTruncated (bool). " ~ "When the edit produces no change (new content identical to the replaced text), also includes: noOp (true) and note. " ~ "When an insert-mode edit (insert_after, its alias append, or insert_before) has a content boundary line duplicating the kept anchor line/block, also includes: anchorDuplicate (true) and note. " ~ "When includeDiff is true, also includes: diff (string, the unified diff between the pre-edit and post-edit lines). " ~ "When auto-count is used, also includes: autoCountUsed (true) and note (string). " ~ "When dryRun is true, also includes: preview (string). " ~ "On failure returns JSON with ok=false, an error string, and a diagnostic field with closest-match details. " ~ "byLine edits on a path modified by a successful edit earlier in this session are rejected until the file is re-read with read_file; files modified by other processes between turns are caught only by a best-effort content-hash cross-check.") ExecuteFuncResult editFile(
         Context baseCtx, UnifiedEditFileParams params) {
     mixin(baseContextToSpecific!FileContext);
 
@@ -179,7 +186,7 @@ package string staleBylineTargetError(string path) @safe {
         fileLines = File(path_.toString).byLineCopy.array;
         auto outcome = editFileUnifiedMemory(fileLines, mode_, params.content, params.startLine, params.count,
                 params.marker, params.searchContent, params.replaceAll, params.matchIndex,
-                params.scopeStart, params.scopeEnd, params.verifyContent);
+                params.scopeStart, params.scopeEnd, params.verifyContent, params.fragmentOk);
 
         auto json = JSONValue.emptyObject;
         json["ok"] = true;
@@ -192,6 +199,55 @@ package string staleBylineTargetError(string path) @safe {
             json["autoCountUsed"] = true;
             json["note"] = outcome.note;
         }
+        if (params.fragmentOk && outcome.fragmentLinesReplaced > 0)
+            json["fragmentLinesReplaced"] = outcome.fragmentLinesReplaced;
+
+        // echo the exact pre-edit target lines consumed by
+        // replace/remove modes, truncated when large (>11 lines: then
+        // 5 + marker + 5 = 11 rendered entries are strictly fewer than the
+        // total, so the marker stays truthful).
+        if (outcome.replacedLines.length > 0) {
+            if (outcome.replacedLines.length > 11) {
+                json["replaced"] = outcome.replacedLines[0 .. 5] ~ [
+                    "… (" ~ to!string(
+                            outcome.replacedTotal) ~ " lines replaced; first 5 and last 5 shown)"
+                ] ~ outcome.replacedLines[$ - 5 .. $];
+                json["replacedTotal"] = outcome.replacedTotal;
+                json["replacedTruncated"] = true;
+            } else {
+                json["replaced"] = JSONValue(outcome.replacedLines);
+            }
+        }
+
+        if (outcome.noOp) {
+            json["noOp"] = true;
+            // autoCount shares this slot and CAN coexist with noOp (e.g.
+            // byContent replace with count omitted and content identical to
+            // the matched block): keep the auto-count derivation note and
+            // append the no-op explanation instead of clobbering it.
+            json["note"] = (outcome.note.length > 0 ? outcome.note ~ "; " : "") ~ "the edit produced no change (new content identical to the replaced text); if you intended a change, the content equals the search text";
+        }
+
+        // Session monitoring must see silent no-ops by name: the
+        // success-path no-op is logged as a first-class event even though ok
+        // stays true. Path is already sanitized (logPath above).
+        if (outcome.noOp)
+            logger.warningf("tool=editFile event=noop mode=%s targeting=%s path=%s dryRun=%s",
+                    params.mode, targeting, logPath, dryRun);
+
+        if (outcome.anchorDuplicate) {
+            json["anchorDuplicate"] = true;
+            // The auto-count note CAN coexist with anchorDuplicate (byContent
+            // inserts auto-derive the target count from the matched block, so
+            // autoCountUsed=true there): keep the auto-count derivation note
+            // and append the anchor-duplication explanation instead of
+            // clobbering it.
+            const dupNote = (mode_ == EditMode.insert_after || mode_ == EditMode.append) ? "content's first line duplicates the matched block's last line; the anchor was kept, so it now appears twice — drop it from content if unintended" : "content's last line duplicates the matched block's first line; the anchor was kept, so it now appears twice — drop it from content if unintended";
+            json["note"] = (outcome.note.length > 0 ? outcome.note ~ "; " : "") ~ dupNote;
+        }
+
+        if (params.includeDiff)
+            json["diff"] = unifiedDiffLines(fileLines, outcome.lines);
 
         // Preserve the original file's trailing-newline state
         const trailingNewline = fileEndsWithNewline(path_.toString);

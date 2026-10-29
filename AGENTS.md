@@ -87,6 +87,14 @@ dub build --config=llmfun_util                    # Manual test utility (runs no
 - Prefer an immediately invoked local function over a declared variable plus branches.
 - Zero-initialize floating point explicitly; D's default is NaN.
 
+### Const and parameter types
+
+- **`const x = <expr>` infers whole-type const**: a `const` local over a `string[]` expression becomes `const(string[])`, which cannot be passed to any `string[]` parameter. Declare such locals `auto` unless const is really needed.
+- **Read-only `string[]` parameters: use plain `string[]`** for internal helpers, or `const(string)[]` when the no-reorder/no-cell-write promise should be explicit. Never `const(string[])`: it is strictly dominated by `const(string)[]` - same caller-side guarantees, more callee freedom (rebind, `~=`).
+- **Const is transitive and one-way**: neither const form converts to `string[]`, so mixing const params with `string[]` params breaks callers holding const data. Keep one style per data flow.
+- **A by-value array parameter shares the caller's buffer**: `sort()` and `p[i] = ...` inside the callee mutate the caller's array; rebinding and `~=` (reallocates) do not. The elements themselves (strings) are immutable and can never be corrupted without copying.
+- For arrays of mutable-value elements, whole-array const (`const(int[])`) and elements-const (`const(int)[]`) are two different, meaningful promises.
+
 ### Formatting
 
 - K&R brace style (opening brace on the same line).

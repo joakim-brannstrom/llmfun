@@ -2248,11 +2248,18 @@ unittest {
 version (unittest) {
     static import llm.test_util;
 
+    /// Stand-in for the repo's real AGENTS.md: the rebuild tests assert
+    /// injection of this fixture through the injectable agentsMdFile_ path,
+    /// so they never read or depend on the repo file.
+    package immutable fixtureAgentsMdText = "# Fixture agents.md rules\n\n- keep the rebuild tests hermetic\n";
+
     /// Wire an AgentApp the way AppAgentActor.startSetup does for the fields
     /// rebuildSystemPrompt needs: test llmConf over `td` (including a base
-    /// AGENT.md prompt file - getPrompt throws when it is missing), a live
-    /// agent_, a skill manager, and an in-memory primary RAG (registered in
-    /// the TestArea so cleanup destroys it before the dir is removed).
+    /// AGENT.md prompt file - getPrompt throws when it is missing), a fixture
+    /// AGENTS.md (written into the test area and selected through the
+    /// injectable agentsMdFile_ path), a live agent_, a skill manager, and an
+    /// in-memory primary RAG (registered in the TestArea so cleanup destroys
+    /// it before the dir is removed).
     private void wireRebuildTestApp(ref AgentApp app, ref llm.test_util.TestArea td) {
         import std.file : write;
         import std.path : buildPath;
@@ -2262,6 +2269,11 @@ version (unittest) {
         import llm.test_util : TestArea, TestEmbedder;
 
         app.llmConf = testLlmConfig(td);
+        // A small AGENTS.md fixture in the test area: rebuildSystemPrompt
+        // reads it through the injectable agentsMdFile_ path, so these tests
+        // never read or depend on the repo's real AGENTS.md.
+        app.agentsMdFile_ = td.workArea ~ "AGENTS.md";
+        write(app.agentsMdFile_.toString, fixtureAgentsMdText);
         // getPrompt(promptName: agentPrompt) reads promptDir/AGENT.md; the
         // startup prompt dir in production carries it.
         write(buildPath(app.llmConf.promptDir[0].toString, "AGENT.md"), "test agent prompt");
@@ -2304,8 +2316,6 @@ version (unittest) {
 @(
         "rebuildSystemPrompt rebuilds the startup prompt through the shared path (full treatment under the defaults)")
 unittest {
-    import std.file : readText;
-
     auto td = testArea("app_agent_rebuild_full");
     scope (exit)
         td.cleanup;
@@ -2313,17 +2323,12 @@ unittest {
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
     wireRebuildTestApp(app, td);
 
-    // The verbatim-injection tests assert AGENTS.md injection, which the
-    // full treatment only does while the repo AGENTS.md is under the
-    // compression threshold; guard against the repo file growing past it.
-    assert(readText("AGENTS.md").length <= 20 * 1024,
-            "repo AGENTS.md exceeds the default 20 KB full-treatment threshold; these tests assume verbatim injection");
-
+    // The verbatim-injection tests assert AGENTS.md injection of the fixture
+    // written into the test area, which is far below the threshold.
     app.rebuildSystemPrompt();
 
-    // The real workarea AGENTS.md (20087 bytes, within the default 20 KB
-    // threshold) rides along verbatim under the full treatment.
-    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+    // The fixture payload rides along verbatim under the full treatment.
+    assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
             "full treatment injects the AGENTS.md payload verbatim");
     assert(app.systemPrompt_.canFind("test agent prompt"), "the base prompt file is still composed");
     assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
@@ -2335,8 +2340,6 @@ unittest {
 
 @("rebuildSystemPrompt defers while an agent run is in flight and applies at the next safe point")
 unittest {
-    import std.file : readText;
-
     auto td = testArea("app_agent_rebuild_defer");
     scope (exit)
         td.cleanup;
@@ -2353,7 +2356,7 @@ unittest {
     app.agentRunInFlight_ = false;
     app.rebuildSystemPrompt();
     assert(!app.agentMdRebuildPending_, "the parked rebuild is applied");
-    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
             "the applied rebuild injects the AGENTS.md payload");
     app.rag = null; // release app's reference so the TestArea owns the RAG
 }
@@ -2361,8 +2364,6 @@ unittest {
 @(
         "rebuildSystemPrompt with agentsMd.enabled=false recomposes without the payload and without RAG interaction")
 unittest {
-    import std.file : readText;
-
     auto td = testArea("app_agent_rebuild_disabled");
     scope (exit)
         td.cleanup;
@@ -2375,7 +2376,7 @@ unittest {
 
     assert(app.systemPrompt_.canFind("test agent prompt"),
             "base prompt and manifest are still composed");
-    assert(!app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(!app.systemPrompt_.canFind(fixtureAgentsMdText),
             "no AGENTS.md payload under enabled=false");
     assert(app.rag.db.getSources.length == 0, "no indexing runs");
     app.rag = null; // release app's reference so the TestArea owns the RAG
@@ -2395,7 +2396,7 @@ unittest {
     app.llmConf.agentsMd.ragIndex = false;
     app.rebuildSystemPrompt();
 
-    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
             "the payload is still injected under the full treatment");
     assert(app.rag.db.getSources.length == 0, "no RAG interaction at all");
 }
@@ -2424,8 +2425,6 @@ unittest {
 
 @("startup lifecycle: rebuildSystemPrompt composes the AGENTS.md payload through the shared startup path and installs it in the chat history")
 unittest {
-    import std.file : readText;
-
     auto td = testArea("app_agent_lifecycle_startup");
     scope (exit)
         td.cleanup;
@@ -2433,15 +2432,11 @@ unittest {
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
     wireRebuildTestApp(app, td);
 
-    // This and the other lifecycle tests assert verbatim AGENTS.md injection,
-    // which the full treatment only does while the repo AGENTS.md is under the
-    // compression threshold; guard against the repo file growing past it.
-    assert(readText("AGENTS.md").length <= 20 * 1024,
-            "repo AGENTS.md exceeds the default 20 KB full-treatment threshold; these tests assume verbatim injection");
-
+    // This and the other lifecycle tests assert verbatim injection of the
+    // fixture written into the test area, which is far below the threshold.
     app.rebuildSystemPrompt();
 
-    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
             "the startup build injects the AGENTS.md payload verbatim");
     assert(app.systemPrompt_.canFind("test agent prompt"), "the base prompt file is still composed");
     assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
@@ -2460,7 +2455,6 @@ unittest {
 
 @("model-switch lifecycle: /model recomputes the prompt through the real dispatch path")
 unittest {
-    import std.file : readText;
     import std.typecons : Nullable;
 
     auto td = testArea("app_agent_lifecycle_model_switch");
@@ -2477,7 +2471,7 @@ unittest {
     app.llmConf.codeModels[1].agentsMd = bOverride;
 
     app.rebuildSystemPrompt();
-    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
             "setup: model A's full treatment injects the AGENTS.md payload");
 
     // Drive the REAL /model dispatch path: the registry routes the command to
@@ -2487,7 +2481,7 @@ unittest {
     assert(app.llmConf.activeCodeModelIndex == 1, "the active model is now model-b");
 
     // The recomputed prompt applies model B's treatment: disabled -> no payload.
-    assert(!app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(!app.systemPrompt_.canFind(fixtureAgentsMdText),
             "the recomputed prompt has no AGENTS.md payload under model B's disabled treatment");
     assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
             "no RAG pointer without a payload");
@@ -2499,7 +2493,7 @@ unittest {
 
 @("refresh-agent-md lifecycle: the disabled path reports and does nothing; the enabled path clears the cache and reprocesses")
 unittest {
-    import std.file : exists, readText, write;
+    import std.file : exists, write;
 
     auto td = testArea("app_agent_lifecycle_refresh");
     scope (exit)
@@ -2532,7 +2526,7 @@ unittest {
     // mode=full then injects the payload verbatim and indexes it into the
     // in-memory RAG (ragIndex=true).
     assert(!cachePath.exists, "the forced refresh clears the cache file");
-    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
             "the forced refresh injects the AGENTS.md payload verbatim");
     assert(!app.systemPrompt_.canFind("- stale cached summary"),
             "no stale cached summary survives the refresh");
@@ -2601,7 +2595,7 @@ unittest {
 @("injection rows end-to-end: the real path produces each payload/instruction combination")
 unittest {
     import std.datetime.systime : Clock;
-    import std.file : exists, readText, remove;
+    import std.file : exists, remove;
     import std.string : format, indexOf;
 
     auto td = testArea("app_agent_lifecycle_rows");
@@ -2615,7 +2609,7 @@ unittest {
     // failure deterministically (no LLM endpoint is contacted).
     app.llmConf.dataDir = td.workArea;
     auto cachePath = td.workArea ~ "agent_md_cache.json";
-    const rawChecksum = computeContentHash(readText("AGENTS.md"));
+    const rawChecksum = computeContentHash(fixtureAgentsMdText);
     const topicName = format!"agent_md_%08x"(rawChecksum);
     const generatedSummary = "- stubbed AGENTS.md summary for the lifecycle rows\n";
 
@@ -2669,7 +2663,6 @@ unittest {
 
 @("rebuild deferral lifecycle: a rebuild requested while an agent run is in flight is parked and applied by the next safe point after the run")
 unittest {
-    import std.file : readText;
     import std.typecons : Nullable;
 
     auto td = testArea("app_agent_lifecycle_defer");
@@ -2685,11 +2678,8 @@ unittest {
     bOverride.enabled = Nullable!bool(false);
     app.llmConf.codeModels[1].agentsMd = bOverride;
 
-    assert(readText("AGENTS.md").length <= 20 * 1024,
-            "repo AGENTS.md exceeds the default 20 KB full-treatment threshold; these tests assume verbatim injection");
-
     app.rebuildSystemPrompt();
-    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
             "setup: model A's full treatment injects the AGENTS.md payload");
 
     // Park a rebuild the way the in-flight guard does: the production safe
@@ -2700,14 +2690,14 @@ unittest {
             "/model must dispatch as an in-session command");
     assert(app.agentMdRebuildPending_, "the rebuild is parked while the run is in flight");
     assert(app.llmConf.activeCodeModelIndex == 1, "the model switch itself is not deferred");
-    assert(app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
             "model A's payload is still applied while the rebuild is parked");
 
     // The next safe point applies the parked rebuild.
     app.agentRunInFlight_ = false;
     app.rebuildSystemPrompt();
     assert(!app.agentMdRebuildPending_, "the parked rebuild is applied");
-    assert(!app.systemPrompt_.canFind(readText("AGENTS.md")),
+    assert(!app.systemPrompt_.canFind(fixtureAgentsMdText),
             "the applied rebuild switches to model B's disabled treatment");
     assert(systemPromptOf(app.agent_.chat.getMessages()) == app.systemPrompt_,
             "the recomputed prompt is installed in the chat history");
