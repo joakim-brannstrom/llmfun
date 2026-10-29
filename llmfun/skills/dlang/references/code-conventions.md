@@ -63,6 +63,51 @@
   else status = "error";
   ```
 
+## Const and Parameter Types
+
+- **`const x = <expr>` infers whole-type const.** A `const` local over a
+  `string[]` expression becomes `const(string[])`, which cannot be passed to
+  any `string[]` parameter:
+
+  ```d
+  // Good
+  auto lines = splitLines(content);   // string[]
+
+  // Bad - const(string[]) cannot initialize a string[] parameter
+  const lines = splitLines(content);
+  ```
+
+- **Read-only `string[]` parameters: plain `string[]`** for internal helpers,
+  or `const(string)[]` when the no-reorder/no-cell-write promise should be
+  explicit. Never `const(string[])`: it is strictly dominated by
+  `const(string)[]` - same caller-side guarantees, more callee freedom
+  (rebinding and `~=` work).
+
+- **Const is transitive and one-way.** Neither const form converts to
+  `string[]`, so mixing const parameters with `string[]` parameters breaks
+  callers holding const data. Keep one style per data flow.
+
+- **A by-value array parameter shares the caller's buffer.** `sort()` and
+  `p[i] = ...` inside the callee mutate the caller's array; rebinding and
+  `~=` (reallocates) do not. The elements themselves (strings) are immutable
+  and can never be corrupted without copying:
+
+  ```d
+  void calleeSort(string[] p) { p.sort(); }
+
+  void main() {
+      string[] a = ["pear", "apple"];
+      calleeSort(a);
+      assert(a == ["apple", "pear"]);   // caller's array was reordered
+  }
+  ```
+
+- **For arrays of mutable-value elements, whole-array const and elements-const
+  are two different, meaningful promises:** `const(int[])` ("no reorder
+  either") vs `const(int)[]` ("no cell writes, reorder ok"). For string arrays
+  the difference collapses to the shell only, because string is already
+  `immutable(char)[]`.
+
 ## Naming & Formatting
 
 - **K&R brace style** (opening brace on the same line)

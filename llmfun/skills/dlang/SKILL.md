@@ -51,6 +51,12 @@ Full details in `references/code-conventions.md`. Key rules:
 - **NEVER initialize `string` with `= ""`.** D auto-initializes locals.
 - **Prefer local function initialization** over scattered assignments.
 
+### Const & Params
+
+- **Read-only `string[]` params: `const(string)[]`, not `const(string[])`.**
+- **`const x = <string[] expr>` infers `const(string[])`; prefer `auto`.**
+- **By-value params share the caller's buffer:** sort/element-assign mutate it
+
 ### Naming & Formatting
 
 - **Local imports** inside functions/structs where symbols are not pervasive
