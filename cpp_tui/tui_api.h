@@ -53,8 +53,21 @@ extern "C" {
  *   4 - single handle: TuiBackendMode/TuiBackendKind, tuiInit(state, mode),
  *       per-state frame calls, None-safe tuiRender, tuiBackendActive/Note,
  *       destroy-tears-down; TuiScreen + tuiShutdown removed.
+ *   5 - MVP additive surface: tuiSetUiGeneration (1); tuiRequestCancel/
+ *       tuiTakeCancel (3); TuiLogRecord/tuiAddLogRecord + tuiAddLogMessageEx
+ *       wrapper (32); TuiRuntimeStatus/tuiSetRuntimeStatus (39);
+ *       SessionItem.updatedAtMs/flags (24); tuiSetRawLogOpen/tuiIsRawLogOpen
+ *       (33); PipelineChatMessage.currentTool/contextUsed/contextMax/reserved
+ *       (39a). One bump for the whole workbench MVP: the later symbols land
+ *       inside v5 without re-bumping (task 32 asserts the pin is still 5).
+ *   6 - legacy renderer removed (task 41): TuiUiGeneration and
+ *       tuiSetUiGeneration are gone, so a caller that still sets a generation
+ *       fails to build instead of silently rendering nothing. The workbench is
+ *       the only renderer; every other symbol is unchanged. This is the one
+ *       deliberate *removal* in the header's history - the v5 note above still
+ *       records what v5 added.
  */
-#define TUI_API_VERSION 4
+#define TUI_API_VERSION 6
 
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
@@ -135,13 +148,58 @@ typedef struct ChatMessageParam {
     TuiChatMessageType type; /* offset 48, size 4 */
 } ChatMessageParam;          /* total size: 52 bytes (+ 4-byte tail padding) */
 
+/* PipelineChatMessage — one streaming update for a pipeline agent lane (the Agents tab's
+ * per-agent row, design §5.21).
+ *
+ * Ownership: every String is inbound (non-owning); `tuiPipelineAgentUpdate` copies their data
+ * during the call, so the caller's buffers may be reused or freed as soon as it returns.
+ *
+ * Layout (64-bit): 6x String{ptr(8) + size_t(8)} + 3x int64(8) = 120 bytes, no tail padding.
+ * All fields are naturally aligned.
+ *
+ * The last four fields are the v5 additions (task 39a). They are *appended*, so every earlier
+ * offset is unchanged and a caller recompiled against this header that leaves them zero still
+ * sends a valid update (no tool name, no context reading).
+ *
+ * `status` is the v4 status sentence. It is kept because removing it would move every offset
+ * below it (the v6 note's "every other symbol is unchanged"), and nothing in C++ reads it since
+ * task 41 removed the renderer that showed it: this UI reads the numbers below it and never
+ * parses that text (D-STATUS: numbers are the contract).
+ *
+ *   * `currentTool` — the newest tool this agent has called in the response ("" = none yet);
+ *   * `contextUsed` / `contextMax` — tokens in the context, and the model's context size. A
+ *     `contextUsed` above 0 is drawn whatever the ceiling is; the ceiling is what makes a *zero*
+ *     unambiguous for the sender: `0/8192` is a real zero, `0/0` is no reading at all.
+ *     `contextUsed` alone cannot tell those apart, which is why the pair is sent instead of the
+ *     count on its own.
+ *   * `reserved` — zero. It is a slot a later producer can use instead of growing the struct
+ *     again (it buys no alignment: 112 bytes is already 8-aligned).
+ */
 typedef struct PipelineChatMessage {
-    String content;
-    String reasoning;
-    String role;
-    String finishReason;
-    String status;
-} PipelineChatMessage;
+    String content;      /* offset 0,   size 16 */
+    String reasoning;    /* offset 16,  size 16 */
+    String role;         /* offset 32,  size 16 */
+    String finishReason; /* offset 48,  size 16 */
+    String status;       /* offset 64,  size 16 - the v4 sentence; unread since task 41 */
+    String currentTool;  /* offset 80,  size 16 - newest tool of this response; "" = none yet */
+    int64_t contextUsed; /* offset 96,  size 8  - tokens in context; 0 is a value */
+    int64_t contextMax;  /* offset 104, size 8  - the model's ceiling; 0 = unknown. It is only
+                          * needed to make a ZERO unambiguous (0/8192 = a real zero, 0/0 = no
+                          * reading at all); a contextUsed above 0 is drawn either way */
+    int64_t reserved;    /* offset 112, size 8  - zero; a slot for a later producer, no more */
+} PipelineChatMessage;   /* total size: 120 bytes */
+
+/* The size is a wire contract with `llm/tui/package.d`, which pins the same 120 bytes: a layout
+ * change has to fail the build here, at the definition, in every TU that includes this header.
+ * (The per-field offsets and the "the fields arrive unchanged" round-trip are pinned by
+ * `./test_tui_api_v4` case 1f; headers are exempt from the `./test_metrics` gate ledger, so this
+ * pin costs the ledger nothing.)
+ */
+#if defined(__cplusplus)
+static_assert(sizeof(PipelineChatMessage) == 120, "PipelineChatMessage is a 120-byte contract");
+#else
+_Static_assert(sizeof(PipelineChatMessage) == 120, "PipelineChatMessage is a 120-byte contract");
+#endif
 
 /* SessionItem - One row of the session sidebar snapshot.
  *
@@ -149,9 +207,24 @@ typedef struct PipelineChatMessage {
  * data during tuiSetSessionList, so the caller's buffers may be reused or
  * freed immediately after the call returns.
  *
- * Layout (64-bit): 3x String{ptr(8) + size_t(8)} + size_t(8) + int(4)
- *   = 60 bytes (+ 4-byte tail padding), total struct size 64 bytes.
- * All fields are naturally aligned.
+ * Layout (64-bit): 3x String{ptr(8) + size_t(8)} + size_t(8) + int(4) + 4 bytes
+ *   of padding + int64(8) + 2x int32(4) = 80 bytes, no tail padding. All fields are
+ *   naturally aligned; the padding after `isActive` is what lifts `updatedAtMs` to
+ *   its 8-byte boundary.
+ *
+ * The three fields after `isActive` are the v5 additions (task 24). They are
+ * *appended*, so every pre-v5 offset is unchanged and a caller that is
+ * recompiled against this header and leaves them zero (a `{0}`-style
+ * initializer) still produces a valid snapshot:
+ * `updatedAtMs == 0` means "unknown", which the rail renders as a flat list
+ * with no fabricated dates, and `flags == 0` means no row is marked running.
+ *
+ * That compatibility is **source-level**. `TUI_API_VERSION` is documentation
+ * only (nothing checks it at run time) and D and C++ ship together (C-02, C-11),
+ * so an object file compiled against the pre-v5 64-byte struct and linked
+ * against this library would stride 64 bytes through an 80-byte array. "Append
+ * only" means no *recompiled* caller changes behaviour; it is not a promise that
+ * a stale binary keeps working.
  *
  * Example initialization:
  *   SessionItem item = {
@@ -160,6 +233,8 @@ typedef struct PipelineChatMessage {
  *       .preview      = String{"Hello", 5},
  *       .messageCount = 3,
  *       .isActive     = 1,
+ *       .updatedAtMs  = 1766083200000,
+ *       .flags        = TuiSessionFlag_Running,
  *   };
  */
 typedef struct SessionItem {
@@ -168,7 +243,20 @@ typedef struct SessionItem {
     String preview;      /* offset 32, size 16 - first user message, truncated by D */
     size_t messageCount; /* offset 48, size 8 */
     int isActive;        /* offset 56, size 4 - 1 = active, 0 = not */
-} SessionItem;           /* total size: 64 bytes */
+    int64_t updatedAtMs; /* offset 64, size 8 - unix ms; 0 = unknown */
+    int32_t flags;       /* offset 72, size 4 - TuiSessionFlag_* bits, 0 = none */
+    int32_t reserved;    /* offset 76, size 4 - must be 0 (keeps the size 80) */
+} SessionItem;           /* total size: 80 bytes */
+
+/* SessionItem.flags - what the session snapshot may say about a row.
+ *
+ * Only `Running` crosses the ABI. `unread` and `pinned` are UI-local by design
+ * (FR-03, D-19): unread is "updatedAt advanced while this session was not
+ * active during this process lifetime" and pinned is a `ui.conf` preference, so
+ * neither is a fact the store has. Bits above 0 are reserved for later
+ * additive flags and must be zero, exactly like `reserved`.
+ */
+#define TuiSessionFlag_Running 1 /* bit 0: a run is in flight for this session */
 
 /* TuiSessionActionType - Kind of a session sidebar action.
  * Append-only ordering: existing values must never be renumbered or
@@ -180,7 +268,7 @@ typedef enum TuiSessionActionType {
     TuiSessionAction_Select = 1, /* switch to the session */
     TuiSessionAction_New = 2,    /* create a new session */
     TuiSessionAction_Rename = 3, /* rename the session (title payload) */
-    TuiSessionAction_Delete = 4  /* delete the session (already confirmed) */
+    TuiSessionAction_Delete = 4  /* delete the session (the UI never re-asks) */
 } TuiSessionActionType;
 
 /* SessionAction - One queued sidebar action, consumed by tuiGetSessionAction.
@@ -348,7 +436,14 @@ int tuiBackendActive(const TuiState* state);
  */
 String tuiBackendNote(void);
 
-/* Set the logging to on/off. Must be done before tuiRender is called. */
+/* Set the logging to on/off; may be called at any time, including between frames (the
+ * `/debug` command toggles it at runtime).
+ *
+ * On: `llmfun_ui_log.txt` (in the process's working directory) is opened lazily at the first
+ * archived line, and a latch set by a previous failed open or write is cleared and the failed
+ * stream dropped - a new request is a new attempt. Off: the handle is closed, so nothing lands
+ * in a file the user switched off. A failed open or write is never retried per record.
+ */
 void tuiSetLogging(TuiState* state, int onOff);
 
 /* Cap the TUI's rendered width in terminal columns. 0 = unlimited (default,
@@ -384,6 +479,97 @@ void tuiInitQueryHistory(TuiState* state, const String* history, size_t count);
  * Null-safe: no-op if state is NULL.
  */
 void tuiAddLogMessage(TuiState* state, String summary, String text);
+
+/* Structured log records (v5, task 32, design §5.2 / §6.4)
+ *
+ * The log crossed this ABI as two formatted strings, which cannot carry the fields the
+ * Raw Log needs (module, function, file, line) and forced D to format a line the UI then
+ * had to un-format. A record carries the fields instead: D forwards what its
+ * `std.logger.LogEntry` already holds, C++ owns the one bounded ring, and the archive line
+ * is formatted in C++ from the record (the historical format is preserved by
+ * `logArchiveLine()`).
+ *
+ * Ownership: every String here is inbound. The implementation copies all of them during
+ * the call, so D may free or reuse its buffers as soon as the call returns (C-02). No
+ * exception crosses the boundary (C-03), and no std::string sits in the struct.
+ *
+ * Thread: frame thread only, like every other mutating entry point (§3.8).
+ */
+
+/* TuiLogLevel — the severity of one record.
+ * It mirrors D's LogLevel as the five steps the UI can tell apart: `trace` and `debug` are
+ * developer detail (the Raw Log shows them, Activity does not), `info`/`warn`/`error` are
+ * the user-facing three. D folds `critical` and `fatal` into `error`, and an unknown value
+ * into `info`, so the UI never receives a severity it has no rendering for.
+ */
+typedef enum TuiLogLevel {
+    TuiLogLevel_Trace = 0,
+    TuiLogLevel_Debug = 1,
+    TuiLogLevel_Info = 2,
+    TuiLogLevel_Warn = 3,
+    TuiLogLevel_Error = 4
+} TuiLogLevel;
+
+/* TuiLogAction — what a record's action row can offer.
+ * An id, never a label: the UI owns the word ("Retry", "Details"), so the same record
+ * renders in the user's language and a translation cannot desynchronise a callback. An
+ * unknown id off the wire renders as `None` rather than as a guessed action.
+ */
+typedef enum TuiLogAction {
+    TuiLogAction_None = 0,
+    TuiLogAction_Retry = 1,
+    TuiLogAction_Details = 2
+} TuiLogAction;
+
+/* TuiLogRecord — one structured log record.
+ *
+ * `message` is unformatted, user-facing and one line; `detail` is optional multi-line
+ * context for the Raw Log. `module`/`function`/`file`/`line` are the developer fields: they
+ * never reach the Activity tab (`model::projectForActivity()` has no field for them).
+ *
+ * `timestampMs` is **Unix-epoch milliseconds in UTC** - the unit both consumers assume, since
+ * the archive formats it with `gmtime(ms / 1000)` and the Activity clock with
+ * `localtime(ms / 1000)`. A sender must not pass a raw `SysTime.stdTime`/10_000 (that counts
+ * from 1 A.D.). `timestampMs == 0` means "the sender had no clock" and the UI stamps the
+ * arrival time.
+ *
+ * An out-of-range `level`/`action` is folded once, at the boundary (unknown level -> info,
+ * unknown action -> none), before either the ring or the Activity projection sees it.
+ */
+typedef struct TuiLogRecord {
+    int32_t level;        /* TuiLogLevel */
+    int32_t action;       /* TuiLogAction; the UI renders the label */
+    int64_t timestampMs;  /* Unix-epoch ms (UTC); 0 = UI stamps the arrival */
+    int32_t line;         /* LogEntry.line, 0 = unknown */
+    int32_t reserved;     /* zero; keeps the struct layout stable */
+    String message;       /* unformatted, user-facing, one line */
+    String detail;        /* optional multi-line context for the Raw Log */
+    String module;        /* LogEntry.moduleName */
+    String function;      /* LogEntry.funcName */
+    String file;          /* LogEntry.file */
+    String actionPayload; /* turn/tool id for the action, optional */
+} TuiLogRecord;
+
+/* Append one structured record.
+ *
+ * The single bounded store is the C++ ring (5000 records / 2 MB, FIFO); a record that does
+ * not fit evicts the oldest and increments the dropped counter the Raw Log renders, so
+ * nothing is ever lost silently (NFR-17). `record` may not be NULL; the struct itself is
+ * copied field by field, and every String in it is copied during this call.
+ *
+ * Null-safe: no-op if state or record is NULL.
+ */
+void tuiAddLogRecord(TuiState* state, const TuiLogRecord* record);
+
+/* Append a record from two strings (the compatibility wrapper).
+ *
+ * Maps `summary` -> message, `text` -> detail, `level` -> level and leaves every metadata
+ * field empty. It exists for the call sites that genuinely have no metadata; a site that
+ * does should call tuiAddLogRecord and send the fields.
+ *
+ * Null-safe: no-op if state is NULL.
+ */
+void tuiAddLogMessageEx(TuiState* state, TuiLogLevel level, String summary, String text);
 
 /* Append a chat message to the scrollable output display area.
  *
@@ -430,9 +616,11 @@ void tuiStreamChatMessageClear(TuiState* state);
  * If agent is not yet registered, it is auto-registered as the latest
  * discovered agent. If MaxPipelineAgents is exceeded, the agent with
  * the oldest lastUpdate time is silently dropped.
- * Updates content, reasoning, role, and finishReason for the agent
- * identified by agentId. All String parameters are inbound — their data
- * is copied internally.
+ * Updates content, reasoning, role, finishReason, status and the v5
+ * `currentTool`/`contextUsed`/`contextMax` fields for the agent identified by
+ * agentId. All String members are inbound — their data is copied internally.
+ * The lane row mirrors the numbers and never parses `status` (see
+ * PipelineChatMessage); the sentence is an ABI field nothing draws.
  * Null-safe: no-op if state is NULL or agentId is empty.
  */
 void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage msg);
@@ -452,6 +640,62 @@ void tuiPipelineAgentDone(TuiState* state, String agentId);
  * Null-safe: no-op if state is NULL.
  */
 void tuiPipelineClear(TuiState* state);
+
+/* TuiRuntimeStatus — the run's status as numbers (v5, task 39 / D-STATUS).
+ *
+ * The contract is numbers, not a sentence: the UI formats them once per update and never
+ * parses them back (design §6.3). The structured path and the status-sentence fallback agree
+ * chip for chip on the numbers both can express; where they cannot, the structured path is the
+ * stricter one and says so - `tokensPerSecond == 0` and `contextMax == 0` are the *absence*
+ * values (the row draws `—`, not `0 tok/s` or `42k/0`), while the sentence renders whatever it
+ * was given. `phase` is the ordinal of the UI's phase vocabulary
+ * (`idle|thinking|tooling|writing|waiting|error|offline` = 0..6); an ordinal this build does not
+ * know renders as idle, never as a neighbouring phase.
+ *
+ * `detail` is the current step (a tool name, a model step), one line. `compactAt` is the
+ * threshold D's `needCompression()` compares `contextUsed` with. `elapsedMs` is the run's clock -
+ * monotonic from the run's start, never process uptime. It is a sampled value: the UI shows it as
+ * the settled duration and runs the frame's own clock while a run is in flight, so the row and the
+ * top bar cannot disagree between two status updates.
+ *
+ * The struct carries no model name: a model changes when the user changes it, not per status
+ * tick, so that one chip keeps coming from the status sentence.
+ *
+ * Sender contract (D-STATUS): the tick stream stays at or below 20 Hz, with two documented
+ * exceptions - one update when a turn starts doing work (so the row does not keep the previous
+ * turn's phase through a slow first token) and one flush at a request boundary when the window
+ * swallowed the newest values. Always send the final one when the turn ends. "Run" means the
+ * user's turn, not one LLM request: a tool-calling turn is many requests, and an `idle` published
+ * at a request boundary would be a lie for the rest of it - the flush carries the phase the last
+ * tick had. A sender that has not been converted keeps working - the sentence stays the fallback.
+ */
+typedef struct TuiRuntimeStatus {
+    int32_t phase; /* 0 idle,1 thinking,2 tooling,3 writing,4 waiting,5 error,6 offline */
+    String detail; /* current tool / model, one line; copied during the call */
+    int64_t contextUsed, contextMax, compactAt;
+    double tokensPerSecond;
+    int64_t elapsedMs;
+    int32_t pendingQuestions;
+    int32_t reserved; /* zero; keeps 8-byte alignment explicit */
+} TuiRuntimeStatus;
+
+/* Set the run's structured status, or hand the chips back to the status sentence.
+ *
+ * Passing NULL clears it: the sentence splitter owns the chips again, which is also what a
+ * session switch does, so a status can never keep describing a session the user left (§5.4).
+ *
+ * `phase == 6` (offline) is the one fact the sentence cannot express - it also drives the
+ * thread's offline card and the composer's disabled state, so it is the single trigger for
+ * "the model is unreachable".
+ *
+ * A state that will never draw the numbers must not claim a structured status, and a clear is
+ * always honoured - so a status set before a session switch is still dropped rather than kept
+ * describing a session the user left.
+ *
+ * Every String in the struct is copied during the call. Frame-thread only, like every
+ * mutating entry point. Null-safe: no-op if state or status is NULL.
+ */
+void tuiSetRuntimeStatus(TuiState* state, const TuiRuntimeStatus* status);
 
 /* Set the text displayed in the status line at the bottom of the terminal.
  *
@@ -592,6 +836,62 @@ SessionAction tuiGetSessionAction(TuiState* state);
  * Returns 1 if the last rendered frame consumed input, 0 otherwise.
  * */
 int tuiHasMoreEvents();
+
+/* Run cancellation (MVP, task 3).
+
+ * The composer's Stop button (and, from task 11, Esc while a run is active)
+ * asks the UI loop to stop the running agent. The MVP adds no agent cancel
+ * API: the flag is consumed once per frame by the D UI loop, which calls the
+ * same stopAgent() the typed "/stop" command uses (D-CANCEL), so partial
+ * output is kept by the existing stop path rather than by a second one.
+ *
+ * Frame-thread only (no mutex): the flag is written and read on the thread
+ * that drives the frame loop. Debug builds assert it.
+ *
+ * Null-safe: no-op if state is NULL.
+ */
+void tuiRequestCancel(TuiState* state);
+
+/* Take one pending cancel request.
+
+ * Consume-on-read: returns 1 once per request and then 0 again. A second
+ * request while one is still pending is a no-op, so a double click can never
+ * queue two stops.
+ *
+ * Null-safe: returns 0 if state is NULL.
+ */
+int tuiTakeCancel(TuiState* state);
+
+/* Raw Log access (v5, task 33). */
+
+/* Open or close the Raw Log surface.
+ *
+ * `open` is 1 to open and 0 to close. Opening is what `--debug-ui` does before the first frame,
+ * so the overlay is up on the frame the window appears; the state is never persisted, so every
+ * start is closed (D-RAWLOG) and a restart cannot reopen it.
+ *
+ * This is deliberately the *only* bridge the access paths need: `/rawlog`, the palette's
+ * Developer row and `Ctrl+Shift+L` are all inside the UI (they write the same flag), and the
+ * logger policy (raise on open, restore on close) is driven by polling `tuiIsRawLogOpen()` once
+ * per frame. The call does not touch the log ring and does not enable the archive: the surface
+ * is a view (R-08).
+ *
+ * Frame-thread only, like every mutating entry point.
+ *
+ * Null-safe: no-op if state is NULL.
+ */
+void tuiSetRawLogOpen(TuiState* state, int open);
+
+/* Is the Raw Log surface up?
+ *
+ * D polls this once per frame to raise the in-process logger to the developer level while the
+ * surface is open and to restore the previous level on close **and** on quit (D-RAWLOG). It
+ * reflects the flag the UI's own access paths write, so a `/rawlog` in the composer is visible
+ * to the very next poll.
+ *
+ * Null-safe: returns 0 if state is NULL.
+ */
+int tuiIsRawLogOpen(const TuiState* state);
 
 #ifdef __cplusplus
 }

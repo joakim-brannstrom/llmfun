@@ -1,0 +1,28 @@
+name: palette-filtered
+screen: 80x24
+state: section=0 rows=8 selected=0 query='co'
+text:
+
+
+
+
+
+
+
+
+         Search                                                   ALL 8
+          co
+         Copy last answer  Copy the newest answer to the cli... ACTIONS
+         Focus composer  Move the keyboard to the query field   ACTIONS
+         Focus mode  Hide the side panels and give the threa... ACTIONS
+         Toggle inspector  Show or hide the agents and activ... ACTIONS
+         Alpha refactor  active - 3 messages                   SESSIONS
+         Esc close   Enter run   Tab group   ^N/^P move
+
+
+
+
+
+
+
+

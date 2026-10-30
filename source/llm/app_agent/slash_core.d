@@ -37,13 +37,9 @@ private AgentStatus compactHandler(ref AgentApp app, string arg) {
     return AgentStatus.active;
 }
 
-/// `/help`: print the registry-generated help. The splash gate is preserved
-/// (`LLMFUN_NO_SPLASH` env or a CLI prompt suppresses the output).
+/// `/help`: print the registry's command list into the thread.
 private AgentStatus helpHandler(ref AgentApp app, string arg) {
-    auto helpText = app.printHelp(app.conf_);
-    if (helpText !is null) {
-        app.sendChatMessage(helpText, TuiChatMessageType_User);
-    }
+    app.sendChatMessage(app.printHelp(), TuiChatMessageType_Assistant);
     return AgentStatus.active;
 }
 

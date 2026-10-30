@@ -1,0 +1,47 @@
+name: topbar-narrow
+screen: 60x20
+bar: 0,0 60x1
+state: rawLogOpen
+parts: mark=1 wordmark=6 title=10 hint=0 pill=17 badge=5 gear=12 truncated=1
+text:
+   llmfun   a session…  ◐ running 00:12   RAW    Settings
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fills:
+0: 1-1=111, 10-10=102, 23-39=23, 41-45=23, 47-58=23
+1: 
+2: 
+3: 
+4: 
+5: 
+6: 
+7: 
+8: 
+9: 
+10: 
+11: 
+12: 
+13: 
+14: 
+15: 
+16: 
+17: 
+18: 
+19: 

@@ -1,0 +1,47 @@
+name: parity-shell
+screen: 60x20
+renderer: workbench (the only renderer since task 41)
+glyphs: unicode
+depth: truecolor
+text:
+   llmfun   Alpha s… Ctrl+K commands  ✓ Ready    Settings
+  Search
+
+ SESSIONS
+ ▌● Alpha session
+  ▸ Beta session
+  ▸ Gamma session
+
+
+
+
+
+
+
+   + New session
+
+   Ask anything...  / commands                        none
+  0                                               Send
+
+  ✓ Ready      Ctrl+K commands  ctx 0/0   -   none   Ready
+fills:
+0: 1-1=111, 10-10=102, 37-45=23, 47-58=23
+1: 0-0=17, 1-24=16, 25-59=17
+2: 0-59=17
+3: 0-59=17
+4: 0-59=17
+5: 0-59=17
+6: 0-59=17
+7: 0-59=17
+8: 0-59=17
+9: 0-59=17
+10: 0-59=17
+11: 0-59=17
+12: 0-59=17
+13: 0-59=17
+14: 0-0=17, 1-17=23, 18-59=17
+15: 0-59=59
+16: 0-0=59, 1-58=23, 59-59=59
+17: 0-0=59, 1-45=23, 46-57=111, 58-58=23, 59-59=59
+18: 0-59=59
+19: 0-0=146, 31-39=23, 41-43=23, 45-50=23, 52-58=23

@@ -1,0 +1,37 @@
+name: help-filtered
+screen: 100x30
+page: x=10 y=3 w=80 h=24
+query: 'composer'
+rows: built=29 matches=7 drawn=17 first=0 viewport=17 column=11
+sections: 4 groups: 3 entries: 4 lines: 18
+text:
+   llmfun   help                                             Ctrl+K commands  ✓ Ready    Settings
+  Search                                                                 [5] Agents [6] Activity
+                                                                          all  info  warn  error
+ SESSIONS
+ ▌● help                                                                                   yet
+    hello   Help                                                    7 matches    Close
+             composer
+            Keys
+              composer
+              Up         Recall the previous query
+              Down       Recall the next query
+              Ctrl+Up    Recall the previous query
+              Ctrl+Down  Recall the next query
+            Commands
+              Typed into the composer, or run from the palette's command list. /help
+              still prints the agent's full command list into the thread.
+            Regions
+              composer
+              The query field and its one action: Send while idle, Stop while a run is
+              in flight. Enter inserts a newline, because the terminal delivers
+              Shift+Enter and Ctrl+Enter as the same byte, so the control is what
+              submits. Up and Down on the draft's first and last line recall the
+              history. Esc stops a run, then clears the draft, then releases the
+              keyboard, and in focus mode it leaves the mode first. A paste of more than
+   + New s  Esc close   / search   PgUp/PgDn scroll
+
+   Ask any                                                                                    none
+  0                                                                                       Send
+
+  ✓ Ready                                              Ctrl+K commands  ctx 0/0   -   none   Ready

@@ -224,7 +224,7 @@ void renderOptionsWindow(TuiState& state) {
         // nothing): IsItemEdited gates
         // both the quantize and the write-back, so a read-only open never
         // normalizes a hand-edited FontScaleMain with extra decimals. A
-        // per-frame write-back is unnecessary (the apply in renderMainWindow
+        // per-frame write-back is unnecessary (the apply in `applyGuiFontScale()`
         // is idempotent). The "%d%%" label can transiently show an unquantized
         // value mid-drag (ImGui owns the slider value until release while the
         // font snaps in 5% steps) - intended, not a bug to "fix".

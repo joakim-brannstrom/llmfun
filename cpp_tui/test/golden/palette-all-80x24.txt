@@ -1,0 +1,28 @@
+name: palette-all
+screen: 80x24
+state: section=0 rows=24 selected=0 query=''
+text:
+
+
+
+
+
+
+
+
+         Search                                                  ALL 24
+
+         New session  Start a fresh session (rail +)            ACTIONS
+         Focus composer  Move the keyboard to the query field   ACTIONS
+         Toggle rail  Show or hide the session list (Ctrl+B)    ACTIONS
+         Toggle inspector  Show or hide the agents and activ... ACTIONS
+         Agents tab  Show the inspector's Agents tab (Ctrl+5)   ACTIONS
+         Esc close   Enter run   Tab group   ^N/^P move
+
+
+
+
+
+
+
+

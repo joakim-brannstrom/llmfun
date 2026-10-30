@@ -1,0 +1,22 @@
+name: help-floor
+screen: 40x15
+page: x=4 y=1 w=32 h=12
+query: ''
+rows: built=196 matches=40 drawn=5 first=0 viewport=5 column=9
+sections: 4 groups: 11 entries: 32 lines: 149
+text:
+
+
+  ll
+  As  Help                 Close     re…
+  Su   Search the page
+  Pl  Keys
+  Fi    anywhere
+  Ct    Ctrl+Q   Quit the UI (ask…
+        Ctrl+K   Open the command…
+        End      Follow the newes…
+      Esc close   / search
+   A                                ne
+  0
+
+  ✓ Ready     Ctrl+K commands  ctx 0  ✓

@@ -1,0 +1,35 @@
+name: row
+screen: 100x30
+text:
+ row measure 17x1
+
+   Plan: modern UI
+   Active session
+   Disabled row
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fills:
+3: 2-18=17

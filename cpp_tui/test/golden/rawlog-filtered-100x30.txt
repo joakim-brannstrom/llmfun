@@ -1,0 +1,36 @@
+name: rawlog-filtered
+screen: 100x30
+surface: x=0 y=0 w=100 h=30 overlay=1
+state: follow=1 paused=0 filter='read_file'
+parts: matched=1 drawn=1 dropped=0
+text:
+  Raw Log  follow                                                                              1/4
+   read_file
+  00:00:03.000 error llm.agent.pool.processTurn source/llm/agent/pool.d:412 read_file failed
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    Copy     Save     Close    f follow  p pause  / filter  y copy  Esc close

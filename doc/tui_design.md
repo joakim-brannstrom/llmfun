@@ -1,5 +1,12 @@
 # TUI System — Implementation Description
 
+> **Note (task 41).** This is the *implementation appendix* of the UI that existed before
+> the workbench. The renderer it describes (`tui_chat.cpp`, `session_panel.cpp`, the
+> generation flag) is gone; the workbench is the only UI, and its composition, layout,
+> surfaces and keys are documented in [tui_workbench.md](tui_workbench.md). Everything
+> here about the v4 message ABI, the backends, the theme, the markdown path and the grid
+> facts is still current.
+
 ## Overview
 
 The llmfun TUI is a C++17 user interface that renders either into a terminal (built on the **imtui** library, a terminal-based ImGui wrapper at `llmfun/vendor/imtui`) or into a graphical window via the GLFW + OpenGL3 backend (see "Graphical backend (GLFW + OpenGL3)" below). It provides a full-screen chat interface for interacting with an LLM: a scrollable chat output area with typed/color-coded messages, a multiline input area, and a status line. The TUI is self-contained in the `llmfun/cpp_tui/` directory.
@@ -23,6 +30,8 @@ llmfun/cpp_tui/
 ├── tui_widgets.h / tui_widgets.cpp  # Shared widgets: renderButton, separator, style guard
 ├── session_panel.h / session_panel.cpp  # Session sidebar: rows, filter, rename, delete
 ├── session_fuzzy.h  # Pure fzf-style matcher for the session filter (stdlib-only)
+├── views/palette.h / views/palette.cpp  # Ctrl+K palette overlay: table, filtering, activation
+├── views/help.h / views/help.cpp  # `?` help page: generated key table, commands, region prose, search
 ├── probe_margin.c   # PTY probe: asserts no cell lands at/beyond the max-width cap
 ├── test_*.cpp       # Headless test binaries (session filter, fuzzy, max width, v4 API, ...)
 └── test/            # Dev probes (keyboard/mouse/PTY scratch programs)
@@ -233,7 +242,7 @@ per-state `TuiState` owns it:
 | Backend | Implementation | Notes |
 |---------|----------------|-------|
 | `NcursesBackend` | `tui_backend_ncurses.cpp` | the terminal: ImTui text rasteriser + ncurses output; also installs the **popen clipboard** helpers (`xclip` / `wl-copy`) |
-| `GuiBackend` | `tui_backend_gui.cpp` | the window: GLFW + OpenGL3; 800x600, title `llmfun`; the **GLFW platform clipboard** (no subprocess) |
+| `GuiBackend` | `tui_backend_gui.cpp` | the window: GLFW + OpenGL3; 1280x820 default, 640x480 floor, title `llmfun`; the **GLFW platform clipboard** (no subprocess) |
 | `NullBackend` | `tui_backend_null.cpp` | inert (attaches nothing, `kind() == None`); the seam's placeholder for headless/tests — `tuiInit` never attaches it |
 
 The GUI backend asks for a GL 3.0 context with GLSL `#version 130` and
@@ -297,6 +306,13 @@ runtime-gated with `tuiIsTextGrid()` (which reports
   while the pixel framebuffer would otherwise keep stale pixels after a
   resize; buttons and regions size from imgui metrics (`GetFrameHeight`,
   `GetTextLineHeight`, `ItemSpacing`) instead of one-cell constants.
+- **GUI only:** the chrome metrics (window/item/frame padding, window/frame/
+  child rounding, scrollbar size) come from `tui_chrome.h` and are applied by
+  `applyGuiChromeMetrics()` from `GuiBackend::init()`, before the DPI scale so
+  `ScaleAllSizes` covers them. They are *not* in `applyTheme()`: one style unit
+  is one terminal cell in the text grid, so pixel spacing there would multiply
+  every gap by ~8, and several harnesses call `applyTheme()` before their
+  backend (and therefore before `ImTui_ImplText_Init()` sets the cell metrics).
 
 ### Fonts & DPI
 
@@ -349,7 +365,17 @@ the style metrics once (`style.ScaleAllSizes(scale)`) and sets the font scale
 per-monitor query requires GLFW 3.3+; older GLFW compiles the call out inside
 the vendored backend and reports 1.0, so the defaults stay unscaled
 (Wayland/macOS report 1.0 as well). The window size is not changed — the
-layout scales inside the existing 800x600 window.
+layout scales inside the existing 1280x820 window (a persisted `imgui2.conf`
+size wins; one below 640x480 opens at the floor).
+
+**The resize floor is observed.** `glfwSetWindowSizeLimits()` only writes
+`WM_NORMAL_HINTS`: it has no getter and it never resizes the window it is applied
+to, so the backend clamps the *startup* size to the floor too, and
+`Backend::guiWindowGeometry()` reads the hints back (`XGetWMNormalHints`, resolved
+at run time so no target gains an X11 link dependency). It reports the request
+(`limitsRequested`), the observation (`limitsApplied`) and whether this platform
+can observe at all (`limitsObserved`); `test_gui_window` asserts all three, so a
+request that is never written fails instead of passing silently.
 
 ### Clipboard
 
@@ -563,6 +589,17 @@ or reused, so future actions (Fork, Export, Archive, Search) extend it without
 breaking the D mapping. `tui_api.cpp` has compile-time `static_assert`s tying
 the C enum to the internal C++ mirror (`SessionActionType` in `tui.h`).
 
+`SessionItem` above is the **generation-2** shape, and this section documents
+that generation. The v5 workbench MVP appended three fields to the same struct
+— `int64_t updatedAtMs` at offset 64, `int32_t flags` at 72, `int32_t reserved`
+at 76, total 80 bytes — so the rail can group rows by date and mark a running
+one. `tui_api.h` carries the authoritative layout and the degradation rules
+("0 = unknown time, flags 0 = no run, a zeroed item is legal"), and
+`test_tui_api_v4` pins every offset, the round-trip and the fields the ABI must
+*not* carry. `flags` bit 0 is `TuiSessionFlag_Running`, set for the active
+session only while the actor has a run in flight; unread and pinned never cross
+the ABI because they are UI-local facts, not store facts (FR-03, D-19).
+
 New functions:
 
 | Function | Semantics |
@@ -629,6 +666,12 @@ comment. The generations so far:
    per-state frame calls (`tuiBackendNewFrame/Render(state)`), None-safe
    `tuiRender`, `tuiBackendActive`, `tuiBackendNote`, destroy-tears-down;
    `TuiScreen` + `tuiShutdown` removed.
+5. workbench MVP (the `--ui=workbench|legacy` shell): `tuiSetUiGeneration`,
+   `tuiRequestCancel`/`tuiTakeCancel`, `SessionItem.updatedAtMs`/`flags`
+   (appended, task 24), `TuiLogRecord` + `tuiAddLogRecord` (task 32),
+   `TuiRuntimeStatus` + `tuiSetRuntimeStatus` (task 39), and
+   `tuiSetRawLogOpen`/`tuiIsRawLogOpen` (task 33). One generation for the whole
+   MVP; a later symbol lands inside v5 without re-bumping.
 
 ---
 
@@ -906,7 +949,8 @@ on refocus — both bypassed by the id change. (The same pattern powers
 buffer after the rows child closes, so the rename-Esc restore counts as a
 real query for the next frame's filter-persistence check.
 
-**Smoke harness** (`test_session_filter_smoke`): a committed CMake
+**Smoke harness** (`test_session_filter_smoke`; **removed in task 41** with the legacy sidebar -
+`test_rail`/`test_rail_gui` cover the rail now): a committed CMake
 executable driving the real `TuiState` through the imtui text backend
 (same frame pipeline as `main.cpp`, no terminal; 80x24; a 13-session seed
 with distinct filterable titles). Scenarios: type/narrow/rank, no-match
@@ -958,20 +1002,35 @@ frames, verifies the session action queue is empty (`tuiIsSessionActionReady`
 unchanged. `--frames` requires a non-negative integer; usage errors exit 2.
 `--gui --frames N` runs the window backend for N frames and needs a display
 (run it under `xvfb-run` where available).
-The committed `test_session_filter_smoke` harness (see
+The committed `test_session_filter_smoke` harness (removed in task 41; see
 [Filter Input](#filter-input) above) covers the session filter panel
 flows headlessly the same way.
 
 ### Keyboard Shortcuts
 
+The bindings live in one focus-aware table, `cpp_tui/model/keymap.{h,cpp}` (D-KEYMAP); this table is
+the reader's summary of it. `plan/key_gate.md` holds the delivery evidence per chord and per backend.
+
 | Shortcut | Action | Condition |
 |----------|--------|-----------|
-| `Ctrl+C` | Exit TUI (return `false`) | Anywhere |
-| `Ctrl+L` | Clear output area | Only when no widget has focus |
-| `End` | Scroll to bottom, re-enable auto-scroll | Anywhere |
-| `Escape` | Clear input buffer | Input widget active |
+| `Ctrl+Q` | Quit the UI. While a run is active the first press asks: the active tab's status row shows "run active - press Ctrl+Q again to quit" (the composer's row on Chat, the reserved bottom row on Log) and the second press quits | Anywhere (delivered in the terminal since the backend clears `IXON`; `plan/key_gate.md` §4a) |
+| `Ctrl+C` | Not a binding: the terminal's `SIGINT` (ISIG stays on), and `InputText`'s copy chord in the GUI | Terminal / text field |
+| `Ctrl+K` | Open / close the palette overlay | Anywhere (delivered in both backends); closes it while the palette owns the keyboard |
+| `?` | Open the help page (one searchable page: the key table, the commands, one paragraph per region) | Anywhere, **except** while a text field owns the keyboard: `Shift+/` is the `?` being typed there. The terminal delivers no key event for it (plan/key_gate.md §3b), so the grid opens the page from the typed character (`views/shell.cpp`); `Esc` closes it, `/` moves into its search field |
+| `F11` / `Ctrl+Shift+M` | Focus mode: hide the rail, the inspector and the top bar and draw the transcript in a centred column (90 cells / 720 px at 100 %); the composer and the now bar stay | Anywhere, **including** while a text field owns the keyboard (a function key types nothing, so the plain-key rule does not apply). The terminal delivers neither chord (`plan/key_gate.md` §3b/§10b), so the grid's way in is the palette's `Focus mode` row and the way out is `Esc`; `F11` is the pixel profile's key. The bar's other job - naming the session - survives: the OS window title still mirrors it (`tuiBackendSetWindowTitle`), so the mode hides the row, not the identity. While the mode is on, the side regions' controls are unavailable - their toggles and the inspector's tab controls are disabled, chords and palette rows alike (`model::regionControlsApply`) - because the mode must leave the preferences it hides alone: leaving it restores exactly what the user had |
+| `Ctrl+L` | Not bound yet: it needs the thread's own "no widget focused" predicate (tasks 25/44). The terminal also delivers `Ctrl+Shift+L` as `Ctrl+L`, so task 33 decides that pair | - |
+| `End` | Scroll to bottom, re-enable auto-scroll (`ScrollEnd`) | Anywhere, **except** while a text field owns the keyboard: there `End` stays the caret command (the keymap's plain-key rule) |
+| `Escape` | The D-ESC chain, one step per press: close the topmost overlay -> leave focus mode -> cancel the running agent (its partial output and the composer draft are kept) -> clear the input -> release the keyboard | Overlay / composer. The three leading steps are performed by the frame-level dispatcher (close the overlay, leave focus mode, cancel the run), so the cancel works with the composer blurred and on the Log tab; a view-local consumer (rail rename/filter, popup/menu) marks the press consumed so the dispatcher and the composer stand down |
+| `Ctrl+N` / `Ctrl+P` | Palette: next / previous row (the text grid's proven pair) | Palette open |
+| `Up` / `Down` | Palette: next / previous row (pixel profile only) | Palette open |
+| `Enter` | Palette: run the selected row | Palette open |
+| `Tab` / `Shift+Tab` | Palette: cycle the section filter | Palette open |
  | `Ctrl+Up` | Navigate backward in input history (does not work) | Input widget active |
  | `Ctrl+Down` | Navigate forward in input history (does not work) | Input widget active |
+
+A key with no modifier never fires while a text field owns the keyboard, and while an overlay owns
+the keyboard only the chords it lists itself (`Ctrl+K`, `Ctrl+Q`) fire behind it. Both rules are
+properties of the table, pinned by `cpp_tui/test_keymap.cpp`.
 
 Note: History navigation uses `Ctrl+Up`/`Ctrl+Down` instead of plain `Up`/`Down` to avoid conflicting with `InputTextMultiline`'s internal cursor movement.
 
@@ -991,6 +1050,87 @@ Note: History navigation uses `Ctrl+Up`/`Ctrl+Down` instead of plain `Up`/`Down`
 
 - A child window with all decorations disabled (`NoCollapse`, `NoResize`, `NoMove`, `NoTitleBar`, `NoScrollbar`, `NoScrollWithMouse`).
 - Falls back to a default status string (`"Context: 0/0 tokens | Model: none | Ready"`) if `statusText` is empty.
+
+### Palette overlay (`Ctrl+K`, `views/palette.*`)
+
+The palette is the discoverability layer: one static action table plus the live session list,
+fuzzy-matched and drawn as an **overlay**. It is not tiled - it is its own window, positioned
+absolutely from the display size, drawn after the shell, and nothing under it moves
+(`test_palette` asserts that every cell outside its rect is byte-identical while it is open, and
+that the whole grid is identical again after it closes).
+
+- **Rows** (`paletteActions`): `New session`, `Focus composer`, `Copy last answer`, `Stop run`,
+  `Quit` (the `ACTIONS` section), one row per session (`SESSIONS`, title + preview), and - only
+  with a non-empty query - the free-text row `Send "<query>"` (`ASK`) pinned last. Later tasks
+  append to the same table; the ids are stable (`actions.*`, `ask.freeText`) and never display
+  text.
+- **Filtering**: `session_fuzzy.h`, the matcher the rail's filter already uses. A session row is
+  matched on title + preview (`fuzzyScoreFields`, the rail's own call); an action row on its label
+  only - matching prose descriptions makes every short query hit half the table. Matched words are
+  over-drawn in the rail's `matchColor`.
+- **Ranking runs once per change**, never per frame: `PaletteState::visible` is rebuilt when the
+  palette opens or the query/group changes. A keystroke is ranked at the top of the next frame
+  (the box geometry must agree with the list it shows), which the app hides by rendering again
+  immediately after input. The row *flags* (`Stop run` enabled, `Copy last answer` available, the
+  free-text row's readiness) are refreshed **per frame** instead - they move without the table
+  changing (a run starts or ends, an answer arrives), and a snapshot-only table would keep lying
+  until the next query change.
+- **Scale**: the list draws the visible window **plus one row of overscan** (the 6th row is
+  submitted and clipped; `ContentSize.y` is the test's bound), 5 result rows in the text grid and
+  12 in the pixel profile.
+- **Geometry**: text grid 80 % wide and content-sized up to 60 % of the display, centred, 1-cell
+  frame drawn as four filled edges (a 1 px stroke straddles the boundary and eats two cells); pixel
+  profile 640 px centred (max 70 % of a narrow window). The surface is `ImGuiCol_ChildBg` - one
+  token step above the canvas, which is what separates the panel from the thread in a terminal.
+- **Keys**: `Ctrl+K` toggles (in `tui.cpp`, after the shell, so the overlay sits on top), `Enter`
+  activates, `Tab`/`Shift+Tab` cycle the section filter (empty sections are skipped), `Esc` closes,
+  and `Ctrl+N`/`Ctrl+P` walk the rows - the measured pair of `plan/key_gate.md` §4c, because the
+  text backend delivers neither `Up` nor `Down` as a key (§4b). `Up`/`Down` are bound as well and
+  are the pixel profile's path.
+- **The overlay owns the keyboard while it is open** (`TuiState::overlayOwnsKeyboard()`): the
+  shell's frame-global handlers - the rail's `Esc` (filter clear, rename cancel) and the
+  `End`-follow - stand down, so one press does one thing (D-ESC). Handlers that are already gated
+  on their widget's focus (the composer's `Esc`, `Ctrl+Up/Down`) need no check.
+- **The selection fill is drawn on the list row, not the screen slot** (`row == selected`, never
+  `row - firstVisible`): the two agree only while the list is unscrolled, and the wrong choice
+  hides the highlight when the selection sits at the bottom of the window. `test_palette` S2
+  asserts the fill's cell background follows the selection in both states.
+- **Highlight spans are shared with the rail** (`fuzzyHighlightRuns` in `session_fuzzy.h`):
+  character-snapped, word-expanded and merged, one implementation for both lists.
+- **Closing** hands the keyboard back to the composer through `userQuery.isSubmitted` (the same
+  one-shot focus request the Chat menu uses, consumed before the composer's submit branch), and a
+  click into another window closes the overlay instead of leaving a panel that no longer owns the
+  keyboard. That check runs *before* the window is Begun, so the closing frame paints nothing (a
+  check after `Begin` would flash a panel with no content for one frame).
+- **Quit** sets `TuiState::quitRequested`; `tuiRender` answers "user terminated" from the next
+  frame on, which is the same exit handshake a GUI window close uses. Task 11's keymap reuses the
+  slot.
+
+### Help page (`?`, `views/help.*`)
+
+One searchable page that explains the interface (design FR-27, task 42), drawn as an overlay above
+every other surface (`ui::OverlayLayer::Help` is the top of the stack, so `Esc` closes it first).
+Four sections, in the design's order:
+
+- **Keys** - *generated*, never written by hand: one entry per binding of
+  `model::defaultKeymap()`, spelled with `model::chordLabel()` and described with the registry's own
+  one-line summary (`ActionInfo::summary`), grouped by scope. The registry repeats a chord once per
+  region it has to survive in (a modal surface is a keyboard trap), so the page folds the repeats
+  and groups the rest. `./test_help` compares the page's rows with the generated
+  `doc/ui_keys.md`, so the page cannot advertise a chord the build does not bind;
+- **Commands** - the palette's command table (`views::commandTable()`, one source for both), plus
+  the sentence that says `/help` still prints D's full list into the thread;
+- **Regions** - one paragraph per region: top bar, rail, thread, inspector, composer, now bar. The
+  rail's paragraph states what the code does (the character keys, one-press delete) - there is no
+  confirmation step to describe;
+- **Raw Log** - the opt-in developer stream: the paths to it, its keys, and the ring's bound.
+
+Keys: `?` opens the page (a chord in the pixel profile, the typed character in the grid - see
+`plan/key_gate.md` §10a), `Esc` closes it (the chain's first step), `/` moves the keyboard into the
+search field, `PgUp`/`PgDn` page and the arrows step one row. The search is a case-blind substring
+over the key *and* its sentence, and prose is wrapped to the page's width, so the filter can find a
+region by name. The page holds no state that outlives it: the query and the scroll reset on open,
+and no preference is written.
 
 ---
 
@@ -1169,3 +1309,11 @@ hidden-label header rows (an experiment targeting those was reverted).
   ad-hoc visual probe used during the investigation (a grid dump of painted
   cells with background colours plus the frame's nav state) is not committed
   to the repo.
+
+---
+
+**Note (task 41).** The renderer this document describes is gone: the workbench is the only UI
+since task 41, and the composition, layout, surfaces and keys are documented in
+[tui_workbench.md](tui_workbench.md). Everything here about the v4 message ABI, the backends,
+the theme, the markdown path and the grid facts is still current and stays as the
+implementation appendix.

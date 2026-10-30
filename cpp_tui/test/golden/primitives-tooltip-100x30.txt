@@ -1,0 +1,37 @@
+name: tooltip
+screen: 100x30
+text:
+ tooltip measure 22x3
+
+
+    compaction at 115k
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fills:
+2: 2-23=59
+3: 2-2=59, 3-22=23, 23-23=59
+4: 2-23=59

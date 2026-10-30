@@ -1,0 +1,37 @@
+name: settings-filtered
+screen: 100x30
+sheet: x=20 y=7 w=60 h=15
+section: ALL search: 'log'
+rows: built=4 drawn=4 selected=1
+marks: strip=111 selected=111 row=0
+text:
+   llmfun   settings                                         Ctrl+K commands  ✓ Ready    Settings
+  Search                                                                 [5] Agents [6] Activity
+                                                                          all  info  warn  error
+ SESSIONS                   llmfun                                        Search
+ ▌● settings                Ask, plan, or code - the agent can read you… Nothing to report yet
+    hello                   Summarize this workarea
+                            Plan a feature
+
+                     Settings                                 ALL  2    Close
+                      log
+                      ALL    APPEARANCE    BEHAVIOUR    ADVANCED
+                       BEHAVIOUR
+                     ▌ Raw log level                                       off
+                       ADVANCED
+                       Log level                                           off
+
+
+
+
+                     what the Raw Log shows when it is opened (off = only what…
+                     Esc close  Tab section  ^N/^P move  Enter change  / search
+
+
+
+   + New session
+
+   Ask anything...  / commands                                                                none
+  0                                                                                       Send
+
+  ✓ Ready                                              Ctrl+K commands  ctx 0/0   -   none   Ready

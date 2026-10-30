@@ -87,6 +87,9 @@ struct AgentApp {
         // latches a rebuild requested while a run was in flight, applied at
         // the next safe point after the run completes.
         bool agentMdRebuildPending_;
+
+        // TODO: merge, if possible, agentRunInFlight_ and runInFlight
+        bool runInFlight;
     }
 
     private bool oneShotQuery;
@@ -189,14 +192,7 @@ struct AgentApp {
         finishDispose();
     }
 
-    // TODO: If help text ever needs externalization (config file, i18n),
-    //       the function signature should accept a content parameter.
-    package string printHelp(UserConfig.AgentChatConfig conf) {
-        import std.process : environment;
-
-        if (environment.get("LLMFUN_NO_SPLASH") || !conf.prompt.empty)
-            return null;
-
+    package string printHelp() {
         return slashCommands_.helpText();
     }
 
@@ -514,14 +510,14 @@ struct AgentApp {
 
     /** Create a new session and switch to it.
      *
-     * Exactly one save of the current session.
-     * The confirmation message appears in the new session's chat view.
+     * Exactly one save of the current session. The new session is its own
+     * confirmation: it becomes the active rail row and the thread is empty. No
+     * chat message is posted - a synthetic assistant turn here renders as an
+     * "agent - 1 step" work group and buries the real transcript.
      */
     package void doCreateSession() {
         auto newMeta = sessionStore.create();
         switchToSession(newMeta.id);
-        this.sendChatMessage("Created new session: '%s' (%s)",
-                TuiChatMessageType_Assistant, newMeta.title, shortSessionId(newMeta.id));
     }
 
     /** Rename the active session.
@@ -622,12 +618,24 @@ struct AgentApp {
      * `isActive` marks the session whose id equals `activeId`; all other
      * fields pass through unchanged, preserving the caller's sort order
      * (the store already sorts by updatedAt descending).
+     *
+     * `updatedAtMs` is `SessionMeta.updatedAt` (unix seconds) converted to
+     * milliseconds - the one conversion, no formatting (D-SESSION-TS). A
+     * timestamp of 0 stays 0, which the rail reads as "unknown" and answers
+     * with a flat list rather than a fabricated date.
+     *
+     * `activeRunning` sets the `running` flag (bit 0) for the *active* row only.
+     * That is the documented hole in the snapshot: the store has no per-session
+     * run state, and the run the actor knows about is always the active
+     * session's, so any other row is left at 0 instead of guessing.
      */
-    package static UiSessionItem[] mapSessionItems(const SessionMeta[] sessions, SessionId activeId) @safe pure nothrow {
+    package static UiSessionItem[] mapSessionItems(const SessionMeta[] sessions,
+            SessionId activeId, bool activeRunning = false) @safe pure nothrow {
         auto items = new UiSessionItem[sessions.length];
         foreach (i, ref const s; sessions) {
+            const isActive = s.id.get == activeId.get;
             items[i] = UiSessionItem(s.id, s.title, s.preview, s.messageCount,
-                    s.id.get == activeId.get);
+                    isActive, s.updatedAt * 1000, isActive && activeRunning ? 1 : 0);
         }
         return items;
     }
@@ -640,11 +648,19 @@ struct AgentApp {
      * row never reorders the list; only a new message in a session moves
      * that session to the top. Guarded by `uiMsg.isActive()` so one-shot
      * mode (-p) never sends.
+     *
+     * The `running` flag is read from `runInFlight`, not from a parameter: the
+     * actor owns that state for exactly as long as `runAgent` runs, and a
+     * parameter would let any of the eight call sites report "no run" in the
+     * middle of one (a rename served from a slash command during a run would
+     * silently stop the rail's spinner). The store has no per-session run state,
+     * so every row except the active one keeps flag 0 - task 24's documented
+     * hole, which the multi-session run model (task 38) closes.
      */
     package void sendSessionList() {
         if (!uiMsg.isActive())
             return;
-        auto items = mapSessionItems(sessionStore.list(), activeSession.id);
+        auto items = mapSessionItems(sessionStore.list(), activeSession.id, runInFlight);
         uiMsg.sessionList(items);
     }
 
@@ -1066,10 +1082,11 @@ class AppAgentActor {
 
         // threads, like this supervisor, may block on a full mailbox.
         // Config.detached: the TUI actor must own one FIXED thread. Its GLFW
-        // window/GL context are thread-affine.
+        // window/GL context are thread-affine. The backend mode (where to draw) is the only
+        // choice left: the workbench is the one renderer (task 41).
         tui_ = sys.spawnBounded!(Config.detached, TextUserInterfaceActor)(1000,
                 TypedAddress!TUIListener(self_.address().lock()), app.llmConf.uiInitFile,
-                app.llmConf.tui.maxWidth, resolveTuiBackendMode(app.conf_));
+                app.llmConf.tui.maxWidth, resolveTuiBackendMode(app.conf_), app.conf_.debugUi);
         app.uiMsg = new UiMessenger(new TuiChannelSink(tui_));
         monitor(self_.address(), tui_);
         app.uiMsg.initHistory(app.agent_.getUserQueries.map!(a => a.content).array.idup);
@@ -1087,9 +1104,6 @@ class AppAgentActor {
         }
 
         app.sendSessionList();
-        auto helpText = app.printHelp(app.conf_);
-        if (helpText !is null)
-            app.sendChatMessage(helpText, TuiChatMessageType_User);
         app.setStatusText(true);
     }
 
@@ -1097,6 +1111,18 @@ class AppAgentActor {
         auto query = s.strip;
         if (!query.empty) {
             app.uiMsg.busy();
+            // The snapshot that carries the running flag (task 24): `runInFlight` is the
+            // actor's own run state, so every send while `runAgent` is on the stack says
+            // "running" and no caller has to remember it. The end-of-run send below clears
+            // it for the same reason - one owner, two boundaries.
+            //
+            // Ordering: this snapshot is taken before `runAgent()` appends the user's
+            // message, so its `messageCount`/`preview` are the previous turn's. The flag is
+            // what it is for; the end-of-run snapshot carries the fresh counts. The
+            // alternative - a send inside `runAgent()` after the append - would be a second
+            // list send on the same path, which the single-send rule above guards.
+            app.runInFlight = true;
+            app.sendSessionList();
             clearStopAgent();
             app.setStatusText(false);
             final switch (app.runAgent(query)) {
@@ -1107,6 +1133,7 @@ class AppAgentActor {
                 break;
             }
             app.uiMsg.ready();
+            app.runInFlight = false;
             app.sendSessionList();
             // uiAgentReady only clears the busy flag (Thinking indicator,
             // session-panel gating); without this call the status bar keeps

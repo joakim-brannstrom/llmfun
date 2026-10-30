@@ -1,0 +1,34 @@
+name: icon
+screen: 100x30
+text:
+ icon measure 1x1
+
+  ▸●◐•○✓▲✕◇◐▾▸▌…
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fills:

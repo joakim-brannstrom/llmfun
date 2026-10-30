@@ -1,0 +1,35 @@
+name: button
+screen: 100x30
+text:
+ button measure 8x1
+
+    Send      Send      Send      Send
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fills:
+2: 2-9=23, 12-19=111, 22-29=16, 32-39=23

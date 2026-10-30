@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <termios.h>
+#include <unistd.h>
 
 namespace llmfun::tui {
 
@@ -51,6 +53,12 @@ namespace {
 class NcursesBackend final : public Backend {
 public:
     bool init(std::string& error) override {
+        // Snapshot the terminal *before* ncurses touches it: shutdown() restores
+        // this struct, and `ImTui_ImplNcurses_Init()` calls
+        // initscr()/cbreak()/noecho() (vendor/imtui/src/imtui-impl-ncurses.cpp),
+        // so a snapshot taken after it would capture ncurses' own modes.
+        hasSavedTermios = tcgetattr(STDIN_FILENO, &savedTermios) == 0;
+
         // mouseSupport=true, fps_active=60.0, fps_idle=3.0 (save CPU when idle)
         screen = ImTui_ImplNcurses_Init(true, 60.0f, 3.0f);
         if (!screen) {
@@ -59,6 +67,21 @@ public:
         }
 
         ImTui_ImplText_Init();
+
+        // Ctrl+Q is the quit chord, and the line discipline was eating it:
+        // `cbreak()` clears ICANON/ECHO but leaves IXON on, so the terminal's
+        // flow control answered the XON byte (0x11) itself and ncurses never saw
+        // a key (plan/key_gate.md §4/F3: `Ctrl+Q` -> nothing at all). Clear it on
+        // the *current* modes - the saved struct above is the shell's and still
+        // has ICANON/ECHO on, so writing it back here would undo cbreak() - and
+        // put the saved settings back on shutdown. Ctrl+C is unaffected: ISIG
+        // stays on, so it remains the terminal's SIGINT (design §6.7, C-07).
+        struct termios current{};
+        if (tcgetattr(STDIN_FILENO, &current) == 0) {
+            current.c_iflag &= ~static_cast<tcflag_t>(IXON);
+            if (tcsetattr(STDIN_FILENO, TCSANOW, &current) == 0)
+                ixonCleared = true;
+        }
 
         ImGuiIO& io = ImGui::GetIO();
         io.GetClipboardTextFn = GetClipboardText;
@@ -88,6 +111,14 @@ public:
             ImTui_ImplText_Shutdown();
             ImTui_ImplNcurses_Shutdown();
             screen = nullptr;
+            // Restore the struct captured before ncurses touched the terminal.
+            // endwin() restores the *shell* modes it saved itself; putting back
+            // exactly what we changed is the property the caller of a UI should be
+            // able to rely on, whatever ncurses decides to restore on its own.
+            if (hasSavedTermios && ixonCleared) {
+                tcsetattr(STDIN_FILENO, TCSANOW, &savedTermios);
+                ixonCleared = false;
+            }
         }
     }
 
@@ -97,6 +128,11 @@ public:
 
 private:
     ImTui::TScreen* screen = nullptr;
+    /// Terminal settings captured before `ImTui_ImplNcurses_Init()` touched the
+    /// tty; restored in shutdown() when `ixonCleared`.
+    struct termios savedTermios{};
+    bool hasSavedTermios = false;
+    bool ixonCleared = false;
 };
 
 } // namespace

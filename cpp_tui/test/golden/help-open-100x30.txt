@@ -1,0 +1,37 @@
+name: help-open
+screen: 100x30
+page: x=10 y=3 w=80 h=24
+query: ''
+rows: built=99 matches=40 drawn=17 first=0 viewport=17 column=14
+sections: 4 groups: 11 entries: 32 lines: 52
+text:
+   llmfun   help                                             Ctrl+K commands  ✓ Ready    Settings
+  Search                                                                 [5] Agents [6] Activity
+                                                                          all  info  warn  error
+ SESSIONS
+ ▌● help                                                                                   yet
+    hello   Help                                                                 Close
+             Search the page
+            Keys
+              anywhere
+              Ctrl+Q        Quit the UI (asks once while a run is active)
+              Ctrl+K        Open the command palette
+              End           Follow the newest content again
+              Ctrl+B        Show or hide the session list
+              PgUp          Show the groups older than the window
+              Ctrl+U        Show the groups older than the window
+              Ctrl+I        Show or hide the inspector panel
+              Ctrl+5        Select the inspector's Agents tab
+              Ctrl+6        Select the inspector's Activity tab
+              Ctrl+1        A reserved tab number: selects nothing and says so
+              Ctrl+2        A reserved tab number: selects nothing and says so
+              Ctrl+Shift+L  Show or hide the Raw Log (the developer stream)
+              Shift+/       Open this page
+              F11           Give the thread the whole window (Esc leaves)
+              Ctrl+Shift+M  Give the thread the whole window (Esc leaves)
+   + New s  Esc close   / search   PgUp/PgDn scroll
+
+   Ask any                                                                                    none
+  0                                                                                       Send
+
+  ✓ Ready                                              Ctrl+K commands  ctx 0/0   -   none   Ready

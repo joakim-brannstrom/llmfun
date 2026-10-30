@@ -1,0 +1,72 @@
+name: inspector-agents-lanes
+screen: 100x30
+rail: x=0 w=26 thread: x=26 w=46 inspector: x=72 w=28
+open: 1 tab: agents focused: ''
+lanes: 3 rows=3 drawn=3
+mission: 'planner ✓ -> coder ◐ -> r…'
+action: 'Stop all'
+lane: '  planner | ✓ done | 00:12'
+lane: '  coder | ◐ running'
+lane: '  reviewer | ○ queued'
+text:
+   llmfun                                            Ctrl+K commands  ◐ running 00:00    Settings
+  Search                                                                 [5] Agents [6] Activity
+                                                                         planner ✓ -> coder ◐ -> r…
+ No sessions yet            llmfun                                         planner | ✓ done | 00:12
+                            Ask, plan, or code - the agent can read you…   coder | ◐ running
+                            Summarize this workarea                        reviewer | ○ queued
+                            Plan a feature
+                            Find failing tests
+                            Ctrl+K
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   + New session                                                          Stop all
+
+   Ask anything...  / commands                                                                none
+  0  thinking                                                                             Stop
+
+  ◐ thinking | 00:00                        Esc stop | Ctrl+K commands  ctx 0/0   -   none   Ready
+fills:
+0: 1-1=111, 10-10=102, 69-85=23, 87-98=23
+1: 0-0=17, 1-24=23, 25-25=17, 72-72=17, 73-82=111, 83-99=17
+2: 0-25=17, 72-99=17
+3: 0-25=17, 72-99=17
+4: 0-25=17, 72-99=17
+5: 0-25=17, 72-99=17
+6: 0-25=17, 72-99=17
+7: 0-25=17, 72-99=17
+8: 0-25=17, 72-99=17
+9: 0-25=17, 72-99=17
+10: 0-25=17, 72-99=17
+11: 0-25=17, 72-99=17
+12: 0-25=17, 72-99=17
+13: 0-25=17, 72-99=17
+14: 0-25=17, 72-99=17
+15: 0-25=17, 72-99=17
+16: 0-25=17, 72-99=17
+17: 0-25=17, 72-99=17
+18: 0-25=17, 72-99=17
+19: 0-25=17, 72-99=17
+20: 0-25=17, 72-99=17
+21: 0-25=17, 72-99=17
+22: 0-25=17, 72-99=17
+23: 0-25=17, 72-99=17
+24: 0-0=17, 1-17=23, 18-25=17, 72-72=17, 73-82=23, 83-99=17
+25: 0-99=67
+26: 0-0=67, 1-1=23, 2-2=231, 3-98=23, 99-99=67
+27: 0-0=67, 1-98=23, 99-99=67
+28: 0-99=67
+29: 0-0=111, 71-79=23, 81-83=23, 85-90=23, 92-98=23

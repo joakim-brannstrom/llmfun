@@ -1,0 +1,21 @@
+name: rawlog-empty
+screen: 40x15
+surface: x=0 y=0 w=40 h=15 overlay=1
+state: follow=1 paused=0 filter=''
+parts: matched=0 drawn=1 dropped=0
+text:
+  Raw Log  follow                    0
+   Filter
+  No records yet
+
+
+
+
+
+
+
+
+
+
+
+    Copy     Save     Close

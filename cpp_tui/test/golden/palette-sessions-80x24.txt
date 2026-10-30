@@ -1,0 +1,28 @@
+name: palette-sessions
+screen: 80x24
+state: section=2 rows=3 selected=0 query=''
+text:
+
+
+
+
+
+
+
+
+
+         Search                                              SESSIONS 3
+
+         Alpha refactor  active - 3 messages                   SESSIONS
+         Beta deploy  deploy the beta build                    SESSIONS
+         Gamma debug  1 message                                SESSIONS
+         Esc close   Enter run   Tab group   ^N/^P move
+
+
+
+
+
+
+
+
+

@@ -363,8 +363,7 @@ class Agent : IBasicAgent {
             auto sp = StreamResponse(prevStat);
             auto stream = (const(char)[] chunk) { /*logger.trace(chunk);*/ sp.parse(chunk);
                 if (streamCallback !is null) {
-                    streamCallback.messageUpdate(sp.message,
-                            sp.toolCalls.byValue.map!(a => a.toStream).array, sp.stat);
+                    streamCallback.messageUpdate(sp.message, orderedToolCalls(sp), sp.stat);
                 }
             };
             rq.setCallbacks(stream: stream.toDelegate, interrupt: interrupt);
@@ -902,6 +901,23 @@ private:
             }
         }
     }
+}
+
+/// The stream's tool calls in protocol order (task 39a).
+///
+/// `StreamResponse.toolCalls` is an associative array keyed by the call's index in the
+/// response, and an AA's iteration order is not defined. Without this, both the `--- Tool ---`
+/// block order in the streamed text and "the newest tool" (`tools[$ - 1]`) would depend on the
+/// AA's layout: two runs of the same response could disagree, and the lane row could name the
+/// wrong tool. Sorting by key makes the last element the highest-index call, which is what the
+/// UI reports as `currentTool`.
+package StreamToolCall[] orderedToolCalls(ref StreamResponse sp) {
+    return sp.toolCalls
+        .byKeyValue
+        .array
+        .sort!((a, b) => a.key < b.key)
+        .map!(a => a.value.toStream)
+        .array;
 }
 
 struct StreamResponse {

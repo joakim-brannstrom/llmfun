@@ -1,0 +1,34 @@
+name: disclosure
+screen: 100x30
+text:
+ disclosure measure 6x1
+
+  ▸ WORK
+  ▾ WORK
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fills:

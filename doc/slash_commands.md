@@ -198,7 +198,7 @@ Slash-command plugins are trusted in-process code; the API surface, not the regi
 
 ### Golden Help Test
 
-`tests.d` embeds the pre-refactor `/help` output as a literal block and asserts `registry.helpText()` is byte-for-byte equal. **Maintenance rule: any change to a command's help line, order, name, or aliases must update the golden block in the same change.** The golden test uses a bare registry (built-ins only) so global startup-hook commands cannot pollute it.
+`slash.d`'s registry unittest pins the `/help` header (the four lines above the command rows) and the `(order asc, registration index asc)` ordering, and the per-group modules (`slash_core.d`, `slash_model.d`, ...) assert each command's help line. **Maintenance rule: any change to a command's help line, order, name, or aliases must update those assertions in the same change.** The tests use a bare registry (built-ins only) so global startup-hook commands cannot pollute them.
 
 ### External-Registration Test
 

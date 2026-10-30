@@ -59,13 +59,9 @@
 #include <cstdlib>
 #include <string>
 
-// Legal completion of the C API's forward declaration
-// `typedef struct TuiState TuiState;` (tui_api.h) — layout matches
-// tui_api.cpp exactly. Lets the test read back the core state the C API
-// wrapped, i.e. the white-box observation point for Case D's floor assert.
-struct TuiState {
-    ::llmfun::tui::TuiState* inner;
-};
+// `TuiState`: the handle's private shape, shared by the contract tests that read back what a
+// `tui*` call wrote (this one observes the width floor).
+#include "test/tui_state_handle.h"
 
 // The TUI's minimum render width in columns. MUST stay in sync with
 // MIN_TERMINAL_WIDTH in cpp_tui/tui.cpp (tuiRender). Case D asserts the C
@@ -139,7 +135,7 @@ void harnessInit() {
     std::setlocale(LC_ALL, "");
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    llmfun::tui::applyTheme();
+    llmfun::tui::applyUiTheme();
     ImGui::GetIO().IniFilename = nullptr;
     ImTui_ImplText_Init();
     ImGui::GetIO().DisplaySize = ImVec2(80.0f, 24.0f);

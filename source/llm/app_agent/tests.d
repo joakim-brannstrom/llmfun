@@ -32,7 +32,7 @@ import llm.rag.rag : RAG;
 import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
 import llm.skill;
-import llm.types : ServerStat, IStreamCallback;
+import llm.types : ServerStat, IStreamCallback, StreamMessage, StreamToolCall;
 import llm.utility;
 import llmfun_tui;
 
@@ -649,11 +649,13 @@ unittest {
     a.preview = "prev a";
     a.messageCount = 3;
     a.userMessageCount = 2;
+    a.updatedAt = 1_781_000_000; // unix seconds
     b.id = SessionId("20260618-153045-b3c4");
     b.title = "Beta";
     b.preview = "prev b";
     b.messageCount = 5;
     b.userMessageCount = 1;
+    b.updatedAt = 1_781_086_400;
 
     // Active marker follows the activeId argument; order is preserved.
     auto items = AgentApp.mapSessionItems([a, b], b.id);
@@ -668,10 +670,33 @@ unittest {
     assert(items[1].messageCount == 5);
     assert(items[1].isActive);
 
+    // v5 (task 24): updatedAt crosses as milliseconds, the one conversion, and
+    // no row is running unless the active one is.
+    assert(items[0].updatedAtMs == 1_781_000_000_000);
+    assert(items[1].updatedAtMs == 1_781_086_400_000);
+    assert(items[0].flags == 0 && items[1].flags == 0);
+
+    // A zero timestamp stays zero: the rail reads it as "unknown" and draws a
+    // flat list instead of a fabricated date.
+    SessionMeta undated;
+    undated.id = SessionId("20260618-153045-c5d6");
+    undated.title = "Undated";
+    assert(AgentApp.mapSessionItems([undated], SessionId.init)[0].updatedAtMs == 0);
+
+    // Running is a property of the *active* row only, and only when the caller
+    // says a run is in flight (the actor's busy state is the only source).
+    auto running = AgentApp.mapSessionItems([a, b], b.id, true);
+    assert(running[0].flags == 0);
+    assert(running[1].flags == 1);
+    auto idle = AgentApp.mapSessionItems([a, b], b.id, false);
+    assert(idle[0].flags == 0 && idle[1].flags == 0);
+
     // Empty input -> empty snapshot; no active session -> no active row.
     assert(AgentApp.mapSessionItems([], SessionId.init).length == 0);
     auto noActive = AgentApp.mapSessionItems([a], SessionId.init);
     assert(noActive.length == 1 && !noActive[0].isActive);
+    // ...and with no active session there is no row a run could belong to.
+    assert(AgentApp.mapSessionItems([a], SessionId.init, true)[0].flags == 0);
 }
 
 @("sidebar invalid-id rejection for each action type")
@@ -869,6 +894,59 @@ unittest {
     snap = sink.lastSessionList();
     assert(snap.length == 0, "empty store must produce an empty snapshot");
     assert(sink.countOf("sessionList") == 4, "sendSessionList must emit the empty snapshot");
+}
+
+@("the running flag is the actor's run state, so every snapshot in a run carries it (task 24)")
+unittest {
+    import std.file : write;
+    import std.format : format;
+    import std.path : buildPath;
+
+    auto tmpDir = testArea("app_agent_running_flag");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto a = SessionId("20260618-153045-a1b2");
+    auto b = SessionId("20260618-153045-b3c4");
+    write(buildPath(tmpDir, a.get ~ ".json"),
+            `{"title": "A", "createdAt": 100, "updatedAt": 100, "messages": []}`);
+    write(buildPath(tmpDir, b.get ~ ".json"),
+            `{"title": "B", "createdAt": 100, "updatedAt": 300, "messages": []}`);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.sessionStore = new SessionStore(tmpDir.Path);
+    app.activeSession.id = a;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+
+    // No run: no row may be marked running, however the snapshot was reached.
+    app.sendSessionList();
+    assert(sink.lastSessionList().all!(item => item.flags == 0),
+            "an idle actor marks no session running");
+
+    // A run in flight: the *active* row carries bit 0 on every send. The flag lives on
+    // the actor, so a rename or a switch served mid-run cannot report "no run" by
+    // forgetting a parameter - that is the whole point of the member.
+    app.runInFlight = true;
+    app.sendSessionList();
+    auto snap = sink.lastSessionList();
+    size_t activeIndex = size_t.max;
+    foreach (i, ref const item; snap) {
+        if (item.id == a)
+            activeIndex = i;
+    }
+    assert(activeIndex != size_t.max && snap[activeIndex].flags == 1,
+            "the active session is marked running while the actor has a run in flight");
+    foreach (i, ref const item; snap) {
+        if (i != activeIndex)
+            assert(item.flags == 0, "...and no other row claims the run");
+    }
+
+    // End of the run: the next snapshot clears it.
+    app.runInFlight = false;
+    app.sendSessionList();
+    assert(sink.lastSessionList().all!(item => item.flags == 0),
+            "the end-of-run snapshot clears the running flag");
 }
 
 @(
@@ -2634,4 +2712,76 @@ unittest {
     assert(systemPromptOf(app.agent_.chat.getMessages()) == app.systemPrompt_,
             "the recomputed prompt is installed in the chat history");
     app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+// A new session is its own confirmation: it becomes the active rail row and the
+// thread is empty. A synthetic assistant turn here renders as an "agent - 1 step"
+// work group and buries the real transcript (GUI report), so the create path must
+// post no chat message at all.
+@("creating a session posts no chat message")
+unittest {
+    import std.path : buildPath;
+    import llm.agent : Agent;
+    import llm.session : SessionStore;
+    import my.filter : ReFilter;
+
+    auto tmpDir = testArea("app_agent_create_session_silent");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    // activateSession() drives the agent's chat, exactly as the actor does.
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+
+    app.doCreateSession();
+
+    assert(sink.chatMessages.length == 0, "a new session must not post a chat turn");
+    assert(store.list().length == 1, "the session was created");
+    assert(app.activeSession.id.length > 0, "the new session is active");
+}
+
+@("the pipeline updater sends the context numbers and the newest tool as fields")
+unittest {
+    auto sink = new TuiRecordingSink();
+    auto ui = new UiMessenger(sink);
+    auto updater = new PipelineStreamMessageUpdater(ui, 8192, "model-x");
+    updater.setId("coder");
+
+    // No tool call yet: no tool name, and the numbers are the stat's (startContext + tokenCount).
+    updater.messageUpdate(StreamMessage(content: "hello"), null,
+            ServerStat(startContext: 1200, tokenCount: 34));
+    assert(sink.laneUpdates.length == 1, "one tick, one recorded lane update");
+    auto first = sink.laneUpdates[0];
+    assert(first.agentId == "coder", "the agent id travels");
+    assert(first.content.canFind("hello"), "the stream content still crosses");
+    assert(first.currentTool.length == 0, "no tool call yet: the field is empty");
+    assert(first.contextUsed == 1234, "contextUsed is stat.context: " ~ first
+            .contextUsed.to!string);
+    assert(first.contextMax == 8192, "contextMax is the model's context size");
+    assert(first.status.canFind("1234/8192 tokens"),
+            "the legacy sentence still goes out (the legacy panel paints it): " ~ first.status);
+
+    // Two calls in one response: the array arrives in protocol order, so the last element is the
+    // newest call - the tool name the row shows.
+    StreamToolCall[] tools = [
+        StreamToolCall(toolName: "grep_files", arguments: "{}"),
+        StreamToolCall(toolName: "write_file", arguments: "{\"path\":\"/tmp/x\"}")
+    ];
+    updater.messageUpdate(StreamMessage(content: "done", role: "assistant"),
+            tools, ServerStat(startContext: 10, tokenCount: 5));
+    assert(sink.countOf("pipelineStreamChatMessage") == 2, "one message per tick");
+    auto last = sink.laneUpdates[$ - 1];
+    assert(last.currentTool == "write_file", "the newest call (highest index) is the field");
+    assert(last.contextUsed == 15, "the numbers move with the stat");
+    assert(last.role == "assistant", "the role crosses");
+    assert(last.content.canFind("--- Tool ---"),
+            "the marker blocks are still written into the content (the legacy panel reads them)");
+    assert(last.content.canFind("grep_files")
+            && last.content.canFind("write_file"), "both tool blocks are in the text");
 }

@@ -1,0 +1,47 @@
+name: nowbar-compact
+screen: 50x20
+nowbar: 0,19 50x1
+phase: writing compact: 1
+parts: rule=1 mark=1 state=7 tail=8 hints=8 ctx=9 speed=0 model=0 stateChip=1 badge=5 truncated=1
+text:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ◐ writing | 00:12    Esc stop  ctx 42k  ◐  RAW
+fills:
+0: 
+1: 
+2: 
+3: 
+4: 
+5: 
+6: 
+7: 
+8: 
+9: 
+10: 
+11: 
+12: 
+13: 
+14: 
+15: 
+16: 
+17: 
+18: 
+19: 0-0=111, 32-40=23, 44-48=23

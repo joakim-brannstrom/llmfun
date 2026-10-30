@@ -163,7 +163,7 @@ struct SlashCommandRegistry {
 
     /** Render the `/help` text: header + bare-query line + every command's
      * help lines, sorted stably by `(order asc, registration index asc)`.
-     * The golden test in `tests.d` locks the exact byte-for-byte output.
+     * The golden test in this module locks the header and the ordering.
      *
      * Sorting uses an index array: `SlashCommand` holds a delegate, so
      * `const(SlashCommand)[] .dup` is not copyable (const delegate cannot
@@ -171,8 +171,8 @@ struct SlashCommandRegistry {
      */
     string helpText() const {
         string[] lines;
-        lines ~= "llmfun agent mode - type a query and press Tab to start.";
-        lines ~= " Use /commands for special actions:";
+        lines ~= "llmfun agent mode - type a query and press Send.";
+        lines ~= " Slash commands:";
         lines ~= "";
         lines ~= "   (bare query)       Send a message to the agent";
 
@@ -348,9 +348,8 @@ unittest {
 
     // Help text: header + bare-query line + commands sorted by order asc
     auto help = reg.helpText();
-    assert(help.startsWith("llmfun agent mode - type a query and press Tab to start.\n"
-            ~ " Use /commands for special actions:\n" ~ "\n"
-            ~ "   (bare query)       Send a message to the agent\n"));
+    assert(help.startsWith("llmfun agent mode - type a query and press Send.\n"
+            ~ " Slash commands:\n" ~ "\n" ~ "   (bare query)       Send a message to the agent\n"));
     assert(help.indexOf("   /ping") < help.indexOf("   /model"));
     assert(help.indexOf("   /model") < help.indexOf("   /plan"));
 

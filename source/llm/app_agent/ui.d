@@ -34,8 +34,8 @@ interface TuiSink {
     void streamStatusText(string status);
     void streamChatMessage(string msg, string thinking);
     void streamChatDone();
-    void pipelineStreamChatMessage(string agentId, string content,
-            string thinking, string role, string status);
+    void pipelineStreamChatMessage(string agentId, string content, string thinking,
+            string role, string status, string currentTool, long contextUsed, long contextMax);
     void pipelineStreamDone(string agentId);
     void pipelineClear();
     void sessionList(const(UiSessionItem)[] items);
@@ -105,9 +105,10 @@ class TuiChannelSink : TuiSink {
         ch.uiStreamChatDone();
     }
 
-    override void pipelineStreamChatMessage(string agentId, string content,
-            string thinking, string role, string status) {
-        ch.uiMsg(UiPipelineStreamChatMessage(agentId, content, thinking, role, status));
+    override void pipelineStreamChatMessage(string agentId, string content, string thinking,
+            string role, string status, string currentTool, long contextUsed, long contextMax) {
+        ch.uiMsg(UiPipelineStreamChatMessage(agentId, content, thinking, role,
+                status, currentTool, contextUsed, contextMax));
     }
 
     override void pipelineStreamDone(string agentId) {
@@ -175,8 +176,8 @@ class TuiBlockedSink : TuiSink {
     override void streamChatDone() {
     }
 
-    override void pipelineStreamChatMessage(string agentId, string content,
-            string thinking, string role, string status) {
+    override void pipelineStreamChatMessage(string agentId, string content, string thinking,
+            string role, string status, string currentTool, long contextUsed, long contextMax) {
     }
 
     override void pipelineStreamDone(string agentId) {
@@ -213,6 +214,21 @@ class TuiRecordingSink : TuiSink {
     Stamp[] stamps;
     /// sessionList snapshots in call order; items are copied at record time so later store mutations cannot leak into the recording.
     UiSessionItem[][] sessionLists;
+
+    /// pipelineStreamChatMessage calls in call order. The arguments are copied field by field
+    /// rather than summarised into `Call.payload`: a test asserts the numbers and the tool name
+    /// the lane row shows, so it must not depend on a formatted string.
+    struct LaneUpdate {
+        string agentId;
+        string content;
+        string role;
+        string status;
+        string currentTool;
+        long contextUsed;
+        long contextMax;
+    }
+
+    LaneUpdate[] laneUpdates;
 
     int countOf(string kind) const {
         int n;
@@ -291,8 +307,10 @@ class TuiRecordingSink : TuiSink {
         record("streamChatDone");
     }
 
-    override void pipelineStreamChatMessage(string agentId, string content,
-            string thinking, string role, string status) {
+    override void pipelineStreamChatMessage(string agentId, string content, string thinking,
+            string role, string status, string currentTool, long contextUsed, long contextMax) {
+        laneUpdates ~= LaneUpdate(agentId, content, role, status, currentTool,
+                contextUsed, contextMax);
         record("pipelineStreamChatMessage", agentId ~ ": " ~ content);
     }
 
@@ -396,9 +414,10 @@ class UiMessenger {
         sink.streamChatDone();
     }
 
-    void pipelineStreamChatMessage(string agentId, string content,
-            string thinking, string role, string status) {
-        sink.pipelineStreamChatMessage(agentId, content, thinking, role, status);
+    void pipelineStreamChatMessage(string agentId, string content, string thinking,
+            string role, string status, string currentTool, long contextUsed, long contextMax) {
+        sink.pipelineStreamChatMessage(agentId, content, thinking, role,
+                status, currentTool, contextUsed, contextMax);
     }
 
     void pipelineStreamDone(string agentId) {
@@ -487,11 +506,18 @@ class PipelineStreamMessageUpdater : IStreamCallback {
             }
         }
 
+        // Still sent: the legacy generation paints this sentence in its pipeline panel (D-10's
+        // transition aid). The workbench generation reads the fields below and never parses it.
         string status = i"Context $(stat.context)/$(contextSize) tokens | $(
                 format!"%.1f"(stat.predictedPerSecond)) tok/s".text;
 
-        uiMsg.pipelineStreamChatMessage(agentId: agentId, content: content,
-                thinking: msg.reasoning, role: msg.role, status: status);
+        // The lane row's tool name is the newest call of this response. `tools` arrives in
+        // protocol-index order (`llm.agent.orderedToolCalls`), so the last element is the newest
+        // whatever order the response's AA yielded.
+        uiMsg.pipelineStreamChatMessage(agentId: agentId, content: content, thinking: msg.reasoning,
+                role: msg.role, status: status, currentTool: tools.empty
+                ? null : tools[$ - 1].toolName, contextUsed: stat.context,
+                contextMax: contextSize);
     }
 
     override void streamMessageDone() {

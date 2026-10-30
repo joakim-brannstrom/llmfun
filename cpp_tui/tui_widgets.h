@@ -1,5 +1,4 @@
-/// Shared TUI render widgets: button, separator, and a style-color guard.
-/// Reusable ImGui render helpers shared by the sidebar and chat cluster.
+/// Shared TUI render helper: a separator row.
 #pragma once
 
 #include <array>
@@ -11,8 +10,6 @@
 #include "imgui/imgui_internal.h"
 
 namespace llmfun::tui {
-
-bool renderButton(const std::string& label, int width, bool active, ImVec4 colorActive);
 
 // Per-TU private copy (internal linkage): each including translation unit gets
 // its own `static` definition, so this adds no new exported symbol.
@@ -34,26 +31,5 @@ static void renderSeparator(const std::string& prefix, std::string_view ch, int 
         ImGui::Text("%s%s", prefix.c_str(), buf.data());
     }
 }
-
-struct StyleColorGuard {
-private:
-    int count;
-
-public:
-    explicit StyleColorGuard(int n) : count(n) {}
-    ~StyleColorGuard() { pop(); }
-
-    void pop() {
-        for (int i = 0; i < count; ++i) {
-            ImGui::PopStyleColor();
-        }
-        count = 0;
-    }
-
-    StyleColorGuard(const StyleColorGuard&) = delete;
-    StyleColorGuard& operator=(const StyleColorGuard&) = delete;
-    StyleColorGuard(StyleColorGuard&&) = delete;
-    StyleColorGuard& operator=(StyleColorGuard&&) = delete;
-};
 
 } // namespace llmfun::tui

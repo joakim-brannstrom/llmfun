@@ -2153,3 +2153,64 @@ unittest {
     activateTool(st, pool, "task5d_ghost");
     assert(st.activated == ["task5d_camel"], "unknown name no-ops: " ~ st.activated.to!string);
 }
+
+// The stream's tool calls are an AA keyed by the call's protocol index, and an AA's iteration
+// order is not defined. Flattening by sorted key makes both the `--- Tool ---` block order in
+// the streamed text and "the newest tool" (`tools[$ - 1]`, which the lane row reports as
+// `currentTool`) deterministic - the prerequisite for carrying the tool name as a field.
+@("the stream's tool calls are flattened in protocol order")
+unittest {
+    auto sp = StreamResponse(ServerStat.init);
+    // Inserted in a scrambled order: the AA's iteration order is not the insertion order.
+    sp.toolCalls[2] = StreamResponse.ToolCall(id: "c", name: "write_file", arguments: "{}");
+    sp.toolCalls[0] = StreamResponse.ToolCall(id: "a", name: "read_file", arguments: "{}");
+    sp.toolCalls[1] = StreamResponse.ToolCall(id: "b", name: "grep_files", arguments: "{}");
+
+    auto flat = orderedToolCalls(sp);
+    assert(flat.length == 3, "every call is carried");
+    assert(flat[0].toolName == "read_file" && flat[1].toolName == "grep_files"
+            && flat[2].toolName == "write_file", "the calls are in protocol-index order");
+    assert(flat[$ - 1].toolName == "write_file",
+            "the last element is the highest index - what the UI reports as the newest tool");
+
+    auto noCalls = StreamResponse(ServerStat.init);
+    assert(orderedToolCalls(noCalls).length == 0, "a response with no call is an empty list");
+}
+
+// The lane row reports D's own `stat.context`, and llama.cpp's last chunk rewrites that number:
+// `timings.cache_n` becomes the context start and the streaming estimate is zeroed. The status
+// sentence has always carried the same value, so the field path is consistent with it - and it is
+// why a finished lane can show a *smaller* count than the ticks before it (or none at all, on a
+// first response with no cache hit). Pinned so tasks 40/41 ratify the row's meaning knowingly.
+@("the timings chunk makes stat.context the server's cache_n")
+unittest {
+    // Both chunk shapes are the ones quoted in `parse`'s own comments: a content delta, and the
+    // final chunk that ends a llama.cpp response and carries `timings`.
+    const string contentChunk = `data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"hello world"}}]}`;
+    const string warmEndChunk = `data: {"choices":[{"finish_reason":"stop","index":0,"delta":{}}],`
+        ~ `"timings":{"cache_n":6151,"prompt_n":4,"predicted_n":244,`
+        ~ `"predicted_per_second":30.04}}`;
+    const string coldEndChunk = `data: {"choices":[{"finish_reason":"stop","index":0,"delta":{}}],`
+        ~ `"timings":{"cache_n":0,"predicted_n":2}}`;
+
+    auto sp = StreamResponse(ServerStat.init);
+    // A content chunk grows the streaming estimate: `stat.context` is startContext + tokenCount.
+    sp.parse(contentChunk);
+    assert(sp.stat.startContext == 0, "no timings yet: the estimate starts from the caller's stat");
+    assert(sp.stat.tokenCount > 0, "the generated text is counted");
+    const long streamingEstimate = sp.stat.context;
+
+    sp.parse(warmEndChunk);
+    assert(sp.stat.startContext == 6151, "cache_n becomes the context start");
+    assert(sp.stat.tokenCount == 0, "and the streaming estimate is zeroed");
+    assert(sp.stat.context == 6151, "so the context the UI is told is cache_n");
+    assert(sp.stat.context != streamingEstimate, "which is no longer the streaming estimate");
+
+    // A response with no cache hit at all (the first one of a session) ends with `cache_n == 0`,
+    // so the lane's count becomes 0 and the row draws no number - the case the old
+    // `parsed > 0` latch used to paper over.
+    auto cold = StreamResponse(ServerStat.init);
+    cold.parse(contentChunk);
+    cold.parse(coldEndChunk);
+    assert(cold.stat.context == 0, "a cold response ends with no context count to draw");
+}

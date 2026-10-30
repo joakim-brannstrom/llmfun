@@ -1,0 +1,48 @@
+name: activity-mixed
+screen: 40x20
+panel: x=4 y=0 w=36 h=19
+filter: 0 search: ''
+parts: body=34x16 rows=5 matched=5 drawn=5
+labels: all='all' info='info' warn='warn' error='error' empty='Nothing to report yet'
+text:
+     [5] Agents [6] Activity
+      all  info  warn  error
+      Search
+     00:00:00  ◇ info  session opened
+     00:00:01  ◇ info  model answered
+     00:00:02  ▲ warn  ui.conf readonly
+     00:00:03  ✕ error  read_file fail…
+     00:00:04  ◇ info  run finished
+
+
+
+
+
+
+
+
+
+
+
+
+fills:
+0: 4-15=17, 16-27=111, 28-39=17
+1: 4-4=17, 5-9=111, 10-28=16, 29-39=17
+2: 4-4=17, 5-38=23, 39-39=17
+3: 4-39=17
+4: 4-39=17
+5: 4-39=17
+6: 4-39=17
+7: 4-39=17
+8: 4-39=17
+9: 4-39=17
+10: 4-39=17
+11: 4-39=17
+12: 4-39=17
+13: 4-39=17
+14: 4-39=17
+15: 4-39=17
+16: 4-39=17
+17: 4-39=17
+18: 4-39=17
+19: 

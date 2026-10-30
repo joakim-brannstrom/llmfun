@@ -1,0 +1,22 @@
+name: settings-floor
+screen: 40x15
+sheet: x=8 y=4 w=24 h=7
+section: ALL search: ''
+rows: built=11 drawn=2 selected=1
+marks: strip=111 selected=111 row=0
+text:
+
+
+  llmfun
+  Ask, plan, or code - the agent can re…
+  Summar
+  Plan a Settings       Close
+  Find f  Search
+  Ctrl+K  ALL    APPEARANCE
+           APPEARANCE         ▌
+         ▌ Text scale   1 cell
+
+   Ask...                         none
+  0                           Send
+
+  ✓ Ready     Ctrl+K commands  ctx 0  ✓

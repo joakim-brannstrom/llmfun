@@ -1,0 +1,67 @@
+name: nowbar-offline
+screen: 100x30
+nowbar: 0,29 100x1
+phase: offline compact: 0
+parts: rule=1 mark=1 state=7 tail=0 hints=15 ctx=14 speed=12 model=13 stateChip=9 badge=0 truncated=0
+text:
+   llmfun                                                   Ctrl+K commands  ✕ failed    Settings
+  Search                                                                 [5] Agents [6] Activity
+                                                                          all  info  warn  error
+ No sessions yet            llmfun                                        Search
+                            Ask, plan, or code - the agent can read you… Nothing to report yet
+                            Summarize this workarea
+                            Plan a feature
+                            Find failing tests
+                            Ctrl+K
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   + New session
+
+   Ask anything...  / commands                                                         qwen3-coder
+  ctx █░░░░░ 42k                                                                          Send
+
+  ▲ offline                     Ctrl+K commands  ctx 42k/128k   38.1 tok/s   qwen3-coder   Offline
+fills:
+0: 1-1=111, 10-10=102, 76-85=23, 87-98=23
+1: 0-0=17, 1-24=23, 25-25=17, 72-83=17, 84-95=111, 96-99=17
+2: 0-25=17, 72-72=17, 73-77=111, 78-96=16, 97-99=17
+3: 0-25=17, 72-72=17, 73-98=23, 99-99=17
+4: 0-25=17, 72-99=17
+5: 0-25=17, 72-99=17
+6: 0-25=17, 72-99=17
+7: 0-25=17, 72-99=17
+8: 0-25=17, 72-99=17
+9: 0-25=17, 72-99=17
+10: 0-25=17, 72-99=17
+11: 0-25=17, 72-99=17
+12: 0-25=17, 72-99=17
+13: 0-25=17, 72-99=17
+14: 0-25=17, 72-99=17
+15: 0-25=17, 72-99=17
+16: 0-25=17, 72-99=17
+17: 0-25=17, 72-99=17
+18: 0-25=17, 72-99=17
+19: 0-25=17, 72-99=17
+20: 0-25=17, 72-99=17
+21: 0-25=17, 72-99=17
+22: 0-25=17, 72-99=17
+23: 0-25=17, 72-99=17
+24: 0-0=17, 1-17=23, 18-25=17, 72-99=17
+25: 0-99=67
+26: 0-0=67, 1-1=23, 2-2=231, 3-98=23, 99-99=67
+27: 0-0=67, 1-85=23, 86-97=111, 98-98=23, 99-99=67
+28: 0-99=67
+29: 0-0=210, 48-61=23, 63-74=23, 76-88=23, 90-98=23

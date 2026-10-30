@@ -1,0 +1,79 @@
+name: parity-shell
+screen: 120x36
+renderer: workbench (the only renderer since task 41)
+glyphs: unicode
+depth: truecolor
+text:
+   llmfun   Alpha session                                                        Ctrl+K commands  ✓ Ready    Settings
+  Search                   YOU                                                               [5] Agents [6] Activity
+                           build the project                                                  all  info  warn  error
+ SESSIONS                  ANSWER                                                             Search
+ ▌● Alpha session          read, then build                                                  Nothing to report yet
+    first user preview
+  ▸ Beta session
+    second user preview
+  ▸ Gamma session
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   + New session
+
+   Ask anything...  / commands                                                                                    none
+  0                                                                                                           Send
+
+  ✓ Ready                                                                  Ctrl+K commands  ctx 0/0   -   none   Ready
+fills:
+0: 1-1=111, 10-10=102, 97-105=23, 107-118=23
+1: 0-0=17, 1-24=16, 25-25=17, 26-26=183, 27-103=17, 104-115=111, 116-119=17
+2: 0-92=17, 93-97=111, 98-116=16, 117-119=17
+3: 0-25=17, 26-26=111, 27-92=17, 93-118=16, 119-119=17
+4: 0-119=17
+5: 0-119=17
+6: 0-119=17
+7: 0-119=17
+8: 0-119=17
+9: 0-119=17
+10: 0-119=17
+11: 0-119=17
+12: 0-119=17
+13: 0-119=17
+14: 0-119=17
+15: 0-119=17
+16: 0-119=17
+17: 0-119=17
+18: 0-119=17
+19: 0-119=17
+20: 0-119=17
+21: 0-119=17
+22: 0-119=17
+23: 0-119=17
+24: 0-119=17
+25: 0-119=17
+26: 0-119=17
+27: 0-119=17
+28: 0-119=17
+29: 0-119=17
+30: 0-0=17, 1-17=23, 18-119=17
+31: 0-119=59
+32: 0-0=59, 1-118=23, 119-119=59
+33: 0-0=59, 1-105=23, 106-117=111, 118-118=23, 119-119=59
+34: 0-119=59
+35: 0-0=146, 91-99=23, 101-103=23, 105-110=23, 112-118=23

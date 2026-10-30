@@ -1,0 +1,36 @@
+name: pill
+screen: 100x30
+text:
+ pill measure 17x1
+
+   ◐ running 00:12
+
+   ● Ready
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fills:
+2: 2-18=23
+4: 2-10=23

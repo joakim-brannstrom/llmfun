@@ -33,11 +33,38 @@
 //           contributes no text row); table/mermaid art is NOT asserted
 //           (accepted degradation).
 //
+// The wrapper's own contract (ui/markdown.* — the only file that may name
+// RichMd::) is pinned by five more cases, each a tripwire for one rule:
+//
+//   Case D: `RenderRaw` only. A real file is named as a transclusion embed
+//           (alone on its line, the only form `Render` resolves): the grid must
+//           show the SOURCE and never the file's content, because `Render`
+//           reads the file and model output must not be able to make the
+//           renderer open one.
+//   Case E: the block scope. Two frames that open the same block id enter the
+//           same ImGui id, two blocks enter different ones — the identity
+//           rich_md's per-frame `ID(fragmentCounter++)` relies on, and the one
+//           a frame counter in `beginBlock()` would break. Also the guards
+//           around a call that has nothing to draw into: no frame, and no ImGui
+//           context at all (a rich context can outlive it), are dropped and
+//           counted, never dereferenced; and destroying a state that never had
+//           a context leaves the owner's installed.
+//   Case F: the token bridge. `RichMd::Style` carries the inks, the gaps, the
+//           sub/sup scale and the grid's bar corrections; rich_md's untouched
+//           defaults are alpha -1 ("automatic"), so an unbridged field fails
+//           the case rather than silently keeping rich_md's own colours.
+//   Case G: the selection policy and the published counters. On the app path
+//           the last render ran with the grid's answer, inside a block scope,
+//           with a context, and the theme was not re-applied per frame.
+//   Case H: `store/`, `views/` and `model/` name no RichMd symbol at all, so
+//           the wrapper cannot be bypassed by a second seam.
+//
 // stderr is captured across ALL phases (init, every frame, teardown) and
 // must contain NONE of: "call InitializeMarkdown first" (context missing),
 // "font atlas is not built" (warm-up order broken), "rich_md: UploadRgba"
 // (only surfaces with rich_md's DEFAULT OnImage; this profile
-// sets OnImage = nullptr).
+// sets OnImage = nullptr), or "PushSelectableText" (rich_md's own report of an
+// unbalanced selection push — the wrapper must keep the pair together).
 //
 // Tripwire: this test FAILS if the warm-up recipe is reverted (init after
 // the backend / no bakes -> the rich fonts resolve to the 16px bake and
@@ -67,13 +94,24 @@
 
 #include "tui.h" // llmfun::tui: TuiState, tuiRender, markdown text-mode lifecycle
 
+#include "ui/markdown.h" // the rich_md seam this file also pins (cases D-G)
+#include "ui/tokens.h"   // the inks and gaps the markdown theme is bridged from
+
+#include "imgui_rich_md/rich_md.h" // RichMd::Style, read back by the theme case
+
 #include <array>
 #include <clocale>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
+#ifdef TEST_RICH_MARKDOWN_SRC_DIR
+#include <fstream>
+#endif
+
 #include <stdio.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 // ---------------------------------------------------------------------------
@@ -217,10 +255,15 @@ std::string cleanRow(int y) {
             changed = true;
         }
         if (b > a && (unsigned char)s[b - 1] >= 0x80) {
+            // Walk back over the trailing glyph's continuation bytes; the byte the walk
+            // stops on is the glyph's *lead* byte, so it goes with them. Dropping it is what
+            // makes the strip terminate on a row that ends with a multi-byte glyph (`| ... |`
+            // of a drawn table): keeping it leaves a lone lead byte, which measures as "still
+            // non-ASCII" on every pass - an endless loop, not a wrong string.
             size_t st = b;
             while (st > a && ((unsigned char)s[st - 1] & 0xC0) == 0x80)
                 --st;
-            b = st;
+            b = st > a ? st - 1 : a;
             changed = true;
         }
     }
@@ -299,7 +342,6 @@ void frame(llmfun::tui::TuiState& state) {
 // message with the case document.
 void setupCase(llmfun::tui::TuiState& state, const char* doc) {
     llmfun::tui::tuiClearOutput(state);
-    state.sessionPanel.panelOpen = false;
     ImGui::GetIO().DisplaySize = ImVec2(80.0f, 24.0f);
     llmfun::tui::ChatMessage m;
     m.summary = "Assistant";
@@ -400,7 +442,7 @@ void harnessInit(llmfun::tui::TuiState& state) {
     ImGui::GetIO().IniFilename = nullptr;
     llmfun::tui::initMarkdownTextMode(state); // BEFORE the text backend init
     ImTui_ImplText_Init();
-    llmfun::tui::applyTheme();
+    llmfun::tui::applyUiTheme();
     llmfun::tui::finishMarkdownTextMode(state);
     ImGui::GetIO().DisplaySize = ImVec2(80.0f, 24.0f);
 }
@@ -505,6 +547,12 @@ void caseB(llmfun::tui::TuiState& state) {
 void caseC(llmfun::tui::TuiState& state) {
     g_case = 'C';
     setupCase(state, kFeatures);
+    // 80x30, not the harness default 80x24: the table is drawn by the text-grid renderer
+    // (task 37's bridge), which spends three rows rich_md's native table did not - a top rule,
+    // the header separator and a bottom rule. In 24 rows the document no longer fits, the
+    // thread follows the newest content and "Before." scrolls above the fold; the case is
+    // about what the document renders, not about where a full thread starts.
+    ImGui::GetIO().DisplaySize = ImVec2(80.0f, 30.0f);
     for (int i = 0; i < 4; ++i)
         frame(state);
 
@@ -526,6 +574,341 @@ void caseC(llmfun::tui::TuiState& state) {
 
     debugDump(state, "C");
 }
+
+/// One frame that draws exactly one probe window. The block-scope and theme
+/// assertions need a frame of their own: `beginBlock()` answers its id only
+/// inside one (that is where ImGui has a window to hash against), and a probe
+/// window keeps the app's own layout out of the measurement.
+std::size_t drawBlockProbe(std::size_t blockId, const char* text, bool selectable) {
+    const llmfun::tui::ui::MarkdownTheme theme =
+        llmfun::tui::ui::markdownThemeFromTokens(/*textGrid=*/true);
+    ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+    ImTui_ImplText_NewFrame();
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    ImGui::Begin("##block_probe", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoScrollbar);
+    const std::size_t scope = llmfun::tui::ui::beginBlock(blockId);
+    llmfun::tui::ui::renderModelText(text, theme, selectable);
+    llmfun::tui::ui::endBlock();
+    ImGui::End();
+    ImGui::Render();
+    ImTui_ImplText_RenderDrawData(ImGui::GetDrawData(), &g_screen);
+    ++g_frames;
+    return scope;
+}
+
+bool sameColor(const ImVec4& a, const ImVec4& b) {
+    return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+}
+
+/// D: `RenderRaw` only. A transclusion is a *file read* in rich_md's `Render`, so
+/// the tripwire is a real file: if the wrapper ever calls `Render`, the probe's
+/// content appears on the grid and its path disappears.
+///
+/// The probe lives under the system temp directory rather than the working
+/// directory: `fail()` exits the process, so a red case must not be able to leave
+/// a file behind in `build/tui`.
+void caseTransclusion(llmfun::tui::TuiState& state) {
+    g_case = 'D';
+    const std::filesystem::path probePath =
+        std::filesystem::temp_directory_path() / "llmfun-md-probe.txt";
+    const std::string probeName = probePath.filename().string();
+    const char* kProbeBody = "SECRET_BODY_SHOULD_NEVER_BE_RENDERED";
+    {
+        FILE* f = ::fopen(probePath.c_str(), "w");
+        expect(f != nullptr, "case D: could not create the transclusion probe file");
+        ::fprintf(f, "%s\n", kProbeBody);
+        ::fclose(f);
+    }
+    // The message names the file the way rich_md's transclusion syntax does: an
+    // embed alone on its own line (that is the only form `Render` resolves).
+    const std::string doc = std::string("before\n\n![[") + probePath.string() + "]]\n\nafter";
+    setupCase(state, doc.c_str());
+    for (int i = 0; i < 3; ++i)
+        frame(state);
+
+    bool sourceShown = false;
+    for (int yy = 0; yy < g_screen.ny; ++yy) {
+        const std::string row = rowRaw(yy);
+        expect(row.find(kProbeBody) == std::string::npos,
+               "case D: the transclusion target's CONTENT was rendered - the wrapper used "
+               "Render() instead of RenderRaw() (model output must never read a file)");
+        // The file NAME, not the whole embed: the absolute path may be wrapped
+        // across two rows, the name is short enough to stay on one.
+        if (row.find(probeName) != std::string::npos)
+            sourceShown = true;
+    }
+    expect(sourceShown, "case D: the transclusion source text did not render as text");
+    std::error_code ignored;
+    std::filesystem::remove(probePath, ignored);
+    debugDump(state, "D");
+}
+
+/// E, second half: a rich context with NO ImGui context. `ImGui::GetCurrentWindowRead()`
+/// is `(*GImGui).CurrentWindow`, so a guard shaped "no context, or no window" reads the
+/// missing ImGui context and is itself the null dereference it is meant to prevent.
+/// The measurement runs in a child process: destroying the ImGui context would take the
+/// rest of the suite with it, and an exit status reports a missing guard as a failure
+/// instead of a dead suite (the old order crashes, so the crash is the evidence).
+void expectRenderWithoutImGuiContextIsDropped() {
+    const pid_t pid = ::fork();
+    expect(pid >= 0, "case E: fork() failed - cannot test the no-ImGui-context guard");
+    if (pid == 0) {
+        ImGui::DestroyContext(); // the state under test: rich context installed, no ImGui one
+        const llmfun::tui::ui::MarkdownCounters before = llmfun::tui::ui::markdownCounters();
+        llmfun::tui::ui::renderModelText("x", llmfun::tui::ui::markdownThemeFromTokens(true),
+                                         false);
+        const llmfun::tui::ui::MarkdownCounters after = llmfun::tui::ui::markdownCounters();
+        const bool dropped =
+            after.droppedRenders == before.droppedRenders + 1 && after.renders == before.renders;
+        if (!dropped)
+            ::fprintf(g_errOut,
+                      "case E child: a render with a rich context and no ImGui context was not "
+                      "dropped (droppedRenders %u -> %u, renders %u -> %u)\n",
+                      before.droppedRenders, after.droppedRenders, before.renders, after.renders);
+        ::_exit(dropped ? 0 : 1);
+    }
+    int status = 0;
+    expect(::waitpid(pid, &status, 0) == pid, "case E: waitpid() failed");
+    expect(!WIFSIGNALED(status),
+           "case E: a render with a rich context but no ImGui context crashed (signal " +
+               std::to_string(WTERMSIG(status)) +
+               ") - the frame guard reads the ImGui context instead of testing for it");
+    expect(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+           "case E: a render with a rich context but no ImGui context was not dropped");
+}
+
+/// E: the block scope. Two frames that open the same block must enter the same
+/// ImGui id, and two blocks must enter different ones - which is exactly what a
+/// per-frame counter would break, and what rich_md's `ID(fragmentCounter++)`
+/// needs from its caller.
+void caseBlockScope() {
+    g_case = 'E';
+    const std::size_t first = drawBlockProbe(7, "alpha", false);
+    const std::size_t again = drawBlockProbe(7, "alpha", false);
+    const std::size_t other = drawBlockProbe(8, "alpha", false);
+    expect(first != 0, "case E: beginBlock() answered no id inside a frame");
+    expect(first == again, "case E: the same block id entered a different ImGui scope on the "
+                           "next frame - rich_md's fragment ids would drift");
+    expect(first != other, "case E: two block ids shared one ImGui scope");
+    // Outside a frame there is no window to push an id onto: the call answers 0 and
+    // leaves the stack alone (a PushID there would dereference a null window), and
+    // the matching endBlock() is then a no-op.
+    expect(llmfun::tui::ui::beginBlock(7) == 0,
+           "case E: beginBlock() outside a frame must answer no id");
+    llmfun::tui::ui::endBlock();
+    // ... and the scope it did not open is neither counted nor drawn into: a render
+    // with no frame is dropped, and an unmatched endBlock() must not leave a phantom
+    // depth behind that would make the next render look scoped.
+    const llmfun::tui::ui::MarkdownCounters before = llmfun::tui::ui::markdownCounters();
+    llmfun::tui::ui::renderModelText("x", llmfun::tui::ui::markdownThemeFromTokens(true), false);
+    const llmfun::tui::ui::MarkdownCounters after = llmfun::tui::ui::markdownCounters();
+    expect(after.droppedRenders == before.droppedRenders + 1 && after.renders == before.renders,
+           "case E: a render outside a frame must be dropped, not drawn into a null window");
+    expect(after.unscopedRenders == before.unscopedRenders,
+           "case E: endBlock() without a scope left a phantom block depth behind");
+    // The wrapper's context slot is per process, a state is not: destroying one that
+    // never had a context (every headless state) must leave the owner's in place, or
+    // the owner silently falls back to plain text for the rest of its life.
+    expect(llmfun::tui::ui::markdownContext() != nullptr,
+           "case E: the harness state has no rich context to protect");
+    llmfun::tui::TuiState headless;
+    llmfun::tui::destroyMarkdown(headless);
+    expect(llmfun::tui::ui::markdownContext() != nullptr,
+           "case E: destroying a headless state cleared the rich context of the state that owns "
+           "one - that state would draw plain text from then on");
+    // And the guard that has no window to test against.
+    expectRenderWithoutImGuiContextIsDropped();
+}
+
+/// F: the token bridge, field by field. `RichMd::Style` is the sink that
+/// `ImGuiCol_*` mapping cannot reach, and rich_md ships values of its own there -
+/// the "automatic" alpha -1 markers *and* a hard-coded amber `==mark==` fill that
+/// is used without a resolve step. So every colour the bridge owns is compared
+/// against the token it must be, and every distance against the value the token
+/// arithmetic produces; an alpha check alone would miss the amber.
+void caseTheme() {
+    g_case = 'F';
+    using llmfun::tui::ui::ColorToken;
+    const llmfun::tui::ui::MarkdownTheme grid =
+        llmfun::tui::ui::markdownThemeFromTokens(/*textGrid=*/true);
+    const llmfun::tui::ui::MarkdownTheme pixel =
+        llmfun::tui::ui::markdownThemeFromTokens(/*textGrid=*/false);
+
+    // Theme field -> the token it must be (six, i.e. every colour in the theme).
+    struct ThemeToken {
+        const char* name;
+        ImVec4 value;
+        ColorToken token;
+    };
+    const ThemeToken kThemeTokens[] = {
+        {"link", grid.link, ColorToken::accent},
+        {"inlineCode", grid.inlineCode, ColorToken::roleTool},
+        {"quoteBar", grid.quoteBar, ColorToken::lineStrong},
+        {"admonitionNote", grid.admonitionNote, ColorToken::accent},
+        {"admonitionWarn", grid.admonitionWarn, ColorToken::stateWarn},
+        {"markFill", grid.markFill, ColorToken::selection},
+    };
+    for (const ThemeToken& row : kThemeTokens)
+        expect(sameColor(row.value, llmfun::tui::ui::color(row.token)),
+               std::string("case F: theme.") + row.name + " is not its token");
+
+    expect(grid.blockGap > 0.0f && grid.blockGap < 1.0f,
+           "case F: the grid's block gap must stay below one cell, or it eats a row the "
+           "1-row-per-line layout does not budget");
+    // rich_md draws `(7 - level) * headerGapStep`, so an h1 above the first block is
+    // the widest step and the one that would eat a row first.
+    expect(6.0f * grid.headerGap < 1.0f,
+           "case F: the grid's widest heading gap (h1 = 6 steps) must stay below one cell");
+    expect(pixel.blockGap == grid.blockGap,
+           "case F: a gap is a fraction of the drawn size, so both profiles resolve the same "
+           "em value");
+    expect(grid.subSupScale == 1.0f, "case F: sub/sup must stay one cell tall on the grid");
+    expect(pixel.subSupScale > 0.0f && pixel.subSupScale < 1.0f,
+           "case F: the pixel profile scales sub/sup down by a type step");
+
+    llmfun::tui::ui::applyMarkdownTheme(pixel);
+    const RichMd::Style& style = RichMd::GetStyle();
+    // The style field each theme colour must have reached.
+    struct StyleField {
+        const char* name;
+        ImVec4 actual;
+        ImVec4 expected;
+    };
+    const StyleField kStyleColours[] = {
+        {"linkColor", style.linkColor, pixel.link},
+        {"codeColor", style.codeColor, pixel.inlineCode},
+        {"quoteBar", style.quoteBar, pixel.quoteBar},
+        {"markBackground", style.markBackground, pixel.markFill},
+    };
+    for (const StyleField& row : kStyleColours)
+        expect(sameColor(row.actual, row.expected),
+               std::string("case F: RichMd::Style.") + row.name + " not bridged from the theme");
+    // All five admonition slots, each on its class: a future split of Note/Tip/
+    // Important must not be able to slip past a two-slot spot check.
+    for (int i = 0; i < 5; ++i) {
+        const ImVec4 want = i < 3 ? pixel.admonitionNote : pixel.admonitionWarn;
+        expect(sameColor(style.admonitionColors[i], want),
+               "case F: admonition slot " + std::to_string(i) + " carries the wrong class");
+    }
+    expect(style.blockGap == pixel.blockGap, "case F: RichMd::Style.blockGap not bridged");
+    expect(style.headerGapStep == pixel.headerGap,
+           "case F: RichMd::Style.headerGapStep not bridged");
+    expect(style.subSupScale == pixel.subSupScale, "case F: RichMd::Style.subSupScale not bridged");
+    expect(style.listItemGap == 0.0f && style.fragmentGapTop == 0.0f,
+           "case F: a list item / fragment gap must be a stated zero, not a library default");
+    // The tripwire for "ImGuiCol_* alone": rich_md's untouched colours are alpha -1
+    // ("automatic"), so an unbridged field shows up as a negative alpha even where
+    // the token happens to be close to the library's own value.
+    expect(style.linkColor.w >= 0.0f && style.codeColor.w >= 0.0f && style.quoteBar.w >= 0.0f &&
+               style.admonitionColors[0].w >= 0.0f && style.markBackground.w >= 0.0f,
+           "case F: a RichMd::Style colour still carries rich_md's 'automatic' marker");
+    expect(!sameColor(style.linkColor, llmfun::tui::ui::color(llmfun::tui::ui::ColorToken::textHi)),
+           "case F: a link must not be drawn in body ink");
+
+    // The grid's own corrections, and the profile restored for the cases after.
+    llmfun::tui::ui::applyMarkdownTheme(grid);
+    const RichMd::Style& gridStyle = RichMd::GetStyle();
+    expect(gridStyle.quoteBarThickness == 1.0f && gridStyle.admonitionBarThickness == 1.0f,
+           "case F: a grid bar must be exactly one cell (a 2-3 px bar erases the content's "
+           "first cells)");
+    expect(gridStyle.subSupScale == 1.0f, "case F: the grid's sub/sup scale was not restored");
+
+    // applyUiTheme() is the sink that follows the live profile and the colour
+    // depth, so it must re-apply the markdown style: the text profile builds its
+    // rich context *before* the backend, i.e. before the depth is known, and
+    // rich_md's style would otherwise be the only thing in the app that does not
+    // follow the theme. Leaving the pixel theme in place is the failure this
+    // checks - the pixel profile's sub/sup scale is not the grid's.
+    llmfun::tui::ui::applyMarkdownTheme(pixel);
+    llmfun::tui::applyUiTheme();
+    const llmfun::tui::ui::MarkdownTheme live =
+        llmfun::tui::ui::markdownThemeFromTokens(llmfun::tui::tuiIsTextGrid());
+    const RichMd::Style& afterTheme = RichMd::GetStyle();
+    expect(afterTheme.subSupScale == live.subSupScale &&
+               sameColor(afterTheme.linkColor, live.link) &&
+               sameColor(afterTheme.markBackground, live.markFill),
+           "case F: applyUiTheme() left the markdown style on another profile or depth");
+}
+
+/// G: the selection policy and the counters the wrapper publishes. The app path
+/// is what is measured here, not the policy alone: the last render of a real
+/// message must have run with the grid's answer, inside a block scope, with a
+/// context.
+void caseSelectionAndCounters(llmfun::tui::TuiState& state) {
+    g_case = 'G';
+    expect(!llmfun::tui::ui::markdownSelectable(/*textGrid=*/true),
+           "case G: the text grid must not select model text (Ctrl+C is quit there)");
+    expect(llmfun::tui::ui::markdownSelectable(/*textGrid=*/false),
+           "case G: the pixel profile keeps rich_md's selection");
+    const llmfun::tui::ui::MarkdownTheme gridTheme =
+        llmfun::tui::ui::markdownThemeFromTokens(/*textGrid=*/true);
+    const llmfun::tui::ui::MarkdownTheme guiTheme =
+        llmfun::tui::ui::markdownThemeFromTokens(/*textGrid=*/false);
+    expect(gridTheme.textGrid && !llmfun::tui::ui::markdownSelectable(gridTheme.textGrid),
+           "case G: the text grid's theme and its selection policy disagree");
+    expect(!guiTheme.textGrid && llmfun::tui::ui::markdownSelectable(guiTheme.textGrid),
+           "case G: the pixel profile's theme and its selection policy disagree");
+
+    setupCase(state, "one **markdown** body");
+    const llmfun::tui::ui::MarkdownCounters before = llmfun::tui::ui::markdownCounters();
+    for (int i = 0; i < 3; ++i)
+        frame(state);
+    const llmfun::tui::ui::MarkdownCounters after = llmfun::tui::ui::markdownCounters();
+
+    expect(after.renders > before.renders, "case G: the app path rendered no model text");
+    expect(after.droppedRenders == before.droppedRenders,
+           "case G: a render found no rich context (a call site skipped markdownReady())");
+    expect(after.unscopedRenders == before.unscopedRenders,
+           "case G: a model render ran outside beginBlock() - its rich_md ids are not stable");
+    expect(after.lastSelectable == false,
+           "case G: the app rendered model text as selectable on the text grid");
+    expect(after.styleApplies <= before.styleApplies + 1,
+           "case G: the token theme was re-applied per frame instead of once per theme");
+}
+
+#ifdef TEST_RICH_MARKDOWN_SRC_DIR
+/// H: `ui/markdown.*` is the only seam. `store/`, `views/` and `model/` may name
+/// no rich_md symbol at all: a second seam would bypass `RenderRaw`, the block
+/// scope and the theme, and nothing would notice until a file was read or an id
+/// drifted.
+void caseSingleSeam() {
+    g_case = 'H';
+    namespace fs = std::filesystem;
+    const fs::path root(TEST_RICH_MARKDOWN_SRC_DIR);
+    int scanned = 0;
+    for (const char* dir : {"store", "views", "model"}) {
+        for (const auto& entry : fs::directory_iterator(root / dir)) {
+            if (!entry.is_regular_file())
+                continue;
+            const std::string ext = entry.path().extension().string();
+            if (ext != ".cpp" && ext != ".h")
+                continue;
+            std::ifstream in(entry.path(), std::ios::binary);
+            expect(in.good(), std::string("case H: cannot read ") + entry.path().string());
+            std::string source((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+            ++scanned;
+            expect(source.find("RichMd") == std::string::npos,
+                   "case H: " + entry.path().string() +
+                       " names RichMd - rich_md must only be reachable through ui/markdown.*");
+        }
+    }
+    expect(scanned >= 8, "case H: the seam scan found almost no sources (bad source dir?)");
+    // And the wrapper itself must be the file that renders, or the scan above
+    // would pass vacuously with rich_md gone from the tree.
+    const fs::path wrapper = root / "ui" / "markdown.cpp";
+    std::ifstream in(wrapper, std::ios::binary);
+    expect(in.good(), "case H: cannot read ui/markdown.cpp");
+    const std::string source((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+    expect(source.find("RenderRaw") != std::string::npos,
+           "case H: ui/markdown.cpp does not render - the seam moved");
+}
+#endif
 
 } // namespace
 
@@ -573,6 +956,13 @@ int main() {
     caseA(state);
     caseB(state);
     caseC(state);
+    caseTransclusion(state);
+    caseBlockScope();
+    caseTheme();
+    caseSelectionAndCounters(state);
+#ifdef TEST_RICH_MARKDOWN_SRC_DIR
+    caseSingleSeam();
+#endif
 
     harnessShutdown(state);
     cap.stop(g_capturedErr);
@@ -585,6 +975,10 @@ int main() {
     expect(g_capturedErr.find("rich_md: UploadRgba") == std::string::npos,
            "stderr: 'rich_md: UploadRgba' — an image upload was attempted (OnImage must be "
            "nullptr in this profile)");
+    // rich_md reports an unbalanced selection push itself; the wrapper's only job
+    // is to keep the pair together, and this is the check that it does.
+    expect(g_capturedErr.find("PushSelectableText") == std::string::npos,
+           "stderr: rich_md reported a PushSelectableText() that was never popped");
 
     ::fprintf(g_errOut, "OK test_rich_markdown_text (frames=%d, captured stderr %zu bytes%s)\n",
               g_frames, g_capturedErr.size(), g_capturedErr.empty() ? "" : " — see dump above");

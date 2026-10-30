@@ -255,9 +255,9 @@ The TUI has a session sidebar: a left panel listing all sessions (id, title, pre
 The panel is a `ChatTabSessionPanel` (`cpp_tui/tui.h`), auto-opened at startup:
 
 - Open width is 30 columns (`PanelWActivated`); collapsing leaves an 8-column "Open" button strip so the output area never covers it.
-- One row per session: title truncated to the row width with an ellipsis (UTF-8 safe) plus the always-kept ` [N]` message-count suffix; the active row is highlighted; hovering shows a tooltip with the full title and preview.
-- "New" at the top queues a create action; each row carries a `|...|` menu button that opens a small popup with `Rename` and `Delete` items: rename is available on any row via the menu, and delete is single-press (the arm/confirm re-ask is gone).
-- The panel has no vertical scrolling yet; rows below the terminal height are unreachable for now.
+- One row per session: title truncated to the row width with an ellipsis (UTF-8 safe) plus the always-kept ` [N]` message-count suffix; the active row is highlighted; hovering shows a tooltip with the full title and preview. The preview has no line of its own (task 7): it is tooltip text that still feeds the filter, and it returns as a second row line with the rebuilt rail.
+- "New" at the top queues a create action. A row's menu opens on right-click, on the `...` that appears while the row is hovered, and on `m` — which acts on the row under the pointer, else the row with keyboard focus, else the active session, else the first visible one. It is a small popup with `Rename` and `Delete` items, anchored to the row it acts on (flipped above it near the bottom edge, where it would otherwise cover that row's title). Rename is available on any row, and delete is single-press (the arm/confirm re-ask is gone). `m` reads the frame's input *characters*, because the ncurses backend never turns a printable key into a key event; it does not fire while the rename box is open or a text field edits.
+- The rows live in a child with a vertical scrollbar, so every session is reachable: drag the one-cell bar in the TUI (no wheel events are forwarded), use the wheel in the GUI, or click a row and walk with the arrow keys — ImGui scrolls the focused row into view.
 
 ### Message Flow
 
@@ -293,7 +293,7 @@ The new D messages live in `source/llm/tui/package.d` (module `llm.tui`):
 
 | Direction | Message | Payload |
 |-----------|---------|---------|
-| D -> UI | `UiSessionList` | `UiSessionItem[]` (id, title, preview, messageCount, isActive); immutable for `std.concurrency` send |
+| D -> UI | `UiSessionList` | `UiSessionItem[]` (id, title, preview, messageCount, isActive, updatedAtMs, flags); immutable for `std.concurrency` send. `updatedAtMs` is `SessionMeta.updatedAt * 1000` (0 = unknown) and `flags` bit 0 is the only bit that crosses (`running`, set for the active session while the actor has a run on the stack - `AgentApp.runInFlight`, not a parameter of the send); unread and pinned stay UI-local |
 | UI -> D | `UiSessionSelect` | `SessionId id` |
 | UI -> D | `UiSessionNew` | none |
 | UI -> D | `UiSessionRename` | `SessionId id`, `string title` |
@@ -311,7 +311,9 @@ always wins the slot while agents are present; the session panel renders only
 when the pipeline is empty. The rule is keyed on **agents-present**
 (`!state.left.agents.empty()`), not on the pipeline's open/closed state, and
 panel state is preserved, so the session panel reappears exactly as it was
-when the pipeline clears. The output area offsets by `leftPanelWidth(state)`:
+when the pipeline clears. The output area offsets by `leftPanelWidth(state)` (**removed in
+task 41** with the legacy renderer: the workbench's rail column comes from `ui::computeShell()`
+through `views::shellLayoutFor()`):
 session panel open = 30 columns, collapsed = 8-column "Open" strip, pipeline
 present = the pipeline panel's width. See `doc/tui_design.md` for the panel
 internals.
@@ -324,6 +326,7 @@ While the agent is busy (`readyStatus == false`), sidebar actions are guard-and-
 
 - The rename box binds to **its row** (`renameRowId`; any row via the menu — no follow-active rebind) and the action carries that id; D renames that id regardless of the current active session, so a rename can never hit the wrong session if a switch raced in between. Menu `Rename` on row B while the box is open on row A retargets the box to B and reinitializes its buffer, discarding A's draft (logged). That branch is defensive-only with a mouse: opening another row's menu first deactivates the open input, so the focus-loss terminate fires before the popup's Rename item can run — it is kept as a safety net. Empty/whitespace-only titles are rejected in the panel and again in D; there is no length cap anywhere (matching `/rename` and `SessionStore.rename`). The panel buffer holds 256 bytes; a title that does not fit initializes the buffer empty, so a blind Enter is rejected as empty until a new title is typed — no silent truncation. The buffer is (re)initialized only on open/retarget, never per frame.
 - Delete is single-press via the menu: clicking `Delete` queues `{Delete, id}` immediately (guard-and-skipped while busy) — no armed/pending state exists in the C++ panel anymore. The slash-command `/delete` keeps its own two-step confirmation state machine (`decideDeleteCommand` and the agent-side `pendingDeleteId`, untouched), and every sidebar handler still clears the agent-side `pendingDeleteId` on entry, so a stale slash confirmation can never fire against a session that was switched away from, renamed, or deleted via the sidebar.
+- The workbench rail (task 23) says the same thing in its own view: the row menu's `Delete` and the `d` row key queue `{Delete, id}` in one press, with no confirmation anywhere. `d` acts only on the row under the pointer or the row that holds the keyboard-nav focus (`targetRow()`); there is no fallback to the active session, so a stray `d` does nothing. `Esc` has no delete step — the rail's chain is "close the rename box, then clear the search". The `/delete` slash command keeps its own two-step rule (above) because it is a typed command, not an aimed click.
 - Deleting the active session goes through the same fallback (most recently updated remaining session, else a fresh one); deleting a non-active session removes it and refreshes without switching.
 
 ### Refresh Rule
@@ -467,7 +470,8 @@ re-asserted with stale text.
   unit test for the matcher: match/no-match, case-folding, subsequence
   order, ranking, clamping, multi-byte behavior. Links only the standard
   library, which also verifies the header is TUI-independent.
-- `test_session_filter_smoke` (`cpp_tui/test_session_filter_smoke.cpp`) —
+- `test_session_filter_smoke` (`cpp_tui/test_session_filter_smoke.cpp`) — **removed in task 41**
+  (the legacy sidebar it drove retired); the rail's coverage is `test_rail` + `test_rail_gui` —
   committed panel-level headless smoke harness driving the real
   `TuiState` and frame loop through the text backend (no terminal), with a
   13-session seed: type/narrow/rank, no-match, Esc, Enter, click,
@@ -485,7 +489,7 @@ Build and run from the repo root (glibc environment):
 make -f tui.mak
 cd build/tui
 ./test_session_fuzzy
-TERM=xterm-256color COLUMNS=80 LINES=24 timeout 300 ./test_session_filter_smoke < /dev/null
+# (removed in task 41: `./test_rail` and `./test_rail_gui --out DIR` replace it)
 ```
 
 ### Follow-ups (designed for, deferred)

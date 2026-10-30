@@ -21,7 +21,7 @@
 //
 // Also checks that the C-API clear functions are no-ops on a NULL state,
 // that outputLineNextId is NOT reset (monotonic per-message id, uniqueness
-// only), TUI_API_VERSION is pinned at the current generation (4), and the
+// only), TUI_API_VERSION is pinned at the current generation (6), and the
 // auto-scroll flag is unaffected by the clear.
 //
 // Exit codes: 0 = all scenarios pass; 1 = first assertion failure.
@@ -35,14 +35,9 @@
 #include <cstdlib>
 #include <string>
 
-// Legal completion of the C API's forward declaration
-// `typedef struct TuiState TuiState;` (tui_api.h) — layout matches
-// tui_api.cpp exactly. Lets the test read back the core state the C API
-// wrapped, i.e. the white-box observation point for Scenario 6's switch-path
-// assert (same pattern as test_tui_maxwidth.cpp).
-struct TuiState {
-    ::llmfun::tui::TuiState* inner;
-};
+// `TuiState`: the handle's private shape, shared by the contract tests that read back what a
+// `tui*` call wrote (this one observes the clear path's state).
+#include "test/tui_state_handle.h"
 
 // NOTE: no `using namespace llmfun::tui;` — it would make `TuiState`
 // ambiguous against the C API's global typedef. Everything
@@ -71,38 +66,44 @@ llmfun::tui::ChatMessage makeMsg(const char* text, size_t id) {
     return llmfun::tui::ChatMessage{"summary", text, "", llmfun::tui::ChatMessageType::User, id};
 }
 
-// Scenario 1: stale open-group positions are reset by the clear.
+// Scenario 1: stale expansion state is reset by the clear.
 void scenario1_openGroupReset() {
     g_scenario = 1;
-    phase("stale outputLineOpen positions suppressed header labels after clear");
+    phase("stale outputLineOpen ids suppressed header labels after clear");
 
     llmfun::tui::TuiState state;
 
-    // Previous session: two messages, then the user collapses the header
-    // group at position 0 (what the render loop does on a closed
-    // CollapsingHeader / AssistantWork group).
+    // Previous session: two messages, then the user collapses the first one
+    // (the render loop records the message id in outputLineOpen) and the
+    // assistant-work group that starts at it (openWorkGroups).
     llmfun::tui::tuiAddOutputLine(state, makeMsg("first", state.chat.outputLineNextId++));
     llmfun::tui::tuiAddOutputLine(state, makeMsg("second", state.chat.outputLineNextId++));
-    state.chat.outputLineOpen.insert(0);
-    expect(state.chat.outputLineOpen.count(0) == 1,
-           "precondition: position 0 recorded as collapsed group");
+    const size_t collapsedId = state.chat.outputLines.front().id;
+    state.chat.outputLineOpen.insert(collapsedId);
+    state.chat.openWorkGroups.insert(collapsedId);
+    state.chat.expansionDefaultThroughId = state.chat.outputLines.back().id;
+    expect(state.chat.outputLineOpen.count(collapsedId) == 1,
+           "precondition: the message is recorded as collapsed");
 
     // Session switch: the D side calls uiMsg.clearChat() → C-API
     // tuiClearChatMessages → tuiClearOutput. The fixed behavior must reset
-    // the open-group set together with the lines.
+    // the expansion state together with the lines — including the default
+    // watermark, or a replayed message would inherit "already seeded".
     llmfun::tui::tuiClearOutput(state);
     expect(state.chat.outputLines.empty(), "output lines cleared");
-    expect(state.chat.outputLineOpen.empty(), "open-group positions reset with the lines (fix)");
+    expect(state.chat.outputLineOpen.empty(), "collapsed message ids reset with the lines (fix)");
+    expect(state.chat.openWorkGroups.empty(), "work-group ids reset with the lines");
+    expect(state.chat.expansionDefaultThroughId == 0, "default-expansion watermark reset");
 
     // New session: replayed messages must ALL render with their header
-    // labels (showHeader == outputLineOpen.count(i) == 0 per position).
+    // labels (none of their ids is in the open set, and the watermark is 0 so
+    // each one seeds its own default on the first render).
     llmfun::tui::tuiAddOutputLine(state, makeMsg("replayed-a", state.chat.outputLineNextId++));
     llmfun::tui::tuiAddOutputLine(state, makeMsg("replayed-b", state.chat.outputLineNextId++));
     llmfun::tui::tuiAddOutputLine(state, makeMsg("replayed-c", state.chat.outputLineNextId++));
-    for (size_t i = 0; i < state.chat.outputLines.size(); ++i)
-        expect(state.chat.outputLineOpen.count(i) == 0, "replayed message at position " +
-                                                            std::to_string(i) +
-                                                            " renders with its header label");
+    for (const auto& msg : state.chat.outputLines)
+        expect(state.chat.outputLineOpen.count(msg.id) == 0,
+               "replayed message " + std::to_string(msg.id) + " is not pre-collapsed");
 }
 
 // Scenario 2: the stream bubble does not survive a clear.
@@ -158,8 +159,8 @@ void scenario4_scrollAndApiVersion() {
     expect(state.autoScroll == true, "auto-scroll on stays on across a clear");
 
     // Documentation-only marker: the widened clear contract must not bump it.
-    // 4 is the current generation (the single-handle v4 reshape).
-    static_assert(TUI_API_VERSION == 4, "TUI_API_VERSION must stay at the current v4 generation");
+    // 6 is the current generation (the legacy renderer's removal, task 41).
+    static_assert(TUI_API_VERSION == 6, "TUI_API_VERSION must stay at the current v6 generation");
 }
 
 // Scenario 5: C-API null-safety preserved.
@@ -209,6 +210,41 @@ void scenario6_cApiSwitchPath() {
     tuiDestroyState(st);
 }
 
+// Scenario 7: the 1000-message cap prunes the expansion state of the message it
+// evicts (review M2 — ids are never reused, so a stale entry would leak).
+void scenario7_evictionPrunesExpansion() {
+    g_scenario = 7;
+    phase("evicted messages take their expansion state with them");
+
+    llmfun::tui::TuiState state;
+    const size_t cap = llmfun::tui::ChatTab::MaxChatMessages;
+
+    // Fill to the cap and record the oldest message as expanded (message) and as
+    // an expanded group (its id is also a group key).
+    for (size_t i = 0; i < cap; ++i)
+        llmfun::tui::tuiAddOutputLine(state, makeMsg("fill", state.chat.outputLineNextId++));
+    expect(state.chat.outputLines.size() == cap, "the thread stops at MaxChatMessages");
+    const size_t oldestId = state.chat.outputLines.front().id;
+    state.chat.outputLineOpen.insert(oldestId);
+    state.chat.openWorkGroups.insert(oldestId);
+
+    // One more message evicts the oldest one.
+    llmfun::tui::tuiAddOutputLine(state, makeMsg("newest", state.chat.outputLineNextId++));
+    expect(state.chat.outputLines.size() == cap, "the thread stays at MaxChatMessages");
+    expect(state.chat.outputLines.front().id > oldestId, "the oldest message was evicted");
+    expect(state.chat.outputLineOpen.count(oldestId) == 0,
+           "the evicted message's expansion state is pruned");
+    expect(state.chat.openWorkGroups.count(oldestId) == 0,
+           "the evicted message's work-group state is pruned");
+
+    // A surviving message keeps its state (the pruning is keyed, not a reset).
+    const size_t survivorId = state.chat.outputLines.front().id;
+    state.chat.outputLineOpen.insert(survivorId);
+    llmfun::tui::tuiAddOutputLine(state, makeMsg("newer", state.chat.outputLineNextId++));
+    expect(state.chat.outputLines.front().id > survivorId, "the next oldest message was evicted");
+    expect(state.chat.outputLines.size() == cap, "still capped");
+}
+
 } // namespace
 
 int main() {
@@ -218,6 +254,7 @@ int main() {
     scenario4_scrollAndApiVersion();
     scenario5_cApiNullSafety();
     scenario6_cApiSwitchPath();
+    scenario7_evictionPrunesExpansion();
     std::printf("OK: all clear-output scenarios passed\n");
     return 0;
 }

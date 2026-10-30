@@ -70,9 +70,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace llmfun::tui {
@@ -255,6 +257,78 @@ inline int fuzzyScoreFields(const std::string& query, const std::string& title,
     const int titlePart = (titleScore >= 0) ? titleScore : 0;
     const int previewPart = (previewScore >= 0) ? (previewScore / 2) : 0;
     return titlePart > previewPart ? titlePart : previewPart;
+}
+
+// Fills `runs` with the highlight spans of a fuzzy match (see the header comment
+// of fuzzyHighlightRuns below), reusing `scratch` for the matched byte offsets so
+// drawing a list allocates nothing per row.
+inline void fuzzyHighlightRuns(const std::string& query, const std::string& text,
+                               std::size_t portion, std::vector<std::size_t>& scratch,
+                               std::vector<std::pair<std::size_t, std::size_t>>& runs);
+
+// Byte-level building blocks of the highlight spans: a UTF-8 continuation byte
+// (never a character start) and the four word separators fuzzyIsBoundary uses.
+static bool fuzzyIsContinuation(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
+static bool fuzzyIsSeparator(char c) { return c == ' ' || c == '-' || c == '_' || c == '/'; }
+
+// Highlight spans of a fuzzy match, as [begin, end) byte offsets into `text`,
+// clipped to its first `portion` bytes (what the caller actually draws):
+//   * one span per contiguous group of matched query bytes;
+//   * snapped out to whole UTF-8 characters, so a span never splits one;
+//   * expanded to the whole word around the match, so an ASCII prefix lights an
+//     accented word whole ("caf" -> "Café");
+//   * spans that snap into the same word merged into one, so a word is over-drawn
+//     once and not twice with the same colour.
+// A span wholly beyond `portion` is dropped, one crossing it is clipped - on a
+// character boundary, because both walks stop only on separator bytes (always
+// whole ASCII characters). An empty query or a non-match leaves `runs` empty.
+inline void fuzzyHighlightRuns(const std::string& query, const std::string& text,
+                               std::size_t portion, std::vector<std::size_t>& scratch,
+                               std::vector<std::pair<std::size_t, std::size_t>>& runs) {
+    runs.clear();
+    if (!fuzzyMatchPositions(query, text, scratch)) {
+        return;
+    }
+    const std::size_t n = text.size();
+    for (std::size_t i = 0; i < scratch.size();) {
+        std::size_t s = scratch[i];
+        std::size_t e = s;
+        while (i < scratch.size() && scratch[i] == e) {
+            ++e;
+            ++i;
+        }
+        while (s > 0 && fuzzyIsContinuation(text[s])) {
+            --s;
+        }
+        while (e < n && fuzzyIsContinuation(text[e])) {
+            ++e;
+        }
+        while (s > 0 && !fuzzyIsSeparator(text[s - 1])) {
+            --s;
+        }
+        while (e < n && !fuzzyIsSeparator(text[e])) {
+            ++e;
+        }
+        if (s >= portion) {
+            continue; // matched only beyond the drawn prefix
+        }
+        if (e > portion) {
+            e = portion; // clip to the character-boundary prefix
+        }
+        if (!runs.empty() && s <= runs.back().second) {
+            runs.back().second = std::max(runs.back().second, e);
+        } else {
+            runs.emplace_back(s, e);
+        }
+    }
+}
+
+// Same, with a throw-away scratch vector (a one-off call, not a per-row draw).
+inline void fuzzyHighlightRuns(const std::string& query, const std::string& text,
+                               std::size_t portion,
+                               std::vector<std::pair<std::size_t, std::size_t>>& runs) {
+    std::vector<std::size_t> scratch;
+    fuzzyHighlightRuns(query, text, portion, scratch, runs);
 }
 
 } // namespace llmfun::tui

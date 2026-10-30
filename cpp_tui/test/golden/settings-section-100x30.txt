@@ -1,0 +1,37 @@
+name: settings-section
+screen: 100x30
+sheet: x=20 y=7 w=60 h=15
+section: BEHAVIOUR search: ''
+rows: built=3 drawn=3 selected=1
+marks: strip=111 selected=111 row=0
+text:
+   llmfun   settings                                         Ctrl+K commands  ✓ Ready    Settings
+  Search                                                                 [5] Agents [6] Activity
+                                                                          all  info  warn  error
+ SESSIONS                   llmfun                                        Search
+ ▌● settings                Ask, plan, or code - the agent can read you… Nothing to report yet
+    hello                   Summarize this workarea
+                            Plan a feature
+
+                     Settings                           BEHAVIOUR  2    Close
+                      Search
+                      ALL    APPEARANCE    BEHAVIOUR    ADVANCED
+                       BEHAVIOUR
+                     ▌ Send key                                   enterNewline
+                       Raw log level                                       off
+
+
+
+
+
+                     Enter breaks the line; the Send button sends
+                     Esc close  Tab section  ^N/^P move  Enter change  / search
+
+
+
+   + New session
+
+   Ask anything...  / commands                                                                none
+  0                                                                                       Send
+
+  ✓ Ready                                              Ctrl+K commands  ctx 0/0   -   none   Ready

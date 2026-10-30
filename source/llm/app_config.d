@@ -63,6 +63,9 @@ struct UserConfig {
             @(NamedArgument("gui").Description("Require the GUI; fail if it cannot start"))
             bool gui;
         }
+
+        @(NamedArgument("debug-ui").Description("Start with the Raw Log overlay open (developer)"))
+        bool debugUi;
     }
 
     @(Command("rag"))

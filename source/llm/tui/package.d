@@ -74,14 +74,85 @@ package string timeSuffix(MessageTime time) {
     }, (NoProcessingTime nt) => "");
 }
 
-// A D `Logger` implementation that captures log entries and drains them for display in the TUI log tab.
+// One captured log entry, field for field (design §6.4). D no longer formats a line: the
+// C++ ring is the single bounded store, and the archive line is formatted there from these
+// fields, so the record the UI sees is the record the runtime produced.
+struct TuiLogRecordData {
+    LogLevel level;
+    long timestampMs;
+    int line;
+    string message;
+    string moduleName;
+    string funcName;
+    string file;
+}
+
+// The severity as the UI's five-step scale (TuiLogLevel).
+//
+// This std.logger's `LogLevel` has no `debug` member at all (all, trace, info, warning, error,
+// critical, fatal, off), so `TuiLogLevel_Debug` is never sent from D: `trace` is the developer
+// level that only the Raw Log shows, and there is nothing between it and info. `critical` and
+// `fatal` fold into `error` - the UI has no rendering that tells them apart, and a user-facing
+// history wants "something failed", not the runtime's severity taxonomy. `all` is a filter
+// value (a message is never logged at it) and `off` silences the logger; both land on the ends
+// of the scale, as does anything unknown off the wire.
+static assert(LogLevel.all < LogLevel.trace && LogLevel.trace < LogLevel.info
+        && LogLevel.info < LogLevel.warning && LogLevel.warning < LogLevel.error
+        && LogLevel.error < LogLevel.critical && LogLevel.critical < LogLevel.fatal && LogLevel.fatal < LogLevel.off,
+        "std.logger's LogLevel order changed: toTuiLevel's comparisons assume it");
+TuiLogLevel toTuiLevel(LogLevel level) @safe {
+    if (level <= LogLevel.trace)
+        return TuiLogLevel_Trace;
+    if (level == LogLevel.info)
+        return TuiLogLevel_Info;
+    if (level == LogLevel.warning)
+        return TuiLogLevel_Warn;
+    if (level >= LogLevel.error && level <= LogLevel.fatal)
+        return TuiLogLevel_Error;
+    return TuiLogLevel_Info;
+}
+
+// The first line of a message: the user-facing one-liner the Activity row prints.
+//
+// Byte level on purpose: a newline is one byte in UTF-8, so slicing cannot split a codepoint,
+// and a message is only ever cut where the runtime put a line break.
+string firstLineOf(string msg) @safe {
+    import std.string : indexOf;
+
+    const at = msg.indexOf('\n');
+    return at < 0 ? msg : msg[0 .. at];
+}
+
+// Everything after the first line, or an empty string. Only the *multi-line* tail becomes
+// the record's `detail` (the Raw Log's context); a single-line message has no detail, which
+// keeps the Activity projection from holding the message twice.
+string restLinesOf(string msg) @safe {
+    import std.string : indexOf;
+
+    const at = msg.indexOf('\n');
+    return at < 0 ? null : msg[at + 1 .. $];
+}
+
+// A D `Logger` implementation that captures log entries and drains them for display in the
+// TUI (Activity and the Raw Log), one record per entry.
 class TuiLogger : Logger {
     import core.sync.mutex;
 
+    /// The cap on the *queue between two frames* (the C++ ring is the bounded store).
+    ///
+    /// Generous on purpose: one frame's worth of an extremely chatty run is a few thousand
+    /// records, so 20 000 is slack, not a limit anybody should reach. It exists because the
+    /// queue is not the store: without a cap, a stalled frame loop (a blocking tool call, a
+    /// paused GUI) would grow this appender for as long as the stall lasts. What is dropped is
+    /// *counted* and reported on the next drain, so nothing is lost silently (NFR-17).
+    private immutable MaxQueued = 20_000;
+
     private {
-        Appender!(string[]) entries;
+        Appender!(TuiLogRecordData[]) entries;
         Mutex mtx;
-        immutable MaxEntries = 1000;
+        /// Records this queue had to drop because nobody drained it in time. Flushed as one
+        /// synthetic record on the next drain, then reset.
+        size_t droppedInQueue;
     }
 
     this(const LogLevel lvl = LogLevel.warning) @safe {
@@ -90,24 +161,50 @@ class TuiLogger : Logger {
     }
 
     override void writeLogMsg(ref LogEntry payload) @trusted {
-        import std.datetime : Clock;
+        import std.datetime : SysTime;
 
         mtx.lock_nothrow();
         scope (exit)
             mtx.unlock_nothrow();
-        if (entries[].length < MaxEntries) {
-            entries.put(i"$(Clock.currTime) - $(payload.logLevel): $(payload.msg) [$(
-                    payload.funcName):$(payload.line)]".text);
+        // The store's bounds (5000 records / 2 MB) belong to the C++ ring; this queue only
+        // has to survive one frame. What it cannot keep is counted, not dropped silently.
+        if (entries[].length >= MaxQueued) {
+            ++droppedInQueue;
+            return;
         }
+        const SysTime stamp = payload.timestamp;
+        // Unix-epoch milliseconds, because that is what every consumer reads:
+        // `tui.cpp`'s `archiveTimestamp()` and the Activity clock both do `gmtime(ms / 1000)`.
+        // `SysTime.stdTime` counts hnsecs from *1 A.D.*, so `stdTime / 10_000` keeps the time
+        // of day and moves the date ~1969 years out; `toUnixTime` is the epoch seconds and
+        // `fracSecs` the sub-second part (`toUnixTime` alone is whole-second only).
+        const long stampMs = stamp.stdTime > 0
+            ? cast(long) stamp.toUnixTime * 1_000L + stamp.fracSecs.total!"msecs" : 0;
+        entries.put(TuiLogRecordData(payload.logLevel, stampMs, payload.line,
+                payload.msg, payload.moduleName, payload.funcName, payload.file));
     }
 
-    string[] drainEntries() @safe {
+    /// The records captured since the last drain, as a *copy*: `entries[]` is a slice of the
+    /// appender's own buffer, which the next `put()` overwrites, so returning it would hand the
+    /// frame thread a view of live memory a producer thread is writing (task-31 review I1).
+    ///
+    /// A queue overflow is reported here as one synthetic warning - the count the review asked
+    /// for, in the same record stream the Raw Log and Activity already read.
+    TuiLogRecordData[] drainEntries() @safe {
+        import std.conv : text;
+
         mtx.lock_nothrow();
         scope (exit)
             mtx.unlock_nothrow();
-        auto tmp = entries[];
+        TuiLogRecordData[] drained = entries[].dup;
         entries.clear();
-        return tmp;
+        if (droppedInQueue > 0) {
+            drained ~= TuiLogRecordData(LogLevel.warning, 0, 0,
+                    "log queue dropped " ~ droppedInQueue.text ~ " records (the frame loop did not drain in time)",
+                    null, null, null);
+            droppedInQueue = 0;
+        }
+        return drained;
     }
 }
 
@@ -125,7 +222,7 @@ struct TuiLogSwap {
         isSwapped = false;
     }
 
-    string[] drainEntries() @trusted {
+    TuiLogRecordData[] drainEntries() @trusted {
         return (cast() tui).drainEntries();
     }
 }
@@ -137,15 +234,98 @@ TuiLogSwap swapToTuiLogger() @trusted {
     return TuiLogSwap(true, prev, n);
 }
 
+// Build the C record for one captured entry.
+//
+// Positional on purpose: two of the struct's fields (`module`, `function`) are D keywords,
+// so D source cannot name them. The layout is pinned by the static asserts below, and a
+// reordering of `TuiLogRecord` fails the *build* instead of silently sending a module name
+// where the UI expects a message.
+TuiLogRecord makeLogRecord(TuiLogRecordData record, TuiLogAction action, string actionPayload) @trusted {
+    static assert(TuiLogRecord.tupleof.length == 11,
+            "TuiLogRecord grew: update makeLogRecord's positional list");
+    static assert(is(typeof(TuiLogRecord.tupleof[0]) == int)
+            && is(typeof(TuiLogRecord.tupleof[2]) == long) && is(typeof(TuiLogRecord.tupleof[5]) == String)
+            && is(typeof(TuiLogRecord.tupleof[10]) == String),
+            "TuiLogRecord's field order changed: update makeLogRecord's positional list");
+    // The names, not only the types: two same-typed neighbours (`message`/`detail`,
+    // `module`/`function`) could otherwise be swapped without a word of warning.
+    static assert(__traits(identifier, TuiLogRecord.tupleof[5]) == "message"
+            && __traits(identifier, TuiLogRecord.tupleof[6]) == "detail"
+            && __traits(identifier, TuiLogRecord.tupleof[7]) == "module"
+            && __traits(identifier, TuiLogRecord.tupleof[8]) == "function" && __traits(identifier,
+                TuiLogRecord.tupleof[9]) == "file",
+            "TuiLogRecord's field names changed: update makeLogRecord");
+
+    auto message = firstLineOf(record.message);
+    auto detail = restLinesOf(record.message);
+    return TuiLogRecord(toTuiLevel(record.level), action, record.timestampMs,
+            record.line, 0, // reserved
+            String(message.ptr, message.length),
+            String(detail.ptr, detail.length), String(record.moduleName.ptr,
+                record.moduleName.length), String(record.funcName.ptr, record.funcName.length),
+            String(record.file.ptr, record.file.length),
+            String(actionPayload.ptr, actionPayload.length));
+}
+
 void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
     if (!log.isSwapped)
         return;
 
-    foreach (msg; log.drainEntries) {
-        string summary = shortSummary(msg);
-        auto s = String(summary.ptr, summary.length);
-        auto q = String(msg.ptr, msg.length);
-        tuiAddLogMessage(tuiState, s, q);
+    foreach (record; log.drainEntries) {
+        auto apiRecord = makeLogRecord(record, TuiLogAction_None, null);
+        tuiAddLogRecord(tuiState, &apiRecord);
+    }
+}
+
+/// The Raw Log's logger rule, as data (D-RAWLOG, task 33).
+///
+/// Opening the developer surface raises the process' in-process logger to the developer level and
+/// closing it - or quitting - restores what was configured. The rule is one struct so it can be
+/// tested without a window, and so there is exactly one place that decides "raise" and "restore".
+///
+/// `std.logger` has no `debug` step at all (`all < trace < info < warning < error`), so the
+/// design's "raise to debug" is `trace`: the one level below `info` that carries developer detail.
+/// `UiLog=trace` asks for the same floor, so the design's parenthetical is satisfied by
+/// construction; a level the user already made more verbose than `trace` (`all`) is never
+/// lowered, because the surface may add detail but never remove it.
+///
+/// The archive (`tuiSetLogging`) is deliberately not part of this: it keeps the level the user
+/// configured, and neither `--debug-ui` nor an open surface turns it into a trace file.
+struct RawLogLevelBorrow {
+    private {
+        LogLevel saved;
+        bool raised;
+    }
+
+    /// One call per frame with the surface's state; one write per edge. Returns true when this
+    /// call changed the level (a test reads it; production only needs the effect).
+    bool sync(bool open) {
+        if (open == raised)
+            return false;
+        if (open) {
+            saved = globalLogLevel;
+            if (saved > LogLevel.trace)
+                globalLogLevel = LogLevel.trace;
+            raised = true;
+        } else {
+            globalLogLevel = saved;
+            raised = false;
+        }
+        return true;
+    }
+
+    /// Put back what was borrowed. Idempotent, so the quit path can call it whether or not the
+    /// surface is open (a quit with the surface up is the case the design names explicitly).
+    void restore() {
+        if (!raised)
+            return;
+        globalLogLevel = saved;
+        raised = false;
+    }
+
+    /// Is the level currently borrowed? Read by the tests and the actor's log line.
+    bool isRaised() const {
+        return raised;
     }
 }
 
@@ -153,10 +333,11 @@ struct TextUserInterface {
     private {
         TuiState* tuiState;
         TuiLogSwap logSwap;
+        /// The Raw Log's borrowed logger level (D-RAWLOG): one raise per open, one restore per
+        /// close, and the same restore on quit.
+        RawLogLevelBorrow rawLogLevel;
     }
 
-    // Package-visible state: read/write seam for the llm.tui.tests driver (the
-    // test module lives in package llm.tui, so package members are reachable).
     package {
         string query_;
         string statusText;
@@ -174,6 +355,10 @@ struct TextUserInterface {
     }
 
     ~this() {
+        // The Raw Log's borrowed level is restored on the way out as well as on close: a quit
+        // with the surface open must not leave the process logging at the developer level for
+        // whatever runs after the UI (D-RAWLOG's "and in the shutdown path").
+        restoreRawLogLevel();
         tuiDestroyState(tuiState);
     }
 
@@ -231,6 +416,14 @@ struct TextUserInterface {
         tuiReadyStatus(tuiState, x ? 1 : 0);
     }
 
+    // Composer Stop (task 3): the C++ frame code records a one-slot cancel
+    // request; consuming it here keeps the typed "/stop" path as the only stop
+    // implementation (D-CANCEL), so partial output is preserved exactly as it
+    // is for the slash command.
+    bool takeCancel() @trusted {
+        return tuiTakeCancel(tuiState) != 0;
+    }
+
     void streamChat(string msg, string thinking) {
         auto s = String(null, 0);
         auto q = String(msg.ptr, msg.length);
@@ -249,9 +442,16 @@ struct TextUserInterface {
         auto reasoning = msg.thinking.toTuiString;
         auto role = msg.role.toTuiString;
         auto status = msg.status.toTuiString;
+        auto currentTool = msg.currentTool.toTuiString;
         String finish;
-        tuiPipelineAgentUpdate(tuiState, id, PipelineChatMessage(content: content,
-                reasoning: reasoning, role: role, finishReason: finish, status: status));
+        // The layout is a wire contract with `cpp_tui/tui_api.h` (120 bytes: task 39a appended
+        // the lane's fields); a reordering fails the build instead of sending a tool name where
+        // the UI expects a count.
+        static assert(PipelineChatMessage.sizeof == 120,
+                "PipelineChatMessage layout changed: update tui_api.h and this mirror together");
+        tuiPipelineAgentUpdate(tuiState, id, PipelineChatMessage(content: content, reasoning: reasoning, role: role,
+                finishReason: finish, status: status, currentTool: currentTool,
+                contextUsed: msg.contextUsed, contextMax: msg.contextMax));
     }
 
     void pipelineMessage(UiPipelineStreamDone msg) {
@@ -271,6 +471,33 @@ struct TextUserInterface {
         logSwap = swapToTuiLogger();
     }
 
+    // Raw Log access (`--debug-ui`, task 33). One call before the first frame is all the flag
+    // needs: the C++ frame reads it when it lays out, so the overlay is up on the frame the
+    // window appears - which is what the design means by "starts with the Raw Log open".
+    void setRawLogOpen(bool open) {
+        tuiSetRawLogOpen(tuiState, open ? 1 : 0);
+    }
+
+    // The Raw Log's logger rule (D-RAWLOG): while the surface is up the process logs at the
+    // developer level, and closing it - or quitting - restores what was configured.
+    //
+    // One poll per frame and one edge per change, never a write per frame: the level is a
+    // process-wide setting and every write of it is visible to every producer thread.
+    //
+    // `std.logger` has no `debug` step at all (`all < trace < info < warning < error`), so the
+    // design's "raise to debug" is `trace` - the one level below `info` that carries developer
+    // detail. `UiLog=trace` asks for the same floor, so the design's parenthetical is satisfied
+    // by construction; a level the user already made more verbose than `trace` (`all`) is never
+    // lowered. The archive (`tuiSetLogging`) is deliberately untouched: it keeps the level the
+    // user configured, and neither `--debug-ui` nor an open surface turns it into a trace file.
+    void syncRawLogLevel() {
+        rawLogLevel.sync(tuiIsRawLogOpen(tuiState) != 0);
+    }
+
+    void restoreRawLogLevel() {
+        rawLogLevel.restore();
+    }
+
     string userQuery() @safe {
         auto tmp = query_;
         query_ = null;
@@ -278,7 +505,8 @@ struct TextUserInterface {
     }
 
     void setHistory(immutable(string)[] history) {
-        if (history.empty)
+        if (history.empty) // on purpose do NOT clear the history. By not clearing it is easy
+            // to "repeat" previous questions with a cleared chat.
             return;
         auto app = appender!(String[])();
         foreach (a; history) {
@@ -295,7 +523,8 @@ struct TextUserInterface {
         auto app = appender!(SessionItem[])();
         foreach (ref const item; items) {
             app.put(SessionItem(toTuiString(item.id.get), toTuiString(item.title),
-                    toTuiString(item.preview), item.messageCount, item.isActive ? 1 : 0));
+                    toTuiString(item.preview), item.messageCount,
+                    item.isActive ? 1 : 0, item.updatedAtMs, item.flags, 0));
         }
         tuiSetSessionList(tuiState, app[].ptr, app[].length);
     }
@@ -334,6 +563,10 @@ struct TextUserInterface {
         }
 
         tuiLogToTui(logSwap, tuiState);
+
+        // It runs after the frame has drawn, so a `/rawlog` or an `Esc` in
+        // this frame is already reflected in the flag.
+        syncRawLogLevel();
 
         tuiBackendRender(tuiState);
     }
@@ -417,6 +650,9 @@ class TextUserInterfaceActor : TUICommands {
     private {
         ActorRef selfRef;
 
+        // Should the first frame start with the Raw Log open (`--debug-ui`, task 33)?
+        bool debugUi;
+
         TypedAddress!TUIListener listenerAddress;
         Channel!TUIListener listener;
 
@@ -473,10 +709,12 @@ class TextUserInterfaceActor : TUICommands {
     // from onSpawn. On success the active backend and any fallback note are
     // logged; the note also seeds the status line. The ui field takes the
     // state on every path so its dtor tears it down once.
-    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth, TuiBackendMode mode) {
+    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth,
+            TuiBackendMode mode, bool debugUi = false) {
         assert(maxWidth >= 0 && maxWidth <= 10_000,
                 "maxWidth out of int-safe range: " ~ maxWidth.to!string);
         this.listenerAddress = listener;
+        this.debugUi = debugUi;
         pendingMode = mode;
         initPending = true;
         state = tuiCreateState();
@@ -527,6 +765,11 @@ class TextUserInterfaceActor : TUICommands {
             ui.setUiAsStdLogger;
             if (!note.empty)
                 ui.setStatusText(note);
+            // `--debug-ui` (task 33): open the developer surface *before* the first frame, so it
+            // is up on the frame the window appears. The flag is a per-run request: the open
+            // state is never persisted, and the surface's own `/rawlog`/Close still work.
+            if (debugUi)
+                ui.setRawLogOpen(true);
         }
 
         this.selfRef = selfRef;
@@ -580,6 +823,14 @@ class TextUserInterfaceActor : TUICommands {
 
         ++updateCycle;
         auto query = ui.userQuery();
+
+        // Composer Stop / Esc (task 3): one poll per rendered frame, before the
+        // typed-query dispatch below. Same call the "/stop" intercept makes, so
+        // a UI cancel and a typed stop are indistinguishable to the agent.
+        if (ui.takeCancel()) {
+            stopAgent();
+            ui.setStatusText("Stopping agent");
+        }
 
         if (!query.strip.empty) {
             if (query == "/stop") {
@@ -786,6 +1037,9 @@ struct UiPipelineStreamChatMessage {
     string thinking;
     string role;
     string status;
+    string currentTool;
+    long contextUsed;
+    long contextMax;
 }
 
 struct UiPipelineStreamDone {
@@ -796,12 +1050,19 @@ struct UiPipelineClear {
 }
 
 // Session sidebar snapshot (D -> UI): full ordered list of sessions.
+//
+// `updatedAtMs` and `flags` are the v5 additions (task 24) the workbench rail
+// groups and marks rows with; the legacy panel ignores them, so both renderers
+// can share one snapshot. `flags` bit 0 = a run is in flight. `unread` and
+// `pinned` are UI-local by design and are therefore not here (FR-03, D-19).
 struct UiSessionItem {
     SessionId id;
     string title;
     string preview;
     size_t messageCount;
     bool isActive;
+    long updatedAtMs; // SessionMeta.updatedAt (unix seconds) * 1000; 0 = unknown
+    int flags; // bit 0 = running (TuiSessionFlag_Running); no other bit is used
 }
 
 struct UiSessionList {

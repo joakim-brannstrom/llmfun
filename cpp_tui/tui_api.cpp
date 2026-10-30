@@ -10,6 +10,7 @@
 #include <cstring>
 #include <new>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 #include <unordered_set>
 #include <utility>
@@ -48,6 +49,34 @@ static void setLastError(const char* msg) {
     }
     hasError = true;
 }
+
+/* ----------------------------------------------------------------------------
+ * The Agents tab's mirror (task 30, design §5.21).
+ *
+ * `views/` may not name a v4 type (D-ADAPTER), so the two pipeline calls that carry state
+ * copy what a lane needs into `UiState::agents` as it arrives: the tab then draws a value
+ * list it owns instead of reading the v4 store through a seam that does not exist. No new ABI
+ * symbol is involved - `tuiPipelineAgentUpdate/Done/Clear` are the surface D has always had;
+ * task 39a widened the lane's own message struct, so the number and the tool name arrive as
+ * fields instead of being parsed out of the stream's own text.
+ *
+ * The body is `model::applyAgentUpdate()`/`finishAgentLane()`: what a lane *is* is a model
+ * answer, and it is testable without a C surface in the way (`./test_agents_tab`).
+ * -------------------------------------------------------------------------- */
+
+namespace {
+
+/// One lane update, with the clock read once so the create path and the update path cannot
+/// stamp a lane from two different instants. The count and the tool name are the fields D sent:
+/// nothing here reads the stream's text (D-STATUS, task 39a).
+void mirrorLaneUpdate(::llmfun::tui::TuiState& state, const std::string& id,
+                      const std::string& role, const std::string& content,
+                      const std::string& currentTool, std::int64_t contextUsed) {
+    ::llmfun::tui::model::applyAgentUpdate(state.ui, id, role, content, currentTool, contextUsed,
+                                           ::llmfun::tui::model::agentClockMs());
+}
+
+} // namespace
 
 #ifdef __cplusplus
 extern "C" {
@@ -195,7 +224,9 @@ int tuiInit(TuiState* state, TuiBackendMode mode) {
     // style colors (notably Colors[ImGuiCol_NavHighlight] = (0,0,0,0), which
     // aliases ImGuiCol_NavCursor in ImGui 1.91.4+), so applying the theme
     // before the backend would let the backend undo the NavCursor override.
-    ::llmfun::tui::applyTheme();
+    // applyUiTheme() also picks the colour depth for the active profile
+    // (ui/tokens.h): once per state, never per frame.
+    ::llmfun::tui::applyUiTheme();
     // Pin the text-grid default font after the theme: the whole UI (not just
     // markdown) must stay at 1-cell metrics.
     if (::llmfun::tui::tuiIsTextGrid())
@@ -222,9 +253,14 @@ void tuiDestroyState(TuiState* state) {
     if (!state)
         return;
     if (state->inner) {
-        // Rich textures must be freed while the backend is still alive; the
-        // rich context outlives nothing here (created per tuiInit).
-        ::llmfun::tui::destroyMarkdown(*state->inner);
+        // The close path's settings save (D-UI-CONF, task 29): a GUI window closed with its X
+        // ends the D loop through `shouldClose()` and never sets `quitRequested`, so the quit
+        // path's save does not run - this is the one place every exit goes through. It carries a
+        // change and nothing else, and it is idempotent with the quit path's save.
+        ::llmfun::tui::saveUiConfOnShutdown(*state->inner);
+        // The archive handle (task 32): every record line is flushed as it is written, and a
+        // quit closes the descriptor the record path opened lazily.
+        ::llmfun::tui::closeLogArchive(*state->inner);
         if (state->inner->backend) {
             state->inner->backend->shutdown();
             state->inner->backend.reset();
@@ -279,6 +315,16 @@ static_assert(static_cast<int>(::llmfun::tui::BackendKind::Tui) == TuiBackendKin
 static_assert(static_cast<int>(::llmfun::tui::BackendKind::Gui) == TuiBackendKind_Gui,
               "C/C++ backend kind mismatch (Gui)");
 
+// The Raw Log's own level constants (model/rawlog_data.h) are the ABI's numbers: the surface orders
+// rows by severity and the floor's compare assumes the ABI's order, so a renumbering on either
+// side is a build failure rather than a `trace` row drawn above an `error`.
+static_assert(::llmfun::tui::model::kRawLogLevelTrace == TuiLogLevel_Trace &&
+                  ::llmfun::tui::model::kRawLogLevelDebug == TuiLogLevel_Debug &&
+                  ::llmfun::tui::model::kRawLogLevelInfo == TuiLogLevel_Info &&
+                  ::llmfun::tui::model::kRawLogLevelWarn == TuiLogLevel_Warn &&
+                  ::llmfun::tui::model::kRawLogLevelError == TuiLogLevel_Error,
+              "model/rawlog_data.h level constants must mirror TuiLogLevel");
+
 int tuiBackendActive(const TuiState* state) {
     if (!state || !state->inner || !state->inner->backend)
         return TuiBackendKind_None;
@@ -316,12 +362,110 @@ void tuiSetIniFilename(TuiState* state, String filename) {
     ::llmfun::tui::tuiSetIniFilename(*state->inner, filename_);
 }
 
+void tuiRequestCancel(TuiState* state) {
+    if (!state || !state->inner)
+        return;
+    ::llmfun::tui::tuiRequestCancel(*state->inner);
+}
+
+int tuiTakeCancel(TuiState* state) {
+    if (!state || !state->inner)
+        return 0;
+    return ::llmfun::tui::tuiTakeCancel(*state->inner) ? 1 : 0;
+}
+
+void tuiSetRawLogOpen(TuiState* state, int open) {
+    if (!state || !state->inner)
+        return;
+    // One flag, the shell's own (`UiState::rawLogOpen`): the now bar's badge, the layout's
+    // drawer and the `Esc` chain all read it, and the request is idempotent - `--debug-ui` may
+    // set it on the frame after the user typed `/rawlog`, and the surface must simply be open.
+    ::llmfun::tui::model::UiState& ui = state->inner->ui;
+    if (open != 0) {
+        if (!ui.rawLogOpen)
+            ::llmfun::tui::views::toggleRawLog(*state->inner);
+        return;
+    }
+    if (ui.rawLogOpen)
+        ::llmfun::tui::views::closeRawLog(*state->inner);
+}
+
+int tuiIsRawLogOpen(const TuiState* state) {
+    if (!state || !state->inner)
+        return 0;
+    return state->inner->ui.rawLogOpen ? 1 : 0;
+}
+
 void tuiAddLogMessage(TuiState* state, String summary, String text) {
     if (!state || !state->inner)
         return;
     std::string summary_(summary.data ? summary.data : "", summary.data ? summary.len : 0);
     std::string text_(text.data ? text.data : "", text.data ? text.len : 0);
     ::llmfun::tui::tuiAddLogMessage(*state->inner, ::llmfun::tui::LogMessage{summary_, text_});
+}
+
+/// The one record copy: the inbound POD becomes an owned record (every String is copied
+/// during the call, so D may free its buffers as soon as the call returns - C-02).
+///
+/// A pure copy on purpose. The two *rules* - stamping a missing clock and folding a level or
+/// action the UI has no rendering for - belong to the one place that feeds both stores
+/// (`tuiAddLogRecord`), so the ring and the Activity projection cannot be handed two different
+/// answers (task-32 review, Minor 4/5).
+static ::llmfun::tui::LogRecord copyRecord(const TuiLogRecord& record) {
+    const auto stringOf = [](String s) {
+        return s.data ? std::string(s.data, s.len) : std::string();
+    };
+    ::llmfun::tui::LogRecord out;
+    out.level = record.level;
+    out.action = record.action;
+    out.timestampMs = record.timestampMs;
+    out.line = record.line;
+    out.message = stringOf(record.message);
+    out.detail = stringOf(record.detail);
+    out.module = stringOf(record.module);
+    out.function = stringOf(record.function);
+    out.file = stringOf(record.file);
+    out.actionPayload = stringOf(record.actionPayload);
+    return out;
+}
+
+void tuiAddLogRecord(TuiState* state, const TuiLogRecord* record) {
+    if (!state || !state->inner || !record)
+        return;
+    // One normalised record feeds both stores: the arrival stamp (0 = "the sender had none")
+    // and the fallbacks for values the UI has no rendering for are applied here, once, so the
+    // raw record and the Activity projection of it cannot disagree - an out-of-range level the
+    // ring clamps to info must not stay unrenderable in the tab the same record is projected
+    // into (task-32 review, Minor 5).
+    TuiLogRecord inbound = *record;
+    if (inbound.level < TuiLogLevel_Trace || inbound.level > TuiLogLevel_Error)
+        inbound.level = TuiLogLevel_Info;
+    if (inbound.action < TuiLogAction_None || inbound.action > TuiLogAction_Details)
+        inbound.action = TuiLogAction_None;
+    if (inbound.line < 0)
+        inbound.line = 0; // a negative source line is "unknown", the value the archive prints as 0
+    if (inbound.timestampMs <= 0)
+        inbound.timestampMs = ::llmfun::tui::nowMs();
+    // The raw ring (the Raw Log's store, task 33) ...
+    ::llmfun::tui::tuiAddLogRecord(*state->inner, copyRecord(inbound));
+    // ... and Activity, its user-facing projection: the same arrival, decided by the one
+    // function that knows what Activity may show (D-ACTIVITY). `visible` is the last frame's
+    // derivation, which is what makes a record arrive "read" while the tab is on screen.
+    ::llmfun::tui::model::appendActivity(
+        state->inner->ui, ::llmfun::tui::model::projectForActivity(inbound), inbound.level,
+        ::llmfun::tui::isActivityVisible(*state->inner));
+}
+
+void tuiAddLogMessageEx(TuiState* state, TuiLogLevel level, String summary, String text) {
+    if (!state || !state->inner)
+        return;
+    TuiLogRecord record{};
+    record.level = level;
+    record.action = TuiLogAction_None;
+    record.timestampMs = 0; // the UI stamps the arrival
+    record.message = summary;
+    record.detail = text;
+    tuiAddLogRecord(state, &record);
 }
 
 void tuiAddChatMessage(TuiState* state, ChatMessageParam param) {
@@ -373,6 +517,50 @@ void tuiSetStatusText(TuiState* state, String text) {
     ::llmfun::tui::tuiSetStatusText(*state->inner, s);
 }
 
+void tuiSetRuntimeStatus(TuiState* state, const TuiRuntimeStatus* status) {
+    // Copied field by field across the boundary, so the layout is a wire contract: the D side
+    // pins the same size (`llm/tui/package.d`), and `tui_api.h` states it ("reserved keeps
+    // 8-byte alignment explicit").
+    static_assert(sizeof(TuiRuntimeStatus) == 72,
+                  "TuiRuntimeStatus layout changed: update the D mirror as well");
+    if (!state || !state->inner)
+        return;
+    // Clearing is always honoured: a status set before a switch must still be droppable (the
+    // same rule `tuiSetRawLogOpen`'s close follows).
+    if (!status) {
+        ::llmfun::tui::tuiSetRuntimeStatus(*state->inner, ::llmfun::tui::model::RuntimeStatus{});
+        return;
+    }
+    ::llmfun::tui::model::RuntimeStatus inbound;
+    inbound.phase = status->phase;
+    if (inbound.phase < 0 || inbound.phase >= ::llmfun::tui::model::kPhaseCount) {
+        // A phase this build does not know is idle, not a crash and not a neighbour: the sender may
+        // be newer than the UI, and its other numbers are still readable. Warned when the unknown
+        // ordinal changes, not once per update: a newer sender's 20 Hz stream would otherwise fill
+        // the log for a whole run with the same line. The memory is this state's (a test or a
+        // re-init starts clean); the counter is what makes the dedup observable.
+        if (!state->inner->warnedUnknownPhase || status->phase != state->inner->lastUnknownPhase) {
+            state->inner->warnedUnknownPhase = true;
+            state->inner->lastUnknownPhase = status->phase;
+            ++state->inner->unknownPhaseWarnings;
+            std::fprintf(stderr, "llmfun: tuiSetRuntimeStatus: unknown phase %d, using idle\n",
+                         static_cast<int>(status->phase));
+        }
+        inbound.phase = ::llmfun::tui::model::phaseOrdinal(::llmfun::tui::model::Phase::Idle);
+    }
+    // Every String is copied during the call, like every other inbound String in this API.
+    inbound.detail.assign(status->detail.data ? status->detail.data : "",
+                          status->detail.data ? status->detail.len : 0);
+    inbound.contextUsed = status->contextUsed;
+    inbound.contextMax = status->contextMax;
+    inbound.compactAt = status->compactAt;
+    inbound.tokensPerSecond = status->tokensPerSecond;
+    inbound.elapsedMs = status->elapsedMs;
+    inbound.pendingQuestions = status->pendingQuestions;
+    inbound.structured = true;
+    ::llmfun::tui::tuiSetRuntimeStatus(*state->inner, inbound);
+}
+
 String tuiGetInput(TuiState* state) {
     if (!state || !state->inner)
         return {nullptr, 0};
@@ -420,7 +608,7 @@ void tuiSetAutoScroll(TuiState* state, int enabled) {
 void tuiReadyStatus(TuiState* state, int ready) {
     if (!state || !state->inner)
         return;
-    state->inner->readyStatus = ready == 1;
+    ::llmfun::tui::tuiSetReadyStatus(*state->inner, ready == 1);
 }
 
 void tuiInitQueryHistory(TuiState* state, const String* history, size_t count) {
@@ -432,7 +620,10 @@ void tuiInitQueryHistory(TuiState* state, const String* history, size_t count) {
         const size_t n = count < maxEntries ? count : maxEntries;
         const size_t startAt = count < maxEntries ? 0 : (count - maxEntries);
         vec.reserve(n);
-        for (size_t i = startAt; i < n; ++i) {
+        // startAt..count-1 is exactly the last `n` entries. `n` is the number
+        // to keep, not an end index: looping to `n` copied the wrong range
+        // (0 entries when count >= 2 * maxEntries).
+        for (size_t i = startAt; i < count; ++i) {
             const String* s = &history[i];
             if (s->data) {
                 vec.emplace_back(s->data, s->len);
@@ -448,6 +639,9 @@ void tuiInitQueryHistory(TuiState* state, const String* history, size_t count) {
 }
 
 void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage msg) {
+    // Copied field by field across the boundary, so the layout is a wire contract: `tui_api.h`
+    // states it, `llm/tui/package.d` pins the same size in a `static assert`, and
+    // `./test_tui_api_v4` (case 1f) pins the size and every offset on this side.
     if (!state || !state->inner)
         return;
     std::string id(agentId.data ? agentId.data : "", agentId.data ? agentId.len : 0);
@@ -460,6 +654,11 @@ void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage
     std::string fr(msg.finishReason.data ? msg.finishReason.data : "",
                    msg.finishReason.data ? msg.finishReason.len : 0);
     std::string st(msg.status.data ? msg.status.data : "", msg.status.data ? msg.status.len : 0);
+    std::string tool(msg.currentTool.data ? msg.currentTool.data : "",
+                     msg.currentTool.data ? msg.currentTool.len : 0);
+    // `msg.contextMax` is deliberately not read: it is the producer's zero-vs-none bit, and the
+    // lane draws no number for either zero, so it has no consumer on this side.
+    const std::int64_t ctxUsed = msg.contextUsed;
 
     auto& agents = state->inner->left.agents;
     for (auto& agent : agents) {
@@ -471,6 +670,7 @@ void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage
             agent.stream.status = st;
             agent.lastUpdate = std::chrono::system_clock::now();
             agent.activity = true;
+            mirrorLaneUpdate(*state->inner, id, role_, c, tool, ctxUsed);
             return;
         }
     }
@@ -494,6 +694,7 @@ void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage
         true,
         std::vector<::llmfun::tui::AgentStreamMessage>{},
     });
+    mirrorLaneUpdate(*state->inner, id, role_, c, tool, ctxUsed);
 }
 
 void tuiPipelineAgentDone(TuiState* state, String agentId) {
@@ -509,6 +710,7 @@ void tuiPipelineAgentDone(TuiState* state, String agentId) {
             agent.finished();
             // Note: lastUpdate is NOT refreshed — done agents are evicted
             // first (LRU policy) if capacity is exceeded.
+            ::llmfun::tui::model::finishAgentLane(state->inner->ui, id);
             return;
         }
     }
@@ -518,6 +720,7 @@ void tuiPipelineClear(TuiState* state) {
     if (!state || !state->inner)
         return;
     state->inner->left.agents.clear();
+    ::llmfun::tui::model::clearAgentLanes(state->inner->ui);
 }
 
 /* Compile-time linkage between the C enum (tui_api.h) and the internal C++
@@ -535,16 +738,27 @@ static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Rename) == TuiS
 static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Delete) == TuiSessionAction_Delete,
               "C/C++ session action enum mismatch (Delete)");
 
+/* The lane list's capacity is the pipeline panel's (task 30): `model/` may not include
+ * `tui.h`, so the model carries the number and this is where the two are pinned together. A
+ * change to `ChatTabLeftPanel::MaxAgents` that forgot the lanes would otherwise let the tab
+ * list an agent the v4 store has already evicted.
+ */
+static_assert(::llmfun::tui::model::kAgentLaneMax == ::llmfun::tui::ChatTabLeftPanel::MaxAgents,
+              "the Agents tab's lane capacity must match the pipeline's MaxAgents");
+
+/* Same linkage for the v5 session-row flags (task 24): `SessionItem::flags` is a
+ * bit field, not an enum, so the two spellings are pinned with a static_assert
+ * on the one bit that exists rather than by an enum mirror.
+ */
+static_assert(::llmfun::tui::kSessionFlagRunning == TuiSessionFlag_Running,
+              "C/C++ session row flag mismatch (Running)");
+
 /* Session sidebar */
 
 void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count) {
     if (!state || !state->inner)
         return;
     auto& panel = state->inner->sessionPanel;
-    // The previous active id, for the stale-pending rule: a slash
-    // /switch typed while busy changes the active session, and the queued
-    // click must not override the user's explicit switch.
-    const std::string prevActiveId = panel.activeId;
     panel.sessions.clear();
     panel.activeId.clear();
     if (items && count > 0) {
@@ -558,33 +772,19 @@ void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count) 
                 it.preview.data ? std::string(it.preview.data, it.preview.len) : std::string();
             e.messageCount = it.messageCount;
             e.isActive = it.isActive != 0;
+            // v5 (task 24): the appended fields pass through unchanged - no
+            // conversion, no clamping. A caller that never sets them sends 0/0,
+            // which is "unknown time, no run" and renders as a flat rail.
+            e.updatedAtMs = it.updatedAtMs;
+            e.flags = it.flags;
             if (e.isActive)
                 panel.activeId = e.id; // at most one active entry expected; last wins
             panel.sessions.push_back(std::move(e));
         }
     }
-    // Pending-switch slot: drop the queued id when its target left the snapshot
-    // or the active session changed - a /switch typed while busy wins over the queued click.
-    if (!panel.pendingSelectId.empty()) {
-        const std::string& pending = panel.pendingSelectId;
-        auto found = std::find_if(
-            panel.sessions.begin(), panel.sessions.end(),
-            [&pending](const ::llmfun::tui::SessionEntry& s) { return s.id == pending; });
-        if (found == panel.sessions.end() || panel.activeId != prevActiveId)
-            panel.pendingSelectId.clear();
-    }
-    // The rename box binds to renameRowId; when that row is no longer in the
-    // snapshot, close the box - an open box bound to a missing row is
-    // dead-but-harmless state.
-    if (panel.renameActive) {
-        auto found = std::find_if(
-            panel.sessions.begin(), panel.sessions.end(),
-            [&panel](const ::llmfun::tui::SessionEntry& s) { return s.id == panel.renameRowId; });
-        if (found == panel.sessions.end()) {
-            panel.renameActive = false;
-            panel.renameFocus = false;
-        }
-    }
+    // No stale-slot pruning here any more: the rail's answers are one-shot (`views::RailState`),
+    // so a select or a rename the frame queued is already gone by the next snapshot - there is no
+    // queued id in this struct to go stale (task 41).
 }
 
 int tuiIsSessionActionReady(TuiState* state) {

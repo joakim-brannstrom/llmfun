@@ -1,0 +1,36 @@
+name: skeleton
+screen: 100x30
+text:
+ skeleton measure 24x1
+
+  …
+
+  …
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fills:
+2: 2-25=16
+4: 2-25=16

@@ -381,3 +381,112 @@ unittest {
     assert(timeSuffix(MessageTime(0.dur!"msecs")) == " [0ms]");
     assert(timeSuffix(MessageTime(-1200.dur!"msecs")) == ""); // negative: no suffix
 }
+
+@("TUI logger: records, a copied drain and a bounded queue")
+unittest {
+    // The logger is the pipe between the runtime and the C++ ring: it captures the entry's
+    // *fields* (no formatted line), hands out a **copy** of what it captured (a slice of the
+    // appender's own buffer is not a snapshot - it is memory the next `put` writes into), and
+    // bounds what it cannot drain in time while *counting* the loss (task-31 review I1/I2).
+    import std.algorithm.searching : endsWith;
+    import std.conv : text;
+
+    auto log = new TuiLogger(LogLevel.all);
+
+    log.info("first record");
+    auto first = log.drainEntries();
+    assert(first.length == 1, "one log call is one record");
+    assert(first[0].message == "first record", "the message arrives unformatted");
+
+    log.info("second record");
+    assert(first[0].message == "first record",
+            "the drained array is a copy: a later write cannot mutate it");
+
+    // The queue is bounded, and what it cannot keep is reported as one record. The bound is
+    // exact: 20 000 kept + 1 synthetic overflow record (an `<=` would also pass a future
+    // off-by-one in `MaxQueued`).
+    foreach (i; 0 .. 20_050)
+        log.info("spam");
+    auto drained = log.drainEntries();
+    assert(drained.length == 20_001,
+            "the queue keeps exactly MaxQueued records plus the one overflow report (got "
+            ~ drained.length.text ~ ")");
+    assert(drained[$ - 1].message.endsWith("records (the frame loop did not drain in time)"),
+            "the overflow is reported, not swallowed");
+    // ... and the counter resets, so the report is not repeated on the next drain.
+    log.info("after the flood");
+    auto after = log.drainEntries();
+    assert(after.length == 1, "the synthetic record is emitted once");
+}
+
+@("TUI logger: a 5000-record burst is not truncated (no stop-when-full cap)")
+unittest {
+    import std.conv : text;
+
+    // The 1000-entry stop-when-full cap D used to have is gone: the C++ ring is the single
+    // bounded store, so a burst that fits between two frames has to arrive whole - a cap here
+    // would drop the *newest* records, which is the wrong end of a log.
+    auto log = new TuiLogger(LogLevel.all);
+    foreach (i; 0 .. 5_000)
+        log.info("burst");
+    auto drained = log.drainEntries();
+    assert(drained.length == 5_000,
+            "a 5000-record burst arrives whole (got " ~ drained.length.text ~ ")");
+    assert(drained[0].message == "burst" && drained[$ - 1].message == "burst",
+            "arrival order is preserved across the burst");
+}
+
+@("TUI log levels: the five-step scale, with no level invented for D")
+unittest {
+    // This std.logger has no `debug` member at all (all, trace, info, warning, error,
+    // critical, fatal, off), so TuiLogLevel_Debug never comes from D: trace is the developer
+    // level. `critical` and `fatal` fold into error - the UI has one rendering for "something
+    // failed", and a user-facing history wants that, not the runtime's severity taxonomy.
+    assert(toTuiLevel(LogLevel.trace) == TuiLogLevel_Trace);
+    assert(toTuiLevel(LogLevel.info) == TuiLogLevel_Info);
+    assert(toTuiLevel(LogLevel.warning) == TuiLogLevel_Warn);
+    assert(toTuiLevel(LogLevel.error) == TuiLogLevel_Error);
+    assert(toTuiLevel(LogLevel.critical) == TuiLogLevel_Error);
+    assert(toTuiLevel(LogLevel.fatal) == TuiLogLevel_Error);
+    // `all` is a filter value, never a message's level, and `off` silences the logger: neither
+    // has a rendering of its own, so they land on the documented ends of the scale.
+    assert(toTuiLevel(LogLevel.all) == TuiLogLevel_Trace);
+    assert(toTuiLevel(LogLevel.off) == TuiLogLevel_Info);
+    // An out-of-range value off the wire is info, never a guess.
+    assert(toTuiLevel(cast(LogLevel) 100) == TuiLogLevel_Info);
+    assert(toTuiLevel(cast(LogLevel) 0) == TuiLogLevel_Trace);
+}
+
+@("TUI log record: fields map positionally, the message splits at its first line")
+unittest {
+    // `TuiLogRecord`'s `module` and `function` fields are D keywords, so the record is built
+    // and read positionally; the static asserts in `makeLogRecord` pin the layout this test
+    // relies on.
+    string view(String s) {
+        return s.data is null ? "" : cast(string) s.data[0 .. s.len];
+    }
+
+    auto record = makeLogRecord(TuiLogRecordData(LogLevel.error, 1_782_000_000_123L,
+            412, "read_file failed\n  at pool.d:412\n  at agent.d:88",
+            "llm.agent.pool", "processTurn", "/src/llm/agent/pool.d"), TuiLogAction_Retry, "turn-7");
+
+    assert(record.level == TuiLogLevel_Error, "error keeps its severity");
+    assert(record.action == TuiLogAction_Retry, "the action crosses as an id, never a label");
+    assert(record.timestampMs == 1_782_000_000_123L, "the sender's clock is kept");
+    assert(record.line == 412, "the source line is kept");
+    assert(record.reserved == 0, "the reserved word stays zero");
+    assert(view(record.tupleof[5]) == "read_file failed", "the first line is the message");
+    assert(view(record.tupleof[6]) == "  at pool.d:412\n  at agent.d:88",
+            "the rest of a multi-line entry is the detail");
+    assert(view(record.tupleof[7]) == "llm.agent.pool", "the module crosses");
+    assert(view(record.tupleof[8]) == "processTurn", "the function crosses");
+    assert(view(record.tupleof[9]) == "/src/llm/agent/pool.d", "the file crosses");
+    assert(view(record.tupleof[10]) == "turn-7", "the action payload crosses");
+
+    // A single-line entry has no detail: the Activity row must not hold the message twice.
+    auto single = makeLogRecord(TuiLogRecordData(LogLevel.info, 0, 0,
+            "one line", null, null, null), TuiLogAction_None, null);
+    assert(view(single.tupleof[5]) == "one line");
+    assert(view(single.tupleof[6]).length == 0, "a single-line message has no detail");
+    assert(single.timestampMs == 0, "a record with no clock stays 0: the UI stamps the arrival");
+}

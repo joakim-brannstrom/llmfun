@@ -9,6 +9,10 @@ namespace {
 
 class NullBackend final : public Backend {
 public:
+    // No window, so no window-title sink: `tuiBackendSetWindowTitle()` (tui_backend.h) forwards
+    // to whatever sink a pixel backend installed, and with none installed it is the no-op this
+    // backend's title is. That is the whole "no-op on TUI/None" contract - there is nothing to
+    // implement here, which is why this file did not grow a function for it.
     bool init(std::string&) override { return true; }
 
     void newFrame() override {}
