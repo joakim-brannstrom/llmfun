@@ -52,7 +52,7 @@ If your identity is **llmfun**:
 
 ## Commands
 
-**Container:** use the image `llmfun/app:latest` for `execute_command`. Pass the whole command line as ONE string in a single-element array: `execute_command(environmentTag="llmfun", command=["cd llmfun && dub build --config=application"])`. `command` is an array of argument elements (no whitespace joining). The element count must be within the environment's `minArgs`/`maxArgs` (defaults 0 and 1; `-1` = unbounded). The `native` environment is a (1, 1) single-command-string environment.
+**Container:** use the image `llmfun/app:latest` for `execute_command`. Pass the whole command line as ONE string in a single-element array: `execute_command(environmentTag="llmfun", command=["cd llmfun && dub build --config=application"])`.
 
 ```bash
 dub test                                          # Unit tests (primary gate)
@@ -87,13 +87,11 @@ dub build --config=llmfun_util                    # Manual test utility (runs no
 - Prefer an immediately invoked local function over a declared variable plus branches.
 - Zero-initialize floating point explicitly; D's default is NaN.
 
-### Const and parameter types
+### Const and arrays
 
-- **`const x = <expr>` infers whole-type const**: a `const` local over a `string[]` expression becomes `const(string[])`, which cannot be passed to any `string[]` parameter. Declare such locals `auto` unless const is really needed.
-- **Read-only `string[]` parameters: use plain `string[]`** for internal helpers, or `const(string)[]` when the no-reorder/no-cell-write promise should be explicit. Never `const(string[])`: it is strictly dominated by `const(string)[]` - same caller-side guarantees, more callee freedom (rebind, `~=`).
-- **Const is transitive and one-way**: neither const form converts to `string[]`, so mixing const params with `string[]` params breaks callers holding const data. Keep one style per data flow.
-- **A by-value array parameter shares the caller's buffer**: `sort()` and `p[i] = ...` inside the callee mutate the caller's array; rebinding and `~=` (reallocates) do not. The elements themselves (strings) are immutable and can never be corrupted without copying.
-- For arrays of mutable-value elements, whole-array const (`const(int[])`) and elements-const (`const(int)[]`) are two different, meaningful promises.
+- `const` locals over `string[]` infer `const(string[])`, which no `string[]` parameter accepts; declare them `auto`.
+- Read-only string arrays: `string[]` internally, `const(string)[]` for no-rewrite; never `const(string[])`.
+- By-value array parameters share the caller's buffer: element changes mutate the caller's array; rebinding and `~=` do not.
 
 ### Formatting
 
@@ -136,36 +134,35 @@ dub build --config=llmfun_util                    # Manual test utility (runs no
 
 ### Chat sessions
 
-- One JSON file per session under `<dataDir>/chat/<id>.json`, header `{title, createdAt, updatedAt, messages}`. `SessionStore` (`session/`) speaks JSON only; `app_agent` bridges it to `agent_.chat`.
-- `SessionId` is a `NamedType!string`; `state.json` stores the plain string (`activeChatSessionId`). Session id == filename, immutable, `<YYYYMMDD-HHMMSS>-<4hex>`, regex-validated at every store entry point (path traversal). Title lives in the header; rename edits the header only.
-- Single writer (the agent thread), every write atomic (tmp file + rename). Unknown header keys round-trip through `SessionMeta.extra`.
+- One JSON file per session under `<dataDir>/chat/<id>.json`. `SessionStore` (`session/`) speaks JSON only; `app_agent` bridges it to the agent's `Chat`.
+- Session id == filename, immutable, `<YYYYMMDD-HHMMSS>-<4hex>`, regex-validated at every store entry point (path traversal). Title lives in the header; rename edits the header only.
+- Single writer (the agent thread), every write atomic (tmp file + rename).
 - System-prompt entries are stripped before save and re-set at startup. One-shot mode (`-p`) appends to the last active session.
 - Full documentation: `doc/sessions.md`.
 
 ### Turn ids and compression
 
-- Every history entry carries a `turnId` (mixin `TurnIdMixin`); 0 = no turn. A turn is one user query plus everything produced while answering it.
-- Only `Chat.add` decides boundaries: a user-query message opens a turn (allocating from `nextTurnId_`), every other insertion continues it, `setSystemPrompt` stamps 0. Vision chats open one explicitly with `beginNewTurn()`.
-- Counter state is per-Chat (no static/shared/atomic). The high-water mark persists as the header key `next_turn_id`; the per-message stamp lives in `save_data["turn_id"]`.
-- Invariants pinned by unittests in `llm/chat.d`: history sorted by `(turn_id, position)`, active-turn stamps > 0, counter never decreases, no id reuse within a session (also across restarts). Legacy files are reconstructed on load (`reconstructTurnIds`).
-- Projections: `getDialogueHistory()` (facts) and `getReasoningTrace()` (trace). Harness control traffic (user-role messages with `userQuery == false`) appears in neither.
-- Compression multicasts a `CompressionCheckpoint` once per compression that evicts verbatim content. Listeners must not block and must not throw.
+- Every history entry carries a `turnId`; 0 = no turn. A turn is one user query plus everything produced while answering it.
+- Only `Chat.add` decides boundaries: a user-query message opens a turn, every other insertion continues it; vision chats open one explicitly.
+- The counter is per-Chat, never static/shared; the high-water mark persists in the session header.
+- Invariants (sorted history, active-turn stamps > 0, no id reuse) are pinned by unittests; legacy files are reconstructed on load.
+- Projections: `getDialogueHistory()` (facts) and `getReasoningTrace()` (trace). Harness control traffic appears in neither.
+- Compression multicasts a checkpoint once per compression that evicts verbatim content. Listeners must not block and must not throw.
 
 ### Searchable dialogue and reasoning history
 
 - `DialogueIndex` (`rag/dialogue_index.d`) is owned by the agent thread and drives a worker actor on its own thread (`rag/dialogue_worker.d`); the worker owns its own embedder and exchanges value messages only.
-- Episodes go into per-session SQLite WAL databases under `dialogueDir` (default `llmfun/data/dialogue`), one `<sessionId>.db`, as Topic sources named `d_<sess>__t<turnStart>_<turnEnd>__<epochMillis>` (`encodeTopicName`/`decodeTopicName`).
-- Dedup identity is topic + content; a turn split across two checkpoints merges (existing episode text + the new piece under the same topic). FTS is rebuilt synchronously after every job that committed chunks.
-- Turn metadata is always derived by decoding topic names, never from worker memory. `query_dialogue_history` takes `maxTurnAge`: 0/negative = no filtering, positive N keeps `turnEnd >= maxTurn - N`.
+- Episodes go into per-session SQLite WAL databases (default `llmfun/data/dialogue`), one db per session, as Topic sources. Dedup identity is topic + content; a turn split across two checkpoints merges. FTS is rebuilt synchronously after every job that committed chunks.
+- Turn metadata is always derived by decoding topic names, never from worker memory.
 - Indexing is asynchronous (~2-3 s lag, stated in the tool description). When the agent should query is prompted from `llmfun/config/prompt/AGENT.md`, not from a code constant.
-- `llmfun rag --dialogue` reports over the session databases read-only and dispatches before `createRag`; a session whose read-only open fails is skipped with a warning.
+- `llmfun rag --dialogue` reports over the session databases read-only; a session whose read-only open fails is skipped with a warning.
 - Reasoning counterpart: `ReasoningIndex` (`rag/reasoning_index.d`). Docs: `doc/dialogue_search.md`, `doc/reasoning_search.md`.
 
 ### Slash commands
 
 - Delegate registry (`app_agent/slash.d`): `SlashCommand` structs with name, aliases, help lines, `SlashArgMode`, help `order`, and an `AgentStatus delegate(ref AgentApp, string)` handler.
-- Built-ins are registered by group modules: `slash_core.d` (help/quit/stop/continue/compact/debug), `slash_session.d` (sessions/switch/new/rename/delete/clear + the delete confirm state machine), `slash_model.d`, `slash_pipeline.d` (plan/code), `slash_skills.d`.
-- Help text is generated from the registry (order asc, then registration index); a golden unittest in `tests.d` locks it.
+- Built-ins are registered by group modules: `slash_core.d`, `slash_session.d`, `slash_model.d`, `slash_pipeline.d`, `slash_skills.d`.
+- Help text is generated from the registry (order asc, then registration index); a golden unittest locks it.
 - Plugin API: `addStartupSlashCommand`, `AgentApp.registerSlashCommand`, `slashCommands()`, `sendChatMessage`, plus `SlashCommand`/`SlashArgMode`/`AgentStatus`. Docs: `doc/slash_commands.md`.
 
 ### Tools and the tool broker
@@ -177,16 +174,14 @@ dub build --config=llmfun_util                    # Manual test utility (runs no
 
 ### Memory tiers
 
-- Memories are Markdown files in every configured `memoryArea` dir (default resolution: `llmfun/data/memory` plus the XDG data dir), under the subdirs `short/`, `long/`, `archive/`.
-- Writes always land in `short/` (rewriting an existing `long/` memory requires including its stored content). `get_memory_topics` lists `short/` only; `long/` is RAG-indexed; `archive/` is unreachable.
-- `MemoryTierActor` (`memory_tier.d`) runs one pass at startup and on every `tierPassIntervalHours` tick (0 = startup only): create any missing tier dirs, flat-layout upgrade, reconcile disk vs RAG, promote aged `short/` entries (default 7 d) to `long/`, demote aged `long/` entries (default 100 d) to `archive/`.
-- Every phase is diff-based, so a crash window heals on the next pass; failures are logged and skipped. Tier dirs are created by that pass, so a missing structure heals on the next agent start.
+- Memories are Markdown files in every configured `memoryArea` dir, under the subdirs `short/`, `long/`, `archive/`. Writes always land in `short/` (rewriting an existing `long/` memory requires including its stored content). `get_memory_topics` lists `short/` only; `long/` is RAG-indexed; `archive/` is unreachable.
+- `MemoryTierActor` (`memory_tier.d`) runs one diff-based pass at startup and on every tick: create any missing tier dirs, flat-layout upgrade, reconcile disk vs RAG, promote aged `short/` entries to `long/`, demote aged `long/` entries to `archive/`. Failures are logged and skipped, so a crash window heals on the next pass.
 - Agent-facing rules: `llmfun/skills/llmfun-memory/SKILL.md`.
 
 ### Pipeline, RAG, skills
 
 - DAG pipeline engine in `pipeline/package.d` (topological sort in `pipeline/graph.d`); nodes propagate outputs to downstream nodes.
-- RAG: SQLite + FTS5 + sqlite3-vec, `SchemaVersion = 6` in `rag/database.d`; embedder factory with HTTP (OpenAI-compatible) and local (llama.cpp) backends.
+- RAG: SQLite + FTS5 + sqlite3-vec; embedder factory with HTTP (OpenAI-compatible) and local (llama.cpp) backends.
 - Skills follow the Agent Skills standard: a directory with `SKILL.md` plus optional `references/`, `scripts/`, `assets/`. Built-ins live in `llmfun/skills/`; loading copies the skill into the sandbox workarea. Docs: `doc/skills.md`.
 
 ### Configuration
@@ -199,15 +194,14 @@ dub build --config=llmfun_util                    # Manual test utility (runs no
 ### TUI
 
 - C++ TUI (`cpp_tui/`) renders Dear ImGui in the terminal with markdown via the vendored `imgui_rich_md`; D bindings in `tui/package.d` handle streaming and inter-thread messages; the pure C API (`tui_api.h`/`tui_api.cpp`) is the D interop seam. D can import `.c` files directly - no bindings or `extern(C)` needed.
-- Session sidebar (`ChatTabSessionPanel`): rows with active marker and `[N]` count, a per-row menu (Rename/Delete), and an fzf-style fuzzy filter over title + preview. New/Delete are guard-and-skipped while busy; a pending session switch defers to a single last-click-wins slot. Mutually exclusive with the pipeline panel.
-- Persistent messages render a derived header `[NR] <summary> [TIME]` (D side only): NR is the 1-based ordinal among displayed persistent messages, TIME the measured LLM/tool duration (`save_data.processMs`, formatted by mylib `my.time`). Display-only lines and the one-shot CLI are undecorated.
-- Max width: `tui.maxWidth` (0 = unlimited, valid 0 or [40, 10000], enforced in `validateConfig`) is clamped in C++ every frame; `LLMFUN_TUI_MAX_WIDTH` for the standalone `cpp_tui` binary.
-- Details: `doc/tui_design.md`.
+- Session sidebar: rows with active marker and `[N]` count, a per-row menu (Rename/Delete), and an fzf-style fuzzy filter over title + preview. New/Delete are guard-and-skipped while busy; a pending session switch defers to a single last-click-wins slot. Mutually exclusive with the pipeline panel.
+- Persistent messages render a derived header `[NR] <summary> [TIME]` (D side only): NR is the 1-based ordinal among displayed persistent messages, TIME the measured LLM/tool duration. Display-only lines and the one-shot CLI are undecorated.
+- Max width: `tui.maxWidth` (0 = unlimited, valid 0 or [40, 10000]) is clamped in C++ every frame. Docs: `doc/tui_design.md`.
 
 ### MCP server
 
 - MCP over stdio with JSON-RPC 2.0 (`mcp_server/`: `types.d`, `protocol.d`, `transport.d`, `package.d`), bridging to the tool registry via `descAllFunctions()` and `executeFunc()`.
-- Runs as a `std.concurrency` actor driven by value messages (`McpServerConfig`, `McpShutdown`, `McpStarted`, `McpStopped`, `McpFailed`); no shared state, and SIGINT/SIGTERM are blocked and consumed by the main thread.
+- Runs as a `std.concurrency` actor driven by value messages; no shared state, and SIGINT/SIGTERM are blocked and consumed by the main thread.
 - Methods: `initialize`, `tools/list`, `tools/call`, `ping`, `resources/list`, `prompts/list`. Tool visibility via `ReFilter` (`--include`/`--exclude`). Docs: `doc/mcp.md`.
 
 ## Testing
@@ -233,14 +227,9 @@ For a temporary experiment, add `@("my_experiment") unittest { ... }` to any mod
 
 Give every unittest an `@("...")` description - it is what `dub test` prints when the test fails.
 
-Describe the scenario (input or condition and expected outcome), not the implementation:
+Describe the scenario (input or condition and expected outcome), not the implementation: `@("0/0 escalation ladder is rejected")`, `@("a valid enum member name selects that member; an invalid one keeps the default")`.
 
-`@("0/0 escalation ladder is rejected")`
-`@("empty file names are rejected only for enabled kinds")`
-`@("a valid enum member name selects that member; an invalid one keeps the default")`
-
-Not: `@("validateConfig calls checkNudges first")` or `@("parses the value through the Nullable branch")`.
-Avoid internal jargon - the description must be readable without knowing the code's internals. Not: `@("a minArgs 0 environment forwards an empty command past the arity check for both runners")` (jargon: "runners", "arity check"). Better: `@("an environment with minArgs 0 accepts an empty command instead of rejecting it")`.
+Not: `@("validateConfig calls checkNudges first")` or `@("parses the value through the Nullable branch")`. Avoid internal jargon - the description must be readable without knowing the code's internals.
 
 ## Agent Rules
 
