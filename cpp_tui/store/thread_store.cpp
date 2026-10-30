@@ -1206,7 +1206,6 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
         ImGui::PushStyleColor(ImGuiCol_Text, ui::color(ui::ColorToken::textMid));
         renderBodyText(body, true, showTableSource);
         ImGui::PopStyleColor();
-        renderSeparator("End ", "-", ImGui::GetContentRegionMax().x - 4, true);
     } else {
         renderBodyText(body, markdown, showTableSource);
     }
