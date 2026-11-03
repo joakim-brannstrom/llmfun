@@ -38,6 +38,14 @@
 - add a menu item to navigate the RAG database
 - the title in the GUI should contain the session name
 - the session sometimes have a system prompt as its description
+- make the colors configurable for user/agent/answer
+- make the whole color schema swappable/configurable
+- make it so that a new instance with --local-setup inherit the central configuration
+- make Send configurable so enter, ctrl+enter and tab is possible to choose
+- make Pin persistent
+- make it possible to control how much is printed when it is working such as "minimal" where you only see it is working compared to "maximum" where you see everything.
+    - show changes from edit_file as a unified diff in maximal mode (expanded diff like git diff) + thinking trace + content, just the unified diff in medium mode and +/- changed lines in what file with minimum (git diff --stat).
+- add back the copy buttons in the chat window. They are more convenient when the desire is to copy everything.
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
