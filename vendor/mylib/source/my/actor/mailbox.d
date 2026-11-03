@@ -378,6 +378,38 @@ struct Address {
         return false;
     }
 
+    /** Non-destructive peek: does this address hold pending work for its
+     * single consumer?
+     *
+     * For a behavior actor the peek is `!incoming.empty()` - the incoming
+     * queue alone, the only work carrier this struct has.
+     *
+     * Single consumer: the actor's own thread peeks between process()
+     * calls, so the peek is race-free beyond the queue mutexes.
+     */
+    package bool hasPending() @safe pure nothrow const @nogc
+    in (mtx !is null) {
+        try {
+            synchronized (mtx) {
+                return !incoming.empty;
+            }
+        } catch (Exception e) {
+        }
+        return false;
+    }
+
+    /** How many messages are pending: the count twin of `hasPending` */
+    package size_t pendingCount() @safe pure nothrow const @nogc
+    in (mtx !is null) {
+        try {
+            synchronized (mtx) {
+                return incoming.length;
+            }
+        } catch (Exception e) {
+        }
+        return 0;
+    }
+
     package size_t length() @safe pure nothrow const {
         try {
             synchronized (mtx) {

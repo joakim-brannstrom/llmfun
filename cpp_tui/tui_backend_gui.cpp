@@ -8,6 +8,8 @@
 
 #include <GLFW/glfw3.h>
 
+#include <chrono>
+
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
@@ -413,6 +415,11 @@ public:
     void newFrame() override {
         // Event-waiting idle: block until input arrives or one period elapses
         // (vsync stays on), so a static window never busy-spins.
+        //
+        // Interaction with the parked loop (tui.cpp): this wait happens
+        // BEFORE the loop's own park, so a cycle costs this period plus the
+        // loop's timeout. Idle self-corrects (the wait adapts to the time
+        // already elapsed in the pump) and input storms wake this wait early.
         glfwWaitEventsTimeout(EventWaitSeconds);
         ImGui_ImplGlfw_NewFrame();
         ImGui_ImplOpenGL3_NewFrame();
@@ -466,6 +473,13 @@ public:
     BackendKind kind() const override { return BackendKind::Gui; }
 
     bool shouldClose() const override { return window != nullptr && glfwWindowShouldClose(window); }
+
+    void waitEvents(std::chrono::milliseconds timeout) override {
+        // GLFW wakes on input natively: keys, buttons, wheel, focus and
+        // motion all end this wait early; everything else waits the full
+        // timeout. A zero duration returns immediately (pending events only).
+        glfwWaitEventsTimeout(timeout.count() / 1000.0);
+    }
 
     bool captureNextFramePpm(const std::string& path) override {
         if (window == nullptr || path.empty())

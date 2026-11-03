@@ -107,7 +107,7 @@ private class RecordingTUIListener : TUIListener {
 /// Drives an actor instance directly on the test thread: own address +
 /// ActorShell, no System. spawn! returns a TypedAddress and my.actor
 /// exposes no path from an address back to the instance, so tests needing
-/// instance-state setup (query_, the session stash, nextUpdate - the
+/// instance-state setup (query_, the session stash - the
 /// package seams in package.d) drive the shell themselves. The test thread
 /// is the actor thread (no field synchronization), and process() is called
 /// with a frozen fake clock (starts at 0, +1msecs per call) so the delayed
@@ -184,7 +184,7 @@ unittest {
 /// RecordingTUIListener and a headless TextUserInterfaceActor (real C
 /// state, no backend) on their own shells; the actor shell is
 /// bootstrapped unless `bootstrap` is false (onSpawn ran, first tick
-/// armed) - the listener shell's first tick runs on the first drive().
+/// queued) - the listener shell's first tick runs on the first drive().
 /// The startup-failure test passes false to inject `startupError` before
 /// onSpawn. The caller must kill() both.
 private final class TuiDriveFixture {
@@ -204,8 +204,9 @@ private final class TuiDriveFixture {
                 Path.init, 80, tuiCreateState());
         dActor = new DrivenActor!TextUserInterfaceActor(actor);
 
-        // Bootstrap: onSpawn runs and arms the repeating self-tick at
-        // real-time + UpdateInterval (never due under the frozen clock).
+        // Bootstrap: onSpawn queues the first continuation tick AND the
+        // fixture's process() dispatches it - the first frame renders here
+        // (updateCycle 1); the mailbox then holds exactly the re-armed tick.
         if (bootstrap)
             dActor.process();
     }
@@ -274,19 +275,143 @@ unittest {
     f.teardown();
 }
 
-@("TUI actor: render branch")
+@("TUI actor: renders happen on ticks; a uiMsg dispatch never renders")
 unittest {
     auto f = new TuiDriveFixture();
 
-    // Package seam: arm the render branch one tick in the past (headless:
-    // the C backend no-ops, this exercises the poll/render bookkeeping).
-    auto armed = Clock.currTime - 1.dur!"msecs";
-    f.actor.nextUpdate = armed;
-    f.drive();
+    f.drive(); // pops the re-armed tick: peek sees the queued message -> non-parking render
+    assert(f.actor.updateCycle == 2,
+            "render must have run (the bootstrap tick rendered first, this drive's tick saw the message)");
 
-    auto advanced = f.actor.nextUpdate - armed;
-    assert(advanced >= 9.dur!"msecs", "render branch should have run (nextUpdate advanced)");
-    assert(advanced <= 30.dur!"msecs", "at most one render per drive (no double advance)");
+    f.drive(); // pops the message: NO render - a uiMsg dispatch only mutates state
+    assert(f.actor.updateCycle == 2, "a uiMsg dispatch must not render - the follow-up tick does");
+    f.dActor.process(); // pops the re-armed tick: parked render; re-arms
+    assert(f.actor.updateCycle == 3, "the follow-up tick renders once");
+    f.teardown();
+}
+
+@("TUI actor: parked render still runs the polls")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // The bootstrap tick was already dispatched by the fixture; a bare
+    // process() pops the re-armed one: the mailbox is clean at postProcess ->
+    // render(!false) parks inside the C call (headless: no backend, the
+    // parked entry returns immediately). The updateCycle advance proves the
+    // parked pass returned and the polls after it ran.
+    f.dActor.process();
+    assert(f.actor.updateCycle == 2, "parked render must return and run the polls");
+    f.teardown();
+}
+
+@("TUI actor: hasPending peeks the mailbox without consuming")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // Queue a message without driving: the package seam must see it, be
+    // non-destructive, and keep seeing it while the re-armed tick is in front
+    // (the bootstrap tick was already dispatched; each process pops the tick,
+    // peeks the queued message, renders non-parking, and re-arms).
+    dynSend(f.dActor.address, "uiMsg", UiStatusText("x"));
+    assert(f.actor.hasPending(), "a queued message must flag pending");
+    assert(f.actor.hasPending(), "peek must be non-destructive");
+    f.dActor.process(); // pops the re-armed tick: peek sees the message, renders
+    assert(f.actor.hasPending(), "the peeked message is still queued");
+    assert(f.actor.pendingCount() == 2, "the peeked message + the re-armed tick");
+    f.dActor.process(); // pops the message: consumed, no re-queue for externals
+    assert(f.actor.pendingCount() == 1, "the message is gone - exactly the re-armed tick remains");
+    f.teardown();
+}
+
+@("TUI actor: uiMsg dispatches send no self-ticks")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // The bootstrap tick re-arms after each dispatch, so the mailbox always
+    // holds exactly the one re-armed tick - a leftover self-tick sent from a
+    // uiMsg handler would pile up on top of it.
+    f.drive(); // pops the re-armed tick: peek sees the message -> non-parking render; re-arm
+    assert(f.actor.updateCycle == 2);
+    assert(f.actor.pendingCount() == 2, "the external message + the re-armed tick");
+    f.drive(); // pops the message: NO render (a uiMsg dispatch runs no postProcess), no re-arm
+    assert(f.actor.updateCycle == 2, "a uiMsg dispatch must not render - the follow-up tick does");
+    assert(f.actor.pendingCount() == 2,
+            "an external dispatch must not enqueue a tick - the second external + the re-armed tick remain");
+    f.teardown();
+}
+
+@("TUI actor: external messages never enqueue ticks")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // The ONLY send site is the uiTick tail, which re-arms after every
+    // dispatch. Driving external messages must never ADD a tick beyond
+    // that re-arm - a postProcess tail-send would permanently add one per
+    // external message.
+    f.drive(); // pops the re-armed tick: peek sees the message -> non-parking render; re-arm
+    assert(f.actor.updateCycle == 2);
+    assert(f.actor.pendingCount() == 2, "the external message + the re-armed tick");
+    f.drive(); // pops the message: NO render (a uiMsg dispatch runs no postProcess); no re-arm
+    assert(f.actor.updateCycle == 2, "a uiMsg dispatch must not render - the follow-up tick does");
+    assert(f.actor.pendingCount() == 2, "the second external + the re-armed tick");
+    f.dActor.process(); // pops the re-armed tick: parked render; re-arms
+    assert(f.actor.updateCycle == 3, "the follow-up tick renders once");
+    assert(f.actor.pendingCount() == 2, "the external + the re-armed tick remain");
+    f.dActor.process(); // pops the external: no render, no re-arm
+    assert(f.actor.updateCycle == 3, "the last external does not render");
+    assert(f.actor.pendingCount() == 1, "the burst drained: exactly the re-armed tick remains");
+    f.teardown();
+}
+
+@("TUI actor: the re-armed tick keeps exactly one tick in flight")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // The mailbox must hold at most one SELF tick in flight plus whatever
+    // externals are still queued - the re-arm never accumulates (a
+    // postProcess tail-send leaks one tick per external message). The
+    // bootstrap tick is already queued by onSpawn and dispatched by the
+    // fixture; an extra uiTick here plays an in-flight one.
+    dynSend(f.dActor.address, "uiTick");
+    f.dActor.process(); // pops the bootstrap tick: parks; re-arms
+    assert(f.actor.updateCycle == 2, "the bootstrap tick rendered");
+    assert(f.actor.pendingCount() == 2,
+            "the re-armed tick + the external one - at most one self tick in flight");
+    f.dActor.process(); // pops the external tick: parks (the first chain's
+    // re-arm is queued); re-arms
+    assert(f.actor.updateCycle == 3);
+    assert(f.actor.pendingCount() == 2, "a manual uiTick send (out of contract - production has no second "
+            ~ "sender) forks a second re-arm chain: two self-ticks, never a third");
+    f.teardown();
+}
+
+@("TUI actor: a burst plus a tick drains down to exactly the re-armed tick")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // At the final state (onSpawn queues the bootstrap tick and the fixture
+    // dispatches it): the burst drains via the single re-arm chain - uiMsg
+    // dispatches neither render nor re-arm, the ticks do.
+    dynSend(f.dActor.address, "uiMsg", UiStatusText("m1"));
+    dynSend(f.dActor.address, "uiMsg", UiStatusText("m2"));
+    dynSend(f.dActor.address, "uiTick");
+    f.dActor.process(); // pops the bootstrap tick (front): peek [m1, m2, tick] -> non-parking render; re-arm
+    assert(f.actor.updateCycle == 2);
+    assert(f.actor.pendingCount() == 4, "m1 + m2 + the external tick + the re-armed tick");
+    f.dActor.process(); // pops m1: NO render (a uiMsg dispatch runs no postProcess); no re-arm
+    assert(f.actor.updateCycle == 2, "a uiMsg dispatch must not render - the follow-up tick does");
+    assert(f.actor.pendingCount() == 3);
+    f.dActor.process(); // pops m2: still no render, no re-arm
+    assert(f.actor.updateCycle == 2);
+    assert(f.actor.pendingCount() == 2);
+    f.dActor.process(); // pops the external tick: parked render (only the re-armed
+    // tick is left); re-arms (the second chain)
+    assert(f.actor.updateCycle == 3);
+    assert(f.actor.pendingCount() == 2,
+            "two re-arm chains - one per self-tick source; never a third");
+    f.dActor.process(); // pops the re-armed tick: parked (the other re-armed tick queued); re-arms
+    assert(f.actor.updateCycle == 4, "each parked pass still advances the cycle");
+    assert(f.actor.pendingCount() == 2);
     f.teardown();
 }
 
@@ -301,8 +426,8 @@ unittest {
     assert(f.listener.startupFailure == "boom", "listener must receive uiStartupFailed(reason)");
     assert(f.listener.terminated == 0, "no terminate expected");
 
-    // No frame tick was armed: with one, the due tick below would run
-    // uiTick -> postProcess and render (updateCycle would advance).
+    // No tick was sent: with one, the due processAt below would dispatch it
+    // and run uiTick -> postProcess and render (updateCycle would advance).
     f.dActor.processAt(Clock.currTime + 1.dur!"seconds");
     assert(f.actor.updateCycle == 0, "a failed startup must not arm the frame tick");
 
@@ -313,19 +438,41 @@ unittest {
 unittest {
     auto f = new TuiDriveFixture();
 
-    // Package seam: a frame reported user-terminated (GUI window close).
     f.actor.ui.userTerminated_ = true;
-    f.actor.nextUpdate = Clock.currTime - 1.dur!"msecs";
-    f.drive(); // render branch -> sees the flag -> uiTerminate
+    f.drive(); // render -> sees the flag -> uiTerminate
 
     assert(f.listener.terminated == 1, "uiTerminated must be dispatched once");
 
     // A later message must not re-run the handshake (running is false; the
     // exit is already on its way).
-    f.actor.nextUpdate = Clock.currTime - 1.dur!"msecs";
     f.drive();
     assert(f.listener.terminated == 1, "no duplicate uiTerminated");
 
+    f.teardown();
+}
+
+@("TUI actor: an in-flight tick after uiTerminate skips the work and re-arms nothing")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // The `running` guard at the top of uiTick is the chain stopper.
+    // Terminate first (the re-armed tick - the bootstrap tick was already
+    // dispatched by the fixture ctor - runs the exit handshake), then dispatch
+    // one more tick: it skips the work and re-arms nothing - which is exactly
+    // what ends the chain (the single send site at the uiTick tail never runs
+    // again).
+    f.actor.ui.userTerminated_ = true;
+    f.dActor.process(); // the re-armed tick: parked render -> sees the flag -> uiTerminate
+    f.dListener.process(); // deliver the uiTerminated channel message
+    assert(f.listener.terminated == 1, "uiTerminated must be dispatched once");
+    assert(f.actor.updateCycle == 1, "the setup tick's render; the in-test tick contributed 0");
+    assert(!f.actor.hasPending(), "the chain stopped");
+
+    dynSend(f.dActor.address, "uiTick"); // an in-flight tick
+    f.dActor.process();
+    assert(f.actor.updateCycle == 1, "the skipped tick must not render");
+    assert(f.listener.terminated == 1, "no duplicate uiTerminated");
+    assert(f.actor.pendingCount() == 0, "the skipped tick re-armed nothing");
     f.teardown();
 }
 

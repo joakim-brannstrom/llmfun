@@ -10,9 +10,12 @@
 #include "imgui/imgui.h"
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <poll.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -76,7 +79,7 @@ public:
         // has ICANON/ECHO on, so writing it back here would undo cbreak() - and
         // put the saved settings back on shutdown. Ctrl+C is unaffected: ISIG
         // stays on, so it remains the terminal's SIGINT (design §6.7, C-07).
-        struct termios current{};
+        struct termios current {};
         if (tcgetattr(STDIN_FILENO, &current) == 0) {
             current.c_iflag &= ~static_cast<tcflag_t>(IXON);
             if (tcsetattr(STDIN_FILENO, TCSANOW, &current) == 0)
@@ -126,11 +129,31 @@ public:
 
     bool shouldClose() const override { return false; }
 
+    void waitEvents(std::chrono::milliseconds timeout) override {
+        if (timeout <= std::chrono::milliseconds::zero())
+            return;
+        // Input wakes the wait early: a byte on stdin - a key, an escape
+        // sequence or a mouse report the line discipline queued - makes stdin
+        // readable, and poll() returns the moment it is. It consumes nothing:
+        // the next NewFrame's getch() reads what arrived. Not a tty (a
+        // headless run): nothing can arrive, so sleep the timeout out instead
+        // of spinning on an EOF-readable stdin (poll reports POLLIN for EOF).
+        if (!isatty(STDIN_FILENO)) {
+            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(timeout);
+            const auto rest = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout - secs);
+            const timespec ts{static_cast<time_t>(secs.count()), static_cast<long>(rest.count())};
+            nanosleep(&ts, nullptr);
+            return;
+        }
+        pollfd pfd{STDIN_FILENO, POLLIN, 0};
+        poll(&pfd, 1, static_cast<int>(timeout.count()));
+    }
+
 private:
     ImTui::TScreen* screen = nullptr;
     /// Terminal settings captured before `ImTui_ImplNcurses_Init()` touched the
     /// tty; restored in shutdown() when `ixonCleared`.
-    struct termios savedTermios{};
+    struct termios savedTermios {};
     bool hasSavedTermios = false;
     bool ixonCleared = false;
 };
