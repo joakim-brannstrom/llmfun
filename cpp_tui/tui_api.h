@@ -417,6 +417,41 @@ void tuiBackendRender(TuiState* state);
  */
 int tuiRender(TuiState* state);
 
+/* The parked render entry.
+ *
+ * One call = one pump + render + present cycle: pumps backend input and
+ * begins a new ImGui frame (tuiBackendNewFrame), renders, presents, and -
+ * when `blocking` is non-zero - waits one FramePace (16 ms, ~60 fps)
+ * inside the call. Input wakes the wait early. The user-terminated
+ * condition (the quit chord or the GUI window close) returns before any
+ * wait, so the caller's loop ends through its normal handshake.
+ *
+ * blocking = 0 never waits: one pump + render + present, then return.
+ *
+ * None-safety: a NULL state, an uninitialized state, or a state with no
+ * backend attached is inert - returns without touching anything.
+ *
+ * Distinct C symbol: the C API is extern "C" - no overloading - so the
+ * parked entry cannot share the tuiRender name.
+ *
+ * Frame-thread only, like tuiRender.
+ */
+void tuiRenderBlocking(TuiState* state, int blocking);
+
+/* Peek the user-terminated condition the frame loop just observed: the quit
+ * chord (the palette's Quit row, the keymap's quit chord) or the GUI window
+ * close.
+ *
+ * Non-consuming, like tuiIsSubmitReady: the condition stays
+ * set - the actor is exiting and nothing resets it.
+ *
+ * None-safety: a NULL state, an uninitialized state, or a state with no
+ * backend attached answers 0.
+ *
+ * Frame-thread only, like tuiRender.
+ */
+int tuiQuitRequested(const TuiState* state);
+
 /* Get the backend currently attached to the state as a TuiBackendKind.
  *
  * Returns TuiBackendKind_None for a NULL state or an uninitialized
@@ -827,15 +862,6 @@ int tuiIsSessionActionReady(TuiState* state);
  * state is NULL.
  */
 SessionAction tuiGetSessionAction(TuiState* state);
-
-/* Reports whether the frame we just rendered consumed at least one input
- * event (mouse, key, ...). If so, more input is likely to arrive: the next
- * frame should be rendered immediately instead of waiting for the refresh
- * interval.
- *
- * Returns 1 if the last rendered frame consumed input, 0 otherwise.
- * */
-int tuiHasMoreEvents();
 
 /* Run cancellation (MVP, task 3).
 

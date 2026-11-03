@@ -3,6 +3,7 @@
 /// created via the make*Backend factories and owned by the caller.
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <string>
 
@@ -54,6 +55,14 @@ struct Backend {
 
     /// true once the backend observed an exit request (window close; Ctrl+C stays core-side).
     virtual bool shouldClose() const = 0;
+
+    /// Wait for up to `timeout`; return early when input arrives (a key, button,
+    /// wheel, focus or motion event). Never returns early for any other reason.
+    ///
+    /// The parked render-or-park loop's idle wait: a
+    /// clean-idle frame parks here instead of busy-polling, input wakes the wait
+    /// early. A zero duration doesn't block.
+    virtual void waitEvents(std::chrono::milliseconds timeout) = 0;
 
     /// Write the NEXT rendered frame to `path` as a binary PPM (P6, 8 bit per
     /// channel). GUI only: the pixel profile is the only backend that has pixels

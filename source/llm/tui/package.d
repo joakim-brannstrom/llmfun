@@ -362,10 +362,6 @@ struct TextUserInterface {
         tuiDestroyState(tuiState);
     }
 
-    bool hasMoreEvents() {
-        return tuiHasMoreEvents() == 1;
-    }
-
     void addChatMessage(string msg, string thinking, TuiChatMessageType type,
             size_t nr, MessageTime time) {
         string summary;
@@ -545,13 +541,7 @@ struct TextUserInterface {
         return userTerminated_;
     }
 
-    void render() {
-        tuiBackendNewFrame(tuiState);
-
-        if (tuiRender(tuiState) == 0) {
-            userTerminated_ = true;
-        }
-
+    void render(bool blocking = false) {
         auto status = String(statusText.ptr, statusText.length);
         tuiSetStatusText(tuiState, status);
 
@@ -564,11 +554,12 @@ struct TextUserInterface {
 
         tuiLogToTui(logSwap, tuiState);
 
-        // It runs after the frame has drawn, so a `/rawlog` or an `Esc` in
-        // this frame is already reflected in the flag.
         syncRawLogLevel();
 
-        tuiBackendRender(tuiState);
+        tuiRenderBlocking(tuiState, blocking ? 1 : 0);
+
+        if (tuiQuitRequested(tuiState) != 0)
+            userTerminated_ = true;
     }
 }
 
@@ -656,13 +647,10 @@ class TextUserInterfaceActor : TUICommands {
         TypedAddress!TUIListener listenerAddress;
         Channel!TUIListener listener;
 
-        immutable SlowUpdateInterval = 10.dur!"msecs";
-        immutable FastUpdateInterval = 2.dur!"msecs";
-
-        // Guards uiTick(): a due tick entry may still be dispatched after
-        // uiTerminate (cancelTick drops the pending one; an in-flight one
-        // runs once) - skip the poll/render work rather than touch the
-        // torn-down UI.
+        // Guards uiTick(): the chain stopper. An in-flight tick may still be
+        // dispatched after uiTerminate - skip the poll/render work rather than
+        // touch the torn-down UI. No repeating entry exists anymore, so
+        // nothing needs canceling.
         bool running = true;
     }
 
@@ -695,8 +683,6 @@ class TextUserInterfaceActor : TUICommands {
 
         string pendingActionId;
         string pendingActionTitle;
-
-        SysTime nextUpdate;
     }
 
     // Production path: create the C state now (no backend); the backend
@@ -774,20 +760,18 @@ class TextUserInterfaceActor : TUICommands {
 
         this.selfRef = selfRef;
         listener = typeof(listener)(listenerAddress, this.selfRef);
-        // Production path: attach the backend HERE, on the actor's own
-        // thread (see the ctor note); the test seam may have injected a
-        // startup error before spawn, in which case no init is attempted.
+        // attach the backend HERE, on the actor's own thread.
         if (initPending && startupError.empty)
             attachBackend();
         if (!startupError.empty) {
             listener.uiStartupFailed(startupError);
             return;
         }
-        selfRef.scheduleRepeating(SlowUpdateInterval, "uiTick");
+        dynSend(selfRef.address, "uiTick");
     }
 
     void onExit(ExitMsg _) {
-        ui = TextUserInterface.init; // dtor: tuiDestroyState
+        ui = TextUserInterface.init;
     }
 
     void onException(Exception e) {
@@ -798,30 +782,42 @@ class TextUserInterfaceActor : TUICommands {
         logger.warning("TUI actor error: ", e.reason.to!string);
     }
 
-    // Must be called by every message handler except uiTerminate. Polls the
-    // pending user query and at most one session action, then renders if due.
+    /** Non-destructive peek over the actor's mailbox before the render -
+     * pending work means the render must not park.
+     */
+    package bool hasPending() @safe {
+        return selfRef.hasPending();
+    }
+
+    /** How many incoming messages are pending: the count twin of the
+     * `hasPending()` peek above (same incoming-only semantics - see there
+     * for the stash/delayed/repeating reasoning). The mailbox must hold
+     * exactly the one re-armed tick, never an accumulated pile. */
+    package size_t pendingCount() @safe {
+        return selfRef.pendingCount();
+    }
+
+    // Must be called by every message handler except uiTerminate. Renders -
+    // parking inside the C call when the mailbox is clean (no pending work) -
+    // then polls the pending user query and at most one session action (the
+    // polls harvest what the C++ side collected during the park).
     private void postProcess() {
         import std.string : strip;
 
-        // it is only worth processing the rest of the method if render() has
-        // been called because the rest of the function react on "input" that
-        // is updated by render via imgui.
-        if (Clock.currTime > nextUpdate) {
-            ui.render();
-            nextUpdate = Clock.currTime + SlowUpdateInterval;
-        } else {
-            return;
-        }
+        const pending = hasPending();
+        ui.render(!pending);
 
-        // GUI window close: the C frame reports user-terminated
-        // (tuiRender returned 0). Run the same exit handshake as the
-        // app-initiated uiTerminate (final render + notify + exit).
+        // GUI window close / quit chord: the parked entry answers the
+        // user-terminated condition (tuiQuitRequested). Run the same exit
+        // handshake as the app-initiated uiTerminate (final render + notify +
+        // exit).
         if (ui.hasUserTerminated()) {
             uiTerminate();
             return;
         }
 
         ++updateCycle;
+
         auto query = ui.userQuery();
 
         // Composer Stop / Esc (task 3): one poll per rendered frame, before the
@@ -869,54 +865,44 @@ class TextUserInterfaceActor : TUICommands {
         if (pendingAction == TuiSessionAction_None) {
             ui.pollSessionAction(pendingAction, pendingActionId, pendingActionTitle);
         }
-
-        if (ui.hasMoreEvents()) {
-            dynSend(selfRef.address, "uiTick");
-            nextUpdate = Clock.currTime + FastUpdateInterval;
-        }
     }
 
-    // Repeating self-tick target (armed in onSpawn). The shell dispatches
-    // this at every interval and re-arms after each fire; the render cadence
-    // is still gated by nextUpdate inside postProcess.
     void uiTick() {
-        if (running)
-            postProcess();
+        if (!running)
+            return; // in-flight tick after uiTerminate: skip the work
+        scope (exit) {
+            if (running)
+                dynSend(selfRef.address, "uiTick");
+        }
+        postProcess();
     }
 
     void uiMsg(UiChatMessage a) {
         ui.addChatMessage(a.msg, null, a.type, a.nr, a.time);
-        postProcess;
     }
 
     void uiMsg(UiChatThinkMessage a) {
         ui.addChatMessage(a.msg, a.thinking, a.type, a.nr, a.time);
-        postProcess;
     }
 
     void uiMsg(UiFinalAnswer a) {
         ui.addChatMessage(a.msg, null, TuiChatMessageType_FinalAnswer, a.nr, a.time);
-        postProcess;
     }
 
     void uiMsg(UiStatusText a) {
         ui.setStatusText(a.status);
-        postProcess;
     }
 
     void uiMsg(UiInitHistory m) {
         ui.setHistory(m.queries);
-        postProcess();
     }
 
     void uiMsg(UiSessionList m) {
         ui.setSessionList(m.items);
-        postProcess();
     }
 
     void uiMsg(UiStreamChatMessage m) {
         ui.streamChat(m.msg, m.thinking);
-        postProcess();
     }
 
     void uiMsg(UiLogFile a) {
@@ -926,52 +912,44 @@ class TextUserInterfaceActor : TUICommands {
 
     void uiMsg(UiPipelineStreamChatMessage m) {
         ui.pipelineMessage(m);
-        postProcess();
     }
 
     void uiMsg(UiPipelineStreamDone m) {
         ui.pipelineMessage(m);
-        postProcess();
     }
 
     void uiStreamChatDone() {
         ui.streamChatDone();
-        postProcess();
     }
 
     void uiPipelineClear() {
         ui.pipelineClear();
-        postProcess();
     }
 
     void uiClearChat() {
         ui.clearChat;
-        postProcess;
     }
 
     void uiAgentBusy() {
         ui.setReadyStatus(false);
-        postProcess;
     }
 
     void uiAgentReady() {
         ui.setReadyStatus(true);
         playNotification();
-        postProcess;
     }
 
     // Termination handshake: final render, async-notify the agent, exit.
     // Idempotent: the window-close path can observe user-terminated on later
     // frames before the exit message is processed; only the first call runs
-    // (running flips false and later calls no-op). cancelTick keeps the
-    // zombie quiescent: without it the shell would keep re-arming due ticks
-    // (uiTick no-ops via `running`) until the system shuts the actor down at
-    // process exit.
+    // (running flips false and later calls no-op).
+    //
+    // No repeating entry exists anymore, so nothing needs canceling - the
+    // `running` guard at the top of uiTick is what stops the chain.
     void uiTerminate() {
         if (!running)
             return;
         running = false;
-        selfRef.cancelTick();
         ui.render();
         listener.uiTerminated();
         sendExit(selfRef.address, ExitReason.userShutdown);

@@ -642,6 +642,19 @@ bool tuiIsTextGrid();
 /// Render one frame. Returns false to exit.
 bool tuiRender(TuiState& state);
 
+/// The render entry: one pump + render + present cycle. `blocking=false`
+/// returns after at most one pump + render + present cycle and never waits;
+/// `blocking=true` waits inside the call for one FramePace (16 ms,
+/// ~60 fps) - input wakes the wait early (`Backend::waitEvents`). The
+/// user-terminated condition (the quit chord or the GUI window close) returns
+/// before any wait, so the caller's loop ends through its normal handshake.
+///
+/// None-safety: a backend-less state is inert - the entry returns before
+/// any work.
+///
+/// Frame-thread only, like tuiRender.
+void tuiRenderBlocking(TuiState& state, bool blocking);
+
 /// Set the logging to on/off. Must be done before tuiRender is called.
 ///
 /// On: opens the archive lazily at the first line and clears a previous failed-open/write
@@ -806,10 +819,5 @@ void tuiResetSubmit(TuiState& state);
 /// Distinction: tuiGetInput() returns the current editable buffer;
 /// tuiGetSubmitQuery() returns the last submitted query (read-only snapshot).
 std::string tuiGetSubmitQuery(const TuiState& state);
-
-/// Reports whether the frame we just rendered consumed at least one input
-/// event (mouse, key, ...). If so, more input is likely to arrive: render
-/// the next frame immediately instead of waiting for the refresh interval.
-bool tuiHasMoreEvents();
 
 } // namespace llmfun::tui

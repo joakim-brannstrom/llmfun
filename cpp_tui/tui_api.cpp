@@ -304,6 +304,19 @@ int tuiRender(TuiState* state) {
     return (continueRender && !state->inner->backend->shouldClose()) ? 1 : 0;
 }
 
+void tuiRenderBlocking(TuiState* state, int blocking) {
+    if (!state || !state->inner || !state->inner->backend)
+        return;
+    ::llmfun::tui::tuiRenderBlocking(*state->inner, blocking != 0);
+}
+
+int tuiQuitRequested(const TuiState* state) {
+    if (!state || !state->inner)
+        return 0;
+    const auto& inner = *state->inner;
+    return (inner.quitRequested || (inner.backend && inner.backend->shouldClose())) ? 1 : 0;
+}
+
 /* Compile-time linkage between the C enums (tui_api.h) and the internal C++
  * mirror (tui_backend.h): both lists are append-only and must stay in sync,
  * or tuiBackendActive would silently mis-report the attached backend.
@@ -812,8 +825,6 @@ SessionAction tuiGetSessionAction(TuiState* state) {
         out.title = String_NewBuf(a.title.data(), a.title.size());
     return out;
 }
-
-int tuiHasMoreEvents() { return ::llmfun::tui::tuiHasMoreEvents() ? 1 : 0; }
 
 #ifdef __cplusplus
 }

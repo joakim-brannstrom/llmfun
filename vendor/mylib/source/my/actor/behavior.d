@@ -44,6 +44,23 @@ struct ActorRef {
         return kernel_ !is null ? kernel_.address : WeakAddress.init;
     }
 
+    /** Non-destructive peek (design §4.3, task 5): are messages waiting for
+     * this actor? The parked render entry (T5) decides blocking from it.
+     * Delegates to the address's `hasPending` (incoming mailbox only - see
+     * there for the stash/delayed reasoning). */
+    bool hasPending() @safe {
+        const addr = kernel_.addr.get;
+        return addr !is null && addr.hasPending;
+    }
+
+    /** How many messages are pending: the count twin of `hasPending` above
+     * (same incoming-only peek, as a count). Delegates to the address's
+     * `pendingCount`. */
+    size_t pendingCount() @safe {
+        const addr = kernel_.addr.get;
+        return addr !is null ? addr.pendingCount : 0;
+    }
+
     /** Arm a repeating self-tick: `method(args...)` is invoked on this
      * actor's thread every `interval`. At most one pending tick at a time
      * (it re-arms itself on fire). The first fire is at +`interval`, never

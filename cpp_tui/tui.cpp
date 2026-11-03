@@ -16,6 +16,7 @@
 
 #include "tui_api.h" // String / TuiLogRecord: the ABI's own view of a record (toInbound)
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -996,6 +997,36 @@ bool tuiRender(TuiState& state) {
     return true;
 }
 
+namespace {
+
+inline constexpr std::chrono::milliseconds FramePace{16};
+
+/// The park wait: wait up to `timeoutMs`; input wakes the wait early
+void waitEvents(TuiState& state, std::chrono::milliseconds timeout) {
+    state.backend->waitEvents(timeout);
+}
+
+} // namespace
+
+void tuiRenderBlocking(TuiState& state, bool blocking) {
+    if (!state.backend)
+        return;
+
+    debugMarkFrameThread(state);
+
+    state.backend->newFrame();
+
+    const bool continueRender = tuiRender(state);
+
+    if (continueRender)
+        state.backend->renderFrame();
+
+    if (!blocking || !continueRender || state.quitRequested || state.backend->shouldClose())
+        return;
+
+    waitEvents(state, FramePace);
+}
+
 void tuiSetLogging(TuiState& state, bool onOff) {
     state.isLogActive = onOff;
     if (onOff) {
@@ -1113,11 +1144,6 @@ void saveUiConfOnShutdown(TuiState& state) {
 void tuiInitQueryHistory(TuiState& state, const std::vector<std::string>& history) {
     state.userQuery.inputHistory = history;
     state.userQuery.historyPos = -1;
-}
-
-bool tuiHasMoreEvents() {
-    auto ctx = ImGui::GetCurrentContext();
-    return ctx != nullptr && ctx->InputEventsTrail.Size > 0;
 }
 
 } // namespace llmfun::tui

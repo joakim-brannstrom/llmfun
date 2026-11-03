@@ -22,6 +22,8 @@
 //   - tuiDestroyState(NULL) and destroy-without-init are safe no-ops, and an
 //     ImGui context created by a test harness itself survives a state
 //     destroy;
+//   - tuiRenderBlocking(NULL / none-state)
+//     is inert: a no-op park a headless test can call and return from;
 //   - failed Gui init with a forced-empty display env (DISPLAY and
 //     WAYLAND_DISPLAY unset): non-zero return, non-empty tuiLastError(), the
 //     state stays backend-less, the call is retryable (no "already
@@ -33,6 +35,9 @@
 //   - PTY stdio (both ends TTYs) -> Auto falls back to the terminal backend:
 //     the pinned stderr line and the backend note are checked, a live TUI
 //     frame is rendered, and the single-init guards are pinned.
+//   - tuiRenderBlocking on a live TUI backend in non-blocking mode:
+//     one pump + render + present cycle, then return - never waits (a hang
+//     dies on the child's alarm / the parent-side deadline);
 //   - pipe/`/dev/null` stdio (no TTY) -> Auto fails with the GUI error and
 //     does NOT fall back (checked as: the Auto failure text is byte-identical
 //     to the Gui-mode failure text from the same child).
@@ -134,6 +139,15 @@ void caseNoneStateInert() {
     expect(tuiRender(nullptr) == 0, "tuiRender(NULL) == 0 (exit; v3 convention)");
     expect(tuiRender(state) == 1, "tuiRender(none-state) == 1 (continue; inert, no ImGui access)");
     expect(ImGui::GetCurrentContext() == nullptr, "tuiRender(none-state) left ImGui untouched");
+
+    // tuiRenderBlocking: a backend-less state is inert - a no-op
+    // park, callable headlessly. blocking=false and blocking=1 both return
+    // without touching anything.
+    tuiRenderBlocking(state, 0);
+    tuiRenderBlocking(state, 1);
+    tuiRenderBlocking(nullptr, 1);
+    expect(ImGui::GetCurrentContext() == nullptr,
+           "tuiRenderBlocking(none-state) left ImGui untouched");
 
     tuiDestroyState(state);
 }
@@ -562,6 +576,45 @@ int childPtyAuto() {
     return 0;
 }
 
+// Child: tuiRenderBlocking in non-blocking mode on a live TUI
+// backend: one pump + render + present cycle, then return - never waits. The
+// deadline machinery is the assertion: a hang here dies on the child's alarm
+// and the parent-side deadline, so "returns" is the whole check.
+int childPtyNonBlocking() {
+    setenv("TERM", "xterm-256color", 1);
+    if (!setupPtyStdio()) {
+        std::fprintf(stderr, "child: pty setup failed\n");
+        return 90;
+    }
+
+    TuiState* state = tuiCreateState();
+    if (!state) {
+        std::fprintf(stderr, "child: tuiCreateState failed\n");
+        return 10;
+    }
+    if (tuiInit(state, TuiBackendMode_Tui) != 0) {
+        String err = tuiLastError();
+        std::fprintf(stderr, "child: tuiInit(Tui) failed: %s\n", toStd(err).c_str());
+        String_Free(err);
+        return 11;
+    }
+    if (tuiBackendActive(state) != TuiBackendKind_Tui) {
+        std::fprintf(stderr, "child: expected Tui kind, got %d\n", tuiBackendActive(state));
+        return 12;
+    }
+
+    // blocking=false: at most one pump + render + present cycle, then return.
+    tuiRenderBlocking(state, 0);
+
+    if (tuiBackendActive(state) != TuiBackendKind_Tui) {
+        std::fprintf(stderr, "child: backend kind changed across the non-blocking call\n");
+        return 13;
+    }
+
+    tuiDestroyState(state);
+    return 0;
+}
+
 // Child: Auto mode with pipe stdio (no TTY) and a forced-empty display env —
 // must fail with the GUI error and not attempt the TUI.
 int childPipeAuto() {
@@ -687,6 +740,8 @@ int runChildMode(const char* mode) {
         return childPipeAuto();
     if (std::strcmp(mode, "pty-auto-gui") == 0)
         return childPtyAutoGui();
+    if (std::strcmp(mode, "pty-nonblocking") == 0)
+        return childPtyNonBlocking();
     std::fprintf(stderr, "unknown child mode: %s\n", mode);
     return 99;
 }
@@ -746,7 +801,9 @@ ChildResult runChild(const char* mode) {
         }
         const auto remainingMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-        struct pollfd pfd{errPipe[0], POLLIN, 0};
+        struct pollfd pfd {
+            errPipe[0], POLLIN, 0
+        };
         const int pr = poll(&pfd, 1, static_cast<int>(remainingMs));
         if (pr < 0) {
             if (errno == EINTR)
@@ -800,6 +857,16 @@ void caseAutoTtyMatrix() {
     expect(pipe.exited && pipe.code == 0, "pipe-auto child failed: " + describeChild(pipe));
     expect(pipe.errText.find("falling back") == std::string::npos,
            "no fallback line expected for non-TTY stdio: " + describeChild(pipe));
+}
+
+// tuiRenderBlocking on a live TUI backend in non-blocking mode: the
+// forked-child harness is the deadline - a hang fails the suite instead of
+// passing it, so "the child returned" is the whole never-waits assertion.
+void caseNonBlockingRender() {
+    g_where = "case 6: tuiRenderBlocking, non-blocking on a live TUI backend";
+    ChildResult child = runChild("pty-nonblocking");
+    expect(child.exited && child.code == 0,
+           "pty-nonblocking child failed: " + describeChild(child));
 }
 
 // Member detectors for "the ABI must not carry this field". `createdAt` is
@@ -1355,7 +1422,7 @@ int main(int argc, char** argv) {
     // obstacle is a directory or a link to /dev/full, never a regular file, so a regular log
     // another case left behind is not deleted.
     std::atexit([] {
-        struct stat st{};
+        struct stat st {};
         if (::lstat("llmfun_ui_log.txt", &st) == 0 && !S_ISREG(st.st_mode))
             (void)std::remove("llmfun_ui_log.txt");
     });
@@ -1372,7 +1439,8 @@ int main(int argc, char** argv) {
     caseRuntimeStatus();
     caseDestroyBasics();
     caseFailedGuiInit();
-    caseAutoTtyMatrix();
+    caseAutoTtyMatrix();     // Auto-mode stdio fallback matrix
+    caseNonBlockingRender(); // tuiRenderBlocking, non-blocking on a live backend
 
     std::printf("OK: all v4/v5 API contract cases passed\n");
     return 0;
