@@ -999,8 +999,6 @@ bool tuiRender(TuiState& state) {
 
 namespace {
 
-inline constexpr std::chrono::milliseconds FramePace{16};
-
 /// The park wait: wait up to `timeoutMs`; input wakes the wait early
 void waitEvents(TuiState& state, std::chrono::milliseconds timeout) {
     state.backend->waitEvents(timeout);
@@ -1024,7 +1022,9 @@ void tuiRenderBlocking(TuiState& state, bool blocking) {
     if (!blocking || !continueRender || state.quitRequested || state.backend->shouldClose())
         return;
 
-    waitEvents(state, FramePace);
+    // The park timeout is per state (tuiSetIdlePark): the idle cadence is a
+    // configuration knob, not a constant.
+    waitEvents(state, state.idlePark);
 }
 
 void tuiSetLogging(TuiState& state, bool onOff) {
@@ -1042,6 +1042,15 @@ void tuiSetLogging(TuiState& state, bool onOff) {
 }
 
 void tuiSetMaxWidth(TuiState& state, int maxWidth) { state.maxWidth = maxWidth; }
+
+void tuiSetIdlePark(TuiState& state, int parkMs) {
+    // Defensive guard: config validation (D side) rejects out-of-range
+    // values; non-positive keeps the 16 ms default. 4 ms parks at ~40 fps
+    // idle (hw GL), 1000 ms at ~1 fps.
+    if (parkMs <= 0)
+        return;
+    state.idlePark = std::chrono::milliseconds(parkMs < 4 ? 4 : (parkMs > 1000 ? 1000 : parkMs));
+}
 
 void tuiSetReadyStatus(TuiState& state, bool ready) {
     // The run's own edge is where the run clock starts. D calls this once when a run begins

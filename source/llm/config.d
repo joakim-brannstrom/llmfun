@@ -112,6 +112,15 @@ struct TuiConfig {
     /// Valid values: 0 or [40, 10000] (40 = C++ MIN_TERMINAL_WIDTH; 10000
     /// caps the long->int conversion at the C API boundary).
     long maxWidth = 0;
+
+    /// Idle park timeout in ms: what a blocking render pass waits when
+    /// nothing happened in it. Only the idle cadence depends on it; input
+    /// latency is unaffected (the wait wakes early on events). Effective idle
+    /// cycle = the newFrame wait (~17 ms) + this park + the render time.
+    /// 0 = the C++ default 16 ms (the ~30 fps design cap). Valid values:
+    /// 0 or [4, 1000] (~40 fps to ~1 fps idle); e.g. 75 lands a
+    /// software-GL box near 10 fps idle.
+    long idleParkMs = 100;
 }
 
 enum NudgeKind {
@@ -1609,6 +1618,9 @@ void validateConfig(LlmConfig conf) {
     if (conf.tui.maxWidth != 0 && (conf.tui.maxWidth < 40 || conf.tui.maxWidth > 10_000))
         throw new Exception(i"tui.maxWidth must be 0 or in [40, 10000], got $(conf.tui.maxWidth)"
                 .text);
+    if (conf.tui.idleParkMs != 0 && (conf.tui.idleParkMs < 4 || conf.tui.idleParkMs > 1000))
+        throw new Exception(i"tui.idleParkMs must be 0 or in [4, 1000], got $(conf.tui.idleParkMs)"
+                .text);
 
     // Nudge policy (NudgeConfig structs), global default and per-model
     // wholesale overrides. Files of disabled kinds are neither loaded
@@ -2068,10 +2080,11 @@ codeModels:
     import std.path : buildPath;
     import std.stdio : File;
 
-    auto tmpDir = buildPath("llmfun_test", "tuintest_parse");
-    mkdirRecurse(tmpDir);
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_maxwidth_parse");
     scope (exit)
-        rmdirRecurse(tmpDir);
+        tmpDir.cleanup;
     auto tmpFile = buildPath(tmpDir, "test.yaml");
     string yaml = `tui:
   maxWidth: 255
@@ -2085,10 +2098,11 @@ codeModels:
     import std.path : buildPath;
     import std.stdio : File;
 
-    auto tmpDir = buildPath("llmfun_test", "tuintest_absent");
-    mkdirRecurse(tmpDir);
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_maxwidth_absent");
     scope (exit)
-        rmdirRecurse(tmpDir);
+        tmpDir.cleanup;
     auto tmpFile = buildPath(tmpDir, "test.yaml");
     string yaml = `codeModels:
   - modelName: test
@@ -2106,10 +2120,11 @@ codeModels:
     import std.stdio : File;
     import std.algorithm : canFind;
 
-    auto tmpDir = buildPath("llmfun_test", "tuintest_toosmall");
-    mkdirRecurse(tmpDir);
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_maxwidth_toosmall");
     scope (exit)
-        rmdirRecurse(tmpDir);
+        tmpDir.cleanup;
     auto tmpFile = buildPath(tmpDir, "test.yaml");
     string yaml = `codeModels:
   - modelName: test
@@ -2139,10 +2154,11 @@ tui:
     import std.stdio : File;
     import std.algorithm : canFind;
 
-    auto tmpDir = buildPath("llmfun_test", "tuintest_toobig");
-    mkdirRecurse(tmpDir);
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_maxwidth_toobig");
     scope (exit)
-        rmdirRecurse(tmpDir);
+        tmpDir.cleanup;
     auto tmpFile = buildPath(tmpDir, "test.yaml");
     string yaml = `codeModels:
   - modelName: test
@@ -2166,6 +2182,111 @@ tui:
     }
     assert(threw, "validateConfig must throw for maxWidth > 10000");
     assert(canFind(msg, "tui.maxWidth"), "unexpected error message: " ~ msg);
+}
+
+@("tui.idleParkMs parses from YAML into LlmConfig.tui.idleParkMs") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_idlepark_parse");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `tui:
+  idleParkMs: 75
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.idleParkMs == 75, "expected 75, got " ~ conf.tui.idleParkMs.to!string);
+}
+
+@("absent tui.idleParkMs keeps the default 0 (C++ default 16 ms stays)") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_idlepark_absent");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `tui:
+  maxWidth: 255
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.idleParkMs == 0, "expected default 0, got " ~ conf.tui.idleParkMs.to!string);
+}
+
+@("idleParkMs below 4 is rejected by validateConfig") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+    import std.algorithm : canFind;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_idlepark_toosmall");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+tui:
+  idleParkMs: 2
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.idleParkMs == 2, "parse must accept 2, got " ~ conf.tui.idleParkMs.to!string);
+    bool threw;
+    string msg;
+    try {
+        validateConfig(conf);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for idleParkMs < 4");
+    assert(canFind(msg, "tui.idleParkMs"), "unexpected error message: " ~ msg);
+}
+
+@("idleParkMs above 1000 is rejected by validateConfig") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+    import std.algorithm : canFind;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_idlepark_toobig");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+tui:
+  idleParkMs: 1001
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.idleParkMs == 1001,
+            "parse must accept 1001, got " ~ conf.tui.idleParkMs.to!string);
+    bool threw;
+    string msg;
+    try {
+        validateConfig(conf);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for idleParkMs > 1000");
+    assert(canFind(msg, "tui.idleParkMs"), "unexpected error message: " ~ msg);
 }
 
 @("the shipped example.yaml parses without the tui key; maxWidth stays 0") unittest {
