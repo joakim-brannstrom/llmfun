@@ -421,8 +421,8 @@ int tuiRender(TuiState* state);
  *
  * One call = one pump + render + present cycle: pumps backend input and
  * begins a new ImGui frame (tuiBackendNewFrame), renders, presents, and -
- * when `blocking` is non-zero - waits one FramePace (16 ms, ~60 fps)
- * inside the call. Input wakes the wait early. The user-terminated
+ * when `blocking` is non-zero - waits one idle park (16 ms default, ~30 fps
+ * design cap) inside the call. Input wakes the wait early. The user-terminated
  * condition (the quit chord or the GUI window close) returns before any
  * wait, so the caller's loop ends through its normal handshake.
  *
@@ -492,6 +492,18 @@ void tuiSetLogging(TuiState* state, int onOff);
  * tui.h). Null-safe.
  */
 void tuiSetMaxWidth(TuiState* state, int maxWidth);
+
+/* Set the idle park timeout in milliseconds: what a blocking render pass
+ * waits when nothing happened in it. Only the idle cadence depends on it -
+ * with input the wait wakes early on events, so latency is unaffected. The
+ * effective idle cycle is the newFrame wait (~17 ms) + this park + the
+ * render time; the default 16 ms gives the ~30 fps design cap (24 fps
+ * under software GL). Non-positive keeps the default. Valid values are
+ * clamped to [4, 1000] (~40 fps to
+ * ~1 fps idle); e.g. 75 ms lands a software-GL box near 10 fps idle.
+ * Null-safe.
+ */
+void tuiSetIdlePark(TuiState* state, int parkMs);
 
 /* Set the file imgui persists its settings to (io.IniFilename); the GUI
     backend stores the window size in settingsPath(filename) (imgui2.ini -> imgui2.conf).

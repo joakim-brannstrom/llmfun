@@ -408,6 +408,10 @@ struct TextUserInterface {
         tuiSetMaxWidth(tuiState, w);
     }
 
+    void setIdlePark(int ms) {
+        tuiSetIdlePark(tuiState, ms);
+    }
+
     void setReadyStatus(bool x) {
         tuiReadyStatus(tuiState, x ? 1 : 0);
     }
@@ -696,7 +700,7 @@ class TextUserInterfaceActor : TUICommands {
     // logged; the note also seeds the status line. The ui field takes the
     // state on every path so its dtor tears it down once.
     this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth,
-            TuiBackendMode mode, bool debugUi = false) {
+            TuiBackendMode mode, bool debugUi = false, long idleParkMs = 0) {
         assert(maxWidth >= 0 && maxWidth <= 10_000,
                 "maxWidth out of int-safe range: " ~ maxWidth.to!string);
         this.listenerAddress = listener;
@@ -706,6 +710,7 @@ class TextUserInterfaceActor : TUICommands {
         state = tuiCreateState();
         ui = TextUserInterface(state);
         ui.setMaxWidth(cast(int) maxWidth);
+        ui.setIdlePark(cast(int) idleParkMs);
         ui.setIniFile(iniFile);
     }
 
@@ -714,13 +719,15 @@ class TextUserInterfaceActor : TUICommands {
     // copy's dtor runs at ctor exit, then the field's dtor runs again in
     // onExit). Ownership transfers on successful return only; a throw
     // (assert) leaves the state with the caller.
-    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth, TuiState* state) {
+    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth,
+            TuiState* state, long idleParkMs = 0) {
         assert(maxWidth >= 0 && maxWidth <= 10_000,
                 "maxWidth out of int-safe range: " ~ maxWidth.to!string);
         this.listenerAddress = listener;
         this.state = state;
         ui = TextUserInterface(state);
         ui.setMaxWidth(cast(int) maxWidth);
+        ui.setIdlePark(cast(int) idleParkMs);
         ui.setUiAsStdLogger;
         ui.setIniFile(iniFile);
     }

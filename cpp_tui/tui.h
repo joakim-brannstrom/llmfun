@@ -312,6 +312,13 @@ struct TuiState {
     std::string iniFilename;
     int maxWidth = 0; // 0 = unlimited (current behavior)
 
+    /// The park timeout: what tuiRenderBlocking waits when nothing happened
+    /// in the pass. Only the idle cadence depends on it - with input the
+    /// wait wakes early on events, so latency is unaffected. The effective
+    /// idle cycle is the newFrame wait (~17 ms) + this park + the render
+    /// time; 16 ms is the ~30 fps design cap (24 fps under llvmpipe).
+    std::chrono::milliseconds idlePark{16};
+
     /// The workbench's `ui.conf` was read for this state (D-UI-CONF): the frame layer's
     /// one-shot latch, because the read happens on the first frame - the first moment the state
     /// knows its profile name - and the debounced write runs on every frame after it.
@@ -644,8 +651,8 @@ bool tuiRender(TuiState& state);
 
 /// The render entry: one pump + render + present cycle. `blocking=false`
 /// returns after at most one pump + render + present cycle and never waits;
-/// `blocking=true` waits inside the call for one FramePace (16 ms,
-/// ~60 fps) - input wakes the wait early (`Backend::waitEvents`). The
+/// `blocking=true` waits inside the call for one idle park (16 ms default,
+/// ~30 fps design cap) - input wakes the wait early (`Backend::waitEvents`). The
 /// user-terminated condition (the quit chord or the GUI window close) returns
 /// before any wait, so the caller's loop ends through its normal handshake.
 ///
@@ -670,6 +677,11 @@ void tuiSetLogging(TuiState& state, bool onOff);
 /// pixels, so a column value cannot be applied meaningfully; the window
 /// size is the cap.
 void tuiSetMaxWidth(TuiState& state, int maxWidth);
+
+/// Set the idle park timeout in ms (the C++ side. Only the idle cadence depends
+/// on it - with input the wait wakes early on events. Non-positive keeps the 16
+/// ms default; the setter clamps to [4, 1000].
+void tuiSetIdlePark(TuiState& state, int parkMs);
 
 /// Set the ready flag (run finished / run started). A transition to ready also
 /// drops the composer's Stopping latch (TuiState::cancelRequested), so the action

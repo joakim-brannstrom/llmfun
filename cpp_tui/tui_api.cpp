@@ -368,6 +368,12 @@ void tuiSetMaxWidth(TuiState* state, int maxWidth) {
     ::llmfun::tui::tuiSetMaxWidth(*state->inner, maxWidth);
 }
 
+void tuiSetIdlePark(TuiState* state, int parkMs) {
+    if (!state || !state->inner)
+        return;
+    ::llmfun::tui::tuiSetIdlePark(*state->inner, parkMs);
+}
+
 void tuiSetIniFilename(TuiState* state, String filename) {
     if (!state || !state->inner)
         return;
