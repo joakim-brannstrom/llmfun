@@ -44,19 +44,22 @@ struct ShellFrame {
     /// The preferences `layout` was computed from - the tiling the shell painted.
     ui::LayoutPrefs prefs;
     ImVec2 display = ImVec2(0.0f, 0.0f);
-    /// The inspector's open preference was `-1 auto` this frame, so the width rule (below) owns
-    /// its shape. Kept with the painted preferences because the overlay layer re-lays out from
+    /// The inspector's open preference was `-1 auto` this frame, so the auto rule (below) owns
+    /// its answer - and that answer is *closed*: a first run starts with the panel closed in
+    /// both profiles. Kept with the painted preferences because the overlay layer re-lays out from
     /// them: a rule that was applied once must be applied by the second pass too, or the
     /// palette's re-layout would open a panel the shell had closed.
     bool inspectorAuto = true;
-    /// The rail's open preference was `-1 auto` this frame - the same rule, one region over.
+    /// The rail's open preference was `-1 auto` this frame - the same kind of rule, one region
+    /// over.
     ///
     /// Below the rail's own breakpoint the shape it would get is a *panel*, which covers the
-    /// thread and the composer (design §3.3's "single column, both overlays"). A panel nobody
-    /// asked for is not what "open" means on a narrow display - the inspector's `-1 auto` rule
-    /// says the same thing and has said it since task 29 - so an automatic rail closes there and
-    /// only an explicit 1 opens the panel. Carried on the frame for the overlay layer's re-layout,
-    /// like `inspectorAuto`.
+    /// thread and the composer. A panel nobody
+    /// asked for is not what "open" means on a narrow display, so an automatic rail closes there
+    /// and only an explicit 1 opens the panel. The inspector's `-1 auto` has no shape test
+    /// - it resolves to closed at every width - so the two flags carry two different answers
+    /// and this is the only one that reads the engine's band.
+    /// Carried on the frame for the overlay layer's re-layout, like `inspectorAuto`.
     bool railAuto = true;
     /// The now bar's input exactly as this frame drew it (`views/shell.cpp` derives it once
     /// and hands it to `renderNowBar`), so a harness - and a golden - can measure the row
@@ -110,15 +113,18 @@ void closeRailSearch(model::UiState& ui);
 /// the rail's), which live here and nowhere else so the shell and the overlay layer cannot
 /// disagree about them.
 ///
-/// "Auto" - and only auto - is: docked on a display wide enough for a column, and closed where
-/// the width breakpoint would turn the region into a panel - a panel the user never asked for
-/// covers the thread *and* the composer, which is not what "open" means on a narrow screen. An
-/// *explicit* open (`Ctrl+I`/`Ctrl+B`, the palette's rows, a saved `InspectorOpen=1`/
-/// `RailOpen=1`) keeps the panel shape the engine answered, because that is what the user asked
-/// for and `Esc` closes it again (D-ESC, D-OVERLAY). The layout engine has already answered which
-/// shape this display gives the region, so the rule asks the engine instead of re-deriving a
-/// breakpoint here (D-METRICS: one owner for the geometry). `prefs` is not modified, so the same
-/// arguments always answer the same layout.
+/// The inspector's auto is *closed*, full stop: a first run - and a profile
+/// still carrying the persisted `-1` - starts with the panel closed in both profiles. An
+/// *explicit* open (`Ctrl+O`, the palette's rows, a saved `InspectorOpen=1`) keeps the panel
+/// shape the engine answered, because that is what the user asked for and `Esc` closes it again.
+///
+/// The rail's auto is the narrower rule: open wherever the display can hold
+/// a column, closed where the width breakpoint would turn the region into a panel - a panel the
+/// user never asked for covers the thread *and* the composer, which is not what "open" means on
+/// a narrow screen. The layout engine has already answered which shape this display gives the
+/// region, so the rail's rule asks the engine instead of re-deriving a breakpoint here -
+/// one owner for the geometry. `prefs` is not modified, so the same arguments
+/// always answer the same layout.
 ///
 /// `inspectorAuto`/`railAuto` are the `-1` states, which `LayoutPrefs` cannot express (its two
 /// open flags are resolved bools). The defaults are the first-run preferences, so a caller that
@@ -159,10 +165,6 @@ ShellFrame renderShell(TuiState& state, ImVec2 display);
 /// pure call on the frame an overlay opens, and none on any other frame; it uses
 /// `overlayLayoutFor()`, i.e. the tiling the shell painted - see there for why.
 void renderOverlays(TuiState& state, ShellFrame& frame);
-
-// ---------------------------------------------------------------------------
-// The Esc chain's overlay step, and the `ui.conf` lifecycle (tasks 29/34/42)
-// ---------------------------------------------------------------------------
 
 /// Does `Esc`'s first step apply - is there an overlay to close (D-ESC, D-OVERLAY)?
 ///

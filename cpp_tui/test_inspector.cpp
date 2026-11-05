@@ -12,7 +12,7 @@
 //      type and does not include `tui.h` - the layering every view is held to;
 //   2. the vocabulary. Two tabs, two names, `[`/`]` wrapping in both directions, and
 //      the two empty sentences the task specifies;
-//   3. the keys. `Ctrl+I` toggles, `Ctrl+5`/`Ctrl+6` select the two tabs, `Ctrl+1`/
+//   3. the keys. `Ctrl+O` toggles, `Ctrl+5`/`Ctrl+6` select the two tabs, `Ctrl+1`/
 //      `Ctrl+2` are the reserved digits and select *nothing*; every row is unique and
 //      every action of the registry is still reachable (`./test_keymap`'s R1/R2 rule);
 //   4. the toggle rule. `-1 auto` counts as visible, a press writes 0 or 1 and never
@@ -454,8 +454,10 @@ void checkKeymap() {
     auto actionOf = [&keymap](ImGuiKeyChord chord) {
         return model::resolve(keymap, chord, model::Focus::None);
     };
-    check(actionOf(ImGuiMod_Ctrl | ImGuiKey_I) == model::Action::ToggleInspector,
-          "Ctrl+I toggles the inspector");
+    check(actionOf(ImGuiMod_Ctrl | ImGuiKey_O) == model::Action::ToggleInspector,
+          "Ctrl+O toggles the inspector (byte 0x0F is free and aliases nothing)");
+    check(actionOf(ImGuiMod_Ctrl | ImGuiKey_I) == model::Action::None,
+          "and the Ctrl+I chord is unbound (its byte 9 is Tab in the terminal)");
     check(actionOf(ImGuiMod_Ctrl | ImGuiKey_5) == model::Action::InspectorAgents,
           "Ctrl+5 selects the Agents tab");
     check(actionOf(ImGuiMod_Ctrl | ImGuiKey_6) == model::Action::InspectorActivity,
@@ -522,9 +524,9 @@ void checkToggle() {
     check(prefs.inspectorOpen == -1, "first run: the inspector preference is auto");
     check(prefs.tab == model::InspectorTab::Activity, "first run: the Activity tab is up");
 
-    // The input is what is *on screen*, not the preference: `-1 auto` is a docked panel on a
-    // wide display and no panel at all on a narrow one, so the same preference means two
-    // different things and the toggle must be told which one it is looking at.
+    // The input is what is *on screen*, not the preference: the same preference can mean "a
+    // panel is drawn" or "none is", so the toggle must be told which one it is looking at -
+    // the shape comes from the layout, which may close the panel under auto.
     model::toggleInspector(prefs, /*visible=*/true);
     check(prefs.inspectorOpen == 0, "a visible panel closes on the press");
     model::toggleInspector(prefs, /*visible=*/false);
@@ -550,12 +552,19 @@ void checkLayout() {
     model::ShellPrefs prefs;
 
     bool overlay = false;
+    // The upgrade path: the persisted `-1` - the shipped first-run value, which
+    // an earlier build's "auto" could also leave behind - resolves to *closed* through the same
+    // `shellLayoutFor()` the frame calls, so a user who never touched the inspector sees the
+    // panel closed.
     const ui::Rect autoWide = inspectorRect(100, 30, prefs, overlay);
-    check(autoWide.w == m.inspectorW && !overlay,
-          "auto at 100x30: the docked column (" + num(autoWide.w) + " cells)");
+    check(autoWide.w <= 0.0f && !overlay, "auto at 100x30: closed (auto is closed at every width)");
     const ui::Rect autoNarrow = inspectorRect(80, 24, prefs, overlay);
-    check(autoNarrow.w <= 0.0f, "auto at 80x24: closed, not a panel nobody asked for");
+    check(autoNarrow.w <= 0.0f, "auto at 80x24: closed too, the same answer at every width");
 
+    // The persisted 0/1 answers are unaffected: they keep the meaning the user chose.
+    prefs.inspectorOpen = 0;
+    check(inspectorRect(100, 30, prefs, overlay).w <= 0.0f,
+          "a persisted 0 (explicitly closed) stays closed");
     prefs.inspectorOpen = 1;
     const ui::Rect wide = inspectorRect(100, 30, prefs, overlay);
     check(wide.w == m.inspectorW && !overlay && wide.right() == 100.0f,
@@ -586,20 +595,19 @@ void checkLayout() {
 
 void checkFrame() {
     tui::TuiState state;
-    const ui::Metrics& m = gridMetrics();
 
-    // Auto, wide: docked and open.
+    // Auto, wide: closed - the shipped first run has no panel at any width.
     views::ShellFrame frame = shellFrame(state, 100, 30);
-    check(state.inspector.open, "the frame opens the panel where auto means docked");
-    check(!state.inspector.overlay, "...and says it is not floating");
-    check(frame.layout.inspector.w == m.inspectorW, "...on the layout's own column");
-    check(state.inspector.tab == state.ui.prefs.tab,
-          "the drawn tab is the preference's (" +
-              std::string(views::inspectorTabName(state.inspector.tab)) + ")");
+    check(!state.inspector.open, "the frame keeps the panel closed where auto resolves closed");
+    check(frame.layout.inspector.w <= 0.0f, "...on a closed layout rectangle");
 
-    // A saved tab wins.
+    // A saved tab wins (explicit open: the auto rule answers closed, so the tab's frame is
+    // an explicit one).
+    state.ui.prefs.inspectorOpen = 1;
     state.ui.prefs.tab = model::InspectorTab::Agents;
     shellFrame(state, 100, 30);
+    check(state.inspector.open && !state.inspector.overlay,
+          "premise: the explicit open is the docked column");
     check(state.inspector.tab == model::InspectorTab::Agents, "a saved tab is the drawn tab");
 
     // Auto, narrow: closed - and the flag follows.
@@ -637,10 +645,8 @@ void checkFrame() {
     shellFrame(closed, 100, 30);
     check(closed.ui.prefs.inspectorOpen == 1, "a tab press opens the panel explicitly");
 
-    // The toggle's input is what is *drawn*: with `-1 auto` the panel is closed at 80x24 and
-    // docked at 100x30, so one press must open the first and close the second - the same
-    // preference, two shapes, and a toggle that read the preference would need two presses on
-    // the narrow display where the panel is hardest to reach.
+    // The toggle's input is what is *drawn*: with `-1 auto` the panel is closed at every
+    // width, so the first press opens it - on the wide display too.
     tui::TuiState toggling;
     shellFrame(toggling, 80, 24);
     check(!toggling.inspector.open, "premise: auto at 80x24 is closed");
@@ -653,10 +659,10 @@ void checkFrame() {
 
     tui::TuiState wide;
     shellFrame(wide, 100, 30);
-    check(wide.inspector.open, "premise: auto at 100x30 is docked");
+    check(!wide.inspector.open, "premise: auto at 100x30 is closed too");
     model::toggleInspector(wide.ui.prefs, wide.inspector.open);
     shellFrame(wide, 100, 30);
-    check(!wide.inspector.open, "one press from auto at 100x30 closes it");
+    check(wide.inspector.open, "one press from auto at 100x30 opens it, the same answer");
 }
 
 // ---------------------------------------------------------------------------
@@ -755,6 +761,10 @@ void checkScreen() {
     const int w = 100;
     const int h = 30;
     model::ShellPrefs prefs;
+    // The screen is the panel's anatomy, so the panel has to be up: an explicit 1, because the
+    // auto rule answers closed at every width and an auto frame would hand this an
+    // empty rectangle.
+    prefs.inspectorOpen = 1;
     bool overlay = false;
     const ui::Rect rect = inspectorRect(w, h, prefs, overlay);
 
@@ -1074,6 +1084,7 @@ void checkBounded() {
 
     // In a real frame: a tall body draws its one row, never more than the viewport + 1.
     model::ShellPrefs prefs;
+    prefs.inspectorOpen = 1; // an explicit open: the auto rule answers closed
     bool overlay = false;
     const ui::Rect rect = inspectorRect(100, 30, prefs, overlay);
     views::InspectorState state = openInspector(model::InspectorTab::Agents);

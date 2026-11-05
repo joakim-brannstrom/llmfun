@@ -256,34 +256,17 @@ int caretLine(std::string_view text, int caret);
 /// palette filtered to commands, and a `/` anywhere else is just a slash in the query.
 bool lineEmptyAt(std::string_view text, int caret);
 
-/// Is the send key allowed to send at all?
-///
-/// `plan/key_gate.md` §3 measured `Enter`, `Shift+Enter` and `Ctrl+Enter` as the
-/// same byte in both terminal backends, so an `Enter`-send rule cannot be told from
-/// a newline there - and D-KEYGATE forbids shipping a chord with no evidence. The
-/// composer therefore keeps `Enter` = newline and the action button is the send path
-/// (`SendKey` stays `EnterNewline`, P-13). Flipping this constant is the whole change
-/// the day a backend proves the difference; the rule below already implements both.
-///
-/// **Before flipping it**, wire `sendTrigger`'s `composing` argument to a real signal:
-/// ImGui core has no composition state (an IME's preedit arrives as characters), so the
-/// composer passes `false` today and "a composition never sends" holds only because no
-/// key sends at all. The day a key can send, an `Enter` that accepts an IME candidate
-/// would send the query unless a backend reports the composition.
-inline constexpr bool kEnterSends = false;
+enum class SendTrigger { None, Action, Enter, Tab };
 
-/// What asked the composer to send this frame.
-enum class SendTrigger { None, Action, Enter, CtrlEnter };
-
-/// The one send rule: the action button, or a key when the gate is open.
-///
-/// Never while a paste is in flight (its own newline is not the user's send), and
-/// never while an IME composition is up (`composing`): a composition's `Enter`
-/// accepts the candidate, it does not send the query.
-SendTrigger sendTrigger(bool actionPressed, bool enterPressed, bool ctrlEnterPressed,
-                        bool shiftEnterPressed, model::SendKey setting, bool pasteInFlight,
-                        bool composing);
-
+/// The one send rule: the action button, or a key when its capability proves it. Never
+/// while a paste is in flight (its own newline is not the user's send), and never while
+/// an IME composition is up (`composing`): a composition's Enter accepts the candidate,
+/// it does not send the query. `enterProven` is the per-profile capability,
+/// supplied by the shell from the model - never derived in the composer. Shift+Enter is
+/// the hardcoded newline rule: it never sends.
+SendTrigger sendTrigger(bool actionPressed, bool enterPressed, bool tabPressed,
+                        bool shiftEnterPressed, model::SendKey setting, bool pasteInFlightNow,
+                        bool composing, bool enterProven);
 /// The shipped submit handshake, as one pure function: drop trailing NULs (the
 /// resize callback keeps the widget's terminator inside the buffer), drop *one*
 /// trailing newline (Enter in a multiline field may have inserted it), and refuse a
@@ -457,7 +440,11 @@ struct ComposerInput {
     std::string phase;
     /// The formatted speed (`38.1 tok/s`), empty when the sentence has none.
     std::string speed;
-    model::SendKey sendKey = model::SendKey::EnterNewline;
+    /// The per-profile send-key capability: true where the active profile proves
+    /// `enter`, false on the terminal. Supplied by the shell from the model
+    /// (`model::sendKeyProven`), never derived in the composer.
+    bool enterProven = false;
+    model::SendKey sendKey = model::SendKey::Tab;
 
     // --- the keyboard -------------------------------------------------------
     /// No overlay owns the keyboard, and no view-local handler spent this frame's

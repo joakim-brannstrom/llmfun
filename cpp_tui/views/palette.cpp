@@ -540,7 +540,7 @@ bool performRow(const PaletteItem& item, PaletteState& p, TuiState& state) {
         requestEarlierPage(state.ui);
         return true;
     case model::Action::ToggleInspector:
-        // One rule, one home: the same `model::toggleInspector()` the `Ctrl+I` row performs, with
+        // One rule, one home: the same `model::toggleInspector()` the `Ctrl+O` row performs, with
         // the same *drawn* state as its input (`state.inspector.open`) - so the palette and the
         // chord cannot disagree, and the first press from `-1 auto` on a narrow display opens
         // the panel instead of writing a second "closed". Focus mode hides the panel (task 43), so
@@ -746,11 +746,11 @@ std::vector<PaletteItem> paletteActions(const TuiState& state, const std::string
     items.push_back({kIdToggleRail, kGroupActions, "Toggle rail",
                      "Show or hide the session list (Ctrl+B)", model::regionControlsApply(state.ui),
                      model::Action::ToggleRail});
-    // The inspector's toggle (task 29). A real control as well as a chord: `Ctrl+I` reaches
-    // the pixel profile and not the terminal (plan/key_gate.md §3b), so this row is the grid's
+    // The inspector's toggle. A real control as well as a chord: `Ctrl+O` reaches
+    // both profiles and aliases nothing, so this row is the grid's
     // path to the panel - and the panel has no control of its own while it is closed.
     items.push_back({kIdToggleInspector, kGroupActions, "Toggle inspector",
-                     "Show or hide the agents and activity panel (Ctrl+I)",
+                     "Show or hide the agents and activity panel (Ctrl+O)",
                      model::regionControlsApply(state.ui), model::Action::ToggleInspector});
     // The two tabs (task 29): `Ctrl+5`/`Ctrl+6` are the pixel profile's chords, and the panel's
     // scope is the point of the row - a user who wants the trace stream should not have to open

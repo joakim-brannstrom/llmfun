@@ -193,6 +193,17 @@ std::string uiKeysMarkdown() {
     text += "| `Up` / `Ctrl+Up` | recall the previous query |\n";
     text += "| `Down` / `Ctrl+Down` | recall the next query |\n";
     text += "| `/` on an empty line | open the palette's command entry |\n";
+    // The send key is a preference, not a registry row, so its behavior lives here: the
+    // field's key claim (CallbackCompletion) is what keeps a Tab-send from handing the
+    // keyboard to ImGui's nav tabbing.
+    text += "\n";
+    text += "The send key is a preference (`none` / `enter` / `tab`, default `tab`; `enter` is\n";
+    text += "offered only where the profile proves it, the pixel one). `Tab` is the send key,\n";
+    text += "not a navigation key: the field claims the press\n";
+    text += "(`ImGuiInputTextFlags_CallbackCompletion`), so a Tab-send leaves the field\n";
+    text += "focused instead of ImGui's nav tabbing evicting it, and a Tab that cannot send\n";
+    text += "(offline, a run in flight, a paste question up, send key `none`/`enter`) does\n";
+    text += "nothing rather than moving focus to another widget.\n";
     // The delivery caveat: a row is evidence, not a wish (D-KEYGATE). The measurements live in
     // plan/key_gate.md; the two consequences a user meets are named here.
     text += "\n";
@@ -202,11 +213,12 @@ std::string uiKeysMarkdown() {
         "A row exists only where the chord is actually delivered. Three consequences are worth\n";
     text += "knowing before a key looks broken:\n";
     text += "\n";
+    text += "- `Ctrl+I` is no longer bound at all (it was the inspector's chord; the terminal\n";
+    text += "  hears its byte 9 as `Tab`, which now sends). The terminal also does not deliver\n";
+    text += "  `Ctrl+5` or `Ctrl+6` (`0x1D`/`0x1E` are unmapped), so the inspector is reached\n";
     text +=
-        "- the terminal does not deliver `Ctrl+I`, `Ctrl+5` or `Ctrl+6` (byte 9 is `Tab`, and\n";
-    text +=
-        "  `0x1D`/`0x1E` are unmapped). The inspector is reached there through the palette rows,\n";
-    text += "  the top bar's `Settings` entry and the panel's own `[`/`]` tab keys;\n";
+        "  there through the palette rows, the top bar's `Settings` entry and the panel's own\n";
+    text += "  `[`/`]` tab keys;\n";
     text +=
         "- `Ctrl+Shift+L` arrives as `Ctrl+L` in the terminal (the Shift is lost), so the grid's\n";
     text += "  paths to the Raw Log are `/rawlog`, the palette's Developer row and `--debug-ui`;\n";

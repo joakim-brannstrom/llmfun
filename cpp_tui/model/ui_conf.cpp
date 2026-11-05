@@ -106,12 +106,12 @@ void applyLine(ShellPrefs& prefs, std::string_view line) {
     const std::string_view value = trimBlanks(line.substr(eq + 1));
 
     if (key == "SendKey") {
-        if (equalsWord(value, "enter"))
+        if (equalsWord(value, "none"))
+            prefs.sendKey = SendKey::None;
+        else if (equalsWord(value, "enter"))
             prefs.sendKey = SendKey::Enter;
-        else if (equalsWord(value, "ctrlenter"))
-            prefs.sendKey = SendKey::CtrlEnter;
-        else if (equalsWord(value, "enternewline"))
-            prefs.sendKey = SendKey::EnterNewline;
+        else if (equalsWord(value, "tab"))
+            prefs.sendKey = SendKey::Tab;
         return;
     }
     if (key == "UiLog") {
@@ -222,7 +222,7 @@ void discardTemporary(const std::string& path) { std::remove(temporaryPath(path)
 /// without a preceding load may only create a missing profile; anything else at
 /// the path (a directory, say) is left for the write attempt to report.
 bool isRegularFile(const std::string& path) {
-    struct stat info{};
+    struct stat info {};
     return ::stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
 }
 
@@ -237,7 +237,7 @@ struct DestinationMode {
 
 DestinationMode destinationModeOf(const std::string& path) {
     DestinationMode destination;
-    struct stat info{};
+    struct stat info {};
     if (::stat(path.c_str(), &info) == 0) {
         destination.exists = true;
         destination.mode = info.st_mode & 07777;
@@ -392,15 +392,15 @@ void writeAndReport(const std::string& path, const std::string& text) {
 /// instead of waiting for a warning nobody reads; the `assert` below is only the debug backstop.
 const char* sendKeyWord(SendKey key) {
     switch (key) {
+    case SendKey::None:
+        return "none";
     case SendKey::Enter:
         return "enter";
-    case SendKey::CtrlEnter:
-        return "ctrlenter";
-    case SendKey::EnterNewline:
-        return "enterNewline";
+    case SendKey::Tab:
+        return "tab";
     }
     assert(false && "unhandled SendKey");
-    return "enterNewline";
+    return "none";
 }
 
 /// Clamped, so the writer (and the sheet) never names a level the parser would reject.
@@ -415,43 +415,48 @@ const char* uiLogWord(int level) {
 }
 
 SendKey sendKeyChoice(int index) {
-    // The table's order is the design's own list (`enter`, `ctrlenter`, `enterNewline`), so a
-    // user coming from the design document finds the values where they left them.
+    // The table's order is the shipped list (`none`, `enter`, `tab`).
     if (index <= 0)
-        return SendKey::Enter;
+        return SendKey::None;
     if (index >= kSendKeyChoiceCount - 1)
-        return SendKey::EnterNewline;
-    return SendKey::CtrlEnter;
+        return SendKey::Tab;
+    return SendKey::Enter;
 }
 
 int sendKeyIndex(SendKey key) {
     switch (key) {
-    case SendKey::Enter:
+    case SendKey::None:
         return 0;
-    case SendKey::CtrlEnter:
+    case SendKey::Enter:
         return 1;
-    case SendKey::EnterNewline:
+    case SendKey::Tab:
         return 2;
     }
     assert(false && "unhandled SendKey");
-    return 2;
+    return 0;
 }
 
-bool sendKeyProven(SendKey key) {
-    switch (key) {
-    case SendKey::Enter:
-        // plan/key_gate.md §3: `Enter` arrives, but `Shift+Enter` is the same byte, so "Enter
-        // sends, Shift+Enter breaks the line" cannot be honoured in the grid.
-        return false;
-    case SendKey::CtrlEnter:
-        // §3: `Ctrl+Enter` is `NOT delivered` in both terminal backends, "not bound".
-        return false;
-    case SendKey::EnterNewline:
-        // The shipping rule (R-01): Enter breaks the line, the Send button sends.
-        return true;
-    }
-    assert(false && "unhandled SendKey");
-    return false;
+bool sendKeyProven(SendKey key, bool textGrid) {
+    // The gate's answer is measured per profile: the pixel profile
+    // (`textGrid` false) proves `Enter` - "Enter sends, Shift+Enter breaks the line" -
+    // and every terminal backend proves only `Tab` and `None`, because both deliver
+    // Enter as one byte.
+    return !(textGrid && key == SendKey::Enter);
+}
+
+SendKey sendKeyEffective(SendKey key, bool textGrid) {
+    // What the sheet shows and the composer acts on: an unproven value folds to
+    // `None` - the effective value, so a hand-edited `SendKey=` is never a lie
+    // about the profile.
+    return sendKeyProven(key, textGrid) ? key : SendKey::None;
+}
+
+bool sendKeyOffered(SendKey key, bool textGrid) {
+    // What the sheet may offer as a choice: the values the active profile can
+    // honour. `Enter` is offered only where it is proven, and only while a wired
+    // IME composition exists (`kImeComposingWired`) - a composition's Enter
+    // accepts the candidate, it does not send the query.
+    return sendKeyProven(key, textGrid) && (key != SendKey::Enter || kImeComposingWired);
 }
 
 float clampFontScale(float scale) {

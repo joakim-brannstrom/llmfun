@@ -6,10 +6,10 @@ rows: built=29 matches=7 drawn=17 first=0 viewport=17 column=11
 sections: 4 groups: 3 entries: 4 lines: 18
 text:
    llmfun   help                                             Ctrl+K commands  ✓ Ready    Settings
-  Search                                                                 [5] Agents [6] Activity
-                                                                          all  info  warn  error
+  Search
+
  SESSIONS
- ▌● help                                                                                   yet
+ ▌● help                                                                                  the RAG, …
     hello   Help                                                    7 matches    Close
              composer
             Keys

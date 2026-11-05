@@ -188,22 +188,30 @@ std::vector<SettingsRow> allRows(const SettingsState& state, const model::ShellP
 
     // --- Behaviour ---------------------------------------------------------
     {
-        // The key gate's answer, and *only* that. A hand-edited `SendKey=enter` is a legal line,
-        // so the effective value is shown - in the warning ink, with the reason, because a value
-        // this build cannot honour is a fact the user has to see (plan/key_gate.md §3).
+        // The send key is the one row whose stored value can be one this build cannot
+        // honour (a hand-edited `SendKey=` on the grid): it prints the value the profile
+        // actually applies, in the warning ink, and its note states what sends in *this*
+        // profile (the grid's muscle-memory trade-off).
+        // Its choices are the offered set (`sendKeyOffered()` proves them for the active
+        // profile), never the proven set alone: no backend reports an IME composition
+        // (`kImeComposingWired` stays false), so `enter` is not offered even
+        // where it is proven.
         SettingsRow row;
         row.id = kIdSendKey;
         row.section = kSettingsSectionBehaviour;
         row.label = "Send key";
-        row.value = model::sendKeyWord(prefs.sendKey);
-        if (model::sendKeyProven(prefs.sendKey)) {
-            row.note = "Enter breaks the line; the Send button sends";
+        row.value = model::sendKeyWord(model::sendKeyEffective(prefs.sendKey, m.textGrid));
+        if (model::sendKeyProven(prefs.sendKey, m.textGrid)) {
+            row.note = prefs.sendKey == model::SendKey::Enter
+                           ? "Enter sends; Shift+Enter breaks the line"
+                       : prefs.sendKey == model::SendKey::Tab ? "Tab sends; Enter breaks the line"
+                                                              : "only the Send button sends";
         } else {
-            row.note = "not delivered by this build's key gate - Send is the only way";
+            row.note = "Enter is not delivered here (the same byte as Shift+Enter) - Tab "
+                       "sends; Enter breaks the line";
         }
-        // Nothing to cycle to: the gate proves one value, so this row reports rather than edits.
-        row.kind = SettingsRowKind::ReadOnly;
-        row.enabled = false;
+        row.kind = SettingsRowKind::Choice;
+        row.enabled = true;
         rows.push_back(std::move(row));
     }
     {
@@ -491,6 +499,8 @@ bool takeKeys(SettingsState& state, bool ownsKeyboard) {
            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
 }
 
+} // namespace
+
 /// Run the selected row. `Choice` moves to the next legal value, `Action` performs its one action,
 /// `ReadOnly` does nothing (the row's `enabled` is false, so this is only reached through Enter on
 /// a row the sheet drew as live).
@@ -520,6 +530,23 @@ void activate(SettingsState& state, model::ShellPrefs& prefs, TuiSettings& setti
         prefs.rawLog = (current + 1) % model::kUiLogChoiceCount;
         return;
     }
+    if (std::strcmp(row.id, kIdSendKey) == 0) {
+        // The offered set, in the catalogue's order and wrapping: the next value the
+        // active profile can honour (`sendKeyOffered()`). A value the gate does not
+        // prove is never landed in the file, and a proven-but-unwired one (the
+        // pixel profile's `enter` while no composition signal exists) is not offered
+        // either - the scan steps over it.
+        const int count = model::kSendKeyChoiceCount;
+        const int index = model::sendKeyIndex(prefs.sendKey);
+        for (int step = 1; step <= count; ++step) {
+            const model::SendKey next = model::sendKeyChoice((index + step) % count);
+            if (model::sendKeyOffered(next, m.textGrid)) {
+                prefs.sendKey = next;
+                break;
+            }
+        }
+        return;
+    }
     if (std::strcmp(row.id, kIdCopyInfo) == 0) {
         const std::string text = systemInfoText(state, m);
         if (ImGui::GetCurrentContext() != nullptr)
@@ -528,8 +555,6 @@ void activate(SettingsState& state, model::ShellPrefs& prefs, TuiSettings& setti
         return;
     }
 }
-
-} // namespace
 
 // ---------------------------------------------------------------------------
 // The contract's small answers
@@ -889,10 +914,8 @@ void renderSettings(SettingsState& state, const ui::Rect& region, const ui::Metr
                     ink = ColorToken::accent;
                 else if (!row.enabled)
                     ink = ColorToken::textLow;
-                // The send key is the one row whose value can be a value this build cannot
-                // honour (a hand-edited `SendKey=`): it says so in the warning ink rather than
-                // pretending the setting works.
-                if (std::strcmp(row.id, kIdSendKey) == 0 && !model::sendKeyProven(prefs.sendKey))
+                if (std::strcmp(row.id, kIdSendKey) == 0 &&
+                    !model::sendKeyProven(prefs.sendKey, m.textGrid))
                     ink = ColorToken::stateWarn;
                 lineAt(m, box, valueX, row.value, ink);
             }

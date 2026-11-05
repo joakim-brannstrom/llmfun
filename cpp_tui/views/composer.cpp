@@ -182,6 +182,9 @@ struct FieldContext {
     int firstCaret = 0;
     bool firstHadSelection = false;
     bool slashTaken = false;
+    /// Set when the send key sent this frame: the key's own byte is taken, so the
+    /// send does not also break the line or indent. Shift+Enter keeps its newline.
+    bool suppressNewline = false;
 };
 
 void appendUtf8(std::string& out, char32_t cp) {
@@ -242,11 +245,18 @@ int fieldCallback(ImGuiInputTextCallbackData* data) {
             return 1;
         }
         char32_t out = ch;
+        if (ctx->suppressNewline && (ch == U'\r' || ch == U'\n'))
+            return 1;
         if (!foldPasteChar(ctx->afterCr, ch, out))
             return 1;
         data->EventChar = static_cast<ImWchar>(out);
         return 0;
     }
+    // Tab as the send key: the widget routes the press here instead of ImGui's
+    // nav tabbing, and the caller's key scan has already turned it into a send -
+    // so the completion event itself is swallowed.
+    case ImGuiInputTextFlags_CallbackCompletion:
+        return 0;
     default:
         return 0;
     }
@@ -585,25 +595,26 @@ bool lineEmptyAt(std::string_view text, int caret) {
     return start == end;
 }
 
-SendTrigger sendTrigger(bool actionPressed, bool enterPressed, bool ctrlEnterPressed,
+SendTrigger sendTrigger(bool actionPressed, bool enterPressed, bool tabPressed,
                         bool shiftEnterPressed, model::SendKey setting, bool pasteInFlightNow,
-                        bool composing) {
+                        bool composing, bool enterProven) {
     // The action is a click, so it can never be part of a payload or a composition.
     if (actionPressed)
         return SendTrigger::Action;
     // A paste's own newline is not the user's send (D-PASTE), and a composition's Enter
-    // accepts the candidate (it is not a send). Then the gate: while it is closed no key
-    // sends, whatever the setting says (plan/key_gate.md §3, D-KEYGATE).
-    if (composing || pasteInFlightNow || !kEnterSends)
+    // accepts the candidate (it is not a send). Then the capability: a key that cannot
+    // send never sends, whatever the setting says.
+    if (composing || pasteInFlightNow)
         return SendTrigger::None;
     switch (setting) {
     case model::SendKey::Enter:
         // `Enter` sends and `Shift+Enter` breaks the line - only meaningful where the
-        // two are different chords, which is what `kEnterSends` records.
-        return (enterPressed && !shiftEnterPressed) ? SendTrigger::Enter : SendTrigger::None;
-    case model::SendKey::CtrlEnter:
-        return ctrlEnterPressed ? SendTrigger::CtrlEnter : SendTrigger::None;
-    case model::SendKey::EnterNewline:
+        // capability proves enter (pixel profile); stored-but-unproven never sends.
+        return (enterProven && enterPressed && !shiftEnterPressed) ? SendTrigger::Enter
+                                                                   : SendTrigger::None;
+    case model::SendKey::Tab:
+        return tabPressed ? SendTrigger::Tab : SendTrigger::None;
+    case model::SendKey::None:
         return SendTrigger::None;
     }
     return SendTrigger::None;
@@ -767,6 +778,14 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
 
     const ImGuiID fieldId = ImGui::GetID("##composer_input");
     const bool fieldActive = ImGui::GetActiveID() == fieldId;
+    // ImGui's deactivated-state hook re-applies the field's last text on the next call
+    // ("reapplying final data on deactivation" in imgui_widgets.cpp). It only fires when the
+    // draft was changed behind the widget's back, and every such write here is deliberate -
+    // the send handshake's clear, a draft restore - so the hook's stale copy must never win.
+    // Drop it while this field is not the active one.
+    if (ImGuiContext* g = ImGui::GetCurrentContext())
+        if (!fieldActive && g->InputTextDeactivatedState.ID == fieldId)
+            g->InputTextDeactivatedState.ID = 0;
     // The paste question is the composer's surface while it is up: the field is not
     // drawn, so "the composer owns this Esc" cannot come from the widget's active id.
     const bool ownsKeyboard = fieldActive || st.focusedLastFrame || st.paste.ask;
@@ -827,6 +846,28 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
                             model::defaultKeymap(), model::Focus::Composer,
                             [](ImGuiKeyChord chord) { return ImGui::IsKeyChordPressed(chord); })
                       : model::Action::None;
+
+    // The keyboard's send path: the send key is read before the widget
+    // runs, so the press is judged on this frame's own state, and gated like the
+    // action button (`sendTrigger` owns the paste-in-flight and IME gates). The key's
+    // own byte is suppressed for the widget call below; the newline the filter takes
+    // is the one ImGui's multiline Enter path inserts, so the filter is the only
+    // interception point. Enter and Tab arrive as key events in both backends (ncurses
+    // maps bytes 9/10/13; GLFW reports the keys). Only while the field is actually
+    // being edited: an `ownsKeyboard` frame can also belong to the paste question or
+    // the last frame's focus, and Enter there is the question's or the overlay's, not
+    // the draft's.
+    const bool keySendEnabled =
+        fieldActive && in.acceptKeys && !in.offline && !in.busy && !st.paste.ask;
+    const bool enterPressed = keySendEnabled && ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+    const bool shiftEnterPressed = enterPressed && ImGui::IsKeyDown(ImGuiMod_Shift);
+    const bool tabPressed = keySendEnabled && ImGui::IsKeyPressed(ImGuiKey_Tab, false);
+    const SendTrigger keyTrigger = sendTrigger(
+        /*actionPressed=*/false, enterPressed, tabPressed, shiftEnterPressed, in.sendKey,
+        pasteInFlight(st.paste, in.nowMs), /*composing=*/false, in.enterProven);
+    if (keyTrigger == SendTrigger::Enter || keyTrigger == SendTrigger::Tab)
+        st.submit = true;
+    const bool keySent = keyTrigger == SendTrigger::Enter || keyTrigger == SendTrigger::Tab;
 
     // --- the mode/model text, on the text line -----------------------------
     // Hidden, not truncated, when the field would fall below `kComposerMinTextGu`: the
@@ -976,6 +1017,11 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         context.palette = &st.openPalette;
         if (capture)
             st.paste.captured.clear();
+        // Suppress the send key's own byte for this widget call only; cleared
+        // right after so nothing leaks into the next frame's characters.
+        // (Tab needs no suppression: with CallbackCompletion the widget takes the
+        // key itself and never turns it into a `\t` character event.)
+        context.suppressNewline = keySent && keyTrigger == SendTrigger::Enter;
 
         // The container *is* the well: the field paints no fill of its own (its
         // `FrameBg` slot is the `inset` well the theme binds, which inside a `raised`
@@ -1005,13 +1051,19 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
             // *field* only (its caret marks the focus); the guard puts the flag back so
             // the buttons this view draws below keep theirs.
             const FieldNavCursorGuard navCursor;
-            ImGui::InputTextEx("##composer_input", placeholderFor(m, region.w), in.buffer->data(),
-                               static_cast<int>(in.buffer->size() + 1),
-                               ImVec2(textArea.w, textArea.h),
-                               ImGuiInputTextFlags_Multiline | ImGuiInputTextFlags_CallbackResize |
-                                   ImGuiInputTextFlags_CallbackCharFilter,
-                               fieldCallback, &context);
+            // CallbackCompletion owns the Tab *key* (imgui_widgets.cpp:5338 Shortcut
+            // + routing): without it the field leaves Tab unclaimed and ImGui's nav
+            // tabbing (imgui.cpp:14332, always enabled) evicts the field one frame
+            // after a Tab-send. The callback swallows the event; Tab is the send key,
+            // never a navigation key.
+            ImGui::InputTextEx(
+                "##composer_input", placeholderFor(m, region.w), in.buffer->data(),
+                static_cast<int>(in.buffer->size() + 1), ImVec2(textArea.w, textArea.h),
+                ImGuiInputTextFlags_Multiline | ImGuiInputTextFlags_CallbackResize |
+                    ImGuiInputTextFlags_CallbackCharFilter | ImGuiInputTextFlags_CallbackCompletion,
+                fieldCallback, &context);
         }
+        context.suppressNewline = false;
         if (in.offline)
             ImGui::EndDisabled();
         ImGui::PopClipRect();
@@ -1326,15 +1378,18 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ui::tooltip("Answer the paste question first (Insert or Esc)");
             } else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ui::tooltip("Send the query to the LLM (Enter breaks the line)");
+                ui::tooltip(in.sendKey == model::SendKey::Enter && in.enterProven
+                                ? "Send the query to the LLM (Enter sends; Shift+Enter "
+                                  "breaks the line)"
+                                : "Send the query to the LLM (Enter breaks the line)");
             }
             if (actionEnabled && ui::buttonPressed(actionSpec, m, actionRect)) {
                 if (in.busy) {
                     st.cancelRequested = true;
                 } else {
-                    const SendTrigger trigger =
-                        sendTrigger(/*actionPressed=*/true, false, false, false, in.sendKey,
-                                    pasteInFlight(st.paste, in.nowMs), /*composing=*/false);
+                    const SendTrigger trigger = sendTrigger(
+                        /*actionPressed=*/true, false, false, false, in.sendKey,
+                        pasteInFlight(st.paste, in.nowMs), /*composing=*/false, in.enterProven);
                     if (trigger == SendTrigger::Action)
                         st.submit = true;
                 }

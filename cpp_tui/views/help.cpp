@@ -186,7 +186,7 @@ std::vector<RegionNote> regionNotes() {
          "The right-hand panel, with two tabs. Agents lists one lane per agent (click a row to "
          "drill in; right click, or m, opens the row menu for the row under the pointer); Activity "
          "is the UI's own record list, with a filter over the level and the text. [ and ] walk the "
-         "tabs, Ctrl+I hides or shows the panel, and Ctrl+5 / Ctrl+6 pick a tab in the pixel "
+         "tabs, Ctrl+O hides or shows the panel, and Ctrl+5 / Ctrl+6 pick a tab in the pixel "
          "profile - the terminal cannot deliver those chords."});
     notes.push_back(
         {"composer",

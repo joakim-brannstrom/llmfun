@@ -133,8 +133,8 @@ inline constexpr char kActivityActionClose[] = "]";
 /// pixel profile is where they arrive): the press selected nothing and the strip says why. The
 /// digits 3 and 4 are reserved by the design as well but are not bound, and not because nobody
 /// measured them: byte 3 is `Ctrl+C` (`SIGINT`) and byte 4 is `Ctrl+\` (`SIGQUIT`), so with
-/// `ISIG` on neither can reach the application at all (`plan/key_gate.md` §3b measures `Ctrl+I`
-/// for the same reason). A row for either would be a dead key claiming an action.
+/// `ISIG` on neither can reach the application at all (the key gate measured `Ctrl+I`,
+/// byte 9, for the same reason). A row for either would be a dead key claiming an action.
 inline constexpr char kInspectorReservedHint[] = "not available yet";
 
 /// The badge's separator, in `gu`: one unit between the Activity label and its count.
