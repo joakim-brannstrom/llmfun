@@ -2202,7 +2202,7 @@ tui:
     assert(conf.tui.idleParkMs == 75, "expected 75, got " ~ conf.tui.idleParkMs.to!string);
 }
 
-@("absent tui.idleParkMs keeps the default 0 (C++ default 16 ms stays)") unittest {
+@("absent tui.idleParkMs keeps the struct default of 100") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -2217,7 +2217,8 @@ tui:
 `;
     File(tmpFile, "w").write(yaml);
     auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
-    assert(conf.tui.idleParkMs == 0, "expected default 0, got " ~ conf.tui.idleParkMs.to!string);
+    assert(conf.tui.idleParkMs == 100,
+            "expected the struct default 100, got " ~ conf.tui.idleParkMs.to!string);
 }
 
 @("idleParkMs below 4 is rejected by validateConfig") unittest {

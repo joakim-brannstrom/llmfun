@@ -763,6 +763,31 @@ void checkDrawnRail() {
     check(grid.has(active), "the active row carries the ● marker");
     check(grid.has(rest), "a rest row carries the ▸ marker");
 
+    // The run mark is static by design: a run in flight is state, not
+    // animation, so the time slot reads the same a spinner cycle apart - and it
+    // is always frame 0, `◐`, on EVERY `running` row. The fixture makes the row
+    // non-active (the choice is per draw site, not per row state;
+    // today only the non-active path can reach `Running`, and this pins it so an
+    // active-only branch cannot sneak back in). The rows carry no timestamps, so
+    // the clock cannot reach the frame any other way and the comparison is exact.
+    std::vector<model::SessionRow> runRows = mixedFixture();
+    for (model::SessionRow& r : runRows)
+        r.updatedAtMs = 0; // no relative time: the right-hand slot is the mark alone
+    runRows.front().running = true;
+    const model::RailModel runList = model::buildRailRows(runRows, kNowMs, "");
+    const auto runBody = [&](const ui::Metrics& metrics) {
+        views::renderRail(ui.rail, runList, region, metrics, rowLines, kNowMs, true);
+    };
+    const auto runBodyLater = [&](const ui::Metrics& metrics) {
+        views::renderRail(ui.rail, runList, region, metrics, rowLines, kNowMs + 300, true);
+    };
+    const Grid runGrid = frame(runBody);
+    const Grid runGridLater = frame(runBodyLater);
+    check(runGrid.ch == runGridLater.ch && runGrid.fg == runGridLater.fg &&
+              runGrid.bg == runGridLater.bg,
+          "the running row's mark is static: two frames a spinner cycle apart are identical");
+    check(runGrid.has(utf8Of(0x25D0)), "the running row shows the static run mark ◐");
+
     // The active row's rule is the one-cell glyph and its fill is the selection step
     // (233-255 grey ramp index 235 on the text grid).
     int markerX = -1;
@@ -1050,7 +1075,7 @@ void checkStrip() {
     states[2].id = "m-unread";
     states[2].unread = true;
     states[3].id = "m-run";
-    states[3].running = true;
+    states[3].running = true; // non-active: the static mark is not an active-only branch
     const model::RailModel stateList = model::buildRailRows(states, kNowMs, "");
     ui.rail = model::RailState{};
     const auto stateBody = [&](const ui::Metrics& metrics) {

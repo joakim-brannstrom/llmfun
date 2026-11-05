@@ -2,9 +2,9 @@ name: topbar-narrow
 screen: 60x20
 bar: 0,0 60x1
 state: rawLogOpen
-parts: mark=1 wordmark=6 title=10 hint=0 pill=17 badge=5 gear=12 truncated=1
+parts: mark=1 wordmark=6 title=4 hint=15 help=7 badge=5 gear=12 truncated=1
 text:
-   llmfun   a session…  ◐ running 00:12   RAW    Settings
+   llmfun   a s… Ctrl+K commands Shift+?  RAW    Settings
 
 
 
@@ -25,7 +25,7 @@ text:
 
 
 fills:
-0: 1-1=111, 10-10=102, 23-39=23, 41-45=23, 47-58=23
+0: 1-1=111, 10-10=102, 41-45=23, 47-58=23
 1: 
 2: 
 3: 

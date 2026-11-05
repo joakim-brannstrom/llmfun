@@ -1476,6 +1476,20 @@ void checkSpinner() {
     }
     check(ui::displayWidth(std::string(ui::icon(ui::Icon::Spinner, ui::GlyphSet::Glyphs))) == 1,
           "the table's spinner mark is one cell wide");
+
+    // The static run mark names the intent: whatever the caller's clock says,
+    // `spinnerStatic` draws frame 0 with the spinner's own ink - the same surface a
+    // `spinner` call at rest produces (the Grid capture has no foreground channel,
+    // so the pin covers the glyph, its width and the background; both paths reach
+    // drawGlyph with the same ColorToken::accent, which is what carries the ink).
+    const Grid rest = frame([&](ImDrawList*, const ui::Metrics& mm) {
+        ui::spinner(mm, rectCells(2.0f, 2.0f, ui::measureSpinner(mm)), 0.0);
+    });
+    const Grid still = frame([&](ImDrawList*, const ui::Metrics& mm) {
+        ui::spinnerStatic(mm, rectCells(2.0f, 2.0f, ui::measureSpinner(mm)));
+    });
+    check(still.ch == rest.ch && still.chwidth == rest.chwidth && still.bg == rest.bg,
+          "spinnerStatic is the spinner's frame 0 (glyph, width, background)");
 }
 
 // ---------------------------------------------------------------------------

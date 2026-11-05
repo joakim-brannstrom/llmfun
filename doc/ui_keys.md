@@ -37,10 +37,8 @@ trap: while it is open only its own rows (and the ones repeated for it) fire.
 | Ctrl+B | ToggleRail | everywhere | palette row |
 | PgUp | LoadEarlier | everywhere | palette row |
 | Ctrl+U | LoadEarlier | everywhere | palette row |
-| Up | HistoryPrev | composer | chord only |
-| Down | HistoryNext | composer | chord only |
-| Ctrl+Up | HistoryPrev | composer | chord only |
-| Ctrl+Down | HistoryNext | composer | chord only |
+| PgUp | HistoryPrev | composer | chord only |
+| PgDn | HistoryNext | composer | chord only |
 | Ctrl+O | ToggleInspector | everywhere | palette row |
 | Ctrl+5 | InspectorAgents | everywhere | palette row |
 | Ctrl+6 | InspectorActivity | everywhere | palette row |
@@ -96,8 +94,8 @@ carries none of them.
 | key | action |
 | --- | --- |
 | `Enter` | newline in the draft - the terminal delivers `Shift+Enter` and `Ctrl+Enter` as the same byte (plan/key_gate.md §3), so `Enter` cannot send; the composer's `Send` does |
-| `Up` / `Ctrl+Up` | recall the previous query |
-| `Down` / `Ctrl+Down` | recall the next query |
+| `PgUp` | recall the previous query |
+| `PgDn` | recall the next query |
 | `/` on an empty line | open the palette's command entry |
 
 The send key is a preference (`none` / `enter` / `tab`, default `tab`; `enter` is

@@ -241,7 +241,7 @@ ui::ColorToken markerInkFor(RailRowState state, bool active) {
 /// The strip's mark: the same state table, but the glyph is the *only* carrier.
 ///
 /// The full anatomy says what a row is four ways - the fill, the left rule, the marker
-/// and the time column (where the spinner stands in for the clock). A 7-cell column has
+/// and the time column (where the static run mark stands in for the clock). A 7-cell column has
 /// one cell per row, so every state a row can be in needs its own glyph: pending ○,
 /// running ◐, unread •, active ●, rest ▸. `Running` uses the static mark the design gives
 /// reduced motion (§4.9, "no spinners, static ◐") - a cell renderer cannot animate, and
@@ -344,7 +344,7 @@ RailRowInks railRowInks(RailRowState state) {
         break;
     case RailRowState::Running:
     case RailRowState::Unread:
-        // Marks, not fills: the spinner and the dot are the state.
+        // Marks, not fills: the static run mark and the dot are the state.
         break;
     case RailRowState::Pending:
         // A switch is queued and D has not answered: the input well, marked with the
@@ -802,10 +802,7 @@ void renderRail(model::RailState& rail, const RailModel& list, const ui::Rect& r
                                      ui::Icon::Unread, ui::ColorToken::accent);
                     }
                     if (row.running) {
-                        // "running (spinner replaces time)": the clock is replaced by
-                        // the mark, so a row with no time still says why it is quiet.
-                        ui::spinner(m, ui::Rect{timeX, rowRect.y, timeW, m.row, m.textGrid},
-                                    static_cast<double>(nowMs) / 1000.0);
+                        ui::spinnerStatic(m, ui::Rect{timeX, rowRect.y, timeW, m.row, m.textGrid});
                     } else if (!time.empty()) {
                         lineAt(m, rowRect, time, ui::ColorToken::textLow, timeX, timeW);
                     }

@@ -2,7 +2,7 @@ name: nowbar-compact
 screen: 50x20
 nowbar: 0,19 50x1
 phase: writing compact: 1
-parts: rule=1 mark=1 state=7 tail=8 hints=8 ctx=9 speed=0 model=0 stateChip=1 badge=5 truncated=1
+parts: rule=1 mark=1 state=7 tail=0 hints=0 meterLabel=3 meterBar=6 meterCount=3 model=13 badge=5 truncated=1
 text:
 
 
@@ -23,7 +23,7 @@ text:
 
 
 
-  ◐ writing | 00:12    Esc stop  ctx 42k  ◐  RAW
+  ◐ writing    ctx █░░░░░ 42k  qwen3-coder   RAW
 fills:
 0: 
 1: 
@@ -44,4 +44,4 @@ fills:
 16: 
 17: 
 18: 
-19: 0-0=111, 32-40=23, 44-48=23
+19: 0-0=111, 30-42=23, 44-48=23

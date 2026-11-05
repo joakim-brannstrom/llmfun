@@ -4,7 +4,7 @@ renderer: workbench (the only renderer since task 41)
 glyphs: unicode
 depth: truecolor
 text:
-   llmfun   Alpha session                Ctrl+K commands  ✓ Ready    Settings
+   llmfun   Alpha session                  Ctrl+K commands Shift+?   Settings
    /    YOU
         build the project
    ●    ANSWER
@@ -24,12 +24,12 @@ text:
 
    +
 
-   Ask anything...  / commands                                            none
-  0                                                                   Send
+   Ask anything...  / commands
+                                                                      Send
 
-  ✓ Ready                          Ctrl+K commands  ctx 0/0   -   none   Ready
+  ✓ Ready                                                 ctx ░░░░░░ 0/0  none
 fills:
-0: 1-1=111, 10-10=102, 57-65=23, 67-78=23
+0: 1-1=111, 10-10=102, 67-78=23
 1: 0-0=17, 1-5=23, 6-6=17, 7-7=183, 8-79=17
 2: 0-79=17
 3: 0-6=17, 7-7=111, 8-79=17
@@ -52,4 +52,4 @@ fills:
 20: 0-0=59, 1-78=23, 79-79=59
 21: 0-0=59, 1-65=23, 66-77=111, 78-78=23, 79-79=59
 22: 0-79=59
-23: 0-0=146, 51-59=23, 61-63=23, 65-70=23, 72-78=23
+23: 0-0=146, 73-78=23

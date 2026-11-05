@@ -15,7 +15,7 @@ text:
   Explain the failing test
   in tui_chat.cpp
   and fix it
-  42k                         Send
+                              Send
 
 
 fills:

@@ -78,11 +78,12 @@ enum class RailRowState {
     Hover,
     /// The active session: the `selection` fill and an accent rule at the left.
     Active,
-    /// A run is in flight for it: the spinner replaces the time.
+    /// A run is in flight for it: the static run mark (`◐`, the spinner's frame 0)
+    /// replaces the time.
     ///
     /// Reserved for the multi-session run model (task 38): today D sets the running
-    /// flag on the *active* row only, and an active row draws `Active` - the spinner
-    /// is driven by `SessionRow::running` independently, so it is on screen anyway.
+    /// flag on the *active* row only, and an active row draws `Active` - the static run
+    /// mark is driven by `SessionRow::running` independently, so it is on screen anyway.
     /// The state keeps its inks so the table is complete for the task that can reach
     /// it, and so `./test_theme_contrast` measures it.
     Running,

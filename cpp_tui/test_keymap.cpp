@@ -256,12 +256,33 @@ void checkRegistry() {
     // ...and the rule it is an exception to still holds for the keys that *are* the field's.
     check(model::resolve(model::defaultKeymap(), ImGuiKey_End, model::Focus::Composer) ==
                   model::Action::None &&
+              model::resolve(model::defaultKeymap(), ImGuiKey_PageUp, model::Focus::Composer) ==
+                  model::Action::HistoryPrev &&
               model::resolve(model::defaultKeymap(), ImGuiKey_UpArrow, model::Focus::Composer) ==
-                  model::Action::HistoryPrev,
-          "R7: End stays the field's (inert) and Up stays its history key");
+                  model::Action::None,
+          "End stays the field's (inert), PgUp is its history key, Up is back to the caret");
     check(model::chordLabel(ImGuiKey_F11) == "F11" &&
               model::chordLabel(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_M) == "Ctrl+Shift+M",
           "R7: the new chords have names (a '?' would reach the help page and the document)");
+
+    // The history keymap's collision is answered by the resolver's own order, not by a
+    // special case: the exact-region row beats the `anywhere` one, so `PgUp` recalls inside
+    // the composer and pages the thread everywhere else. `PgDn` is the same one gesture
+    // with no aliases: the `Ctrl+Up`/`Ctrl+Down` rows do not exist, and outside the
+    // composer `PgDn` is simply unbound (`LoadEarlier` is a page *back*, not forward).
+    check(model::resolve(model::defaultKeymap(), ImGuiKey_PageDown, model::Focus::Composer) ==
+              model::Action::HistoryNext,
+          "PgDn is the composer's next-history key");
+    check(model::resolve(model::defaultKeymap(), ImGuiKey_PageUp, model::Focus::None) ==
+                  model::Action::LoadEarlier &&
+              model::resolve(model::defaultKeymap(), ImGuiKey_PageDown, model::Focus::None) ==
+                  model::Action::None,
+          "outside the composer PgUp still pages the thread (and PgDn is unbound)");
+    check(model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_UpArrow,
+                         model::Focus::Composer) == model::Action::None &&
+              model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_DownArrow,
+                             model::Focus::Composer) == model::Action::None,
+          "the Ctrl+Up/Down aliases are not bound (one history gesture)");
 
     g_phase = "inspector chord";
     // The inspector's chord is `Ctrl+O`: byte `0x0F` is free, delivered in both
@@ -939,13 +960,13 @@ void scenarioFocusMode() {
     g_state.ui.focusMode = true;
     check(!llmfun::tui::views::railOwnsEscape(g_state),
           "S10: ...and owns nothing while focus mode hides it");
-    // The proof that the field kept its permission: `↑` recalls the newest history entry, and the
-    // composer only reads the keymap when `acceptKeys` is true.
+    // The proof that the field kept its permission: `PgUp` recalls the newest history
+    // entry, and the composer only reads the keymap when `acceptKeys` is true.
     llmfun::tui::views::pushHistory(g_state, "recalled query");
     g_state.userQuery.inputBuf.clear();
     focusComposer();
     idle(1);
-    pressKey(ImGuiKey_UpArrow);
+    pressKey(ImGuiKey_PageUp);
     check(input() == "recalled query", "S10: the composer's own keys stay alive behind the mode");
     g_state.ui.rail = model::RailState{};
     g_state.ui.focusMode = false;

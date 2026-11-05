@@ -108,10 +108,9 @@ std::size_t formatFixed1(double value, char* buffer, std::size_t size) {
 
 /// 0 → "0", 1234 → "1.2k", 42000 → "42k", 128000 → "128k".
 ///
-/// This is `ui::formatCount`'s documented contract (task 14). That module does
-/// not exist yet and the chips are canonical for the numbers, so the splitter
-/// carries the single copy; when the chips move onto `ui/text.h` (task 25/28)
-/// this function is deleted, not duplicated.
+/// The chips' own copy of the count format, so a number reads the same
+/// wherever the UI shows it. The helper lives here, beside the values it
+/// formats.
 std::string formatCount(long long value) {
     if (value > -1000 && value < 1000)
         return std::to_string(value);
@@ -289,14 +288,11 @@ StatusChips splitStatusText(std::string_view sentence) {
     return chips;
 }
 
-// ---------------------------------------------------------------------------
-// The phase vocabulary (D-PHASE) and the structured path (D-STATUS)
-// ---------------------------------------------------------------------------
+// The phase vocabulary and the structured path
 
 Phase phaseFromOrdinal(int ordinal) {
-    // Mapped, never cast: the ordinal is D's (tui_api.h's TuiRuntimeStatus comment
-    // lists the same seven), and a value this build does not know must not become a
-    // neighbouring phase.
+    // A number outside the enum would read as a neighbouring phase under a
+    // cast. A phase this build cannot name is Idle.
     switch (ordinal) {
     case phaseOrdinal(Phase::Idle):
         return Phase::Idle;

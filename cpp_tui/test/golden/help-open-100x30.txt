@@ -2,10 +2,10 @@ name: help-open
 screen: 100x30
 page: x=10 y=3 w=80 h=24
 query: ''
-rows: built=99 matches=40 drawn=17 first=0 viewport=17 column=14
-sections: 4 groups: 11 entries: 32 lines: 52
+rows: built=97 matches=38 drawn=17 first=0 viewport=17 column=14
+sections: 4 groups: 11 entries: 30 lines: 52
 text:
-   llmfun   help                                             Ctrl+K commands  ✓ Ready    Settings
+   llmfun   help                                               Ctrl+K commands Shift+?   Settings
   Search
 
  SESSIONS
@@ -31,7 +31,7 @@ text:
               Ctrl+Shift+M  Give the thread the whole window (Esc leaves)
    + New s  Esc close   / search   PgUp/PgDn scroll
 
-   Ask any                                                                                    none
-  0                                                                                       Send
+   Ask any
+                                                                                          Send
 
-  ✓ Ready                                              Ctrl+K commands  ctx 0/0   -   none   Ready
+  ✓ Ready                                                                     ctx ░░░░░░ 0/0  none

@@ -16,7 +16,7 @@ text:
            APPEARANCE         ▌
          ▌ Text scale   1 cell
 
-   Ask...                         none
-  0                           Send
+   Ask...
+                              Send
 
-  ✓ Ready     Ctrl+K commands  ctx 0  ✓
+  ✓ Ready           ctx ░░░░░░ 0  none

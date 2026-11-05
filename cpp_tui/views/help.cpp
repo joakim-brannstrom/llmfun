@@ -193,8 +193,8 @@ std::vector<RegionNote> regionNotes() {
          "The query field and its one action: Send while idle, Stop while a run is in flight. "
          "Enter "
          "inserts a newline, because the terminal delivers Shift+Enter and Ctrl+Enter as the same "
-         "byte, so the control is what submits. Up and Down on the draft's first and last line "
-         "recall the history. Esc stops a run, then clears the draft, then releases the keyboard, "
+         "byte, so the control is what submits. PgUp and PgDn recall the history. "
+         "Esc stops a run, then clears the draft, then releases the keyboard, "
          "and in focus mode it leaves the mode first. "
          "A "
          "paste of more than 5000 characters asks before it is inserted."});

@@ -289,8 +289,14 @@ void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
 /// construction; a level the user already made more verbose than `trace` (`all`) is never
 /// lowered, because the surface may add detail but never remove it.
 ///
-/// The archive (`tuiSetLogging`) is deliberately not part of this: it keeps the level the user
-/// configured, and neither `--debug-ui` nor an open surface turns it into a trace file.
+/// The raise normally rides the per-frame poll of the surface's open state, but it can also be
+/// seeded directly on the spawn edge: `--debug-ui` opens the Raw Log before the first frame and
+/// raises the level with it, so records emitted between process start and the first frame are
+/// captured too (the seed is the same `sync(true)` edge, so the later per-frame polls no-op).
+///
+/// The archive (`tuiSetLogging`) is deliberately not part of this: the archive file
+/// (`llmfun_ui_log.txt`) keeps the level the user configured - `--debug-ui` widens the *view*,
+/// never the file, and neither an open surface nor the seed turns it into a trace file.
 struct RawLogLevelBorrow {
     private {
         LogLevel saved;
@@ -645,9 +651,6 @@ class TextUserInterfaceActor : TUICommands {
     private {
         ActorRef selfRef;
 
-        // Should the first frame start with the Raw Log open (`--debug-ui`, task 33)?
-        bool debugUi;
-
         TypedAddress!TUIListener listenerAddress;
         Channel!TUIListener listener;
 
@@ -671,6 +674,8 @@ class TextUserInterfaceActor : TUICommands {
         // arming the frame tick. The startup-failure test injects it before
         // onSpawn runs.
         string startupError;
+
+        bool debugUi;
 
         TextUserInterface ui;
 
@@ -732,6 +737,18 @@ class TextUserInterfaceActor : TUICommands {
         ui.setIniFile(iniFile);
     }
 
+    // with the flag set, open the Raw Log before the first frame AND seed the
+    // borrowed logger level to trace, so records emitted between process start
+    // and the first frame (backend attach, first agent traffic) are captured
+    // too - the per-frame syncRawLogLevel() only ran after it. Without the
+    // flag, nothing changes.
+    package void debugUiSpawnEdge() {
+        if (!debugUi)
+            return;
+        ui.setRawLogOpen(true);
+        ui.syncRawLogLevel(); // reads the just-set open state back from C: the same sync(true) edge
+    }
+
     void onSpawn(ActorRef selfRef) {
         void attachBackend() {
             // the window and the GL context are created (and the context made
@@ -758,11 +775,7 @@ class TextUserInterfaceActor : TUICommands {
             ui.setUiAsStdLogger;
             if (!note.empty)
                 ui.setStatusText(note);
-            // `--debug-ui` (task 33): open the developer surface *before* the first frame, so it
-            // is up on the frame the window appears. The flag is a per-run request: the open
-            // state is never persisted, and the surface's own `/rawlog`/Close still work.
-            if (debugUi)
-                ui.setRawLogOpen(true);
+            debugUiSpawnEdge();
         }
 
         this.selfRef = selfRef;

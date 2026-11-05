@@ -654,6 +654,15 @@ void spinner(const Metrics& m, const Rect& r, double phase) {
     drawGlyph(targetList(), r, r.x, rowPenY(r), mark, ColorToken::accent);
 }
 
+void spinnerStatic(const Metrics& m, const Rect& r) {
+    if (!unitMatches(m, r))
+        return;
+    const int frame = spinnerFrame(-1.0);
+    const char* mark =
+        glyphSetFor(m) == GlyphSet::Ascii ? kSpinnerAscii[frame] : kSpinnerGlyphs[frame];
+    drawGlyph(targetList(), r, r.x, rowPenY(r), mark, ColorToken::accent);
+}
+
 Size measureDisclosure(const Metrics& m, std::string_view label) {
     // [glyph: gu][pad1][label]
     return Size{roundCells(m.gu + m.pad1 + textUnits(m, label)), m.row};

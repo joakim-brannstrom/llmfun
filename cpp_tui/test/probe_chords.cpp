@@ -169,6 +169,9 @@ std::vector<Row> legacyRows() {
         // abbreviation (0x15, inside the Ctrl+letter path's 1-26 range).
         // plan/key_gate.md §4e records what they measured.
         {"PgUp", "\x1b[5~", ImGuiKey_PageUp, 0},
+        // The composer history key needs `PgDn` measured the way `PgUp` was:
+        // the same terminfo-driven CSI family, expected `\x1b[6~`.
+        {"PgDn", "\x1b[6~", ImGuiKey_PageDown, 0},
         {"Ctrl+U", "\x15", ImGuiKey_U, ImGuiMod_Ctrl},
         // Task 26's copy key. A printable key never arrives as a key event in the
         // terminal (F2): the row measures what it *does* arrive as - one character.
@@ -251,6 +254,7 @@ std::vector<Row> guiRows() {
         {"End", "", ImGuiKey_End, 0},
         // Task 25's LoadEarlier pair.
         {"PgUp", "", ImGuiKey_PageUp, 0},
+        {"PgDn", "", ImGuiKey_PageDown, 0},
         {"Ctrl+U", "", ImGuiKey_U, ImGuiMod_Ctrl},
         // Task 26's copy key (see the legacy row).
         {"y", "", ImGuiKey_Y, 0},
@@ -305,6 +309,7 @@ const Expectation kLegacyExpectations[] = {
     {"Ctrl+Q", 1, 0, 1, 0, true, true, ""}, // delivered since task 11 cleared IXON (§4a)
     {"End", 1, 0, 0, 0, true, true, ""},
     {"PgUp", 1, 0, 0, 0, true, true, ""},
+    {"PgDn", 1, 0, 0, 0, true, true, ""},
     {"Ctrl+U", 1, 0, 1, 0, true, true, ""},
     {"y", 0, 0, 0, 0, false, true, "y"},
     {"x", 0, 0, 0, 0, false, true, "x"},
@@ -364,6 +369,7 @@ const Expectation kGuiExpectations[] = {
     {"Ctrl+Q", 1, 0, 1, 0, true, true, ""},
     {"End", 1, 0, 0, 0, true, true, ""},
     {"PgUp", 1, 0, 0, 0, true, true, ""},
+    {"PgDn", 1, 0, 0, 0, true, true, ""},
     {"Ctrl+U", 1, 0, 1, 0, true, true, ""},
     {"y", 1, 0, 0, 0, true, true, ""},
     {"x", 1, 0, 0, 0, true, true, ""},
@@ -430,7 +436,7 @@ bool openPty(const Options& opt, Pty& pty) {
         close(master);
         return false;
     }
-    struct winsize ws{};
+    struct winsize ws {};
     ws.ws_row = static_cast<unsigned short>(opt.rows);
     ws.ws_col = static_cast<unsigned short>(opt.cols);
     if (ioctl(slave, TIOCSWINSZ, &ws) < 0) {
@@ -499,12 +505,13 @@ const std::vector<NamedKey>& candidateKeys() {
             {ImGuiKey_RightBracket, "]"},
             {ImGuiKey_Slash, "/"},
             {ImGuiKey_Backslash, "\\"},
-            // End carries a binding (task 11, ScrollEnd), so the record has to be
-            // able to see it; PgUp carries one since task 25 (LoadEarlier), and a key
-            // the whitelist does not name reads as "nothing at all" - the instrument
+            // End carries a binding (`ScrollEnd`), PgUp one (`LoadEarlier`), and PgDn the
+            // composer history key - and a key the whitelist does not name reads as
+            // "nothing at all" - the instrument
             // bug the End row hit in task 11.
             {ImGuiKey_End, "End"},
             {ImGuiKey_PageUp, "PgUp"},
+            {ImGuiKey_PageDown, "PgDn"},
             // Task 43: `F11` is focus mode's key, so the record has to be able to see it. A key
             // this whitelist does not name reads as "nothing at all" - the instrument bug the End
             // row hit in task 11.
@@ -918,7 +925,7 @@ int runText(const Options& opt, const std::vector<Row>& rows) {
     // and IXON eats Ctrl+Q (XON) / Ctrl+S (XOFF) before the backend can read
     // them. ncurses clears ICRNL here, so '\r' reaches it as CR (which the
     // backend maps to Enter alongside '\n').
-    struct termios tio{};
+    struct termios tio {};
     if (tcgetattr(0, &tio) == 0) {
         std::fprintf(stderr, "# tty: icanon=%d echo=%d isig=%d icrnl=%d ixon=%d\n",
                      (tio.c_lflag & ICANON) ? 1 : 0, (tio.c_lflag & ECHO) ? 1 : 0,

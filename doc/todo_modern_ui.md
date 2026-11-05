@@ -708,7 +708,8 @@ while the developer raw log is open) · settings gear.
 ```
 
 - Active: 2 px accent rule at the left + `accent.quiet` fill + `text.hi` title.
-- Running: spinner glyph replaces the time; a `running` label in the tooltip.
+- Running: the static run mark `◐` (the spinner's frame 0) replaces the time; a `running`
+  label in the tooltip.
 - Unread: 6 px dot in the right gutter (cleared when opened).
 - Hover (GUI): `⋯` menu appears at the right: Rename, Pin, Duplicate, Export, Delete.
   TUI: `m` opens the same menu; `r` renames, `d` deletes (with confirm), `p` pins.
@@ -2562,26 +2563,19 @@ P6. The typed model (P3) starts after the MVP merges; it is the ceiling, not the
 
 ### Session
 - The animation when the active session is working is very annoying. Remove it (the one that goes /-\)
+    - Done: the rail's running row now draws the static run mark `◐` (the spinner's frame 0),
+      unconditionally - every `running` row, not only the active one. `ui::spinner()` remains
+      available as the animated indicator for future animated surfaces; no production draw
+      site calls it right now.
 
 ### Main window
-- The D side should stop adding x and v to tool responses. The UI should instead show the success status and the D side just send over the data.
+- The D side should stop adding x and v to tool responses. The UI should instead show the success status and the D side just send over the data such as the status. I am trying to say that the D side should not "decorate" the answer with a success/fail status but rather that the UI do that in a "prettier" way.
 
 - Tool calls and responses need to be enhanced. They are very ugly now. It is just a json raw dump in screaming white color that hurt the eye.
 
-- End that is visalized to mark the end of the thinking trace when streaming a message look very bad.
-    End
-    ----
-  How can it be improved? Make a couple of proposals
+- make it possible to control how much is printed when it is working such as "minimal" where you only see it is working compared to "maximum" where you see everything.
 
-- consolidation. There now seem to be duplicate UI elements for the same thing.
-    - when an agent run I now see two different timers
-        - top right "running" - I think this one should be removed. The one at the bottom left is enough.
-        - bottom left "writing" (can also be other texts but the importent is the time)
-        I think this is a bit unncessary. Can't they be consolidated?
-    - Why do I seem to have two statuses for what the main agent is doing, the context and tok/s. I have one under "Ask anything / commands" and another one right under it divided in a left and right side.
-        - I think the one in the input field is prettier looking but it is a repeat of the one a row down. It is better if it is moved down and replace the ctx that exist there. The thinking part is redundant and can be removed, the same with the tok/s
-    - I see Ctrlk+K both at the top right and bottom right.
-    - I seee the model two times in the bottom right. The one at the far bottom is enough so the one two rows up can be removed.
+- optimization. The main window should not "show" all messages but rather only the 20. The others are loaded on demand if the user scroll up. They then have a decay time that start when the user have scrolled to the bottom of the screen. After 30s they are "unloaded". By load and unload I mean that they stop rendering.
   
 ### Raw Log
 - I cannot scroll horizontal when needed.
@@ -2590,18 +2584,18 @@ P6. The typed model (P3) starts after the MVP merges; it is the ceiling, not the
     - When a record is dropped an empty "log message" should be added at its position so it is possible to see where it was dropped
 - in settings what really do log level "raw"?
 - "--debug-ui" should set the log level to trace
+- the trace log level is not saved
 
 ### Input field
 
-history is not populated from session load.
-
-In settings the enterNewline option for Send. How do I change it?
-
-tui_api.cpp
-- I added a remark about the use of a global variable that I would like you to fix.
+- history is navigatable with up and down arrow keys. Only page up and page down should work.
 
 # Misc
-- The thread adapter is still v4. Why is that? Shouldn't we migrate to fully v5 and then basically "deprecate"/remove this adapter? Isn't v5 better?
-- Need a "?", help button
 - It is very annoying that while a "execute_command" is running a newline keep on being printed and removed.
-
+    This seems to not be limited to only execute_command but rather when the agent is working
+- add a clone option to the "..." button in the session bar
+- make the colors configurable for user/agent/answer
+- make the whole color schema swappable/configurable
+- make it so that a new instance with --local-setup inherit the central configuration of the UI such as scale etc
+- make Pin persistent
+- make it possible to control how much is printed when it is working such as "minimal" where you only see it is working compared to "maximum" where you see everything.

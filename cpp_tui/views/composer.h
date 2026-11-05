@@ -1,16 +1,17 @@
-/// The composer (`views/composer.cpp`): the only input path (design §4.6, FR-09).
+/// The composer (`views/composer.cpp`): the only input path.
 ///
 ///     ┌──────────────────────────────────────────────────────────────┐
-///     │ Ask anything...  / commands                 Plan ▸ qwen3     │  text area
-///     │ ctx ████░░ 42k  [Prev][Next]  Busy · 38 tok/s         [Send] │  meta row
+///     │ Ask anything...  / commands                              Plan │  text area
+///     │ [Prev][Next]                                       [Send] │  meta row
 ///     └──────────────────────────────────────────────────────────────┘
 ///
 /// One container (1 cell on the text grid, 6 px radius and a `raised` fill in the
 /// pixel profile), a text area that auto-grows 1..8 rows, a meta row carrying the
-/// context meter (left), the history buttons (`Prev`/`Next`, text grid only - that
-/// backend delivers neither arrow, `plan/key_gate.md` §4b), the phase and speed while a
-/// run is active (middle) and the one real action (right, `Send`/`Stop`/`Stopping`/
-/// `Insert`), and the mode/model text right-aligned on the text line.
+/// history buttons (`Prev`/`Next`, text grid only - the terminal backend delivers
+/// neither arrow) and the one real action (right, `Send`/`Stop`/`Stopping`/
+/// `Insert`), and the mode text right-aligned on the text line (the context meter,
+/// the model name, the phase and the speed belong to the now bar, the row that owns
+/// the run's numbers and identity).
 ///
 /// Contract: a view is a geometry taker. It receives `ShellLayout::composer` and a
 /// `Metrics`, reads no display size, no profile flag and no aggregate, so it draws
@@ -30,10 +31,11 @@
 /// composer into a cell grid with no application state. `views/shell.cpp` is where
 /// the aggregate is turned into a `ComposerInput`.
 ///
-/// Decisions this file implements: D-PASTE (paste is captured, folded and asked
-/// about, never submitted), D-ESC's last two steps (clear, blur) and the `Esc` chain
-/// entry, D-KEYGATE's fallback (`Enter` = newline, the action button sends), and
-/// D-THEME (every colour and distance is a token).
+/// Decisions this file implements: paste is captured, folded and asked
+/// about, never submitted; the `Esc` chain's last two steps are clear and blur,
+/// and this view is its entry point; the key gate's fallback is `Enter` =
+/// newline with the action button as the send; and every colour and distance
+/// is a token.
 #pragma once
 
 #include <cstddef>
@@ -65,15 +67,13 @@ struct TuiState;
 
 namespace llmfun::tui::views {
 
-// ---------------------------------------------------------------------------
 // Constants (the design's own numbers, restated here so a view needs no lookup)
-// ---------------------------------------------------------------------------
 
-/// Auto-grow bounds (design §4.6): one text row when empty, eight when full.
+/// Auto-grow bounds: one text row when empty, eight when full.
 inline constexpr int kComposerMinRows = 1;
 inline constexpr int kComposerMaxRows = 8;
 
-/// The largest paste the composer inserts without asking (D-PASTE: "> 5000 chars
+/// The largest paste the composer inserts without asking ("> 5000 chars
 /// asks first"). Counted in **characters** (`ui::utf8Count`), not bytes: 5000 CJK
 /// characters are 15000 bytes, and a byte rule would ask about a third of the text it
 /// promises.
@@ -107,7 +107,7 @@ inline constexpr std::size_t kPasteCaptureAboveChars = 8;
 /// pasting.
 inline constexpr long long kPasteFlightMs = 250;
 
-/// The placeholder (design §4.6). The `…` is East-Asian *Ambiguous*, so the grid -
+/// The placeholder. The `…` is East-Asian *Ambiguous*, so the grid -
 /// where a CJK terminal may draw it two cells wide - gets the three-dot spelling
 /// (the same rule as `model::kEmptySentenceAscii`), and the compact form is what a
 /// 40-cell composer shows.
@@ -121,25 +121,25 @@ inline constexpr const char* kComposerPlaceholderAscii = " Ask anything...  / co
 inline constexpr const char* kComposerPlaceholderCompact = " Ask\u2026";
 inline constexpr const char* kComposerPlaceholderCompactAscii = " Ask...";
 
-/// The text area keeps at least this much room (in `gu`) before the mode/model block
-/// is dropped: a composer whose field is narrower than this is a field the user
-/// cannot see their query in, and the model name is the less important half of the
-/// row (design §4.6's degradation).
+/// The text area keeps at least this much room (in `gu`) before the mode block is
+/// dropped: a composer whose field is narrower than this is a field the user cannot
+/// see their query in - the block is the mode word alone, and the model name lives
+/// on the now bar.
 inline constexpr int kComposerMinTextGu = 24;
 
 /// The text widths, in `gu`, at which the composer stops paying for the long form:
-/// the full meter needs ~18 cells, and the full placeholder needs 26.
+/// the full placeholder needs 26. `kComposerFullMeterGu` is the now bar's pixel
+/// breakpoint: the bar drops its meter below it, and the composer keeps no meter
+/// rule of its own.
 inline constexpr int kComposerFullMeterGu = 80;
 inline constexpr int kComposerFullPlaceholderGu = 44;
 
-/// The context meter's segment counts: the design's 10-segment bar in the pixel
-/// profile, and the TUI's six-glyph form (`ctx ████░░ 42k`, §4.6) on the grid.
+/// The context meter's segment counts - the meter's own vocabulary, shared by both
+/// bars so they read the same thresholds and the same `contextFraction` and can
+/// never disagree: the 10-segment bar in the pixel profile, and the TUI's six-glyph
+/// form (`ctx ████░░ 42k`) on the grid.
 inline constexpr int kMeterSegmentsGui = 10;
 inline constexpr int kMeterSegmentsGrid = 6;
-
-// ---------------------------------------------------------------------------
-// The paste policy (D-PASTE) - pure, so the tests can hammer it
-// ---------------------------------------------------------------------------
 
 /// `\r\n` and a lone `\r` folded to `\n`; every other byte kept.
 ///
@@ -156,7 +156,7 @@ std::string normalisePaste(std::string_view raw);
 /// each other in `./test_composer`.
 bool foldPasteChar(bool& afterCr, char32_t in, char32_t& out);
 
-/// What to do with a pasted payload: insert it, or ask first (D-PASTE's 5000-character
+/// What to do with a pasted payload: insert it, or ask first (the 5000-character
 /// rule, `kPasteAskAboveChars`). `text` is the normalised payload either way and `chars`
 /// its size in codepoints, so the question can show that number without re-walking the
 /// text (`ui::utf8Count`) and the answer needs no second read.
@@ -215,7 +215,7 @@ struct PasteState {
     std::size_t runAt = std::string::npos;
     std::size_t runRemoved = 0;
     /// The question is up: `Insert` sits beside it, `Esc` discards. The action keeps its
-    /// own label - D-CANCEL must not lose the `Stop` control while a question is up.
+    /// own label - the `Stop` control must not be lost while a question is up.
     bool ask = false;
     /// The question's one line (`Paste 6241 characters?`), formatted once when the
     /// question is raised - the view draws a value, it does not format per frame.
@@ -228,31 +228,30 @@ struct PasteState {
     void dismiss();
 };
 
-/// Is a paste still in flight at `nowMs`? While it is, no `Enter` may submit
-/// (D-PASTE): the payload's own newline must not be read as the user's send.
+/// Is a paste still in flight at `nowMs`? While it is, no `Enter` may submit:
+/// the payload's own newline must not be read as the user's send.
 bool pasteInFlight(const PasteState& paste, long long nowMs);
 
-// ---------------------------------------------------------------------------
 // The rest of the input policy
-// ---------------------------------------------------------------------------
 
 /// The lines a draft holds: `count('\n') + 1`, never clamped - "the caret is on the
 /// last line" needs the real count, while the *area* the composer draws is
 /// `composerRows()`.
 int draftLines(std::string_view draft);
 
-/// The text rows a draft needs: `draftLines()` clamped to 1..8 (design §4.6).
+/// The text rows a draft needs: `draftLines()` clamped to 1..8.
 int composerRows(std::string_view draft);
 
 /// The caret's line inside `text` for a byte offset, clamped into the text.
 ///
 /// The composer only needs this to answer "is the caret on the first/last line?",
-/// which is what makes `↑`/`↓` history keys instead of caret moves (design §4.6).
+/// which is the gate the history recall keeps: `PgUp`/`PgDn` recall
+/// only from the lines the gate names.
 int caretLine(std::string_view text, int caret);
 
 /// Is the line the caret sits on empty?
 ///
-/// This is the `/` gate (design §4.6): a `/` typed where its line holds nothing opens the
+/// This is the `/` gate: a `/` typed where its line holds nothing opens the
 /// palette filtered to commands, and a `/` anywhere else is just a slash in the query.
 bool lineEmptyAt(std::string_view text, int caret);
 
@@ -285,12 +284,12 @@ bool prepareSubmit(std::string_view draft, std::string& out);
 /// has the aggregate.
 void pushHistory(llmfun::tui::TuiState& state, const std::string& line);
 
-/// History recall (design §4.6): `step` is -1 for older and +1 for newer, and the
+/// History recall: `step` is -1 for older and +1 for newer, and the
 /// recalled text goes to `out`.
 ///
 /// The gate is the caret: an older entry is only reachable from the draft's first
-/// line and a newer one only from its last line, so `↑`/`↓` stay caret commands
-/// inside a multi-line draft. `caretLine` is the line the caret sat on *before* the
+/// line and a newer one only from its last line - the line gate the recall keeps,
+/// whatever key names the action. `caretLine` is the line the caret sat on *before* the
 /// widget processed the press; a negative value means the field was not being edited
 /// (nothing is recalled then - history is the field's, not the region's).
 ///
@@ -302,7 +301,7 @@ bool historyRecall(const std::vector<std::string>& entries, int& pos, std::strin
                    std::string_view current, int step, int caretLineIndex, int lineCount,
                    std::string& out);
 
-/// The context meter's severity (design §5.14): `accent` below 70 %, `warn` at
+/// The context meter's severity: `accent` below 70 %, `warn` at
 /// 70-89 %, `danger` at 90 % and above. The *colour* is the view's (`ColorToken` is
 /// a `ui/` type, and `model` may not name it); this is the threshold rule, testable
 /// on its own.
@@ -314,9 +313,7 @@ MeterLevel meterLevel(long long used, long long max);
 /// unknown capacity is not a full one).
 float contextFraction(long long used, long long max);
 
-// ---------------------------------------------------------------------------
 // The view
-// ---------------------------------------------------------------------------
 
 /// The composer's cross-frame state, plus the answers it hands back.
 ///
@@ -324,7 +321,7 @@ float contextFraction(long long used, long long max);
 /// the bottom are consumed by the frame layer in the same frame they are set (the
 /// `TopBarState` pattern).
 struct ComposerState {
-    // --- geometry, reported upwards ---------------------------------------
+    // geometry, reported upwards
     /// The height the composer drew with, in the profile's own units (cells on the
     /// text grid, pixels in the GUI). `views::layoutPrefsFor()` feeds it back into
     /// `LayoutPrefs::composerH`, so the thread reserves exactly what the composer
@@ -334,7 +331,7 @@ struct ComposerState {
     /// Text rows drawn this frame (1..8): the auto-grow counter the harness reads.
     int rows = kComposerMinRows;
 
-    // --- the field ---------------------------------------------------------
+    // the field
     /// Take the keyboard on the next drawn frame. Set at startup and after a history
     /// recall or a paste (both rewrite the buffer behind the widget's back, so the
     /// field has to re-read it).
@@ -353,17 +350,17 @@ struct ComposerState {
     /// and history keys use).
     bool focused = false;
 
-    // --- paste (D-PASTE) ---------------------------------------------------
+    // paste
     PasteState paste;
 
-    // --- what the composer answers, consumed by the frame layer ------------
+    // what the composer answers, consumed by the frame layer
     /// The action button was pressed (`Send`): the frame runs the submit handshake.
     bool submit = false;
     /// `Stop` or the Esc cancel step: the frame calls `tuiRequestCancel()` - the one
-    /// path `/stop` uses (D-CANCEL) - and keeps the partial output.
+    /// path `/stop` uses - and keeps the partial output.
     bool cancelRequested = false;
     /// The composer spent this frame's `Esc` (clear or blur): the frame-level steps
-    /// stand down for that press (D-ESC: one step per press).
+    /// stand down for that press (one step per press).
     ///
     /// Only a *focused* composer spends the press. With the field blurred the chain
     /// answers `ClearInput`, and nothing performs it: `dispatchKeys()` performs the
@@ -371,22 +368,13 @@ struct ComposerState {
     /// the buffer - which is not drawn while the field is blurred. That is the chain's
     /// end state, and the next `Esc` on the focused field clears it.
     bool escapeConsumed = false;
-    /// A `/` on an empty line: open the palette filtered to commands (design §4.6).
+    /// A `/` on an empty line: open the palette filtered to commands.
     bool openPalette = false;
 
-    // --- observations, for the harness and the log -------------------------
+    // observations, for the harness and the log
     /// The paste question was answered "insert" this frame, and "discard".
     bool pasteInserted = false;
     bool pasteDiscarded = false;
-
-    // --- cached formatting ------------------------------------------------
-    /// The numbers `meterText` was formatted from, and the text. The meter's count is
-    /// a *number*: it is formatted once per value change, not per frame (design §4.7's
-    /// rule, applied here so the composer cannot become a per-frame formatter).
-    long long meterUsed = -1;
-    long long meterMax = -1;
-    bool meterKnown = false;
-    std::string meterText;
 };
 
 /// What the frame tells the composer, once per frame.
@@ -396,7 +384,7 @@ struct ComposerState {
 /// of a draft is a second truth. The middle group is the run and the numbers, the
 /// last group is the keyboard permission.
 struct ComposerInput {
-    // --- the shipped input store (UserQueryState) --------------------------
+    // the shipped input store (UserQueryState)
     std::string* buffer = nullptr;
     std::vector<std::string>* history = nullptr;
     int* historyPos = nullptr;
@@ -409,51 +397,36 @@ struct ComposerInput {
     /// with its own edit state.
     std::string* handoff = nullptr;
 
-    // --- the run ------------------------------------------------------------
-    /// A run is active: the action reads `Stop` and the meta row shows the phase.
+    // the run
+    /// A run is active: the action reads `Stop`.
     bool busy = false;
     /// The cancel was already requested: the action reads `Stopping` and is disabled,
     /// so a second click cannot queue a second stop (the shipped latch).
     bool stopping = false;
     /// The backend is unreachable: nothing can be sent, so every control is disabled
-    /// rather than removed, and the draft stays visible (design §4.11).
+    /// rather than removed, and the draft stays visible.
     bool offline = false;
 
-    // --- the numbers and the names -----------------------------------------
-    long long contextUsed = 0;
-    long long contextMax = 0;
-    /// Whether the status sentence carried a context pair at all: `false` means the
-    /// meter's count is the missing-value mark, never "0" (D-6: zero is a number,
-    /// absence is not). A `0/0` pair *is* known, and prints `0`.
-    bool contextKnown = true;
-    /// The compaction threshold, or 0 when it is not known (the sentence carries no
-    /// threshold until D sends structured status in task 39): no tick is drawn then.
-    long long compactAt = 0;
+    // the name
     /// `Plan`, `Ask`, `Code`...; empty while the app has no mode, and the view draws
-    /// only the model then (nothing is invented for a mode that does not exist).
+    /// nothing then (nothing is invented for a mode that does not exist). The model
+    /// name, the context numbers, the phase and the speed are the now bar's and the
+    /// status sentence's business, not the composer's input.
     std::string mode;
-    /// The model name from the status sentence (`StatusChips::model`); empty or the
-    /// missing-value dash means "unknown", and nothing is drawn.
-    std::string model;
-    /// One word for the phase while a run is active (`Busy` today; task 28's phase
-    /// vocabulary replaces the source, not this line). Empty while idle.
-    std::string phase;
-    /// The formatted speed (`38.1 tok/s`), empty when the sentence has none.
-    std::string speed;
     /// The per-profile send-key capability: true where the active profile proves
     /// `enter`, false on the terminal. Supplied by the shell from the model
     /// (`model::sendKeyProven`), never derived in the composer.
     bool enterProven = false;
     model::SendKey sendKey = model::SendKey::Tab;
 
-    // --- the keyboard -------------------------------------------------------
+    // the keyboard
     /// No overlay owns the keyboard, and no view-local handler spent this frame's
-    /// `Esc` (D-ESC: one step per press).
+    /// `Esc` (one step per press).
     bool acceptKeys = true;
     /// An overlay is up: the Esc chain's first step (it closes the overlay) belongs to
     /// the frame, not to the field.
     bool overlayOpen = false;
-    /// Focus mode is on (task 43): the chain's step after the overlay's is "leave focus mode", and
+    /// Focus mode is on: the chain's step after the overlay's is "leave focus mode", and
     /// it is the frame's too - so this field must not treat the same press as "clear the draft" or
     /// "release the keyboard". It still has to undo its widget's cancel_edit, which is why it
     /// reads the flag rather than ignoring the key.
@@ -461,7 +434,7 @@ struct ComposerInput {
     /// The frame's clock, in unix milliseconds - the paste flight window's time base.
     long long nowMs = 0;
 
-    // --- the view's own state ----------------------------------------------
+    // the view's own state
     ComposerState* state = nullptr;
 };
 

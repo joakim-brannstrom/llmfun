@@ -64,7 +64,9 @@ struct UserConfig {
             bool gui;
         }
 
-        @(NamedArgument("debug-ui").Description("Start with the Raw Log overlay open (developer)"))
+        @(NamedArgument("debug-ui")
+                .Description(
+                    "Start with the Raw Log overlay open, logging at trace while it is open (developer)"))
         bool debugUi;
     }
 

@@ -100,8 +100,8 @@ void seedSessions(llmfun::tui::TuiState& state, long long nowMs) {
             state.ui.prefs.pinned.insert(f.id);
     }
     // One non-active row carries the run flag (`SessionItem::flags` bit 0, task 24):
-    // the frame then has a spinner to draw, and the checks below can pin the single
-    // hop from the ABI field to the rail's own row. `s02` is the third row, so it is
+    // the frame then has the static run mark to draw, and the checks below can pin the
+    // single hop from the ABI field to the rail's own row. `s02` is the third row, so it
     // inside the drawn window at 1280x820 whatever the group headers cost.
     for (auto& entry : state.sessionPanel.sessions) {
         if (entry.id == "s02")
@@ -510,12 +510,13 @@ int main(int argc, char** argv) {
 
     // (k) the run flag reaches the rail. `deriveRail()` is the *only* reader of
     //     `SessionItem::flags` (bit 0 = running), and the rail draws a running row with
-    //     the spinner in place of its time label. Nothing else in the suite crosses that
-    //     hop - `./test_rail` sets `SessionRow::running` directly - so a wrong bit, an
-    //     inverted test or a deleted line would pass every gate with the field carried,
-    //     unit-tested at the ABI boundary and visually dead. The GUI has no cells to
-    //     read, so the assertion is the pair of frames: identical pixels for an
-    //     unchanged snapshot, one local change inside the row's band for the flag.
+    //     the static run mark in place of its time label. Nothing else in the suite
+    //     crosses that hop - `./test_rail` sets `SessionRow::running` directly - so a
+    //     wrong bit, an inverted test or a deleted line would pass every gate with the
+    //     field carried, unit-tested at the ABI boundary and visually dead. The GUI has
+    //     no cells to read, so the assertion is the pair of frames: the mark is static
+    //     by design, so two consecutive captures of the running frame are
+    //     identical pixels, and the flag's one local change sits inside the row's band.
     const auto captureFrame = [&](const std::string& name) {
         Ppm shot;
         const std::string path = outDir + "/" + name;
@@ -535,10 +536,16 @@ int main(int argc, char** argv) {
 
     setRunningFlag(state, "s02", true);
     const Ppm runningFrame = captureFrame("rail-running.ppm");
+    const Ppm runningAgain = captureFrame("rail-running-again.ppm");
     setRunningFlag(state, "s02", false);
     const Ppm idleFrame = captureFrame("rail-running-cleared.ppm");
     const Ppm idleAgain = captureFrame("rail-running-idle-again.ppm");
 
+    const DiffBox stillDiff = diffBox(runningFrame, runningAgain);
+    check(stillDiff.count == 0,
+          "the run mark is static: consecutive captures of the running frame are identical "
+          "pixels (differing=" +
+              std::to_string(stillDiff.count) + ")");
     const DiffBox idleDiff = diffBox(idleFrame, idleAgain);
     check(idleDiff.count == 0,
           "premise: an unchanged snapshot renders the same pixels (differing=" +
@@ -551,7 +558,7 @@ int main(int argc, char** argv) {
           "...inside the rail column only (x=" + std::to_string(runDiff.x0) + ".." +
               std::to_string(runDiff.x1) + ")");
     check(static_cast<float>(runDiff.y1 - runDiff.y0 + 1) <= 3.0f * rowHeight,
-          "...within one row's band, where the spinner replaces that row's time label (h=" +
+          "...within one row's band, where the static mark replaces that row's time label (h=" +
               std::to_string(runDiff.y1 - runDiff.y0 + 1) + " px)");
     check(static_cast<float>(runDiff.x1) > railLayout.rail.x + 0.5f * railLayout.rail.w,
           "...and on the row's right-hand side, where the time label was drawn");

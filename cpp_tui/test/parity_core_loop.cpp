@@ -1443,7 +1443,9 @@ void checkNarrowRailPanel(bool update) {
     // Premises: the panel band, an automatic rail, and no rail on screen.
     check(h.core->ui.prefs.railOpen == -1, "rail panel: the preference is still auto");
     check(!h.core->ui.rail.open, "rail panel: an automatic rail is closed at 60x20");
-    check(!h.last.hasText("Alpha session"), "rail panel: ...and its rows are not drawn");
+    // The marker is a rail-only row: the active session's name also titles the top bar, and at
+    // this width the bar's title has room for the whole name once the hint pair drops.
+    check(!h.last.hasText("Beta session"), "rail panel: ...and its rows are not drawn");
 
     h.pressCtrl(ImGuiKey_B);
     h.idle(3);
@@ -1522,8 +1524,12 @@ void checkFocusMode(bool update) {
     check(!h.last.hasText("Alpha session"), "focus: the top bar is hidden with it");
     check(h.last.hasText("read, then build"), "focus: the thread is still drawn");
     check(h.last.hasText("Ask anything..."), "focus: the composer is untouched");
-    check(h.last.hasText("Ctrl+K commands") && h.last.hasText("Ready"),
-          "focus: the now bar still carries the state (NFR-16)");
+    // The now bar (the status bar) carries the state chip and the
+    // context meter - the palette hint is the top bar's alone. The
+    // trailing space in `ctx ` keeps the pin on the meter's own label, not any `ctx` a
+    // fixture string could carry.
+    check(h.last.hasText("Ready") && h.last.hasText("ctx "),
+          "focus: the now bar still carries the state and the context pair (NFR-16)");
     check(h.last.findText("YOU", x, y) && x == 16,
           "focus: the transcript is the centred 90-cell column (YOU at cell " + std::to_string(x) +
               ")");

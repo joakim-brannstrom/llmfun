@@ -8,7 +8,7 @@
 ///   * it does not read the aggregate, the display size or the profile flag - the bar is a
 ///     geometry taker, so `./test_topbar` can draw it into a cell grid with no TuiState;
 ///   * it does not queue the rename itself: a committed rename is an *answer* the frame
-///     layer applies through the rail's own `queueSessionAction()` (§6.2, one registry
+///     layer applies through the rail's own `queueSessionAction()` (one registry
 ///     entry), so the two entry points cannot disagree about the action;
 ///   * it does not write a glyph or a colour literal: marks come from `ui/icons.h` and
 ///     colours from `ui::color()`, like every other view.
@@ -21,7 +21,6 @@
 #include "imgui/imgui.h"
 #include "imgui/imgui_internal.h"
 
-#include "ui/icons.h"
 #include "ui/layout.h"
 #include "ui/metrics.h"
 #include "ui/primitives.h"
@@ -39,7 +38,6 @@ namespace llmfun::tui::views {
 namespace {
 
 using ui::ColorToken;
-using ui::Icon;
 
 /// The identity, and the one string the bar draws without a mark: the appendix spells the
 /// wordmark as the word itself (an accent square to its left in the GUI, the word alone on
@@ -48,15 +46,27 @@ constexpr const char* kWordmark = "llmfun";
 
 /// The palette hint: the discoverability layer, and the first thing to drop when the bar is
 /// narrow (`Ctrl+K` still works - the hint is an advertisement, not the control). The design
-/// spells it per profile (§4.2: `Ctrl+K commands` on the one-row bar) and §5.1
-/// (`Ctrl+K Search` in the window), so it is a string the metrics' profile picks.
+/// spells it per profile (`Ctrl+K commands` on the one-row bar,
+/// `Ctrl+K Search` in the window), so it is a string the metrics' profile picks.
 constexpr const char* kHintGrid = "Ctrl+K commands";
 constexpr const char* kHintGui = "Ctrl+K Search";
 
+/// The hint's sibling advertisement: the top bar's visible help entry point.
+/// On the grid it is the `Shift+?` wording drawn like the hint above - the glyph plus the chord
+/// that opens the page, and no click target, because the grid's route to the page is the typed
+/// `?`/the keymap's row. In the pixel profile the affordance *is* the control: a real button
+/// labelled with the glyph, whose request opens the same page the keymap's `Shift+/` row opens.
+constexpr const char* kHelpGrid = "Shift+?";
+constexpr const char* kHelpButton = "?";
+
+/// The pixel button's tooltip. Reads `kHelpGrid`'s chord so the two cannot drift: the
+/// wording explains the button and names the page's other entry point, the one chord.
+constexpr const char* kHelpTooltip = "help (Shift+?)";
+
 /// The settings entry. Text, not a gear glyph: `ui/icons.h` carries state marks, not
-/// shapes, and a gear would be a shape with no word beside it (NFR-16) - and a second name
-/// for the same control. It is the sheet's visible entry point (design §4.2 "gear opens
-/// Settings", task 34), so the label *is* the control and needs no tooltip to explain itself.
+/// shapes, and a gear would be a shape with no word beside it - and a second name
+/// for the same control. It is the sheet's visible entry point ("gear opens
+/// Settings"), so the label *is* the control and needs no tooltip to explain itself.
 constexpr const char* kSettingsLabel = "Settings";
 constexpr const char* kBusyRenameHint = "a rename cannot be queued while a run is active";
 
@@ -118,34 +128,6 @@ bool whitespaceOnly(const std::string& text) {
     return true;
 }
 
-/// The run pill's ink and mark: one glyph, one word, one colour per state (NFR-16).
-///
-/// The pairs are measured against the `raised` chip fill - idle 7.9:1, running 7.0:1,
-/// waiting 8.0:1, failed 5.7:1 - so the word stays readable at every colour depth;
-/// `./test_topbar` re-measures them rather than trusting this comment.
-struct PillLook {
-    Icon mark;
-    ColorToken ink;
-};
-
-PillLook pillLook(RunState state) {
-    switch (state) {
-    case RunState::Idle:
-        return PillLook{Icon::Ok, ColorToken::textMid};
-    case RunState::Running:
-        return PillLook{Icon::Running, ColorToken::accent};
-    case RunState::Waiting:
-        return PillLook{Icon::Pending, ColorToken::stateWarn};
-    case RunState::Failed:
-        return PillLook{Icon::Error, ColorToken::stateDanger};
-    case RunState::RawLogOpen:
-        break;
-    }
-    // `RawLogOpen` is the bar's mode, not a run state: a caller that reaches here asked the
-    // pill to report a mode, and the answer is the ordinary run's.
-    return PillLook{Icon::Running, ColorToken::accent};
-}
-
 } // namespace
 
 const char* runStateName(RunState state) {
@@ -183,22 +165,6 @@ std::string elapsedLabel(long long ms) {
     return buffer;
 }
 
-std::string pillLabel(RunState state, long long elapsedMs) {
-    switch (state) {
-    case RunState::Idle:
-        return "Ready";
-    case RunState::Running:
-        return "running " + elapsedLabel(elapsedMs);
-    case RunState::Waiting:
-        return "waiting " + elapsedLabel(elapsedMs);
-    case RunState::Failed:
-        return "failed";
-    case RunState::RawLogOpen:
-        break;
-    }
-    return "Ready";
-}
-
 TopBarParts topBarMeasure(const TopBarState& state, const ui::Rect& bar, const ui::Metrics& m) {
     TopBarParts parts;
     // Fail closed: a folded region (compact mode folds the top bar: `topBar.h == 0`), a zero
@@ -226,14 +192,17 @@ TopBarParts topBarMeasure(const TopBarState& state, const ui::Rect& bar, const u
     const ui::ButtonSpec gearSpec{kSettingsLabel, /*enabled=*/false};
     const float gearW = ui::measureButton(m, gearSpec).w;
     const float badgeW = state.rawLogOpen ? ui::measureChip(m, kRawBadge).w : 0.0f;
-    const float pillW = ui::measurePill(m, pillLabel(state.run, state.elapsedMs)).w;
     const float hintW = textUnits(m, hintText(m));
+    // The affordance's own profile: the grid advertises in text, the pixel profile reserves a
+    // button. Measured with the primitives that draw it, like every other fixed part.
+    const ui::ButtonSpec helpSpec{kHelpButton};
+    const float helpW = m.textGrid ? textUnits(m, kHelpGrid) : ui::measureButton(m, helpSpec).w;
 
     // Build the bar with a given set of optional parts; the title takes what is left.
     //
-    // The order on screen is mark, wordmark, rule, title, hint, pill, `RAW`, settings, so the
-    // right cluster is placed from the right edge inwards and the hint lands directly left of
-    // the pill.
+    // The order on screen is mark, wordmark, rule, title, hint, help, `RAW`, settings, so
+    // the right cluster is placed from the right edge inwards and the two advertisements (the
+    // hint and the `?` affordance) sit together directly left of the `RAW` badge.
     const auto build = [&](bool withHint, bool withWordmark, bool withGear) {
         TopBarParts out;
         float x = bar.x + pad;
@@ -256,11 +225,14 @@ TopBarParts topBarMeasure(const TopBarState& state, const ui::Rect& bar, const u
             out.badge = TopBarPart{right - badgeW, rowY, badgeW, m.row};
             right = out.badge.x - pad;
         }
-        out.pill = TopBarPart{right - pillW, rowY, pillW, m.row};
-        right = out.pill.x - pad;
 
         float titleRight = right;
-        if (withHint && right - hintW > leftEnd) {
+        // The two advertisements are one rung of the ladder: the hint and the
+        // `?` affordance survive or drop together, so a narrow bar never trades the title's
+        // room for the affordance alone.
+        if (withHint && right - (helpW + pad + hintW) > leftEnd) {
+            out.help = TopBarPart{right - helpW, rowY, helpW, m.row};
+            right = out.help.x - pad;
             out.hint = TopBarPart{right - hintW, rowY, hintW, m.row};
             titleRight = out.hint.x - pad;
         }
@@ -268,9 +240,9 @@ TopBarParts topBarMeasure(const TopBarState& state, const ui::Rect& bar, const u
         return out;
     };
 
-    // Priority (design §4.2): the mark, the run pill and the `RAW` badge never drop; the title
-    // takes what is left; the hint and the wordmark drop before either of them, and the settings
-    // entry only after the wordmark. Four attempts, so a degenerate bar still terminates.
+    // Priority: the mark and the `RAW` badge never drop; the title
+    // takes what is left; the hint with its `?` sibling, the wordmark and the settings entry drop
+    // before either of them, in that order. Four attempts, so a degenerate bar still terminates.
     parts = build(/*withHint=*/true, /*withWordmark=*/true, /*withGear=*/true);
     if (parts.title.empty())
         parts = build(false, true, true);
@@ -304,15 +276,15 @@ void renderTopBar(TopBarState& state, const ui::Rect& bar, const ui::Metrics& m)
 
     // The bar's own type step, pushed *before* the measure: in the pixel profile a label is
     // 13 px against the body's 15 px, so a bar measured at the body size and drawn at the label
-    // size would reserve ~15 % too much per string - a gap opening before the pill, and a
+    // size would reserve ~15 % too much per string - a gap opening before the fixed parts, and a
     // `titleTruncated` that the drawn text does not have. `topBarMeasure()` pushes the same
     // scope itself, so a standalone measure answers the size this view draws at.
     const ui::TypeScope labelType(ui::TypeStep::label, m.textGrid);
     const TopBarParts parts = topBarMeasure(state, bar, m);
 
     // Region chrome. The design's surface and bottom hairline are pixel-profile chrome: a
-    // one-cell bar *is* one cell, and a one-cell hairline would be the whole bar (design §4.2,
-    // "TUI: 1 row"). The grid keeps the terminal's own background, like every other region of
+    // one-cell bar *is* one cell, and a one-cell hairline would be the whole bar
+    // ("TUI: 1 row"). The grid keeps the terminal's own background, like every other region of
     // the grid does. `ui::rule()` is the unrounded fill - a region is square, and the token
     // radius belongs to panels and cards.
     if (!m.textGrid) {
@@ -326,7 +298,7 @@ void renderTopBar(TopBarState& state, const ui::Rect& bar, const ui::Metrics& m)
     // The identity: the accent square, the wordmark and the rule between it and the title. The
     // square is one horizontal unit (1 cell on the grid, 8 px in the GUI); the appendix draws it
     // at 6 px, and the metrics' own `gu` is the token for "one column" - a view may not invent a
-    // length the token table does not have (D-THEME).
+    // length the token table does not have.
     ui::rule(m, rectOf(parts.mark, m), ColorToken::accent);
     line(m, rectOf(parts.wordmark, m), kWordmark, ColorToken::textHi);
     if (!parts.rule.empty())
@@ -360,7 +332,7 @@ void renderTopBar(TopBarState& state, const ui::Rect& bar, const ui::Metrics& m)
         // `InputText` clears its own ActiveId on Escape, so the press is read from the key rather
         // than from the item state. `acceptKeys` is the frame's answer to "may this press be the
         // bar's": false while an overlay owns the keyboard, and false on a frame whose press a
-        // view-local handler (an ImGui popup/menu) already claimed - D-ESC's one step per press.
+        // view-local handler (an ImGui popup/menu) already claimed - one step per press.
         // The press this box takes is marked consumed so the frame-level cancel step stands down.
         const bool esc = state.acceptKeys && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
         if (esc) {
@@ -420,15 +392,30 @@ void renderTopBar(TopBarState& state, const ui::Rect& bar, const ui::Metrics& m)
         }
     }
 
-    // The palette hint, the run pill, the `RAW` badge and the settings entry.
+    // The palette hint, the `?` help affordance, the `RAW` badge and the settings entry.
     line(m, rectOf(parts.hint, m), hintText(m), ColorToken::textLow);
-    const PillLook look = pillLook(state.run);
-    ui::pill(m, rectOf(parts.pill, m), look.mark, pillLabel(state.run, state.elapsedMs), look.ink,
-             ColorToken::raised);
+    if (!parts.help.empty()) {
+        if (m.textGrid) {
+            // The grid's affordance is an advertisement, not the control: it names the chord
+            // (`Shift+?`) and the page is opened by the keymap's row or the shell's typed-`?`
+            // seam - never by a click here, exactly like the hint beside it.
+            line(m, rectOf(parts.help, m), kHelpGrid, ColorToken::textLow);
+        } else {
+            // The pixel profile's affordance is the control: a real button that asks the frame
+            // for the help page, the request the keymap's `Shift+/` row answers with the same
+            // `views::openHelp()` call. Gated on `acceptKeys` like every other click on this
+            // bar: an overlay that owns the keyboard must not lose it to a click underneath.
+            const ui::ButtonSpec helpSpec{kHelpButton};
+            ui::button(helpSpec, m, rectOf(parts.help, m));
+            ui::tooltip(kHelpTooltip);
+            if (ui::buttonPressed(helpSpec, m, rectOf(parts.help, m)) && state.acceptKeys)
+                state.helpRequested = true;
+        }
+    }
     if (!parts.badge.empty())
         ui::chip(m, rectOf(parts.badge, m), kRawBadge, ColorToken::stateWarn, ColorToken::raised);
     if (!parts.gear.empty()) {
-        // The `Settings` entry is a real control now that the sheet exists (design §4.2: "gear
+        // The `Settings` entry is a real control ("gear
         // opens Settings"). It is drawn *enabled* whatever is on screen - the bar's appearance is a
         // function of its own inputs, so opening a panel cannot restyle the row behind it
         // (`./test_inspector_gui` asserts exactly that) - and the *click* is what `acceptKeys`

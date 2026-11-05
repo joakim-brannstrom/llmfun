@@ -5,7 +5,7 @@ open: 1 overlay: 1 tab: agents unread: 0
 parts: agents=10 activity=12 badge=0 notice=0 body=70x21 rows=1 drawn=1
 labels: agents='[5] Agents' activity='[6] Activity' badge='' notice='' empty='No agents this run'
 text:
-   llmfun                                Ctrl+K commands  ✓ Ready    Settings
+   llmfun                                  Ctrl+K commands Shift+?   Settings
    /     [5] Agents [6] Activity
          No agents this run
 
@@ -26,11 +26,11 @@ text:
    +
 
    Ask a
-  0
 
-  ✓ Ready                          Ctrl+K commands  ctx 0/0   -   none   Ready
+
+  ✓ Ready                                                 ctx ░░░░░░ 0/0  none
 fills:
-0: 1-1=111, 10-10=102, 57-65=23, 67-78=23
+0: 1-1=111, 10-10=102, 67-78=23
 1: 0-0=17, 1-5=23, 6-6=17, 8-8=59, 9-18=111, 19-79=59
 2: 0-6=17, 8-8=59, 9-78=17, 79-79=59
 3: 0-6=17, 8-8=59, 9-78=17, 79-79=59
@@ -53,4 +53,4 @@ fills:
 20: 0-0=67, 1-1=23, 2-2=231, 3-7=23, 8-8=59, 9-78=17, 79-79=59
 21: 0-0=67, 1-7=23, 8-8=59, 9-78=17, 79-79=59
 22: 0-7=67, 8-79=59
-23: 0-0=146, 51-59=23, 61-63=23, 65-70=23, 72-78=23
+23: 0-0=146, 73-78=23
