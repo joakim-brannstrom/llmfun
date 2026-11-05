@@ -140,18 +140,33 @@ int main(int argc, char** argv) {
     check(layoutsEqual(overlayLayoutFor(frame, /*paletteOpen=*/false), painted),
           "overlay: with no overlay open the painted layout comes back unchanged");
 
-    // The inspector's auto rule is one rule for both calls: below the wide
-    // breakpoint the inspector would be a panel, so it is closed instead of covering
-    // the thread and the composer.
+    // The inspector's auto rule is one rule for both calls (the shell's and the overlay
+    // layer's), and it is one *answer*: auto resolves closed, so a first run starts
+    // with the panel closed at every width - on a wide display too, where the engine's own
+    // answer would be the docked column. The rail's rule below keeps its own panel-band answer.
     UiState mediumUi;
     ShellFrame medium;
     medium.display = ImVec2(900.0f, 700.0f);
     medium.prefs = layoutPrefsFor(mediumUi, /*paletteOpen=*/false);
     medium.layout = shellLayoutFor(medium.prefs, medium.display);
-    check(medium.prefs.inspectorOpen, "auto rule: the preference is auto (open) before the rule");
+    check(medium.prefs.inspectorOpen,
+          "auto rule: the preference is auto (-1) before the rule resolves it");
     check(medium.layout.inspector.w <= 0.0f,
           "auto rule: ...and the panel form is closed instead (" +
               rectText(medium.layout.inspector) + ")");
+
+    // The wide display is the rule's pin: the engine would still answer the docked column
+    // there, and auto closes it anyway. The 900x700 frame above is closed by the panel band,
+    // not by the rule; this width isolates the rule's answer.
+    UiState inspectorUi;
+    ShellFrame wideShell;
+    wideShell.display = ImVec2(1280.0f, 820.0f);
+    wideShell.prefs = layoutPrefsFor(inspectorUi, /*paletteOpen=*/false);
+    wideShell.layout = shellLayoutFor(wideShell.prefs, wideShell.display);
+    check(!wideShell.layout.inspectorOverlay,
+          "auto rule: premise - the engine answers the docked column at 1280x820");
+    check(wideShell.layout.inspector.w <= 0.0f, "auto rule: ...and auto closes it there too (" +
+                                                    rectText(wideShell.layout.inspector) + ")");
     const ShellLayout mediumOverlay = overlayLayoutFor(medium, /*paletteOpen=*/true);
     check(rectsEqual(mediumOverlay.inspector, medium.layout.inspector),
           "auto rule: the overlay re-layout applies the same rule");

@@ -262,6 +262,32 @@ void checkRegistry() {
     check(model::chordLabel(ImGuiKey_F11) == "F11" &&
               model::chordLabel(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_M) == "Ctrl+Shift+M",
           "R7: the new chords have names (a '?' would reach the help page and the document)");
+
+    g_phase = "inspector chord";
+    // The inspector's chord is `Ctrl+O`: byte `0x0F` is free, delivered in both
+    // profiles, and aliases nothing - unlike `Ctrl+I`, whose byte 9 the terminal hears
+    // as `Tab`, which a Tab-based send gesture would turn into a send.
+    check(model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_O, model::Focus::None) ==
+                  model::Action::ToggleInspector &&
+              model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_O,
+                             model::Focus::Composer) == model::Action::ToggleInspector,
+          "Ctrl+O toggles the inspector in both profiles (the composer's keyboard included)");
+    check(model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_I, model::Focus::None) ==
+                  model::Action::None &&
+              model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_I,
+                             model::Focus::Composer) == model::Action::None,
+          "the Ctrl+I chord is unbound everywhere");
+    // The digit tabs stay pixel-only (unchanged pins: `0x1D`/`0x1E` are unmapped in the
+    // terminal), and the alias set (bytes 10/13) stays unbound.
+    check(model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_5, model::Focus::None) ==
+                  model::Action::InspectorAgents &&
+              model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_6,
+                             model::Focus::None) == model::Action::InspectorActivity &&
+              model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_M,
+                             model::Focus::None) == model::Action::None &&
+              model::resolve(model::defaultKeymap(), ImGuiMod_Ctrl | ImGuiKey_J,
+                             model::Focus::None) == model::Action::None,
+          "Ctrl+5/Ctrl+6 stay pixel-only and the alias set (Ctrl+M/Ctrl+J) stays unbound");
 }
 
 // ---------------------------------------------------------------------------
@@ -930,12 +956,12 @@ void scenarioFocusMode() {
     g_state.ui.prefs.railOpen = 0;
     g_state.ui.prefs.inspectorOpen = 0;
     pressCtrl(ImGuiKey_B);
-    pressCtrl(ImGuiKey_I);
+    pressCtrl(ImGuiKey_O);
     check(g_state.ui.prefs.railOpen == 0 && g_state.ui.prefs.inspectorOpen == 0,
-          "S10: Ctrl+B/Ctrl+I leave a hidden region's preference alone");
+          "S10: Ctrl+B/Ctrl+O leave a hidden region's preference alone");
     g_state.ui.focusMode = false;
     pressCtrl(ImGuiKey_B);
-    pressCtrl(ImGuiKey_I);
+    pressCtrl(ImGuiKey_O);
     check(g_state.ui.prefs.railOpen == 1 && g_state.ui.prefs.inspectorOpen == 1,
           "S10: ...and act again once the mode is left");
 

@@ -881,6 +881,96 @@ void stepAsk(Harness& h) {
     check(tuiIsSubmitReady(h.handle.get()) == 0, "ask: D's acknowledgement clears the flag");
 }
 
+/// Step 3b - the send keys, per profile: `Tab` - the shipped default - submits
+/// in both profiles, `Enter` breaks the line in both by default, and a hand-edited
+/// `SendKey=enter` is honoured *only* where it is proven: the pixel profile. The terminal cannot
+/// tell `Enter` from `Shift+Enter`, so there `enter` folds to `none` and keeps
+/// newlineing even when configured - which is exactly what the sheet's refusal to offer it there
+/// promises (`sendKeyOffered()`). The Send button's own pin is step 3's text-mode click.
+void stepSendKey(Harness& h) {
+    phase("3b. send keys");
+    // The field must be the one being edited (`views/composer.cpp`'s `keySendEnabled` gate), and
+    // it must be *re*-reached after every send: a submit spends the one-shot focus request too
+    // (the shell hands the keyboard back through a fresh request only on the paths that have
+    // one), so the step re-arms it where the grid clicks it and the pixel profile cannot.
+    const auto refocus = [&h]() {
+        if (h.text()) {
+            check(h.clickOn("Ask anything"), "keys: the composer's field is on screen to click");
+        } else {
+            h.core->composer.focusRequested = true;
+        }
+        h.idle(1);
+    };
+    refocus();
+    check(h.core->composer.focused, "keys: premise - the field is the active editor");
+
+    // `Tab`, the default, sends in both profiles.
+    h.typeText("send me");
+    h.pressKey(ImGuiKey_Tab);
+    h.idle(1);
+    check(tuiIsSubmitReady(h.handle.get()) == 1, "keys: Tab submits the draft (the default)");
+    check(h.core->userQuery.submitQuery == "send me", "keys: the submit carries the typed draft (" +
+                                                          quoted(h.core->userQuery.submitQuery) +
+                                                          ")");
+    tuiResetSubmit(h.handle.get());
+    // The send key owns its press (CallbackCompletion claims the Tab key): without
+    // that claim ImGui's nav tabbing - always enabled - evicts the active field a
+    // frame after the send.
+    h.idle(1);
+    check(h.core->composer.focused,
+          "keys: a Tab-send leaves the field focused (nav tabbing must not evict it)");
+    refocus();
+
+    // `Enter` is not a send key by default: it breaks the line, in both profiles.
+    h.typeText("line one");
+    h.pressKey(ImGuiKey_Enter);
+    h.idle(1);
+    check(tuiIsSubmitReady(h.handle.get()) == 0, "keys: Enter does not submit by default");
+    check(h.core->userQuery.inputBuf.find('\n') != std::string::npos,
+          "keys: Enter broke the line (" + quoted(h.core->userQuery.inputBuf) + ")");
+    h.pressKey(ImGuiKey_Tab);
+    h.idle(1);
+    check(tuiIsSubmitReady(h.handle.get()) == 1, "keys: Tab still sends the two-line draft");
+    tuiResetSubmit(h.handle.get());
+    refocus();
+
+    // The hand-edited value: honoured in the pixel profile, folded to `none` (and so a newline
+    // key again) in the terminal.
+    h.core->ui.prefs.sendKey = model::SendKey::Enter;
+    h.idle(1);
+    if (h.text()) {
+        check(model::sendKeyEffective(model::SendKey::Enter, /*textGrid=*/true) ==
+                  model::SendKey::None,
+              "keys: the terminal folds an unproven `enter` to `none`");
+        h.typeText("line two");
+        h.pressKey(ImGuiKey_Enter);
+        h.idle(1);
+        check(tuiIsSubmitReady(h.handle.get()) == 0,
+              "keys: Enter stays a newline in the terminal, even when configured");
+        check(h.core->userQuery.inputBuf.find('\n') != std::string::npos,
+              "keys: ...and the line still breaks (" + quoted(h.core->userQuery.inputBuf) + ")");
+    } else {
+        h.typeText("send me twice");
+        h.pressKey(ImGuiKey_Enter);
+        h.idle(1);
+        check(tuiIsSubmitReady(h.handle.get()) == 1,
+              "keys: a hand-edited `enter` submits in the pixel profile");
+    }
+    h.core->ui.prefs.sendKey = model::SendKey::Tab; // the shipped default again
+    h.idle(1);
+    // Hand the keyboard back to the frame layer: the steps below press plain keys (`/`), which
+    // belong to the palette, not to a field that is still being edited. The first Esc is the
+    // escape chain's clear step while a draft is up; the second is the blur.
+    h.pressKey(ImGuiKey_Escape);
+    h.idle(1);
+    if (h.text() && !h.core->userQuery.inputBuf.empty()) {
+        h.pressKey(ImGuiKey_Escape);
+        h.idle(1);
+    }
+    check(!h.core->composer.focused, "keys: the field is released for the steps after it");
+    check(h.core->userQuery.inputBuf.empty(), "keys: the step leaves no draft behind");
+}
+
 /// Step 4 - stream: a run's live answer arrives through the ABI, the clock runs, and the
 /// composer's action becomes Stop.
 void stepStream(Harness& h) {
@@ -980,16 +1070,14 @@ void stepAgentsTab(Harness& h) {
               "agents: the ABI's context count reached the lane");
     }
 
-    // The panel is docked at the reference width (the `-1 auto` rule), so it is already up; the
-    // palette row is only needed where the width closed it, and it is the grid's documented entry
-    // point for that case (`Ctrl+I` is not delivered by a terminal, plan/key_gate.md §3b).
-    check(h.core->inspector.open, "agents: the inspector is docked at this width");
-    if (!h.core->inspector.open) {
-        check(runPaletteRow(h, "actions.toggleInspector"),
-              "agents: the inspector opens from the palette");
-        h.idle(2);
-        check(h.core->inspector.open, "agents: the panel has an area this frame");
-    }
+    // The `-1 auto` rule resolves *closed* - at the reference width too.
+    // The palette row is the documented entry point for opening the panel (`Ctrl+O` reaches both
+    // profiles, so the chord covers the terminal too).
+    check(!h.core->inspector.open, "agents: premise - auto leaves the panel closed at this width");
+    check(runPaletteRow(h, "actions.toggleInspector"),
+          "agents: the inspector opens from the palette");
+    h.idle(2);
+    check(h.core->inspector.open, "agents: the panel has an area this frame");
 
     // The tab: a click on the strip in the grid, `Ctrl+5` in the pixel profile (the chord the
     // terminal swallows). Both write `ShellPrefs::tab` through the same answer.
@@ -1162,6 +1250,7 @@ void runCoreLoop(Harness& h) {
     stepStart(h);
     stepSelectSession(h);
     stepAsk(h);
+    stepSendKey(h);
     stepStream(h);
     stepStop(h);
     stepAnswer(h);

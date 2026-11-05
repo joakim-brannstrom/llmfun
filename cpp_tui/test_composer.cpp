@@ -380,21 +380,38 @@ void checkSource() {
           "the composer does not include tui.h (views/ names no aggregate)");
     check(source.find("IsKeyPressed(ImGuiKey_UpArrow") == std::string::npos,
           "history keys are resolved through the keymap, not read as raw chords");
-    // The one raw key read is `Esc`, and it is not a chord: `keymap.h` keeps it out of the
-    // table because its step depends on the run and the draft, not on the focus, and the
-    // order lives in `model::resolveEscape`. Everything else must go through the registry.
+    // The raw key reads are `Esc` and the send key. `Esc` is not a chord: `keymap.h`
+    // keeps it out of the table because its step depends on the run and the draft, not
+    // on the focus, and the order lives in `model::resolveEscape`. The send key is not
+    // a chord either: it is the per-profile capability, and its meaning lives in
+    // `sendTrigger` - the composer reads the two keys' pressed-ness (and the Shift
+    // modifier that keeps Shift+Enter a newline) and hands them over, the way the
+    // action button hands its press. Everything else must go through the registry.
     std::size_t directReads = 0;
     std::size_t escReads = 0;
+    std::size_t sendKeyReads = 0;
+    std::size_t shiftReads = 0;
     const std::string escCall = "IsKeyPressed(ImGuiKey_Escape";
+    const std::string enterCall = "IsKeyPressed(ImGuiKey_Enter";
+    const std::string tabCall = "IsKeyPressed(ImGuiKey_Tab";
+    const std::string shiftCall = "IsKeyDown(ImGuiMod_Shift";
     for (std::size_t at = source.find("IsKeyPressed("); at != std::string::npos;
          at = source.find("IsKeyPressed(", at + 1)) {
         ++directReads;
         if (source.compare(at, escCall.size(), escCall) == 0)
             ++escReads;
+        if (source.compare(at, enterCall.size(), enterCall) == 0 ||
+            source.compare(at, tabCall.size(), tabCall) == 0)
+            ++sendKeyReads;
     }
-    check(directReads == escReads, "the only raw key read in the composer is Esc (" +
-                                       std::to_string(directReads) + " reads, " +
-                                       std::to_string(escReads) + " of them Esc)");
+    for (std::size_t at = source.find(shiftCall); at != std::string::npos;
+         at = source.find(shiftCall, at + 1))
+        ++shiftReads;
+    check(directReads == escReads + sendKeyReads,
+          "the only raw chord reads in the composer are Esc and the send key (" +
+              std::to_string(directReads) + " reads, " + std::to_string(escReads) + " Esc, " +
+              std::to_string(sendKeyReads) + " send key)");
+    check(shiftReads == 1, "Shift is read only as the Shift+Enter modifier");
     // The action's label is the only place the words live: one owner.
     check(source.find("\"Send\"") != std::string::npos &&
               source.find("\"Stopping\"") != std::string::npos,
@@ -514,30 +531,50 @@ void checkPaste() {
 // ---------------------------------------------------------------------------
 
 void checkSendRule() {
-    const bool k = false;
     using model::SendKey;
-    const SendKey settings[] = {SendKey::Enter, SendKey::CtrlEnter, SendKey::EnterNewline};
+    const SendKey settings[] = {SendKey::None, SendKey::Enter, SendKey::Tab};
     for (const SendKey setting : settings) {
-        check(views::sendTrigger(/*action=*/true, k, k, k, setting, /*paste=*/false,
-                                 /*composing=*/false) == views::SendTrigger::Action,
+        check(views::sendTrigger(/*actionPressed=*/true, false, false, false, setting,
+                                 /*pasteInFlightNow=*/false, /*composing=*/false,
+                                 /*enterProven=*/false) == views::SendTrigger::Action,
               "the action button always sends");
-        check(views::sendTrigger(/*action=*/false, /*enter=*/true, k, k, setting, false, false) ==
-                  views::SendTrigger::None,
-              "no key sends while the key gate is closed");
-        check(views::sendTrigger(/*action=*/false, k, /*ctrlEnter=*/true, k, setting, false,
-                                 false) == views::SendTrigger::None,
-              "Ctrl+Enter sends nothing while the key gate is closed");
+        // The terminal profile (`enterProven=false`): the stored-but-unproven `Enter`
+        // never sends, whatever the setting says.
+        check(views::sendTrigger(/*actionPressed=*/false, /*enterPressed=*/true, false, false,
+                                 setting, false, false,
+                                 /*enterProven=*/false) == views::SendTrigger::None,
+              "unproven enter never sends");
     }
-    check(!views::kEnterSends,
-          "the gate constant records plan/key_gate.md's answer (Enter = newline)");
-    check(views::sendTrigger(true, true, true, true, SendKey::Enter, /*paste=*/true, false) ==
-              views::SendTrigger::Action,
-          "a click still sends while a paste is in flight (a click is not a payload)");
-    check(views::sendTrigger(false, true, false, false, SendKey::Enter, /*paste=*/true, false) ==
+    // The terminal profile proves `Tab` in both backends: `Tab` sends there too, and
+    // `None` never sends a key.
+    check(views::sendTrigger(false, false, /*tabPressed=*/true, false, SendKey::Tab, false, false,
+                             false) == views::SendTrigger::Tab,
+          "tab sends in the terminal profile too");
+    check(views::sendTrigger(false, /*enterPressed=*/true, false, false, SendKey::None, false,
+                             false, false) == views::SendTrigger::None,
+          "the `none` setting never sends a key");
+    // The capability open (the pixel profile): `Enter` sends and `Shift+Enter` breaks
+    // the line, `Tab` sends, `None` never does.
+    check(views::sendTrigger(false, /*enterPressed=*/true, false, false, SendKey::Enter, false,
+                             false, /*enterProven=*/true) == views::SendTrigger::Enter,
+          "enter sends where the capability proves it");
+    check(views::sendTrigger(false, true, /*tabPressed=*/true, /*shiftEnterPressed=*/true,
+                             SendKey::Enter, false, false, true) == views::SendTrigger::None,
+          "shift+enter breaks the line");
+    check(views::sendTrigger(false, false, true, false, SendKey::Tab, false, false, true) ==
+              views::SendTrigger::Tab,
+          "tab sends");
+    check(views::sendTrigger(false, true, false, false, SendKey::Enter, false, false, false) ==
               views::SendTrigger::None,
+          "stored-but-unproven enter never sends (the terminal)");
+    check(views::sendTrigger(/*actionPressed=*/true, true, true, true, SendKey::Enter,
+                             /*pasteInFlightNow=*/true, false, true) == views::SendTrigger::Action,
+          "a click still sends while a paste is in flight (a click is not a payload)");
+    check(views::sendTrigger(false, true, false, false, SendKey::Enter, /*pasteInFlightNow=*/true,
+                             false, true) == views::SendTrigger::None,
           "a paste in flight blocks the keyboard send (D-PASTE)");
     check(views::sendTrigger(false, true, false, false, SendKey::Enter, false,
-                             /*composing=*/true) == views::SendTrigger::None,
+                             /*composing=*/true, true) == views::SendTrigger::None,
           "an IME composition never sends");
 }
 
@@ -948,6 +985,21 @@ void checkInteraction() {
                 observing(fixture.state, answers, body));
         check(answers.submit, "a click on Send answers submit");
         check(!answers.pasteAsked, "a send leaves no paste question behind");
+    }
+
+    // --- Tab-send answers and stays clean ---------------------------------
+    {
+        Fixture fixture;
+        fixture.buffer = "tab draft";
+        ui::Rect rect = composerRect(g_w, g_h, m);
+        const auto body = bodyFor(fixture, rect);
+        focusField(rect, body);
+        check(fixture.state.focused, "a click on the text area focuses the field");
+        ClickAnswers answers;
+        pressKey(ImGuiKey_Tab, observing(fixture.state, answers, body));
+        check(answers.submit, "tab sends with the tab send key");
+        check(fixture.buffer == "tab draft", "the tab press never inserts a tab byte");
+        check(!answers.palette, "a tab-send never opens the palette");
     }
 
     // --- Send with a whitespace-only draft --------------------------------

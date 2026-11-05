@@ -5,10 +5,10 @@ glyphs: unicode
 depth: truecolor
 text:
    llmfun   Alpha session                                                        Ctrl+K commands  ✓ Ready    Settings
-  Search                   YOU                                                               [5] Agents [6] Activity
-                           build the project                                                  all  info  warn  error
- SESSIONS                  ANSWER                                                             Search
- ▌● Alpha session          read, then build                                                  Nothing to report yet
+  Search                   YOU
+                           build the project
+ SESSIONS                  ANSWER
+ ▌● Alpha session          read, then build
     first user preview
   ▸ Beta session
     second user preview
@@ -42,9 +42,9 @@ text:
   ✓ Ready                                                                  Ctrl+K commands  ctx 0/0   -   none   Ready
 fills:
 0: 1-1=111, 10-10=102, 97-105=23, 107-118=23
-1: 0-0=17, 1-24=16, 25-25=17, 26-26=183, 27-103=17, 104-115=111, 116-119=17
-2: 0-92=17, 93-97=111, 98-116=16, 117-119=17
-3: 0-25=17, 26-26=111, 27-92=17, 93-118=16, 119-119=17
+1: 0-0=17, 1-24=16, 25-25=17, 26-26=183, 27-119=17
+2: 0-119=17
+3: 0-25=17, 26-26=111, 27-119=17
 4: 0-119=17
 5: 0-119=17
 6: 0-119=17

@@ -124,18 +124,18 @@ std::string readText(const std::string& path) {
 }
 
 bool fileExists(const std::string& path) {
-    struct stat info{};
+    struct stat info {};
     return ::stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
 }
 
 bool isDirectory(const std::string& path) {
-    struct stat info{};
+    struct stat info {};
     return ::stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
 }
 
 /// Whole seconds of the file's mtime; -1 when it cannot be read.
 long long writeTime(const std::string& path) {
-    struct stat info{};
+    struct stat info {};
     if (::stat(path.c_str(), &info) != 0)
         return -1;
     return static_cast<long long>(info.st_mtime);
@@ -150,7 +150,7 @@ bool setWriteTime(const std::string& path, long long seconds) {
 }
 
 long long fileMode(const std::string& path) {
-    struct stat info{};
+    struct stat info {};
     if (::stat(path.c_str(), &info) != 0)
         return -1;
     return static_cast<long long>(info.st_mode & 07777);
@@ -220,7 +220,7 @@ int main() {
         removeFile(confOf(dir));
         saveUiConf(ShellPrefs{}, iniOf(dir));
         CHECK(readText(confOf(dir)) == "Version=1\n"
-                                       "SendKey=enterNewline\n"
+                                       "SendKey=tab\n"
                                        "UiLog=off\n"
                                        "RailOpen=auto\n"
                                        "InspectorOpen=auto\n"
@@ -230,7 +230,7 @@ int main() {
         const std::string dir = caseDir("bytes-full");
         removeFile(confOf(dir));
         ShellPrefs prefs;
-        prefs.sendKey = SendKey::CtrlEnter;
+        prefs.sendKey = SendKey::None;
         prefs.rawLog = kRawLogDebug;
         prefs.railOpen = 1;
         prefs.inspectorOpen = 0;
@@ -238,7 +238,7 @@ int main() {
         prefs.pinned = setOf({"s-b", "s-a"});
         saveUiConf(prefs, iniOf(dir));
         CHECK(readText(confOf(dir)) == "Version=1\n"
-                                       "SendKey=ctrlenter\n"
+                                       "SendKey=none\n"
                                        "UiLog=debug\n"
                                        "RailOpen=1\n"
                                        "InspectorOpen=0\n"
@@ -260,7 +260,7 @@ int main() {
         const std::string dir = caseDir("roundtrip");
         const std::string ini = iniOf(dir);
         removeFile(confOf(dir)); // the first save creates the profile
-        const SendKey keys[] = {SendKey::Enter, SendKey::CtrlEnter, SendKey::EnterNewline};
+        const SendKey keys[] = {SendKey::None, SendKey::Enter, SendKey::Tab};
         const InspectorTab tabs[] = {InspectorTab::Agents, InspectorTab::Activity};
         const int levels[] = {kRawLogOff, kRawLogRaw, kRawLogDebug, kRawLogTrace};
         const int triStates[] = {-1, 0, 1};
@@ -346,19 +346,19 @@ int main() {
         // the current value; one out-of-range number clamps.
         writeText(conf, "Frobnicate=9\n"
                         "garbage without an equals sign\n"
-                        "SendKey=tab\n"
+                        "SendKey=banana\n"
                         "UiLog=verbose\n"
                         "RailOpen=banana\n"
                         "InspectorTab=main\n"
                         "InspectorOpen=7\n");
         ShellPrefs prefs;
-        prefs.sendKey = SendKey::CtrlEnter;
+        prefs.sendKey = SendKey::None;
         prefs.rawLog = kRawLogDebug;
         prefs.railOpen = 0;
         prefs.inspectorOpen = 0;
         prefs.tab = InspectorTab::Agents;
         loadUiConf(prefs, ini);
-        CHECK(prefs.sendKey == SendKey::CtrlEnter);
+        CHECK(prefs.sendKey == SendKey::None);
         CHECK(prefs.rawLog == kRawLogDebug);
         CHECK(prefs.railOpen == 0);
         CHECK(prefs.tab == InspectorTab::Agents);
@@ -369,7 +369,7 @@ int main() {
         writeText(conf, "sendkey=enter\n SendKey=enter\nSendKey =enter\n");
         ShellPrefs keys;
         loadUiConf(keys, ini);
-        CHECK(keys.sendKey == SendKey::EnterNewline);
+        CHECK(keys.sendKey == SendKey::Tab);
 
         // A value's *word* has no case to get wrong, and surrounding blanks are fine.
         writeText(conf, "SendKey= ENTER \nUiLog=Trace\nRailOpen=AUTO\nInspectorTab=AGENTS\n");
@@ -381,6 +381,34 @@ int main() {
         CHECK(words.rawLog == kRawLogTrace);
         CHECK(words.railOpen == -1);
         CHECK(words.tab == InspectorTab::Agents);
+
+        // No legacy vocabulary: a word outside the none/enter/tab set is simply
+        // unknown. It leaves the stored value in place (I-09), so on the shipped
+        // default an unparseable word falls back to `tab`.
+        bool unknownIgnored = true;
+        for (const char* unknown : {"quux", "newlinewithenter"}) {
+            writeText(conf, std::string("SendKey=") + unknown + "\n");
+            ShellPrefs kept;
+            kept.sendKey = SendKey::Enter; // any value proves the ignore
+            loadUiConf(kept, ini);
+            unknownIgnored = unknownIgnored && kept.sendKey == SendKey::Enter;
+        }
+        CHECK(unknownIgnored);
+        writeText(conf, "SendKey=quux\n");
+        ShellPrefs fallback;
+        loadUiConf(fallback, ini);
+        CHECK(fallback.sendKey == SendKey::Tab);
+
+        // ... and the round-trip: an unknown word loads as the default, and the
+        // canonical text a later save would write is the default's (a save of an
+        // unchanged load is a no-op - it never canonicalizes a file nobody
+        // touched).
+        CHECK(uiConfText(fallback) == "Version=1\n"
+                                      "SendKey=tab\n"
+                                      "UiLog=off\n"
+                                      "RailOpen=auto\n"
+                                      "InspectorOpen=auto\n"
+                                      "InspectorTab=activity\n");
 
         // Out-of-range tri-states clamp at both ends, and the numbers are read as
         // whole values (no trailing garbage, no hex, no locale).
@@ -423,10 +451,10 @@ int main() {
 
         // CRLF is a Windows hand-edit, not a different format; a file without a
         // trailing newline still parses its last line.
-        writeText(conf, "Version=1\r\nSendKey=ctrlenter\r\nUiLog=debug");
+        writeText(conf, "Version=1\r\nSendKey=enter\r\nUiLog=debug");
         ShellPrefs crlf;
         loadUiConf(crlf, ini);
-        CHECK(crlf.sendKey == SendKey::CtrlEnter && crlf.rawLog == kRawLogDebug);
+        CHECK(crlf.sendKey == SendKey::Enter && crlf.rawLog == kRawLogDebug);
     }
 
     // ---------------------------------------------------------------------------
@@ -486,7 +514,7 @@ int main() {
         // rename: the new bytes are in ui.conf.tmp, the old file is still the file.
         writeText(conf, "Version=1\nSendKey=enter\n");
         const std::string before = readText(conf);
-        writeText(conf + ".tmp", "Version=1\nSendKey=ctrlenter\nRailOpen=0\nUiLog=trace\n");
+        writeText(conf + ".tmp", "Version=1\nSendKey=none\nRailOpen=0\nUiLog=trace\n");
         ShellPrefs prefs;
         loadUiConf(prefs, ini);
         CHECK(prefs.sendKey == SendKey::Enter); // the intact file, not the temporary
@@ -495,13 +523,13 @@ int main() {
         CHECK(fileExists(conf + ".tmp"));
 
         // The next real save replaces the file and takes the temporary with it.
-        prefs.sendKey = SendKey::CtrlEnter;
+        prefs.sendKey = SendKey::None;
         saveUiConf(prefs, ini);
         CHECK(!fileExists(conf + ".tmp"));
         CHECK(readText(conf) == uiConfText(prefs));
         ShellPrefs reloaded;
         loadUiConf(reloaded, ini);
-        CHECK(reloaded.sendKey == SendKey::CtrlEnter);
+        CHECK(reloaded.sendKey == SendKey::None);
     }
     {
         // The swap itself can fail (here: the destination is a directory, so the
@@ -531,7 +559,7 @@ int main() {
         const std::string ini = iniOf(dir);
         const std::string conf = confOf(dir);
         const std::string existing = "Version=1\n"
-                                     "SendKey=ctrlenter\n"
+                                     "SendKey=none\n"
                                      "UiLog=trace\n"
                                      "RailOpen=0\n"
                                      "InspectorOpen=0\n"
@@ -652,7 +680,7 @@ int main() {
         // A literal expectation, not uiConfText()'s own answer.
         CHECK(prefs.rawLog == kRawLogDebug);
         CHECK(readText(conf) == "Version=1\n"
-                                "SendKey=enterNewline\n"
+                                "SendKey=tab\n"
                                 "UiLog=debug\n"
                                 "RailOpen=auto\n"
                                 "InspectorOpen=auto\n"
@@ -744,7 +772,7 @@ int main() {
         removeFile(dir + "/imgui2.conf");
 
         ShellPrefs prefs;
-        prefs.sendKey = SendKey::CtrlEnter;
+        prefs.sendKey = SendKey::None;
         prefs.rawLog = kRawLogTrace;
         prefs.railOpen = 1;
         prefs.pinned = setOf({"s-1"});

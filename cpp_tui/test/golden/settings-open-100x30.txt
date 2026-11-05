@@ -6,10 +6,10 @@ rows: built=11 drawn=8 selected=1
 marks: strip=111 selected=111 row=0
 text:
    llmfun   settings                                         Ctrl+K commands  ✓ Ready    Settings
-  Search                                                                 [5] Agents [6] Activity
-                                                                          all  info  warn  error
- SESSIONS                   llmfun                                        Search
- ▌● settings                Ask, plan, or code - the agent can read you… Nothing to report yet
+  Search
+
+ SESSIONS                   llmfun
+ ▌● settings                Ask, plan, or code - the agent can read your workarea, search the RAG, …
     hello                   Summarize this workarea
                             Plan a feature
 
@@ -19,7 +19,7 @@ text:
                        APPEARANCE                                             ▌
                      ▌ Text scale                                       1 cell▌
                        BEHAVIOUR                                              ▌
-                       Send key                                   enterNewline▌
+                       Send key                                            tab▌
                        Raw log level                                       off▌
                        ADVANCED
                        Backend                            text grid (terminal)

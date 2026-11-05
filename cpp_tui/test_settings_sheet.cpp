@@ -436,8 +436,10 @@ void checkSource() {
     // stale, so a composer field that was active when the sheet opened would make the first press
     // inert with nothing on screen to explain why (review round 2, N2).
     check(!contains(cpp, "WantTextInput"), "the Enter gate reads no process-global focus flag");
-    // The model's catalogue is the one owner of the stored words.
-    check(!contains(cpp, "\"enternewline\""), "the send-key words come from the model, not a copy");
+    // The model's catalogue is the one owner of the stored words: the sheet's
+    // send-key value comes from `sendKeyWord()`, never a copied literal.
+    check(contains(cpp, "model::sendKeyWord("),
+          "the send-key words come from the model, not a copy");
 }
 
 // ---------------------------------------------------------------------------
@@ -446,32 +448,48 @@ void checkSource() {
 
 void checkCatalogue() {
     g_phase = "C: catalogue";
+    check(std::string(model::sendKeyWord(model::SendKey::None)) == "none", "SendKey none word");
     check(std::string(model::sendKeyWord(model::SendKey::Enter)) == "enter", "SendKey enter word");
-    check(std::string(model::sendKeyWord(model::SendKey::CtrlEnter)) == "ctrlenter",
-          "SendKey ctrlenter word");
-    check(std::string(model::sendKeyWord(model::SendKey::EnterNewline)) == "enterNewline",
-          "SendKey enterNewline word");
+    check(std::string(model::sendKeyWord(model::SendKey::Tab)) == "tab", "SendKey tab word");
 
-    // The key gate's answer: exactly one value may be offered (plan/key_gate.md §3).
-    check(model::sendKeyProven(model::SendKey::EnterNewline), "enterNewline is the proven value");
-    check(!model::sendKeyProven(model::SendKey::Enter),
-          "enter is not proven (Shift+Enter is the same byte)");
-    check(!model::sendKeyProven(model::SendKey::CtrlEnter), "ctrlenter is not proven (not bound)");
+    // The key gate's answer is measured per profile: the pixel
+    // profile proves `enter`, the terminal proves `tab` and `none`.
+    check(model::sendKeyProven(model::SendKey::None, /*textGrid=*/false), "none is proven");
+    check(model::sendKeyProven(model::SendKey::Tab, /*textGrid=*/false), "tab is proven");
+    check(model::sendKeyProven(model::SendKey::Enter, /*textGrid=*/false),
+          "enter is proven in the pixel profile (Enter sends, Shift+Enter breaks the line)");
+    check(!model::sendKeyProven(model::SendKey::Enter, /*textGrid=*/true),
+          "enter is not proven in the terminal (Enter is the same byte as Shift+Enter)");
     check(model::kSendKeyChoiceCount == 3, "the table lists the design's three values");
-    check(model::sendKeyChoice(0) == model::SendKey::Enter, "the table starts at `enter`");
-    check(model::sendKeyChoice(1) == model::SendKey::CtrlEnter, "then `ctrlenter`");
-    check(model::sendKeyChoice(2) == model::SendKey::EnterNewline, "then `enterNewline`");
-    check(model::sendKeyChoice(-5) == model::SendKey::Enter, "an index below the table clamps");
-    check(model::sendKeyChoice(99) == model::SendKey::EnterNewline, "and one above it clamps");
-    check(model::sendKeyIndex(model::SendKey::CtrlEnter) == 1, "the index is the inverse");
-    // The count of proven values is one: the sheet must never offer the other two, and this is the
-    // number that says so rather than a comment.
+    check(model::sendKeyChoice(0) == model::SendKey::None, "the table starts at `none`");
+    check(model::sendKeyChoice(1) == model::SendKey::Enter, "then `enter`");
+    check(model::sendKeyChoice(2) == model::SendKey::Tab, "then `tab`");
+    check(model::sendKeyChoice(-5) == model::SendKey::None, "an index below the table clamps");
+    check(model::sendKeyChoice(99) == model::SendKey::Tab, "and one above it clamps");
+    check(model::sendKeyIndex(model::SendKey::Enter) == 1, "the index is the inverse");
+    // What the sheet may *offer*, per profile: the proven set *and* the build's IME
+    // wiring (`kImeComposingWired`) - `enter` is proven in the pixel profile but not
+    // offered while no composition signal exists, so the sheet never offers a
+    // value the composer would swallow.
+    check(model::sendKeyOffered(model::SendKey::None, /*textGrid=*/false) &&
+              model::sendKeyOffered(model::SendKey::None, /*textGrid=*/true),
+          "none is offered in both profiles");
+    check(model::sendKeyOffered(model::SendKey::Tab, /*textGrid=*/false) &&
+              model::sendKeyOffered(model::SendKey::Tab, /*textGrid=*/true),
+          "and so is tab");
+    check(!model::sendKeyOffered(model::SendKey::Enter, /*textGrid=*/true),
+          "enter is not offered while no IME composition is wired, even where it is proven");
+    check(!model::sendKeyOffered(model::SendKey::Enter, /*textGrid=*/false),
+          "enter is proven but not offered in the pixel profile");
+    // The count of proven values is two in the terminal profile (the pixel profile
+    // proves all three): the sheet must never offer the unproven one, and this is
+    // the number that says so rather than a comment.
     int proven = 0;
     for (int i = 0; i < model::kSendKeyChoiceCount; ++i) {
-        if (model::sendKeyProven(model::sendKeyChoice(i)))
+        if (model::sendKeyProven(model::sendKeyChoice(i), /*textGrid=*/true))
             ++proven;
     }
-    check(proven == 1, "exactly one send key is proven");
+    check(proven == 2, "exactly two send keys are proven in the terminal profile");
 
     check(std::string(model::uiLogWord(model::kRawLogOff)) == "off", "UiLog off");
     check(std::string(model::uiLogWord(model::kRawLogRaw)) == "raw", "UiLog raw");
@@ -551,30 +569,60 @@ void checkRows() {
     }
     sheet.section = 0;
 
-    // The send-key row reports the gate's value and edits nothing.
+    // The send-key row is the profile's own choice row: it offers what
+    // `sendKeyOffered()` proves for the active profile and cycles through the
+    // offered set (the raw-log row's rule), and it prints the *effective* value -
+    // a hand-edited, unproven one is shown in the warning ink, never offered.
     const views::SettingsRow* sendKey = findRow(rows, views::kSettingsRowSendKey);
     check(sendKey != nullptr, "the send-key row exists");
     if (sendKey != nullptr) {
-        check(sendKey->kind == views::SettingsRowKind::ReadOnly, "it is not a choice");
-        check(!sendKey->enabled, "and not activatable");
-        check(sendKey->value == model::sendKeyWord(prefs.sendKey), "it prints the effective value");
-        check(contains(sendKey->note, "Send"), "and says what sends instead");
+        check(sendKey->kind == views::SettingsRowKind::Choice, "it is a choice");
+        check(sendKey->enabled, "and activatable");
+        check(sendKey->value ==
+                  model::sendKeyWord(model::sendKeyEffective(prefs.sendKey, m.textGrid)),
+              "it prints the effective value");
+        check(contains(sendKey->note, "sends"), "and says what sends instead");
     }
 
-    // A hand-edited, unproven send key is *shown* (it is the effective value) but never offered.
+    // The pixel profile proves `enter`, and there the row's note must say so: a stored
+    // `enter` sends in the pixel profile, so the note must not describe the
+    // terminal's answer - the grid's note is where the muscle-memory trade-off lives.
+    const ui::Metrics& pixel = ui::metricsFor(/*textGrid=*/false, 1.0f, 1.0f);
+    const model::SendKey storedSendKey = prefs.sendKey;
+    prefs.sendKey = model::SendKey::Enter;
+    const std::vector<views::SettingsRow> pixelRows =
+        views::settingsRows(sheet, prefs, settings, pixel);
+    const views::SettingsRow* pixelSendKey = findRow(pixelRows, views::kSettingsRowSendKey);
+    check(pixelSendKey != nullptr && pixelSendKey->value == "enter" &&
+              contains(pixelSendKey->note, "Enter sends"),
+          "the pixel profile's `enter` note says Enter sends (it does there)");
+    prefs.sendKey = storedSendKey;
+
+    // No send key survives an activation as a choice the active profile cannot honour:
+    // the row's cycle lands on an offered value, never the stored one. The sheet runs on
+    // the grid here - the terminal profile, where
+    // `enter` is unproven, so this catches the hand-edited-value case too.
     bool offeredNothingUnproven = true;
     for (int i = 0; i < model::kSendKeyChoiceCount; ++i) {
         prefs.sendKey = model::sendKeyChoice(i);
         const std::vector<views::SettingsRow> each = views::settingsRows(sheet, prefs, settings, m);
         const views::SettingsRow* row = findRow(each, views::kSettingsRowSendKey);
-        check(row != nullptr && row->value == model::sendKeyWord(prefs.sendKey),
-              std::string("the send-key row prints `") + model::sendKeyWord(prefs.sendKey) + "`");
-        if (row == nullptr || row->enabled || row->kind == views::SettingsRowKind::Choice)
+        check(row != nullptr && row->value == model::sendKeyWord(model::sendKeyEffective(
+                                                  prefs.sendKey, m.textGrid)),
+              std::string("the send-key row prints `") +
+                  model::sendKeyWord(model::sendKeyEffective(prefs.sendKey, m.textGrid)) + "`");
+        // Activating the row cycles to an offered value: an unproven, hand-edited one
+        // is *shown*, never kept - only offered values survive an activation.
+        if (row != nullptr)
+            views::activate(sheet, prefs, settings, m, *row);
+        if (!model::sendKeyOffered(prefs.sendKey, m.textGrid))
             offeredNothingUnproven = false;
     }
-    check(offeredNothingUnproven,
-          "no send key is offered as a choice - the gate proves one value (R-01)");
-    // The loop above left the prefs at the shipped value; rebuild the list the rest reads.
+    check(
+        offeredNothingUnproven,
+        "no unproven send key survives an activation - the sheet cycles what the profile honours");
+    // The loop left the prefs at the last cycled value; restore the shipped one.
+    prefs.sendKey = model::SendKey::Tab;
     rows = views::settingsRows(sheet, prefs, settings, m);
 
     // The Raw log level is a choice over the four words, all of which the writer can spell.
@@ -761,13 +809,19 @@ void checkKeys() {
     pressKey(state, w, h, ImGuiKey_Enter);
     check(state.ui.prefs.rawLog == before, "four presses come back round to the start");
 
-    // The read-only rows do nothing: the send key is the gate's one value, not a choice.
+    // The send-key row is a choice like the Raw log level: Enter cycles through the
+    // offered set - `none`/`tab` on the grid (`enter` is not offered while no IME
+    // composition is wired) - and never the stored-but-unhonourable one.
     const int sendKeyRow = rowIndex(state.settingsSheet.rows, views::kSettingsRowSendKey);
+    check(sendKeyRow > 0, "the send-key row is in the list");
     state.settingsSheet.selected = sendKeyRow;
     appFrame(state, w, h);
     pressKey(state, w, h, ImGuiKey_Enter);
-    check(state.ui.prefs.sendKey == model::SendKey::EnterNewline,
-          "Enter on the send-key row changes nothing (the gate offers one value)");
+    check(state.ui.prefs.sendKey == model::SendKey::None,
+          "Enter moves the send key to the next honoured value (Tab -> none)");
+    pressKey(state, w, h, ImGuiKey_Enter);
+    check(state.ui.prefs.sendKey == model::SendKey::Tab,
+          "and the cycle wraps back through what the profile honours");
     const int uiConfRow = rowIndex(state.settingsSheet.rows, views::kSettingsRowUiConf);
     state.settingsSheet.selected = uiConfRow;
     appFrame(state, w, h);
@@ -1024,12 +1078,12 @@ void checkPersistence() {
     // malformed word: the loader's rules are `./test_ui_settings`'s, and what matters here is that
     // the *sheet* shows the effective value of each.
     writeFile(model::uiConfPath(ini),
-              "Version=1\nSendKey=ctrlenter\nUiLog=debug\nRailOpen=zoinks\nInspectorTab=agents\n");
+              "Version=1\nSendKey=none\nUiLog=debug\nRailOpen=zoinks\nInspectorTab=agents\n");
     {
         tui::TuiState state = makeState();
         state.iniFilename = ini;
         appFrame(state, 100, 30); // the first workbench frame loads ui.conf
-        check(state.ui.prefs.sendKey == model::SendKey::CtrlEnter,
+        check(state.ui.prefs.sendKey == model::SendKey::None,
               "a legal SendKey line reaches the preferences");
         check(state.ui.prefs.rawLog == model::kRawLogDebug, "and so does UiLog");
         check(state.ui.prefs.railOpen != 0, "a malformed RailOpen keeps the current value");
@@ -1038,7 +1092,7 @@ void checkPersistence() {
         const std::vector<views::SettingsRow> rows =
             views::settingsRows(state.settingsSheet, state.ui.prefs, state.settings, gridMetrics());
         const views::SettingsRow* sendKey = findRow(rows, views::kSettingsRowSendKey);
-        check(sendKey != nullptr && sendKey->value == "ctrlenter",
+        check(sendKey != nullptr && sendKey->value == "none",
               "the sheet shows the hand-edited send key, not a silent default");
         const views::SettingsRow* rawLog = findRow(rows, views::kSettingsRowRawLog);
         check(rawLog != nullptr && rawLog->value == "debug", "and the level it is running at");
@@ -1063,7 +1117,7 @@ void checkPersistence() {
         views::uiConfQuit(state.ui, ini);
         const std::string text = readWhole(model::uiConfPath(ini));
         check(contains(text, "UiLog=debug"), "the level is on disk after a quit save");
-        check(contains(text, "SendKey=enterNewline"), "with the send key the build offers");
+        check(contains(text, "SendKey=tab"), "with the send key the build ships");
     }
     {
         tui::TuiState restarted = makeState();

@@ -1,32 +1,19 @@
 /// The one binding table (see keymap.h for the contract and the rules).
 ///
-/// What ships here is what the UI can actually do today: every row is a chord
-/// that reaches a handler in this build. The remaining actions of the design's
-/// §6.7 table are appended by the task that adds their surface - `Ctrl+B` with
-/// the rail's collapse bookkeeping (task 23), `Ctrl+I` and `Ctrl+5`/`Ctrl+6`
-/// with the inspector (task 29), `Ctrl+Shift+L` and the Raw Log keys with the
-/// overlay (task 33), and `Ctrl+L` when the thread owns its own "no widget
-/// focused" predicate (tasks 25/44). A binding that resolves to an action nothing
-/// handles would be a dead key, which is exactly what the registry exists to
-/// prevent.
+/// What ships here is what the UI can actually do today: every row is a chord that reaches a
+/// handler in this build - a binding that resolves to an action nothing handles would be a dead
+/// key, which is exactly what the registry exists to prevent. Where a chord is *not* delivered by
+/// one profile the action needs a second, measured path: the registry's row is
+/// evidence, not a wish.
 ///
-/// Delivery is the other half of the same rule (D-KEYGATE): a row is evidence, not a
-/// wish. Where a chord is *not* delivered by one profile the action needs a second,
-/// measured path - `Ctrl+I`/`Ctrl+5`/`Ctrl+6` reach the pixel profile and the grid
-/// arrives at the same four actions through the palette and the panel's own
-/// character-level `[`/`]` (plan/key_gate.md §10/§11).
+/// Two chords are deliberately not rows:
 ///
-/// Two chords of the design's table are not rows for evidence reasons
-/// (plan/key_gate.md §3-§4, and both are unchanged by this task):
-///
-///  * `Ctrl+C` never reaches the UI in the terminal - `ISIG` is on, so the line
-///    discipline turns it into `SIGINT` before ncurses reads it - and in the GUI
-///    it is the text field's own copy chord. Binding it would either be dead
-///    (grid) or break copy (pixel), so the design's "Ctrl+C = Quit" stays the
-///    terminal's own spelling of quitting.
-///  * `Ctrl+Shift+L` arrives as `Ctrl+L` in the terminal (the shift is lost,
-///    `0x0C`), so it cannot be told apart from the design's clear-output chord.
-///    Task 33 decides that pair; nothing here claims it.
+///  * `Ctrl+C` never reaches the UI in the terminal - `ISIG` is on, so the line discipline turns
+///    it into `SIGINT` before ncurses reads it - and in the GUI it is the text field's own copy
+///    chord. Binding it would either be dead (grid) or break copy (pixel), so
+///    "Ctrl+C = Quit" stays the terminal's own spelling of quitting.
+///  * `Ctrl+Shift+L` arrives as `Ctrl+L` in the terminal (the shift is lost, `0x0C`), so it
+///    cannot be told apart from a plain `Ctrl+L` - the clear-output chord.
 #include "keymap.h"
 
 namespace llmfun::tui::model {
@@ -150,128 +137,33 @@ bool isShiftPrintable(ImGuiKeyChord chord) {
 
 /// The table. `Scope::anywhere()` = every region; `Focus::X` scopes the row to X.
 constexpr Binding kBindings[] = {
-    // Quit: "confirm while running" is the dispatcher's two-press policy
-    // (tuiRequestQuitConfirmed), so one row covers both states. It is repeated
-    // for `Focus::Overlay` because an overlay is a keyboard trap (keymap.h) and
-    // quitting must still work while the palette is open - the second row is what
-    // says so.
     {ctrl(ImGuiKey_Q), Action::Quit, Scope::anywhere()},
     {ctrl(ImGuiKey_Q), Action::Quit, Focus::Overlay},
-
-    // Ctrl+K toggles the palette: it opens from the shell and closes from inside
-    // the overlay. Measured as delivered in both backends
-    // (plan/key_gate.md §4).
     {ctrl(ImGuiKey_K), Action::Palette, Scope::anywhere()},
     {ctrl(ImGuiKey_K), Action::CloseOverlay, Focus::Overlay},
-
-    // End re-enables follow-the-newest. No modifier, so in a text field it stays
-    // the caret command it is there (keymap.h's plain-key rule) - which is also
-    // what keeps the press that closes an overlay from jumping the thread.
-    // plan/key_gate.md §3b records the delivery (the bytes are terminfo-driven:
-    // `\EOF` for xterm, `\E[4~` for linux).
     {ImGuiKey_End, Action::ScrollEnd, Scope::anywhere()},
-
-    // Ctrl+B toggles the rail (task 23, the design's §6.7 row). Measured as
-    // delivered in both backends and in the GUI - plan/key_gate.md §4d - and
-    // deliberately *anywhere*: the rail is a region, and its toggle has to work
-    // from the thread, the composer and the inspector alike.
     {ctrl(ImGuiKey_B), Action::ToggleRail, Scope::anywhere()},
-
-    // Load earlier reveals one page of older groups (task 25, D-BOUNDS).
-    // `PgUp` is the scroller's own key and `Ctrl+U` the design's abbreviation;
-    // both were measured as delivered in the terminal and in the GUI
-    // (plan/key_gate.md §4e). They are plain/`Ctrl` keys, so the keymap's
-    // plain-key rule keeps `PgUp` out of a focused composer - where it is not a
-    // text command anyway - and `Ctrl+U` stays live there, like every other
-    // `Ctrl+<letter>` row.
     {ImGuiKey_PageUp, Action::LoadEarlier, Scope::anywhere()},
     {ctrl(ImGuiKey_U), Action::LoadEarlier, Scope::anywhere()},
-
-    // History (task 27, design §4.6). `↑`/`↓` are the design's keys and
-    // `Ctrl+Up`/`Ctrl+Down` the shipped aliases (the v4 composer bound them
-    // because the text grid delivers no bare arrow as a key at all - plan/key_gate.md
-    // §4b; the terminal's arrow still arrives as `Escape` + `[A`, so the grid gets
-    // history from the aliases and the pixel profile from both). They are
-    // composer-scoped: history is the field's, and the plain-key rule keeps `↑`/`↓`
-    // inert in every other region - where they belong to nav.
     {ImGuiKey_UpArrow, Action::HistoryPrev, Focus::Composer},
     {ImGuiKey_DownArrow, Action::HistoryNext, Focus::Composer},
     {ctrl(ImGuiKey_UpArrow), Action::HistoryPrev, Focus::Composer},
     {ctrl(ImGuiKey_DownArrow), Action::HistoryNext, Focus::Composer},
-
-    // The inspector (task 29, D-INSPECTOR). A measured pair, and both halves of its story:
-    //
-    //  * `Ctrl+I` toggles the panel and `Ctrl+5`/`Ctrl+6` select its two tabs. All three are
-    //    delivered in the pixel profile and *not* in the terminal (plan/key_gate.md §3b:
-    //    byte 9 is `Tab`, and `0x1D`/`0x1E` are unmapped), which is why the action is also a
-    //    palette row and the panel reads the character-level `[`/`]` itself (§10/§11 option
-    //    (a)) - the rows exist for the profile that hears them and neither profile is left
-    //    without a path to the surface;
-    //  * `Ctrl+1`/`Ctrl+2` are the design's reserved tab numbers and select nothing: the
-    //    panel's strip says `not available yet`. They are bound, rather than merely ignored,
-    //    because "reserved" has to be visible to a user who presses one. The digits 3 and 4
-    //    are reserved as well but are not bound, and the reason is delivery rather than
-    //    evidence: byte 3 is `Ctrl+C` (`SIGINT`) and byte 4 is `Ctrl+\` (`SIGQUIT`), so with
-    //    `ISIG` on neither can reach the application at all (`plan/key_gate.md` §3b measures
-    //    `Ctrl+I` for the same reason). A row for either would be a dead key claiming an
-    //    action.
-    {ctrl(ImGuiKey_I), Action::ToggleInspector, Scope::anywhere()},
+    {ctrl(ImGuiKey_O), Action::ToggleInspector, Scope::anywhere()},
     {ctrl(ImGuiKey_5), Action::InspectorAgents, Scope::anywhere()},
     {ctrl(ImGuiKey_6), Action::InspectorActivity, Scope::anywhere()},
     {ctrl(ImGuiKey_1), Action::InspectorReserved, Scope::anywhere()},
     {ctrl(ImGuiKey_2), Action::InspectorReserved, Scope::anywhere()},
-
-    // The Raw Log (task 33, design §4.9). `Ctrl+Shift+L` is the design's chord and the key gate
-    // measures it as delivered **in the pixel profile only**: the terminal turns it into
-    // `Ctrl+L` (the Shift is lost, `0x0C`), which this row does not match, so the grid's paths to
-    // the same surface are `/rawlog`, the palette's Developer row and `--debug-ui`
-    // (plan/key_gate.md §10, the row's own "not bound in the TUI"). The second row exists for the
-    // same reason `Ctrl+Q`/`Ctrl+K` have one: an overlay is a keyboard trap (keymap.h), so the
-    // chord that opened the Raw Log has to reach it again while the overlay owns the keyboard.
     {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_L, Action::ToggleRawLog, Scope::anywhere()},
     {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_L, Action::ToggleRawLog, Focus::Overlay},
-    // The Raw Log is its own focus (`Focus::RawLog`), and it is a keyboard trap like an overlay -
-    // so the four chords that must keep working inside it are repeated for that region: quit, the
-    // palette (which opens above it), the toggle, and the follower's catch-up. `End` is the one
-    // row that differs from the palette's set: `S9` in `./test_palette` pins that `End` must *not*
-    // move the thread behind an open palette, while D-FOLLOW makes it the catch-up chord for a
-    // stream - hence two regions, not one wider one.
     {ctrl(ImGuiKey_Q), Action::Quit, Focus::RawLog},
     {ctrl(ImGuiKey_K), Action::Palette, Focus::RawLog},
     {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_L, Action::ToggleRawLog, Focus::RawLog},
     {ImGuiKey_End, Action::ScrollEnd, Focus::RawLog},
-
-    // The settings sheet (task 34) is a third trap, under the palette and above the Raw Log. Its
-    // own keys are the palette's proven set plus the row keys the view reads itself (`Tab`,
-    // `Enter`,
-    // `Ctrl+P`/`Ctrl+N`, `/`), so only two chords need a row here - and both are already measured:
-    // quit (`Ctrl+Q`, §4a) and the palette (`Ctrl+K`, §4), which opens *above* the sheet instead of
-    // closing it (D-OVERLAY's z-order: palette > settings > Raw Log > inspector). A third row for
-    // the sheet's own toggle would need a chord the gate has not measured, and the sheet is opened
-    // by its visible control (the top bar's `Settings` entry) plus the palette's row (task 35).
     {ctrl(ImGuiKey_Q), Action::Quit, Focus::Settings},
     {ctrl(ImGuiKey_K), Action::Palette, Focus::Settings},
-
-    // The help page (task 42). `?` is `Shift+/` in the pixel profile and the typed character in
-    // the grid (plan/key_gate.md §3b/§10: a printable key never arrives as a key event there), so
-    // the chord is the pixel profile's row and `views/shell.cpp` reads the character for the grid -
-    // one action, one row, a second measured path, the shape `Ctrl+I` already follows.
-    //
-    // It is deliberately *not* repeated for `Focus::Help`: with the page up the page's own search
-    // field may hold the keyboard, where `Shift+/` has to stay the `?` the user is typing - that
-    // is the same rule the composer gets from `resolveBinding()`'s text-field test, and the
-    // anywhere row cannot fire behind the page anyway (a modal surface is a keyboard trap).
     {ImGuiMod_Shift | ImGuiKey_Slash, Action::Help, Scope::anywhere()},
-    // Quit must keep working while the page owns the keyboard, like every other trap's row.
     {ctrl(ImGuiKey_Q), Action::Quit, Focus::Help},
-
-    // Focus mode (task 43, FR-28). `F11` is the design's key: a *function* key, so no modifier -
-    // and the one plain-key shape the text-field rule lets through, because it types nothing
-    // (keymap.h). `Ctrl+Shift+M` is the design's second spelling: delivered in the pixel profile
-    // and *not* in the terminal, which sends `Enter` for it (plan/key_gate.md §3b) - so the grid's
-    // paths are the palette's row and `Esc` to leave, the same "one action, one row, a second
-    // measured path" shape `Ctrl+I` follows. No `Focus::Composer` row is needed: neither chord is
-    // text, so both fire from the field.
     {ImGuiKey_F11, Action::ToggleFocusMode, Scope::anywhere()},
     {ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_M, Action::ToggleFocusMode, Scope::anywhere()},
 };
@@ -295,8 +187,6 @@ constexpr ActionInfo kActions[] = {
     {Action::Palette, "Palette", ActionReach::Chord, "Open the command palette"},
     {Action::CloseOverlay, "CloseOverlay", ActionReach::EscapeChain, "Close the topmost overlay"},
     {Action::ScrollEnd, "ScrollEnd", ActionReach::Chord, "Follow the newest content again"},
-    // `CancelRun` is `Esc` step 2 *and* the palette's `Stop run` row. The row is the answer
-    // that matters here: `Esc` is the accelerator, the row is where a user finds it.
     {Action::CancelRun, "CancelRun", ActionReach::Palette,
      "Stop the running agent (the partial output is kept)"},
     {Action::ClearInput, "ClearInput", ActionReach::EscapeChain, "Empty the composer's draft"},
@@ -317,8 +207,6 @@ constexpr ActionInfo kActions[] = {
     {Action::ToggleRawLog, "ToggleRawLog", ActionReach::Palette,
      "Show or hide the Raw Log (the developer stream)"},
     {Action::Help, "Help", ActionReach::Palette, "Open this page"},
-    // Focus mode (task 43). The palette row is the grid's way in (`F11` never arrives there and
-    // `Ctrl+Shift+M` is `Enter`), and it is the row the registry test walks.
     {Action::ToggleFocusMode, "ToggleFocusMode", ActionReach::Palette,
      "Give the thread the whole window (Esc leaves)"},
     {Action::ExitFocusMode, "ExitFocusMode", ActionReach::EscapeChain, "Leave focus mode"},

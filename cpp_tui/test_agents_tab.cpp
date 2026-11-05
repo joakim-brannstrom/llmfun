@@ -673,6 +673,7 @@ views::InspectorState openAgents() {
 void checkTabRows() {
     const ui::Metrics& m = gridMetrics();
     model::ShellPrefs prefs;
+    prefs.inspectorOpen = 1; // an explicit open: the auto rule answers closed
     const ui::Rect rect = inspectorRect(100, 30, prefs);
     check(rect.w == m.inspectorW, "premise: the docked 28-cell column");
 
@@ -883,6 +884,7 @@ void checkInteraction() {
     {
         tui::TuiState panelState;
         panelState.ui.prefs.tab = model::InspectorTab::Agents;
+        panelState.ui.prefs.inspectorOpen = 1; // explicit: auto answers closed
         const ui::Rect panel = inspectorRect(w, h, panelState.ui.prefs);
         panelState.ui.agents = pipelineState().ui.agents;
         panelState.inspector = openAgents();
@@ -1086,6 +1088,7 @@ void checkDrilldown() {
 
 void checkRailAndInspector() {
     tui::TuiState state = pipelineState();
+    state.ui.prefs.inspectorOpen = 1; // an explicit open: the auto rule answers closed
     Grid grid;
     const views::ShellFrame frameOut = shellFrameGrid(state, 100, 30, grid);
     check(frameOut.layout.rail.w > 0.0f, "the rail has its column at 100x30");

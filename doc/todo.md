@@ -41,7 +41,6 @@
 - make the colors configurable for user/agent/answer
 - make the whole color schema swappable/configurable
 - make it so that a new instance with --local-setup inherit the central configuration
-- make Send configurable so enter, ctrl+enter and tab is possible to choose
 - make Pin persistent
 - make it possible to control how much is printed when it is working such as "minimal" where you only see it is working compared to "maximum" where you see everything.
 

@@ -34,12 +34,13 @@
 
 namespace llmfun::tui::model {
 
-/// What the composer's Send key does (FR-17): `Enter` sends and needs the
-/// modifier to break the line, `CtrlEnter` needs it to send, and `EnterNewline`
-/// is the shipped default - Enter breaks the line and only the button (or
-/// `Ctrl+Enter`) sends. Which one ships is the key gate's answer (D-KEYGATE);
-/// this is only how the choice is persisted.
-enum class SendKey { Enter, CtrlEnter, EnterNewline };
+/// What the composer's Send key does: `Tab` is the shipped default - Tab
+/// sends and the button (or `Shift+Enter`) breaks the line. `Enter` is the
+/// pixel profile's rule - Enter sends and the modifier breaks the line - and
+/// `None` is the terminal's rule, where the only thing that sends is the
+/// button. Which one ships is the key gate's answer; this is only
+/// how the choice is persisted.
+enum class SendKey { None, Enter, Tab };
 
 /// Which inspector tab was last up (D-INSPECTOR: two tabs, `Ctrl+5`/`Ctrl+6`).
 enum class InspectorTab { Agents, Activity };
@@ -72,7 +73,7 @@ inline constexpr int kRawLogTrace = 3;
 inline constexpr int kUiLogChoiceCount = 4;
 const char* uiLogWord(int rawLogPref);
 
-/// The word a `SendKey` is stored with (`enter`, `ctrlenter`, `enterNewline`).
+/// The word a `SendKey` is stored with (`none`, `enter`, `tab`).
 const char* sendKeyWord(SendKey key);
 
 /// The three send keys in the order design §4.10 lists them, and a value's index in that order.
@@ -84,20 +85,10 @@ inline constexpr int kSendKeyChoiceCount = 3;
 SendKey sendKeyChoice(int index);
 int sendKeyIndex(SendKey key);
 
-/// Is this send key the one `plan/key_gate.md` proves - i.e. may the sheet offer it?
-///
-/// The gate's answer is one value, and it is measured rather than assumed: §3's matrix
-/// delivers `Enter` but delivers `Shift+Enter` and `Ctrl+Enter` as *the same byte* in both
-/// terminal backends, so "Enter sends, Shift+Enter breaks the line" cannot exist in the grid,
-/// and `Ctrl+Enter`'s row says "not bound" outright. D-KEYMAP forbids the GUI-only distinction
-/// ("the composer must behave the same in both backends"), so the shipped rule - and the only
-/// value this build can honour - is `enterNewline`: Enter breaks the line and the Send button
-/// sends (R-01). The composer enforces it independently (`views::kEnterSends` is false).
-///
-/// The sheet therefore *shows* an unproven value that a hand-edited `SendKey=` produced (that
-/// is the effective value, and hiding it would be a lie about the profile) but never offers one
-/// as a choice.
-bool sendKeyProven(SendKey key);
+bool sendKeyProven(SendKey key, bool textGrid);
+SendKey sendKeyEffective(SendKey key, bool textGrid);
+bool sendKeyOffered(SendKey key, bool textGrid);
+inline constexpr bool kImeComposingWired = false;
 
 /// The font scale's range and granularity (design §4.10: `0.5 .. 3.0`, in 5 % steps).
 /// `TuiSettings::fontScaleMain` holds the value; this module holds the
@@ -133,7 +124,7 @@ inline constexpr double kUiConfIdleSeconds = 2.0;
 
 /// The shell preferences as they live on disk.
 struct ShellPrefs {
-    SendKey sendKey = SendKey::EnterNewline;
+    SendKey sendKey = SendKey::Tab;
     /// `kRawLogOff` .. `kRawLogTrace`. Off is the shipped default: the overlay is
     /// opt-in and closed on every start.
     int rawLog = kRawLogOff;
@@ -142,10 +133,11 @@ struct ShellPrefs {
     /// strip or the panel), 0 closed, 1 open. Auto is the default: a fresh profile
     /// keeps the layout's own choice.
     int railOpen = -1;
-    /// -1 auto (the shell's auto rule: docked where the display is wide enough for
-    /// three columns, closed where the inspector would become a panel - a panel
-    /// covers the thread *and* the composer, which is not what "open" means on a
-    /// narrow screen), 0 closed, 1 open.
+    /// -1 auto (the shell's auto rule resolves it *closed*: a first run - and a
+    /// profile still carrying the persisted `-1` from an earlier build - starts with the panel
+    /// closed in both profiles; a docked-where-wide auto would open a panel nobody asked for),
+    /// 0 closed, 1 open. An explicit press writes 0/1 and never back to `-1`
+    /// (`toggleInspector()`).
     int inspectorOpen = -1;
     InspectorTab tab = InspectorTab::Activity;
     /// Pinned session ids (design §5.1's `Pin.<sessionId>=1`), pruned on load for a
@@ -169,7 +161,7 @@ struct ShellPrefs {
 /// cannot disagree.
 inline void toggleRail(ShellPrefs& prefs, bool visible) { prefs.railOpen = visible ? 0 : 1; }
 
-/// Show or hide the inspector, as the user's own press means it (`Ctrl+I` and the palette's
+/// Show or hide the inspector, as the user's own press means it (`Ctrl+O` and the palette's
 /// row, task 29). `visible` is the panel that is **on screen** - `InspectorState::open`, which
 /// the frame derived from the layout this frame - and not the raw preference: `-1 auto` means
 /// *docked* where the display is wide and *closed* where it is not, so reading the preference

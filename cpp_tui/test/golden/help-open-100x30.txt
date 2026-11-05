@@ -6,10 +6,10 @@ rows: built=99 matches=40 drawn=17 first=0 viewport=17 column=14
 sections: 4 groups: 11 entries: 32 lines: 52
 text:
    llmfun   help                                             Ctrl+K commands  ✓ Ready    Settings
-  Search                                                                 [5] Agents [6] Activity
-                                                                          all  info  warn  error
+  Search
+
  SESSIONS
- ▌● help                                                                                   yet
+ ▌● help                                                                                  the RAG, …
     hello   Help                                                                 Close
              Search the page
             Keys
@@ -20,7 +20,7 @@ text:
               Ctrl+B        Show or hide the session list
               PgUp          Show the groups older than the window
               Ctrl+U        Show the groups older than the window
-              Ctrl+I        Show or hide the inspector panel
+              Ctrl+O        Show or hide the inspector panel
               Ctrl+5        Select the inspector's Agents tab
               Ctrl+6        Select the inspector's Activity tab
               Ctrl+1        A reserved tab number: selects nothing and says so

@@ -531,6 +531,9 @@ views::ComposerInput composerInputFor(TuiState& state, std::int64_t nowMs) {
     in.phase = model::phaseWord(model::phaseFromOrdinal(state.ui.status.phase));
     in.speed = state.ui.chips.speed;
     in.sendKey = state.ui.prefs.sendKey;
+    // The send-key capability is a model fact: what the active profile proves,
+    // measured once here so the composer never derives it.
+    in.enterProven = model::sendKeyProven(model::SendKey::Enter, ui::metricsFor().textGrid);
     in.acceptKeys = !escStepClosesOverlay(state) && !state.escapeConsumed && !railOwnsEscape(state);
     // `overlayOpen` makes the composer's own `Esc` resolve to `CloseOverlay`, which it does not
     // perform: the frame's step does (D-ESC's first step). It has to be the *same* predicate
@@ -1094,7 +1097,13 @@ ui::ShellLayout shellLayoutFor(const ui::LayoutPrefs& prefs, ImVec2 display, boo
     // The `-1 auto` rules, and *only* auto: an explicit open keeps the shape the engine
     // answered (the docked column, or the panel a narrow display gives it), because the user
     // asked for the panel and `Esc` is what closes it again.
-    if (inspectorAuto && resolved.inspectorOpen && layout.inspectorOverlay) {
+    //
+    // The inspector's auto is *closed*, full stop: a first run - and a profile
+    // still carrying the persisted `-1` from an earlier build - starts with the panel closed in
+    // both profiles. Auto never consults the engine's shape, which on a wide display would open
+    // a panel the user never asked for; the explicit press (`Ctrl+O`, the palette's row) is what
+    // opens, and it writes 0/1 - never back to `-1` (`model::toggleInspector`).
+    if (inspectorAuto && resolved.inspectorOpen) {
         resolved.inspectorOpen = false;
         layout = ui::computeShell(m, display, resolved);
     }

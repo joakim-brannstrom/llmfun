@@ -17,10 +17,11 @@ above them.
 **What this document covers.** The registry rows, the `Esc` chain and the rail's row
 keys. It does not list the character keys a surface reads for itself - the Raw Log's
 `f`/`p`/`/`/`y`, the inspector's `[`/`]` and its hovered `m`, the settings sheet's list
-keys, the palette's, and the help page's `?` (the terminal delivers no key event for a
-printable character, so `Shift+/` is a row for the pixel profile and a typed character
-for the grid) - because those literals live at their call sites rather than in
-one table (the rail's are the ones lifted into `rail_keys.h`).
+keys, the palette's, the help page's `?`, and the frame's `x` (it answers a persistent
+feedback flash: a warning or an error stays until a key does) - because those literals
+live at their call sites rather than in one table (the rail's are the ones lifted into
+`rail_keys.h`). The terminal delivers no key event for a printable character, so
+`Shift+/` is a row for the pixel profile and a typed character for the grid.
 
 One binding per row; `where` is the region that owns the keyboard. A chord with no
 modifier never fires while a text field has the keyboard, and an overlay is a keyboard
@@ -40,7 +41,7 @@ trap: while it is open only its own rows (and the ones repeated for it) fire.
 | Down | HistoryNext | composer | chord only |
 | Ctrl+Up | HistoryPrev | composer | chord only |
 | Ctrl+Down | HistoryNext | composer | chord only |
-| Ctrl+I | ToggleInspector | everywhere | palette row |
+| Ctrl+O | ToggleInspector | everywhere | palette row |
 | Ctrl+5 | InspectorAgents | everywhere | palette row |
 | Ctrl+6 | InspectorActivity | everywhere | palette row |
 | Ctrl+1 | InspectorReserved | everywhere | chord only |
@@ -99,14 +100,24 @@ carries none of them.
 | `Down` / `Ctrl+Down` | recall the next query |
 | `/` on an empty line | open the palette's command entry |
 
+The send key is a preference (`none` / `enter` / `tab`, default `tab`; `enter` is
+offered only where the profile proves it, the pixel one). `Tab` is the send key,
+not a navigation key: the field claims the press
+(`ImGuiInputTextFlags_CallbackCompletion`), so a Tab-send leaves the field
+focused instead of ImGui's nav tabbing evicting it, and a Tab that cannot send
+(offline, a run in flight, a paste question up, send key `none`/`enter`) does
+nothing rather than moving focus to another widget.
+
 ## Delivery
 
 A row exists only where the chord is actually delivered. Three consequences are worth
 knowing before a key looks broken:
 
-- the terminal does not deliver `Ctrl+I`, `Ctrl+5` or `Ctrl+6` (byte 9 is `Tab`, and
-  `0x1D`/`0x1E` are unmapped). The inspector is reached there through the palette rows,
-  the top bar's `Settings` entry and the panel's own `[`/`]` tab keys;
+- `Ctrl+I` is no longer bound at all (it was the inspector's chord; the terminal
+  hears its byte 9 as `Tab`, which now sends). The terminal also does not deliver
+  `Ctrl+5` or `Ctrl+6` (`0x1D`/`0x1E` are unmapped), so the inspector is reached
+  there through the palette rows, the top bar's `Settings` entry and the panel's own
+  `[`/`]` tab keys;
 - `Ctrl+Shift+L` arrives as `Ctrl+L` in the terminal (the Shift is lost), so the grid's
   paths to the Raw Log are `/rawlog`, the palette's Developer row and `--debug-ui`;
 - `Shift+/` is `?`, and the terminal delivers it as that typed character rather than as a

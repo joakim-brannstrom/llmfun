@@ -67,7 +67,7 @@ enum class Action {
     /// policy here, not a second action - an action the table cannot reach is
     /// dead code).
     Quit,
-    /// Open the `Ctrl+K` palette.
+    /// Open the command palette.
     Palette,
     /// Close the topmost overlay (D-OVERLAY).
     CloseOverlay,
@@ -79,7 +79,7 @@ enum class Action {
     ClearInput,
     /// Esc, step 4: release the keyboard.
     Blur,
-    /// Show/hide the session rail (`Ctrl+B`, task 23). It flips
+    /// Show or hide the session rail. It flips
     /// `ShellPrefs::railOpen` between "closed" (0) and "open" (1) and never
     /// writes `-1 auto`: the user's press is an explicit choice, and `auto` is
     /// only the state before the first press.
@@ -95,14 +95,16 @@ enum class Action {
     /// Recall the next (newer) query, or hand the draft back past the newest entry:
     /// `↓` on the draft's last line, or its `Ctrl+Down` alias.
     HistoryNext,
-    /// Show or hide the inspector panel (`Ctrl+I`, task 29, D-INSPECTOR). The press is an
+    /// Show or hide the inspector panel (`Ctrl+O`). The press is an
     /// explicit choice, so it writes 0 or 1 into `ShellPrefs::inspectorOpen` and never back
     /// to `-1 auto` - the rule `Ctrl+B` follows for the rail.
     ///
-    /// The pixel profile delivers the chord; the terminal does not (plan/key_gate.md §3b:
-    /// `Ctrl+I` arrives as `Tab`), which is why the same action is also a palette row - the
-    /// grid's path to it. A row that resolved to an action nothing could reach would be the
-    /// dead key the registry exists to prevent; this one is reachable in both profiles.
+    /// Both profiles deliver the chord and it aliases nothing: `Ctrl+O`'s byte `0x0F` is
+    /// free, while the terminal delivers `Ctrl+I`'s byte 9 as `Tab`, which a Tab-based
+    /// send gesture would turn into a send - so the same action is also a palette
+    /// row, the grid's second measured path to it. A row that resolved to an action
+    /// nothing could reach would be the dead key the registry exists to prevent; this
+    /// one is reachable in both profiles.
     ToggleInspector,
     /// Select the inspector's Agents tab (`Ctrl+5`). Delivered in the pixel profile, swallowed
     /// by the terminal (§3); the grid's spelling of the pair is the character-level `[`/`]`
@@ -118,7 +120,7 @@ enum class Action {
     /// pixel profile only (plan/key_gate.md §10: the terminal loses the Shift and delivers
     /// `Ctrl+L`), so the grid's paths are `/rawlog`, the palette's Developer row and
     /// `--debug-ui` - the same "one action, one row, a second measured path" shape the
-    /// inspector's `Ctrl+I` follows.
+    /// inspector's `Ctrl+O` follows.
     ToggleRawLog,
     /// Open the help page (task 42, design FR-27). `?` is the chord and, in the terminal, the
     /// character (`plan/key_gate.md` §10/§11 option (a)): `Shift+/` is delivered as a key in the

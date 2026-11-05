@@ -8,13 +8,13 @@
 ///     APPEARANCE                                                        a section header
 ///     ▌ Text scale           100 %                                      the selected row's mark
 ///     BEHAVIOUR
-///       Send key             enterNewline
+///       Send key             tab
 ///       Raw log level        off
 ///     ADVANCED
 ///       Backend              gui (window)
 ///       Workbench settings   ui.conf
 ///       ...
-///     Enter breaks the line; the Send button sends                       the selected row's note
+///     Tab sends; Enter breaks the line                                  the selected row's note
 ///     Esc close  Tab section  ^N/^P move  Enter change  / search         the key hints
 ///
 /// The body is a window on a longer list: when the rows run past its bottom edge, a proportional
@@ -277,6 +277,14 @@ struct SettingsState {
 /// row (the rail's rule).
 std::vector<SettingsRow> settingsRows(const SettingsState& state, const model::ShellPrefs& prefs,
                                       const TuiSettings& settings, const ui::Metrics& m);
+
+/// Run the selected row: a `Choice` moves to the next value the row offers, an `Action`
+/// performs its one action, a `ReadOnly` does nothing. `prefs` and `settings` are edited in
+/// place (the same one-owner rule `renderSettings()` follows), so a cycle is a change the
+/// frame writes back - the send-key row's cycle steps through the *offered* set only
+/// (`model::sendKeyOffered()`), never the stored-but-unhonourable one.
+void activate(SettingsState& state, model::ShellPrefs& prefs, TuiSettings& settings,
+              const ui::Metrics& m, const SettingsRow& row);
 
 /// Draw the sheet inside `region` - the box `ui::computeShell()` answered
 /// (`ShellLayout::settingsOverlay`) - and apply the keys it owns.

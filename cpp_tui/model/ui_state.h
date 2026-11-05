@@ -546,7 +546,7 @@ void toggleFocusMode(UiState& ui);
 /// answers nothing.
 void exitFocusMode(UiState& ui);
 
-/// Do the side regions' controls apply right now - the two toggles (`Ctrl+B`, `Ctrl+I`), the
+/// Do the side regions' controls apply right now - the two toggles (`Ctrl+B`, `Ctrl+O`), the
 /// inspector's tab controls (`Ctrl+5`/`Ctrl+6`, `Ctrl+1`/`Ctrl+2`) and their palette rows?
 ///
 /// Focus mode hides the rail and the inspector (task 43), so a control there would write a
