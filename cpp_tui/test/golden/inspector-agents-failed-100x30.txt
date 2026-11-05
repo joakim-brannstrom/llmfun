@@ -9,7 +9,7 @@ lane: '  planner | ✓ done | 00:12'
 lane: '  coder | ✕ failed | 00:31'
 lane: '  reviewer | ✕ failed'
 text:
-   llmfun                                                    Ctrl+K commands  ✓ Ready    Settings
+   llmfun                                                      Ctrl+K commands Shift+?   Settings
   Search                                                                 [5] Agents [6] Activity
                                                                          planner ✓ -> coder ✕ -> r…
  No sessions yet            llmfun                                         planner | ✓ done | 00:12
@@ -35,12 +35,12 @@ text:
 
    + New session
 
-   Ask anything...  / commands                                                                none
-  0                                                                                       Send
+   Ask anything...  / commands
+                                                                                          Send
 
-  ✓ Ready                                              Ctrl+K commands  ctx 0/0   -   none   Ready
+  ✓ Ready                                                                     ctx ░░░░░░ 0/0  none
 fills:
-0: 1-1=111, 10-10=102, 77-85=23, 87-98=23
+0: 1-1=111, 10-10=102, 87-98=23
 1: 0-0=17, 1-24=23, 25-25=17, 72-72=17, 73-82=111, 83-99=17
 2: 0-25=17, 72-99=17
 3: 0-25=17, 72-99=17
@@ -69,4 +69,4 @@ fills:
 26: 0-0=67, 1-1=23, 2-2=231, 3-98=23, 99-99=67
 27: 0-0=67, 1-85=23, 86-97=111, 98-98=23, 99-99=67
 28: 0-99=67
-29: 0-0=146, 71-79=23, 81-83=23, 85-90=23, 92-98=23
+29: 0-0=146, 93-98=23

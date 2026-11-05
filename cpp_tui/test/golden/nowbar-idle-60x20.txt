@@ -2,9 +2,9 @@ name: nowbar-idle
 screen: 60x20
 nowbar: 0,19 60x1
 phase: Ready compact: 0
-parts: rule=1 mark=1 state=5 tail=0 hints=0 ctx=14 speed=12 model=13 stateChip=7 badge=0 truncated=0
+parts: rule=1 mark=1 state=5 tail=0 hints=0 meterLabel=3 meterBar=6 meterCount=8 model=13 badge=0 truncated=0
 text:
-   llmfun            Ctrl+K commands  ✓ Ready    Settings
+   llmfun              Ctrl+K commands Shift+?   Settings
 
 
   llmfun
@@ -20,12 +20,12 @@ text:
 
 
 
-   Ask anything...  / commands                 qwen3-coder
-  42k                                             Send
+   Ask anything...  / commands
+                                                  Send
 
-  ✓ Ready  ctx 42k/128k   38.1 tok/s   qwen3-coder   Ready
+  ✓ Ready    ctx █░░░░░ 42k/128k  38.1 tok/s   qwen3-coder
 fills:
-0: 1-1=111, 10-10=102, 37-45=23, 47-58=23
+0: 1-1=111, 10-10=102, 47-58=23
 1: 
 2: 
 3: 
@@ -44,4 +44,4 @@ fills:
 16: 0-0=67, 1-1=23, 2-2=231, 3-58=23, 59-59=67
 17: 0-0=67, 1-45=23, 46-57=111, 58-58=23, 59-59=67
 18: 0-59=67
-19: 0-0=146, 10-23=23, 25-36=23, 38-50=23, 52-58=23
+19: 0-0=146, 33-44=23, 46-58=23

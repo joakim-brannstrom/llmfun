@@ -2,9 +2,9 @@ name: topbar-running
 screen: 100x30
 bar: 0,0 100x1
 state: running
-parts: mark=1 wordmark=6 title=40 hint=15 pill=17 badge=0 gear=12 truncated=0
+parts: mark=1 wordmark=6 title=50 hint=15 help=7 badge=0 gear=12 truncated=0
 text:
-   llmfun   Demo session                             Ctrl+K commands  ◐ running 00:12    Settings
+   llmfun   Demo session                                       Ctrl+K commands Shift+?   Settings
 
 
 
@@ -35,7 +35,7 @@ text:
 
 
 fills:
-0: 1-1=111, 10-10=102, 69-85=23, 87-98=23
+0: 1-1=111, 10-10=102, 87-98=23
 1: 
 2: 
 3: 

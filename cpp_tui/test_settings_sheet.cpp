@@ -59,6 +59,7 @@
 
 #include "imgui/imgui.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1125,6 +1126,54 @@ void checkPersistence() {
         appFrame(restarted, 100, 30);
         check(restarted.ui.prefs.rawLog == model::kRawLogDebug,
               "and a restarted session reads it back");
+    }
+    // The full frame-level trip for `trace` - three presses reach the top level, the
+    // debounced flush puts it on disk while the session still runs, the quit save keeps it,
+    // and a restarted session reads it back.
+    removeFile(model::uiConfPath(ini));
+    {
+        tui::TuiState state = makeState();
+        state.iniFilename = ini;
+        appFrame(state, 100, 30);
+        views::openSettings(state.settingsSheet);
+        appFrame(state, 100, 30);
+        state.settingsSheet.selected =
+            rowIndex(state.settingsSheet.rows, views::kSettingsRowRawLog);
+        appFrame(state, 100, 30);
+        focusList(state, 100, 30); // the keyboard has to be in the list before `Enter` edits a row
+        pressKey(state, 100, 30, ImGuiKey_Enter);
+        pressKey(state, 100, 30, ImGuiKey_Enter);
+        pressKey(state, 100, 30, ImGuiKey_Enter); // off -> raw -> debug -> trace
+        check(state.ui.prefs.rawLog == model::kRawLogTrace, "three presses reach `trace`");
+        pressKey(state, 100, 30, ImGuiKey_Escape);
+        check(!state.settingsSheet.open,
+              "Esc closed the sheet - the session keeps running, the flush does not need it");
+        // The debounced write: real frames stamp the change with the process clock, so the
+        // idle window is fast-forwarded from *now* - the same seam `tui.cpp:932` reads.
+        const double later =
+            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+                .count() +
+            10.0;
+        views::uiConfFrame(state.ui, state.uiConfLoaded, ini, later);
+        check(contains(readWhole(model::uiConfPath(ini)), "UiLog=trace"),
+              "the idle window flushed trace to disk before any quit");
+        views::uiConfQuit(state.ui, ini);
+        const std::string text = readWhole(model::uiConfPath(ini));
+        // The flush settled the debounce, so this quit save is the *keep* leg: it must
+        // leave the flushed bytes alone (the write leg is the `debug` pin above).
+        check(contains(text, "UiLog=trace"), "trace is on disk after a quit save");
+    }
+    {
+        tui::TuiState restarted = makeState();
+        restarted.iniFilename = ini;
+        appFrame(restarted, 100, 30);
+        check(restarted.ui.prefs.rawLog == model::kRawLogTrace,
+              "and a restarted session reads trace back");
+        const std::vector<views::SettingsRow> rows = views::settingsRows(
+            restarted.settingsSheet, restarted.ui.prefs, restarted.settings, gridMetrics());
+        const views::SettingsRow* rawLog = findRow(rows, views::kSettingsRowRawLog);
+        check(rawLog != nullptr && rawLog->value == "trace",
+              "and the restarted sheet shows the level it loaded");
     }
 
     // Every value the *file* can carry round-trips through the words the sheet prints - the send

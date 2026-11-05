@@ -190,8 +190,8 @@ std::string uiKeysMarkdown() {
     text += "| `Enter` | newline in the draft - the terminal delivers `Shift+Enter` and "
             "`Ctrl+Enter` as the same byte (plan/key_gate.md §3), so `Enter` cannot send; the "
             "composer's `Send` does |\n";
-    text += "| `Up` / `Ctrl+Up` | recall the previous query |\n";
-    text += "| `Down` / `Ctrl+Down` | recall the next query |\n";
+    text += "| `PgUp` | recall the previous query |\n";
+    text += "| `PgDn` | recall the next query |\n";
     text += "| `/` on an empty line | open the palette's command entry |\n";
     // The send key is a preference, not a registry row, so its behavior lives here: the
     // field's key claim (CallbackCompletion) is what keeps a Tab-send from handing the

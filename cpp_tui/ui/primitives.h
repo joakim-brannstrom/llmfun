@@ -265,6 +265,12 @@ Size measureSpinner(const Metrics& m);
 /// whatever the frame rate.
 void spinner(const Metrics& m, const Rect& r, double phase);
 
+/// The spinner's frame 0 - the static run mark (`◐`, ASCII `|`) - drawn with
+/// the spinner's own ink in the same one-unit slot (`measureSpinner`). For a
+/// caller that must not animate: a run in flight is *state*, not motion. The intent named, not a
+/// magic `0.0` phase.
+void spinnerStatic(const Metrics& m, const Rect& r);
+
 /// A disclosure's size: the glyph, `pad1` of air, then the label - one row tall.
 Size measureDisclosure(const Metrics& m, std::string_view label);
 

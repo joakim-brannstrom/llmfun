@@ -1,6 +1,6 @@
 // test_topbar.cpp
 //
-// The top bar (views/topbar.h, design §4.2 / FR-02): five states, one degradation, one
+// The top bar (views/topbar.h): five states, one degradation, one
 // inline rename, and the window-title mirror it feeds.
 //
 // What this binary proves, in order:
@@ -8,15 +8,15 @@
 //   1. the source. `views/topbar.cpp` writes no colour literal, takes the profile from the
 //      metrics (never `tuiIsTextGrid()`), reads no display size, names no v4 type and does not
 //      include `tui.h` - the layering the rest of `views/` is held to (`tools/gate_ratchet.txt`);
-//   2. the labels. `elapsedLabel()`/`pillLabel()` are pinned for every state, including the
+//   2. the labels. `elapsedLabel()` is pinned for every state, including the
 //      clock-jump and past-an-hour cases;
 //   3. the arithmetic. `topBarMeasure()` is swept over widths in both profiles: every part sits
-//      inside the bar, no two parts overlap, the title takes the remainder, and the three
-//      safety signals (the mark, the run pill, the `RAW` badge) survive where the hint and the
-//      wordmark do not;
+//      inside the bar, no two parts overlap, the title takes the remainder, and the two
+//      safety signals (the mark, the `RAW` badge) survive where the hint, the
+//      help affordance and the wordmark do not (the affordance drops with the hint);
 //   4. the truncation. A long title is cut with the profile's ellipsis and the rest of the bar
 //      keeps its geometry;
-//   5. the colours. Every pill pair the bar can draw clears the design's 4.5:1 text bar;
+//   5. the colours. Every ink/fill pair the bar can draw clears the 4.5:1 text bar;
 //   6. the rename. A click opens the box for the *clicked* session, typing reaches the buffer,
 //      Enter commits exactly once, `Esc` cancels and marks the press consumed, an empty title
 //      is refused, and a bar that may not rename (or may not take keys) does neither;
@@ -111,9 +111,7 @@ std::string partText(const views::TopBarPart& part) {
     return num(part.x) + "," + num(part.y) + " " + num(part.w) + "x" + num(part.h);
 }
 
-// ---------------------------------------------------------------------------
 // The cell grid the text backend writes
-// ---------------------------------------------------------------------------
 
 ImTui::TScreen g_screen;
 
@@ -233,9 +231,7 @@ void typeText(const std::string& text, const std::function<void(const ui::Metric
         frame(body, [&](ImGuiIO& io) { io.AddInputCharacter(static_cast<unsigned short>(c)); });
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures and helpers
-// ---------------------------------------------------------------------------
 
 ui::Rect barAt(float x, float y, float w, float h, const ui::Metrics& m) {
     return ui::Rect{x, y, w, h, m.textGrid};
@@ -258,7 +254,7 @@ views::TopBarState stateFor(views::RunState run, const char* title = "Demo sessi
     state.sessionTitle = title;
     state.run = run;
     if (run == views::RunState::Running || run == views::RunState::Waiting)
-        state.elapsedMs = 12000; // 00:12, the design's own pill
+        state.elapsedMs = 12000; // 00:12, the now bar's clock
     return state;
 }
 
@@ -292,16 +288,7 @@ float contrastRatio(ImVec4 a, ImVec4 b) {
     return (hi + 0.05f) / (lo + 0.05f);
 }
 
-std::string hex(ImVec4 c) {
-    char buffer[16];
-    std::snprintf(buffer, sizeof buffer, "#%02X%02X%02X", int(c.x * 255.0f + 0.5f),
-                  int(c.y * 255.0f + 0.5f), int(c.z * 255.0f + 0.5f));
-    return buffer;
-}
-
-// ---------------------------------------------------------------------------
 // 1. The source obeys the layering rules
-// ---------------------------------------------------------------------------
 
 int countOccurrences(const std::string& haystack, const std::string& needle) {
     int count = 0;
@@ -333,32 +320,21 @@ void checkSource() {
           "views/topbar.cpp lays out inside the rect it is given, not against the display");
     check(countOccurrences(source, "ChatMessage") == 0 &&
               countOccurrences(source, "RenderGroup") == 0,
-          "views/topbar.cpp names no v4 type (D-ADAPTER)");
+          "views/topbar.cpp names no v4 type");
     check(countOccurrences(source, "#include \"tui.h\"") == 0,
           "views/topbar.cpp does not include tui.h: the bar reads no aggregate");
 }
 
-// ---------------------------------------------------------------------------
 // 2. Labels
-// ---------------------------------------------------------------------------
 
 void checkLabels() {
     check(views::elapsedLabel(0) == "00:00", "0 ms is 00:00");
-    check(views::elapsedLabel(12000) == "00:12", "12 s is 00:12 (the design's pill)");
+    check(views::elapsedLabel(12000) == "00:12", "12 s is 00:12");
     check(views::elapsedLabel(61000) == "01:01", "61 s is 01:01");
     check(views::elapsedLabel(3599000) == "59:59", "just under an hour stays mm:ss");
     check(views::elapsedLabel(3600000) == "1:00:00", "an hour switches to h:mm:ss");
     check(views::elapsedLabel(3661000) == "1:01:01", "past an hour the minutes keep their place");
     check(views::elapsedLabel(-5) == "00:00", "a negative clock reads 00:00, never -00:00");
-
-    check(views::pillLabel(views::RunState::Idle, 12000) == "Ready",
-          "idle says Ready and does not print a clock");
-    check(views::pillLabel(views::RunState::Running, 12000) == "running 00:12",
-          "running prints the run state and its clock");
-    check(views::pillLabel(views::RunState::Waiting, 12000) == "waiting 00:12",
-          "waiting keeps the clock it waited through");
-    check(views::pillLabel(views::RunState::Failed, 12000) == "failed",
-          "failed prints its word and no clock");
 
     check(std::strcmp(views::runStateName(views::RunState::Idle), "idle") == 0 &&
               std::strcmp(views::runStateName(views::RunState::Running), "running") == 0 &&
@@ -374,13 +350,9 @@ void checkLabels() {
     raw.rawLogOpen = true;
     check(views::barState(raw) == views::RunState::RawLogOpen,
           "an open raw log is the bar's fifth state");
-    check(views::pillLabel(raw.run, raw.elapsedMs) == "running 00:12",
-          "the pill keeps reporting the run while the badge reports the log");
 }
 
-// ---------------------------------------------------------------------------
 // 3. The arithmetic
-// ---------------------------------------------------------------------------
 
 void checkSweepFor(const ui::Metrics& m, const char* profile) {
     const views::RunState states[] = {views::RunState::Idle, views::RunState::Running,
@@ -406,7 +378,7 @@ void checkSweepFor(const ui::Metrics& m, const char* profile) {
                 for (const views::TopBarState& candidate : {state, longTitle}) {
                     const views::TopBarParts parts = views::topBarMeasure(candidate, bar, m);
                     const views::TopBarPart all[] = {parts.mark,  parts.wordmark, parts.rule,
-                                                     parts.title, parts.hint,     parts.pill,
+                                                     parts.title, parts.hint,     parts.help,
                                                      parts.badge, parts.gear};
                     for (const views::TopBarPart& part : all) {
                         if (!inside(part, bar)) {
@@ -422,13 +394,15 @@ void checkSweepFor(const ui::Metrics& m, const char* profile) {
                                 noneOverlap = false;
                                 if (firstProblem.empty())
                                     firstProblem = std::string(profile) + " width " + num(w) +
-                                                   " units: two parts overlap";
+                                                   " units: two parts overlap (" +
+                                                   partText(all[i]) + ", " + partText(all[j]) + ")";
                             }
                     // The right cluster is anchored on the bar's right edge (minus one pad), so
                     // the bar is anchored on both sides rather than left-aligned with a hole.
+                    // Below the gear's rung the title is what runs to the edge.
                     const views::TopBarPart& last = !parts.gear.empty()    ? parts.gear
                                                     : !parts.badge.empty() ? parts.badge
-                                                                           : parts.pill;
+                                                                           : parts.title;
                     if (std::fabs((bar.right() - m.pad1) - last.right()) > 0.01f) {
                         rightmost = false;
                         if (firstProblem.empty())
@@ -436,9 +410,9 @@ void checkSweepFor(const ui::Metrics& m, const char* profile) {
                                 std::string(profile) + " width " + num(w) +
                                 " units: the right cluster does not end at the bar's edge";
                     }
-                    // Left to right: mark, wordmark, rule, title, hint, pill, badge, gear.
+                    // Left to right: mark, wordmark, rule, title, hint, help, badge, gear.
                     const views::TopBarPart order[] = {parts.mark,  parts.wordmark, parts.rule,
-                                                       parts.title, parts.hint,     parts.pill,
+                                                       parts.title, parts.hint,     parts.help,
                                                        parts.badge, parts.gear};
                     float previous = -1.0f;
                     for (const views::TopBarPart& part : order) {
@@ -460,7 +434,7 @@ void checkSweepFor(const ui::Metrics& m, const char* profile) {
                          (allInside ? "" : " - " + firstProblem));
     check(noneOverlap, std::string(profile) + ": no two parts overlap" +
                            (noneOverlap ? "" : " - " + firstProblem));
-    check(rightmost, std::string(profile) + ": the run pill ends at the bar's right edge");
+    check(rightmost, std::string(profile) + ": the right cluster ends at the bar's right edge");
     check(ordered, std::string(profile) + ": the parts keep the design's left-to-right order");
 }
 
@@ -473,8 +447,9 @@ void checkMeasureParts() {
     const views::TopBarState idle = stateFor(views::RunState::Idle);
     const views::TopBarParts parts = views::topBarMeasure(idle, bar, m);
     check(!parts.mark.empty() && !parts.wordmark.empty() && !parts.title.empty() &&
-              !parts.hint.empty() && !parts.pill.empty() && !parts.gear.empty(),
+              !parts.hint.empty() && !parts.gear.empty(),
           "a 100-cell bar draws every part");
+    check(!parts.help.empty(), "a 100-cell bar draws the help affordance");
     check(parts.badge.empty(), "the RAW badge is absent while the raw log is closed");
     check(!views::topBarMeasure(stateFor(views::RunState::Idle, ""), bar, m).titleTruncated,
           "an empty title is not 'truncated'");
@@ -487,31 +462,30 @@ void checkMeasureParts() {
     check(std::fabs((parts.hint.x - m.pad1) - parts.title.right()) < 0.01f,
           "one pad separates the title from the hint");
 
-    // The badge is a safety signal: its width appears and disappears with the flag, and it never
-    // covers the pill.
+    // The affordance is part of the hint cluster: one pad right of the hint, one pad left of
+    // the `RAW` badge (the bar's next fixed part), and its box is the `Shift+?` wording's own
+    // width (grid).
+    check(std::fabs(parts.hint.right() - (parts.help.x - m.pad1)) < 0.01f,
+          "the affordance sits one pad right of the hint");
+    check(parts.help.w == static_cast<float>(ui::displayWidth("Shift+?")),
+          "the grid affordance is the Shift+? wording's own width");
+
+    // The badge is a safety signal: its width appears and disappears with the flag, and the
+    // settings entry keeps its pad to the right of it.
     views::TopBarState raw = idle;
     raw.rawLogOpen = true;
     const views::TopBarParts withBadge = views::topBarMeasure(raw, bar, m);
     check(!withBadge.badge.empty(), "the RAW badge is drawn exactly while the raw log is open");
-    check(withBadge.badge.x == withBadge.pill.right() + m.pad1,
-          "the badge sits one pad right of the pill");
-    check(withBadge.gear.x == withBadge.badge.right() + m.pad1,
+    check(std::fabs(withBadge.gear.x - (withBadge.badge.right() + m.pad1)) < 0.01f,
           "the settings entry sits one pad right of the badge");
-
-    // The pill grows with its label, and the bar is not re-measured behind the caller's back.
-    const views::TopBarParts running =
-        views::topBarMeasure(stateFor(views::RunState::Running), bar, m);
-    check(running.pill.w == ui::measurePill(m, "running 00:12").w,
-          "the pill's width is its own measure (running 00:12)");
-    check(views::topBarMeasure(stateFor(views::RunState::Idle), bar, m).pill.w ==
-              ui::measurePill(m, "Ready").w,
-          "the idle pill is the measure of Ready");
+    check(std::fabs(withBadge.help.right() - (withBadge.badge.x - m.pad1)) < 0.01f,
+          "the affordance sits one pad left of the badge");
 }
 
 void checkNarrowBar() {
     const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
     // The design's narrow breakpoint: 60 cells, where the guideline is "the title truncates, the
-    // mark and the run pill survive".
+    // mark and the `RAW` badge survive".
     const ui::Rect bar = shellTopBar(60, 20, m);
     check(bar.w == 60.0f && bar.h == m.row, "a 60x20 display still gives the bar one full row");
 
@@ -520,7 +494,7 @@ void checkNarrowBar() {
         "a session title that is very much longer than any bar can hold in one row";
     const views::TopBarParts parts = views::topBarMeasure(state, bar, m);
     check(!parts.mark.empty(), "60 cells: the wordmark's mark survives");
-    check(!parts.pill.empty(), "60 cells: the run pill survives");
+    check(!parts.gear.empty(), "60 cells: the settings entry survives");
     check(parts.badge.empty(), "60 cells: no RAW badge while the raw log is closed");
     check(!parts.title.empty(),
           "60 cells: the title keeps a box (it truncates, it does not vanish)");
@@ -531,14 +505,23 @@ void checkNarrowBar() {
           "60 cells: the cut title is shorter than the original");
     check(parts.titleText.find("\xE2\x80\xA6") != std::string::npos,
           "60 cells: the cut is marked with the ellipsis glyph");
-    check(parts.hint.empty(), "60 cells: the palette hint is the first thing to drop");
+    // Without a run pill, 60 cells leaves room for both advertisements; they drop
+    // together one rung narrower, still before the title ever does.
+    check(!parts.hint.empty(), "60 cells: the hint survives");
+    check(!parts.help.empty(), "60 cells: the help affordance survives with the hint");
+    const views::TopBarParts tighter =
+        views::topBarMeasure(state, barAt(0.0f, 0.0f, 44.0f, 1.0f, m), m);
+    check(tighter.hint.empty(), "44 cells: the hint is the first thing to drop");
+    check(tighter.help.empty(), "44 cells: the help affordance drops with the hint (same rung)");
+    check(!tighter.mark.empty() && !tighter.gear.empty(),
+          "44 cells: the mark and the settings entry survive the drop");
 
     // A bar narrower than the fixed parts: the title goes to zero and nothing escapes.
     for (int cells = 40; cells <= 100; ++cells) {
         const ui::Rect narrow = barAt(0.0f, 0.0f, static_cast<float>(cells), 1.0f, m);
         const views::TopBarParts tight = views::topBarMeasure(state, narrow, m);
         const views::TopBarPart all[] = {tight.mark, tight.wordmark, tight.rule,  tight.title,
-                                         tight.hint, tight.pill,     tight.badge, tight.gear};
+                                         tight.hint, tight.help,     tight.badge, tight.gear};
         bool ok = true;
         for (const views::TopBarPart& part : all)
             ok = ok && inside(part, narrow);
@@ -550,30 +533,55 @@ void checkNarrowBar() {
     check(true, "40..100 cells: every part stays inside the bar");
 }
 
-// ---------------------------------------------------------------------------
+// The help affordance
+
+void checkHelpAffordance() {
+    const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
+    const ui::Rect bar = shellTopBar(kScreenW, kScreenH, m);
+    views::TopBarState state = stateFor(views::RunState::Idle);
+    const views::TopBarParts parts = views::topBarMeasure(state, bar, m);
+    const auto body = [&](const ui::Metrics& metrics) { views::renderTopBar(state, bar, metrics); };
+
+    // The grid's advertisement is pinned, not described: the drawn bar carries the `Shift+?`
+    // wording, and it carries it inside the affordance's own box - so "advertisement, not the
+    // control" is what the test asserts.
+    const Grid drawn = frame(body);
+    check(drawn.rowText(0).find("Shift+?") != std::string::npos,
+          "the grid bar draws the Shift+? advertisement ('" + drawn.rowText(0) + "')");
+    std::string box = drawn.span(static_cast<int>(parts.help.x), 0, static_cast<int>(parts.help.w));
+    while (!box.empty() && box.back() == ' ')
+        box.pop_back();
+    check(box == "Shift+?", "the affordance's own box holds exactly the wording ('" + box + "')");
+
+    // And it is not a control: a click on the advertisement opens nothing. The page is reached
+    // by the keymap's `Shift+/` row and the shell's typed-`?` seam, both exercised elsewhere.
+    const float cx = parts.help.x + 1.0f;
+    frame(body, [&](ImGuiIO& io) { io.AddMousePosEvent(cx, 0.0f); });
+    frame(body, [&](ImGuiIO& io) {
+        io.AddMousePosEvent(cx, 0.0f);
+        io.AddMouseButtonEvent(0, true);
+    });
+    frame(body, [&](ImGuiIO& io) { io.AddMouseButtonEvent(0, false); });
+    check(!state.helpRequested, "a click on the grid's advertisement opens nothing");
+
+    // The pixel profile's affordance is the control: its box is the button's own measure, the
+    // one `renderTopBar` draws and hit-tests with (the draw/measure cannot drift). Measured
+    // inside the bar's own label step, which `topBarMeasure` pushes itself.
+    const ui::Metrics pixel = ui::metricsFor(false, 1.0f, 1.0f);
+    const ui::Rect pixelBar = shellTopBar(1280, 820, pixel);
+    const views::TopBarParts pixelParts = views::topBarMeasure(state, pixelBar, pixel);
+    const ui::ButtonSpec helpSpec{"?"};
+    const ui::TypeScope label(ui::TypeStep::label, /*textGrid=*/false);
+    check(std::fabs(pixelParts.help.w - ui::measureButton(pixel, helpSpec).w) < 0.01f,
+          "the pixel affordance is a button's own measure");
+    check(!pixelParts.help.empty(), "the pixel bar draws the affordance");
+}
+
 // 5. Colours
-// ---------------------------------------------------------------------------
 
 void checkContrast() {
-    // Pinned here rather than trusted in a comment: the pill's ink/fill pair is the one choice the
-    // view makes that could make a state unreadable.
-    const ImVec4 fill = ui::color(ui::ColorToken::raised);
-    const struct {
-        views::RunState run;
-        ui::ColorToken ink;
-        const char* name;
-    } pairs[] = {
-        {views::RunState::Idle, ui::ColorToken::textMid, "idle"},
-        {views::RunState::Running, ui::ColorToken::accent, "running"},
-        {views::RunState::Waiting, ui::ColorToken::stateWarn, "waiting"},
-        {views::RunState::Failed, ui::ColorToken::stateDanger, "failed"},
-    };
-    for (const auto& pair : pairs) {
-        const float ratio = contrastRatio(ui::color(pair.ink), fill);
-        check(ratio >= 4.5f, std::string("the ") + pair.name + " pill clears the text bar (" +
-                                 hex(ui::color(pair.ink)) + " on " + hex(fill) + " = " +
-                                 num(ratio) + ":1)");
-    }
+    // Pinned here rather than trusted in a comment: the badge's ink/fill pair and the
+    // hint's ink are the choices the view makes that could make a state unreadable.
     const float badge =
         contrastRatio(ui::color(ui::ColorToken::stateWarn), ui::color(ui::ColorToken::raised));
     check(badge >= 4.5f, "the RAW badge clears the text bar (" + num(badge) + ":1)");
@@ -581,11 +589,12 @@ void checkContrast() {
         contrastRatio(ui::color(ui::ColorToken::textLow), ui::color(ui::ColorToken::surface));
     check(hint >= 4.5f, "the palette hint is the dimmest ink that still clears 4.5:1 (" +
                             num(hint) + ":1 on surface)");
+    const float title =
+        contrastRatio(ui::color(ui::ColorToken::textMid), ui::color(ui::ColorToken::surface));
+    check(title >= 4.5f, "the title's ink clears the text bar (" + num(title) + ":1 on surface)");
 }
 
-// ---------------------------------------------------------------------------
 // 6. The inline rename
-// ---------------------------------------------------------------------------
 
 void checkRename() {
     const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
@@ -773,9 +782,7 @@ void checkRename() {
           "a title too long for the buffer opens empty (no silent truncation)");
 }
 
-// ---------------------------------------------------------------------------
 // 7. The window-title seam
-// ---------------------------------------------------------------------------
 
 std::vector<std::string> g_sinkTitles;
 
@@ -822,9 +829,7 @@ void checkTitleSeam() {
     g_sinkTitles.clear();
 }
 
-// ---------------------------------------------------------------------------
 // 8. The shell: one frame, the title mirror and the queued rename
-// ---------------------------------------------------------------------------
 
 /// One frame of the whole workbench shell, so the bar is exercised where it lives: the frame
 /// derives its inputs from the aggregate and applies its answers.
@@ -974,7 +979,7 @@ void checkShell() {
     shellFrame(state);
     check(state.topBar.sessionTitle == "Plan D", "the echoed second title is the snapshot's now");
 
-    // An Esc a view-local handler already claimed is not the bar's (D-ESC: one step per press).
+    // An Esc a view-local handler already claimed is not the bar's (one step per press).
     // `escapeConsumed` is the frame's latch, set by `tui.cpp` before the shell draws; the press
     // itself still arrives at the bar, which is what makes the latch the only thing stopping it.
     state.topBar.renaming = true;
@@ -1027,9 +1032,7 @@ void checkShell() {
     tui::setWindowTitleSink(nullptr);
 }
 
-// ---------------------------------------------------------------------------
 // 9. Goldens
-// ---------------------------------------------------------------------------
 
 struct Scene {
     const char* name;
@@ -1097,7 +1100,7 @@ std::string goldenText(const Scene& scene) {
     text += "\nstate: " + std::string(views::runStateName(views::barState(state)));
     text += "\nparts: mark=" + num(parts.mark.w) + " wordmark=" + num(parts.wordmark.w) +
             " title=" + num(parts.title.w) + " hint=" + num(parts.hint.w) +
-            " pill=" + num(parts.pill.w) + " badge=" + num(parts.badge.w) +
+            " help=" + num(parts.help.w) + " badge=" + num(parts.badge.w) +
             " gear=" + num(parts.gear.w) + " truncated=" + (parts.titleTruncated ? "1" : "0");
     text += "\ntext:\n";
     for (int y = 0; y < grid.ny; ++y) {
@@ -1107,7 +1110,7 @@ std::string goldenText(const Scene& scene) {
         text += row;
         text += '\n';
     }
-    // A text dump cannot show a fill, and a chip/pill *is* partly its fill: the painted
+    // A text dump cannot show a fill, and a chip *is* partly its fill: the painted
     // background is recorded as runs of equal colour index, one line per row that has any.
     text += "fills:\n";
     for (int y = 0; y < grid.ny; ++y) {
@@ -1220,6 +1223,7 @@ int main(int argc, char** argv) {
     checkSweepFor(ui::metricsFor(true, 1.0f, 1.0f), "grid");
     checkSweepFor(ui::metricsFor(false, 1.0f, 1.0f), "pixel");
     checkNarrowBar();
+    checkHelpAffordance();
     checkContrast();
     checkRename();
     checkTitleSeam();

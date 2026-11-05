@@ -60,10 +60,9 @@ ActiveSession activeSession(const TuiState& state) {
     return ActiveSession{};
 }
 
-/// The bar's run state (design §4.2), from what the frame owns today.
+/// The bar's run state, from what the frame owns.
 ///
-/// Task 39 replaces the body with the phase table (`RuntimeStatus::phase`); until then the
-/// four states are exactly the facts the frame has: the backend-unavailable flag is `failed`,
+/// The four states are exactly the facts the frame has: the backend-unavailable flag is `failed`,
 /// a run with a stop already requested is `waiting` (the UI is waiting for it to wind down),
 /// and a run without one is `running`.
 views::RunState runStateOf(const TuiState& state) {
@@ -91,9 +90,9 @@ std::int64_t runElapsedMs(const TuiState& state) {
 }
 
 /// The phase for the *fallback* path: the facts the frame owns, used only while no structured
-/// status has arrived (D-PHASE).
+/// status has arrived.
 ///
-/// `RuntimeStatus::phase` arrives as an ordinal from D (task 39) and `deriveNowBar()` then stops
+/// `RuntimeStatus::phase` arrives as an ordinal from D and `deriveNowBar()` then stops
 /// deriving a phase at all, so this function is what a state with no structured update draws -
 /// and what it draws for the whole run if the sender is an older D.
 ///
@@ -133,15 +132,15 @@ std::int64_t frameClockMs();
 /// The status the now bar reads and the chips both it and the composer draw.
 ///
 /// One writer (the frame thread), like every other derivation here, and one precedence
-/// (design §4.7: "`RuntimeStatus` when available, else the legacy status sentence"):
+/// ("`RuntimeStatus` when available, else the legacy status sentence"):
 ///
-///   * `ui.status.structured` - task 39's `tuiSetRuntimeStatus` fills the numbers, raises
+///   * `ui.status.structured` - `tuiSetRuntimeStatus` fills the numbers, raises
 ///     the flag and formats the chips into `ui.chips` (`model::chipsFromStatus`, once per
 ///     status update); this function then leaves both alone. Formatting them *here* would
 ///     put four strings and two number formats on the render path of every frame, which is
-///     the thing §6.3's "formatted once per value change" forbids;
+///     the thing the "formatted once per value change" rule forbids;
 ///   * otherwise the provisional phase above and the chips `tuiSetStatusText` derived when
-///     the sentence changed (task 6) - projected into `ui.chips` so a view reads the
+///     the sentence changed - projected into `ui.chips` so a view reads the
 ///     aggregate, with the comparison keeping a settled set from churning its strings every
 ///     frame.
 ///
@@ -157,8 +156,8 @@ views::NowBarInput deriveNowBar(TuiState& state, const ui::Metrics& m) {
     model::UiState& ui = state.ui;
     if (!ui.status.structured) {
         ui.status.phase = model::phaseOrdinal(phaseOf(state));
-        // No step yet: nothing in today's frame says which tool is running, and the
-        // structured status (task 39) is what will.
+        // No step yet: nothing in this frame says which tool is running, and only the
+        // structured status will.
         ui.status.detail.clear();
         ui.status.elapsedMs = runElapsedMs(state);
         ui.status.tokensPerSecond = 0.0; // the sentence's chip stays the formatter's
@@ -169,7 +168,7 @@ views::NowBarInput deriveNowBar(TuiState& state, const ui::Metrics& m) {
         // The sentence path's chips, with the two phases the sentence has no word for kept
         // from the phase: D's sentence still says `Ready` until the structured status
         // exists, and a `Ready` chip beside an `offline` row would contradict the row it
-        // sits on. Every other phase keeps the sentence's word verbatim (task 6: a fragment
+        // sits on. Every other phase keeps the sentence's word verbatim (a fragment
         // the splitter does not recognise is never dropped and never replaced).
         model::StatusChips chips = state.statusChips;
         const model::Phase phase = model::phaseFromOrdinal(ui.status.phase);
@@ -188,12 +187,13 @@ views::NowBarInput deriveNowBar(TuiState& state, const ui::Metrics& m) {
     // frame's own clock is the live one; D's value is the settled duration, shown when it ends.
     in.elapsedMs = state.readyStatus ? ui.status.elapsedMs : runElapsedMs(state);
     in.chips = ui.chips;
+    in.compactAt = ui.status.compactAt;
     in.rawLogOpen = ui.rawLogOpen;
     in.running = !state.readyStatus;
     // The `Esc stop` hint is drawn exactly while this press would *stop the run*: the chain's
-    // earlier steps can spend it - an overlay closes, and in focus mode the mode is left (task 43)
-    // - and a hint that outlives its step advertises a press that now does something else
-    // (D-ESC's steps are one per press). The question is the resolver's, not the run's
+    // earlier steps can spend it - an overlay closes, and in focus mode the mode is left
+    // - and a hint that outlives its step advertises a press that does something else
+    // The steps are one per press. The question is the resolver's, not the run's
     // (`model::escapeStopsRun`), so the two can never disagree.
     in.stopAvailable = model::escapeStopsRun({escStepClosesOverlay(state), cancelStepOpen(state),
                                               !state.userQuery.inputBuf.empty(), ui.focusMode});
@@ -212,7 +212,7 @@ views::NowBarInput deriveNowBar(TuiState& state, const ui::Metrics& m) {
         in.flash = toast->title;
         in.flashKind = toast->kind;
     }
-    // The one open question the row can be asked is the quit confirmation (task 11). It
+    // The one open question the row can be asked is the quit confirmation. It
     // takes the hint slot and the row's middle, never the state or its chip: a question is
     // not a reason to stop saying what the run is doing. The short form is the same question
     // for a row that has no room for the framing - the row picks whichever still names the
@@ -227,7 +227,7 @@ views::NowBarInput deriveNowBar(TuiState& state, const ui::Metrics& m) {
 /// The top bar's inputs for this frame (`views/topbar.h` owns the fields).
 ///
 /// The bar reads no aggregate: this is the one place the four run states, the clock and the
-/// safety flags are derived, so a later source (the phase in task 39) changes one function
+/// safety flags are derived, so a later source (the structured phase) changes one function
 /// instead of a view.
 void deriveTopBar(TuiState& state) {
     const ActiveSession active = activeSession(state);
@@ -247,7 +247,7 @@ void deriveTopBar(TuiState& state) {
     // Which presses are the bar's. Two reasons a frame's keys are not:
     //   * a surface owns the `Esc` chain's first step while it is up - the palette always, the
     //     inspector panel while it floats (`escStepClosesOverlay()`) - so `Esc` closes that
-    //     first and the rename box second (D-ESC: one step per press);
+    //     first and the rename box second (one step per press);
     //   * the frame already latched an `Esc` that a view-local handler took (an ImGui
     //     popup/menu, `tui.cpp`'s `escapeConsumed`), and a press can only be spent once.
     // The bar gates the title's click on the same answer: an overlay must not lose the keyboard
@@ -259,7 +259,7 @@ void deriveTopBar(TuiState& state) {
 /// twice.
 ///
 /// The rename goes through `queueSessionAction()` - the rail's own call - so both entry points
-/// produce one `SessionAction{Rename, id, title}` and D sees one protocol (design §6.2, "one
+/// produce one `SessionAction{Rename, id, title}` and D sees one protocol ("one
 /// registry entry"). The id was captured when the box opened (`TopBarState::renameId`), so a
 /// session switch while the field was up cannot rename the session that replaced it.
 void applyTopBarAnswers(TuiState& state) {
@@ -267,13 +267,22 @@ void applyTopBarAnswers(TuiState& state) {
         state.escapeConsumed = true;
         state.topBar.escapeConsumed = false;
     }
-    // The bar's `Settings` entry (design §4.2: "gear opens Settings") is one of the sheet's two
-    // entry points; the palette's `open settings` row is the other (task 35). It opens the sheet
+    // The bar's `Settings` entry ("gear opens Settings") is one of the sheet's two
+    // entry points; the palette's `open settings` row is the other. It opens the sheet
     // on the frame the click landed, because the overlay layer re-lays out for a surface that
     // opened after the shell painted.
     if (state.topBar.settingsRequested) {
         state.topBar.settingsRequested = false;
         openSettings(state.settingsSheet);
+    }
+    // The bar's `?` affordance is the help page's visible entry point, and it asks
+    // for the same page the keymap's `Shift+/` row and the grid's typed `?` open: one
+    // `views::openHelp()` call, so no second route can disagree about what opening means. The
+    // page has no tiling to reserve - the overlay layer draws it in this same frame, exactly like
+    // the sheet above.
+    if (state.topBar.helpRequested) {
+        state.topBar.helpRequested = false;
+        openHelp(state.help);
     }
     if (!state.topBar.renameCommitted)
         return;
@@ -326,7 +335,7 @@ RailFrame deriveRail(TuiState& state, std::int64_t nowMs) {
     if (!rail.pendingId.empty() && state.readyStatus) {
         if (rail.pendingId != panel.activeId) {
             queueSessionAction(panel, SessionActionType::Select, rail.pendingId, "");
-            // Sent and not acknowledged: the skeleton's trigger (D-RAIL/§4.11).
+            // Sent and not acknowledged: the skeleton's trigger.
             beginRailLoad(rail, rail.pendingId);
         }
         rail.pendingId.clear();
@@ -370,14 +379,14 @@ RailFrame deriveRail(TuiState& state, std::int64_t nowMs) {
         frame.rows.push_back(std::move(row));
     }
 
-    // 4. Unread (D-UNREAD) before the list is built: `apply` is the one writer, and
+    // 4. Unread before the list is built: `apply` is the one writer, and
     //    a row's dot is read back from it so the rule cannot drift between the
     //    tracker and the row it marks.
     state.ui.unread.apply(frame.rows);
     for (model::SessionRow& row : frame.rows)
         row.unread = state.ui.unread.isUnread(row.id);
 
-    // 5. The pin prune, once and only once (D-UI-CONF, `ShellPrefs::pinned`): a `Pin.<id>` line
+    // 5. The pin prune, once and only once (`ShellPrefs::pinned`): a `Pin.<id>` line
     //    for a session the store no longer has would keep a dead id in the preference for ever.
     //    The moment to drop them is the first *complete* snapshot - pruning against a list that
     //    is still loading would delete the pins it has not seen yet - and this is the one place
@@ -403,7 +412,7 @@ RailFrame deriveRail(TuiState& state, std::int64_t nowMs) {
 /// applied twice.
 ///
 /// Every session action goes through `queueSessionAction()` - the registry entry the top
-/// bar's rename also uses - so the rail cannot reach D a second way (design §6.2: "one
+/// bar's rename also uses - so the rail cannot reach D a second way ("one
 /// registry entry"). The guards are the v4 panel's, kept: a select is queued when ready and
 /// deferred when busy, while new/rename/delete are skipped while a run is active, because D
 /// would refuse them.
@@ -416,7 +425,7 @@ void applyRailAnswers(TuiState& state, float fullRailW) {
     model::RailState& rail = state.ui.rail;
     if (rail.escapeConsumed) {
         // The press the rail spent (a closed box, a cleared search): the frame's `Esc`
-        // chain stands down for it (D-ESC).
+        // chain stands down for it.
         state.escapeConsumed = true;
         rail.escapeConsumed = false;
     }
@@ -433,7 +442,7 @@ void applyRailAnswers(TuiState& state, float fullRailW) {
                 rail.pendingId = id; // busy: the single deferred slot, last wins
             }
         }
-        // The user is looking at it: its dot goes now rather than one frame later.
+        // The user is looking at it: its dot goes out this frame, not one later.
         state.ui.unread.clear(id);
     }
 
@@ -462,9 +471,9 @@ void applyRailAnswers(TuiState& state, float fullRailW) {
     if (!rail.pinToggleId.empty()) {
         const std::string id = rail.pinToggleId;
         rail.pinToggleId.clear();
-        // Pins are a preference (`ui.conf`, task 22), not session data: the toggle edits
+        // Pins are a preference (`ui.conf`), not session data: the toggle edits
         // the one owner, `ShellPrefs::pinned`. The file itself is the frame layer's business
-        // (`views::uiConfFrame()` / `uiConfQuit()`, task 29): a pin reaches the disk with the
+        // (`views::uiConfFrame()` / `uiConfQuit()`): a pin reaches the disk with the
         // next debounced write or on quit, and a pin the store no longer has is pruned once, by
         // `deriveRail()`'s first complete snapshot.
         const auto erased = state.ui.prefs.pinned.erase(id);
@@ -503,17 +512,13 @@ std::int64_t frameClockMs() {
 
 /// The composer's inputs for this frame (`views/composer.h` owns the fields).
 ///
-/// The numbers come from the *projection* (`UiState::chips`) rather than from the
-/// sentence: the mini meter and the canonical `ctx` chip are then the same value by
-/// construction (`StatusChips::contextUsed/contextMax` are the numbers the chip's string
-/// was formatted from - task 6's splitter keeps them for exactly this reason), and the
-/// structured status (task 39) reaches this row without a second switchover.
+/// The numbers are not among them: the context meter reads the now bar's
+/// `chips`/`compactAt`, the model name is the now bar's chip, and the phase word lives on
+/// the now bar's left side - so the rows cannot disagree about a number by construction,
+/// because only one row draws it.
 ///
 /// Nothing here is invented. `mode` is empty because the MVP has no Ask/Plan/Code
-/// switch (the composer draws the model alone), `compactAt` is 0 because the sentence
-/// carries no compaction threshold before structured status (task 39), and `phase` is
-/// the phase *word* (task 28's vocabulary), so the meta row says `writing` where it used
-/// to say `Busy` - one state, one word, whichever row shows it.
+/// switch - the composer then draws nothing on the text line.
 views::ComposerInput composerInputFor(TuiState& state, std::int64_t nowMs) {
     views::ComposerInput in;
     in.buffer = &state.userQuery.inputBuf;
@@ -524,25 +529,19 @@ views::ComposerInput composerInputFor(TuiState& state, std::int64_t nowMs) {
     in.busy = !state.readyStatus;
     in.stopping = state.cancelRequested;
     in.offline = state.offline;
-    in.contextUsed = state.ui.chips.contextUsed;
-    in.contextMax = state.ui.chips.contextMax;
-    in.contextKnown = state.ui.chips.context != model::kMissingChipValue;
-    in.model = state.ui.chips.model;
-    in.phase = model::phaseWord(model::phaseFromOrdinal(state.ui.status.phase));
-    in.speed = state.ui.chips.speed;
     in.sendKey = state.ui.prefs.sendKey;
     // The send-key capability is a model fact: what the active profile proves,
     // measured once here so the composer never derives it.
     in.enterProven = model::sendKeyProven(model::SendKey::Enter, ui::metricsFor().textGrid);
     in.acceptKeys = !escStepClosesOverlay(state) && !state.escapeConsumed && !railOwnsEscape(state);
     // `overlayOpen` makes the composer's own `Esc` resolve to `CloseOverlay`, which it does not
-    // perform: the frame's step does (D-ESC's first step). It has to be the *same* predicate
+    // perform: the frame's step does. It has to be the *same* predicate
     // the frame uses, or a floating inspector would let the field clear the draft or cancel the
     // run while the press was meant for the panel. A press the *rail* owns is not an overlay's:
     // the rail closes its own box or clears its own query (railOwnsEscape), so this stays false
     // and the field simply does not read the key.
     in.overlayOpen = escStepClosesOverlay(state);
-    // Focus mode (task 43) is not an overlay - the composer keeps the keyboard there - but its
+    // Focus mode is not an overlay - the composer keeps the keyboard there - but its
     // `Esc` step is the frame's, so the field has to know the chain will not answer with one of
     // *its* steps. One predicate, read from the same state the frame dispatches from.
     in.focusMode = state.ui.focusMode;
@@ -554,29 +553,27 @@ views::ComposerInput composerInputFor(TuiState& state, std::int64_t nowMs) {
 /// Apply what the composer answered this frame, and clear the answers so they cannot be
 /// applied twice.
 ///
-/// The send keeps the shipped handshake - the same three steps the v4 composer ran (drop
-/// NULs, drop one trailing newline, refuse whitespace-only, push history, clear the
-/// draft and the history cursor) - through `views::prepareSubmit()`, so a draft sends
-/// exactly what it used to.
+/// The send is one handshake, `views::prepareSubmit()`: drop NULs, drop one trailing
+/// newline, refuse whitespace-only, push history, clear the draft and the history cursor.
 void applyComposerAnswers(TuiState& state) {
     views::ComposerState& composer = state.composer;
     if (composer.escapeConsumed) {
         // The press the composer spent (a clear, a blur, the paste question): the
-        // frame-level `Esc` chain stands down for it (D-ESC: one step per press).
+        // frame-level `Esc` chain stands down for it.
         state.escapeConsumed = true;
         composer.escapeConsumed = false;
     }
     if (composer.cancelRequested) {
         composer.cancelRequested = false;
-        // D-CANCEL: the same request `/stop` makes, which the D loop turns into
+        // The cancel: the same request `/stop` makes, which the D loop turns into
         // `stopAgent()`; the partial output is kept.
         tuiRequestCancel(state);
     }
     if (composer.openPalette) {
-        // The `/` on an empty line (design §4.6): the palette's command entry. The composer took
+        // The `/` on an empty line: the palette's command entry. The composer took
         // the character instead of inserting it, so it is handed over as the palette's *seed* -
         // typing `continue` then gives `/continue`, and Enter submits a command line rather than
-        // the word behind the slash (plan/key_gate.md §10: the character is the entry point, and
+        // the word behind the slash (the character is the entry point, and
         // it has to survive it). The field keeps its draft; the palette takes the keyboard while
         // it is up.
         composer.openPalette = false;
@@ -607,7 +604,7 @@ void applyComposerAnswers(TuiState& state) {
 /// The inspector's inputs for this frame (`views/inspector.h` owns the fields).
 ///
 /// The frame owns the four derived facts, because they are answers of the layout or of the
-/// record stream rather than of the surface that draws them (D-METRICS: one owner for the
+/// record stream rather than of the surface that draws them (one owner for the
 /// geometry, one writer for the state):
 ///
 ///   * *is the region up* and *is it the floating shape* - `ui::computeShell()`'s rectangles,
@@ -615,8 +612,8 @@ void applyComposerAnswers(TuiState& state) {
 ///   * *which tab is showing* - `ShellPrefs::tab`, the persisted preference, is the owner. The
 ///     surface asks for another one and `applyInspectorAnswers()` writes it, so the drawn tab
 ///     and the saved tab are never two values;
-///   * *how many records arrived unread* - the Activity projection's own count (task 31,
-///     D-UNREAD: a record that arrives while the tab is not on screen is unread, the count
+///   * *how many records arrived unread* - the Activity projection's own count:
+///     a record that arrives while the tab is not on screen is unread, the count
 ///     clears the moment the tab is shown, and it is never persisted).
 ///
 /// The unread count is `UiState::unreadActivity`, incremented by `model::appendActivity()` when
@@ -654,7 +651,7 @@ void deriveInspector(TuiState& state, const ui::ShellLayout& layout) {
     const bool activityOnScreen = views::activityVisible(inspector);
     // Showing the tab *is* reading it: the projection's count is cleared the moment the tab is
     // on screen, and one scroll to the newest record is owed by the transition (never by a
-    // frame: quiet by default, task 31 / D-FOLLOW).
+    // frame: quiet by default).
     if (activityOnScreen) {
         if (!wasActivity)
             inspector.activityScrollToEnd = true;
@@ -665,9 +662,9 @@ void deriveInspector(TuiState& state, const ui::ShellLayout& layout) {
     }
 }
 
-/// The lane list's once-per-frame derivation (design §5.21, task 30).
+/// The lane list's once-per-frame derivation.
 ///
-/// Two facts, both owned by the frame rather than by a view (D-METRICS: one owner, one
+/// Two facts, both owned by the frame rather than by a view (one owner, one
 /// writer): a lane that is still `running` when no run is in flight has to settle into
 /// `failed`/`stopped`, and every live lane's clock has to advance. Both are cheap - no
 /// allocation, one pass over at most `MaxAgents` lanes - and both run whether or not the
@@ -678,7 +675,7 @@ void deriveAgents(TuiState& state, std::int64_t nowMs) {
     model::refreshAgentLanes(state.ui, nowMs);
 }
 
-/// The live answer's clock (design FR-08, task 38).
+/// The live answer's clock.
 ///
 /// Derived once per frame and by the frame alone, for the same reason the lanes' clocks are:
 /// the facts are the store's (`hasStreamMsg`, whether the streamed message already carries
@@ -711,11 +708,11 @@ void deriveStream(TuiState& state, std::int64_t nowMs) {
 void applyInspectorAnswers(TuiState& state) {
     views::InspectorState& inspector = state.inspector;
 
-    // --- the Agents tab (task 30) ------------------------------------------
+    // the Agents tab
     //
     // The drill-down, the lane stop and the run stop are three different things and they are
     // applied in one place, so a click, a menu row and the confirmation all end up as the same
-    // kind of answer (D-METRICS: the surface asks, the frame writes).
+    // kind of answer (the surface asks, the frame writes).
     if (inspector.backRequested) {
         inspector.backRequested = false;
         model::focusAgentLane(state.ui, "");
@@ -731,7 +728,7 @@ void applyInspectorAnswers(TuiState& state) {
     if (inspector.stopAllRequested) {
         inspector.stopAllRequested = false;
         inspector.stopAllArmed = false;
-        // Every lane stops with the run - which is the run's own stop path (D-CANCEL), so a
+        // Every lane stops with the run - which is the run's own stop path, so a
         // `Stop all` from the Agents tab winds down exactly like `/stop`, the composer's Stop
         // and the `Esc` step: one implementation, and the partial output is preserved the same
         // way. The lanes are settled here as well, because the mirror stops updating them the
@@ -758,15 +755,15 @@ void applyInspectorAnswers(TuiState& state) {
         state.ui.prefs.inspectorOpen = 1;
 }
 
-/// The settings sheet's inputs for this frame (design §4.10, task 34).
+/// The settings sheet's inputs for this frame.
 ///
-/// The facts only the frame knows, because a view may read none of them (D-METRICS): the profile's
+/// The facts only the frame knows, because a view may read none of them: the profile's
 /// two file paths (`ui.conf` beside the ini file, `imgui2.conf` derived from its name), the UI log
 /// archive's switch, the ABI and format versions, the run's flags - and the display size, which the
 /// sheet reports as the "size" of the window it is drawn in. They are derived *only while the sheet
 /// is up* - a closed sheet costs nothing - and while it is up they are rebuilt each frame: a
 /// handful of short concatenations in a modal surface the user opened, which is not the always-on
-/// render path §6.3's "no formatting" rule is about (the status chips' strings are rejected because
+/// render path the "no formatting" rule is about (the status chips' strings are rejected because
 /// *every* frame of every session pays for them; here the user is looking at the frame).
 void deriveSettings(TuiState& state, ImVec2 display) {
     views::SettingsState& sheet = state.settingsSheet;
@@ -806,17 +803,17 @@ void applySettingsAnswers(TuiState& state) {
     }
 }
 
-/// The Raw Log's inputs for this frame (design §4.9, D-RAWLOG, task 33).
+/// The Raw Log's inputs for this frame.
 ///
 /// Four facts, none of them the surface's own invention:
 ///
 ///   * *is it up* - `UiState::rawLogOpen`, the flag every access path writes and the now bar's
-///     badge reads. It is never persisted, so every start is closed (D-RAWLOG);
+///     badge reads. It is never persisted, so every start is closed;
 ///   * *which shape* - the text grid's full-screen overlay, or the pixel profile's drawer. The
-///     profile is read from the metrics the frame already has (one place, D-METRICS), and the
+///     profile is read from the metrics the frame already has (one place), and the
 ///     shape decides what the surface may claim: only the overlay is modal, only the overlay
 ///     takes `Esc`;
-///   * *the two view modes* - follow (pointer-owned, D-FOLLOW) and pause;
+///   * *the two view modes* - follow (pointer-owned) and pause;
 ///   * *the level floor* - `ShellPrefs::rawLog` names the level the surface starts at. `off` is
 ///     the shipped default: the surface is closed on every start and shows what a normal run
 ///     logs; `debug`/`trace` widen the floor to the developer records the borrowed logger
@@ -845,11 +842,11 @@ model::RawLogRing rawLogRing(const TuiState& state) {
 
 /// Apply what the Raw Log answered this frame, and clear the answers.
 ///
-/// The surface never writes the aggregate (D-METRICS: a view is a geometry taker), so the four
+/// The surface never writes the aggregate (a view is a geometry taker), so the four
 /// answers land here: a close, a pause toggle, a re-armed follower and the pointer clearing it.
 /// The answer to a `Copy` or a `Save` travels the same way - the surface performed the write (it is
 /// a model call and a clipboard call, neither of which needs the frame), and the *notice* it leaves
-/// is the frame's to publish as one feedback item (task 45: the now bar's flash in the grid, a
+/// is the frame's to publish as one feedback item (the now bar's flash in the grid, a
 /// toast card in the pixel profile), which is where the design says the path is reported.
 void applyRawLogAnswers(TuiState& state, const ui::Metrics& m) {
     views::RawLogState& raw = state.rawLog;
@@ -873,14 +870,14 @@ void applyRawLogAnswers(TuiState& state, const ui::Metrics& m) {
     }
     if (raw.resizeTo > 0.0f) {
         // The drawer's grip: the height the drag asked for, which the *layout* clamps into the
-        // band it can afford (a view never re-tiles by itself, D-METRICS). Per-run only: `ui.conf`
+        // band it can afford (a view never re-tiles by itself). Per-run only: `ui.conf`
         // has no key for a dragged height, like the rail's width.
         state.ui.rawLogH = raw.resizeTo;
         raw.resizeTo = 0.0f;
     }
     if (!raw.notice.empty()) {
         // The surface's one-line answer (a saved path, a failed save, a copy it made) becomes a
-        // feedback item: the *one* place it is published (task 45). Nothing duplicates it - the now
+        // feedback item: the *one* place it is published. Nothing duplicates it - the now
         // bar's flash and the pixel profile's stack both read this queue, so the two presentations
         // cannot say different things about one press.
         notifyRawLog(state, raw.notice, raw.noticeKind, m);
@@ -902,16 +899,15 @@ void pushHistory(TuiState& state, const std::string& line) {
 void returnKeyboardBelow(TuiState& state) {
     // A surface that is still up owns the keyboard, and it takes it back itself: the Raw Log's
     // overlay re-focuses on its next frame, and the settings sheet is modal, so handing the
-    // composer a focus request behind it would type into a field nobody can see (review finding:
-    // `Ctrl+K` above the sheet, then `Esc`, used to do exactly that). A sheet that is up re-arms
-    // its own search field instead.
+    // composer a focus request behind it would type into a field nobody can see. A sheet
+    // that is up re-arms its own search field instead.
     if (state.palette.open || (state.ui.rawLogOpen && state.rawLog.overlayShape))
         return;
     if (state.settingsSheet.open) {
         state.settingsSheet.searchFocus = true;
         return;
     }
-    // The help page (task 42) is a modal surface as well, and the palette's `Show help` row closes
+    // The help page is a modal surface as well, and the palette's `Show help` row closes
     // the palette *after* opening it - so this call runs with the page already up. The page has no
     // field to re-arm; it asserts its own window focus every frame, and a `focusRequested` written
     // here would be a request to type into a field behind it (and it dirties
@@ -953,9 +949,7 @@ void closeRailSearch(model::UiState& ui) {
     ui.rail.searchPrevRailW = 0.0f;
 }
 
-// ---------------------------------------------------------------------------
-// The Raw Log's three entry points (task 33)
-// ---------------------------------------------------------------------------
+// The Raw Log's three entry points
 
 void notifyRawLog(TuiState& state, std::string text, model::ToastKind kind, const ui::Metrics& m) {
     model::raiseToast(state.ui, model::Toast{kind, std::move(text), {}}, frameClockMs(),
@@ -988,10 +982,10 @@ void toggleRawLog(TuiState& state) {
         closeRawLog(state);
         return;
     }
-    // Opening is an explicit request and is never persisted (D-RAWLOG: every start is closed).
+    // Opening is an explicit request and is never persisted (every start is closed).
     // It owes one catch-up to the newest record - the surface opens on the live end of the
     // stream, which is what a developer surface is for; the pin still waits for content to sit
-    // below the fold (D-FOLLOW).
+    // below the fold.
     state.ui.rawLogOpen = true;
     state.rawLog.open = true;
     state.rawLog.nextPinAt = 0.0;
@@ -1017,13 +1011,13 @@ bool handleRawLogCommand(TuiState& state, std::string_view query) {
     return true;
 }
 
-/// Draw the Raw Log's full-screen overlay (the text grid's shape, task 33).
+/// Draw the Raw Log's full-screen overlay (the text grid's shape).
 ///
 /// The frame opens the window, not the view: a view is a geometry taker and never positions
-/// itself (D-METRICS). It has to be a *window* and not a draw-list fill inside the root, because
+/// itself. It has to be a *window* and not a draw-list fill inside the root, because
 /// an overlay's opaque surface must erase the cells underneath it - a fill inside an existing
 /// window recolours them, and a cell renderer would still show the thread's glyphs through the
-/// developer stream. The palette solves the same problem the same way, and D-OVERLAY's z-order is
+/// developer stream. The palette solves the same problem the same way, and the overlay z-order is
 /// what `SetWindowFocus()` on the appearing frame reproduces. Only the topmost surface may take
 /// the focus: a palette above this overlay keeps the keyboard (`ownsKeyboard` is false).
 void drawRawLogOverlay(TuiState& state, const ui::Rect& rect, const ui::Metrics& m,
@@ -1077,13 +1071,13 @@ ui::LayoutPrefs layoutPrefsFor(const model::UiState& ui, bool paletteOpen, float
     // can afford, so a drag can never squeeze the composer or the thread's three rows.
     prefs.rawLogH = ui.rawLogH;
     prefs.paletteOpen = paletteOpen;
-    // The settings sheet (task 34) does not change the tiling either; the flag gives it a
+    // The settings sheet does not change the tiling either; the flag gives it a
     // rectangle and its place in the overlay stack (palette > settings > Raw Log > inspector).
     prefs.settingsOpen = settingsOpen;
-    // The help page (task 42): the same kind of flag, one layer up - it is the top of the stack,
+    // The help page: the same kind of flag, one layer up - it is the top of the stack,
     // so it is drawn last and `Esc` closes it first.
     prefs.helpOpen = helpOpen;
-    // The composer's grown height is the view's own answer from the frame before (task 27), and
+    // The composer's grown height is the view's own answer from the frame before, and
     // "as tall as it is when empty" is the layout's default for the first frame.
     prefs.composerH = composerH;
     return prefs;
@@ -1132,7 +1126,7 @@ ui::ShellLayout overlayLayoutFor(const ShellFrame& frame, bool paletteOpen, bool
 }
 
 ShellFrame renderShell(TuiState& state, ImVec2 display) {
-    // The `?` character (task 42, plan/key_gate.md §10/§11 option (a)): the terminal delivers no
+    // The `?` character: the terminal delivers no
     // key event for a printable character, so the grid's path to the page is the typed `?` - the
     // same route the rail's row keys and the inspector's `[`/`]` take, and like them it is taken
     // *before* any list draws: ImGui's type-to-select claims the queued characters of a nav window
@@ -1146,7 +1140,7 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
         ui::takeCharacter('?'))
         openHelp(state.help);
 
-    // The persistent flash's answer (task 45, FR-29, plan/key_gate.md §4i): `x` acknowledges the
+    // The persistent flash's answer: `x` acknowledges the
     // item the presentations name - `model::dismissShownToast()` is the newest one, which is what
     // the grid's flash and its `x dismiss` hint show and what the pixel profile's stack draws
     // nearest the corner. (A card's own `Dismiss`/cross answers *that* card instead.) A character
@@ -1155,7 +1149,7 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     // an `x` typed into the composer stays an `x` (and a warning survives while the user types,
     // which is the point
     // - it waits for an answer, not for a keystroke; with a draft in progress the route is `Esc`'s
-    // blur step first, D-ESC's order). A modal surface owns every key while it is up, so a press
+    // blur step first). A modal surface owns every key while it is up, so a press
     // meant for the palette cannot clear a warning behind it, and a press a view-local handler
     // already spent is not spent twice.
     if (!state.escapeConsumed && !state.overlayOwnsKeyboard() && ui::takeCharacter('x'))
@@ -1204,7 +1198,7 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     state.ui.rail.open = layout.rail.w > 0.0f && layout.rail.h > 0.0f;
     state.ui.rail.overlay = railFloats;
     // The Raw Log's four inputs: is it up, which shape, its two view modes and the level floor
-    // its `UiLog` preference names (task 33). Derived here with the inspector's, before any
+    // its `UiLog` preference names. Derived here with the inspector's, before any
     // region draws, because the `Esc` chain's answer and every region's `acceptKeys` read it.
     const model::RawLogRing ring = rawLogRing(state);
     deriveRawLog(state, m);
@@ -1218,9 +1212,9 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     // thread and overlaps nothing). Below the width breakpoint the rail and the inspector
     // *float above* the thread (they are panels, not columns), so drawing them before it
     // would let the transcript paint over them; the design's own z-order puts the inspector
-    // above the rail (D-OVERLAY), which is the order they are drawn in here.
+    // above the rail, which is the order they are drawn in here.
 
-    // The top bar (FR-02, views/topbar.h): the frame derives the bar's inputs from the
+    // The top bar (views/topbar.h): the frame derives the bar's inputs from the
     // aggregate, the view draws into the rectangle the layout answered, and the answers come
     // back in the same frame. The window-title mirror is the one write that is not a
     // `UiState` field: it is the internal C++ seam of P-Δ2, never the ABI.
@@ -1237,7 +1231,7 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     // mirror is never ahead of the row. One call per frame: the seam forwards only a change.
     tuiBackendSetWindowTitle(state.topBar.sessionTitle);
     applyTopBarAnswers(state);
-    // The settings sheet's diagnostics (task 34): the paths, the versions, the flags and the
+    // The settings sheet's diagnostics: the paths, the versions, the flags and the
     // display. Derived *after* `applyTopBarAnswers()` because that is where a click on the bar's
     // `Settings` entry opens the sheet - deriving before it would paint one frame with an empty
     // profile path, an empty generation and zeros for the size (`deriveSettings()` is a no-op while
@@ -1247,25 +1241,25 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     // meter and phase line read the same chips, so it runs before any region draws and
     // whether or not the row has a rectangle (compact mode folds the top bar away, never
     // this row). One derivation per frame, from the structured status when D sends one
-    // and from the sentence until then (D-STATUS). The answer is kept on the frame so a
+    // and from the sentence until then. The answer is kept on the frame so a
     // harness - and a golden - measures the row that was drawn instead of rebuilding a
     // fixture that could drift from this derivation.
     frame.nowBar = deriveNowBar(state, m);
     frame.nowBar.compact = layout.compact;
     // The top bar's fold is the layout's answer, not the view's guess: in compact mode and in
-    // focus mode (task 43) the bar draws no row, so the `RAW` badge lives on this one - a hidden
-    // region may never hide a safety signal (design §4.1's degradation rule).
+    // focus mode the bar draws no row, so the `RAW` badge lives on this one - a hidden
+    // region may never hide a safety signal.
     frame.nowBar.topBarFolded = layout.topBar.h <= 0.0f;
     // A view-local key needs the same permission the rail's row keys get: no surface owns the
     // `Esc` chain's first step (`escStepClosesOverlay()`), and no press was already spent
     // (`Esc` is one step per press). The thread's `y` (copy the focused block) is the second
     // consumer of that answer.
     const bool acceptThreadKeys = !escStepClosesOverlay(state) && !state.escapeConsumed;
-    // The transcript is drawn into the readable column, not the region (task 43): focus mode
+    // The transcript is drawn into the readable column, not the region: focus mode
     // caps and centres it, and with the mode off the two rectangles are the same one.
     renderThread(state.ui, state.threadAdapter, layout.threadColumn, layout.loadEarlier, m,
                  layout.compactGroups, layout.compact, acceptThreadKeys);
-    // The rail (task 23, views/rail.h): the frame derives its rows from the snapshot, the view
+    // The rail (views/rail.h): the frame derives its rows from the snapshot, the view
     // draws the visible window of them into the rectangle the layout answered, and the answers (a
     // select, a rename, a delete, a pin) are applied through `queueSessionAction()` in this same
     // frame.
@@ -1278,10 +1272,10 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     const RailFrame railFrame = deriveRail(state, nowMs);
     // Paint order, the rail's half (the inspector's is below and states the rule in full): a
     // *docked* column overlaps nothing and draws here, where its answers are applied next to the
-    // rows that produced them; the *panel* shape is an overlay (design §3.3's "single column,
+    // rows that produced them; the *panel* shape is an overlay ("single column,
     // both overlays") and is therefore drawn at the end of the frame, above the thread's child
     // window - an overlay that drew before it lost the fill to the child's draw list and the
-    // thread's glyphs came through the panel (found in task 40's 60x20 golden).
+    // thread's glyphs came through the panel (found in the 60x20 golden).
     //
     // The rect the panel *paints* on: the layout's rectangle down to the composer's top.
     //
@@ -1298,7 +1292,7 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     const auto drawRail = [&]() {
         // A *modal* surface owns the keyboard (`overlayOwnsKeyboard()`), and a press a view-local
         // handler already spent must not act twice. `Esc` closing the panel is a different
-        // question (D-ESC): the panel's `/`, its row keys and its rename/search `Esc` steps live
+        // question: the panel's `/`, its row keys and its rename/search `Esc` steps live
         // here, and gating them on `escStepClosesOverlay()` made the panel keyboard-dead - the
         // docked column and the strip never had that problem.
         const bool acceptKeys = !state.overlayOwnsKeyboard() && !state.escapeConsumed;
@@ -1313,11 +1307,11 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
         // No column and no panel: the answers still have to be applied, because the palette's
         // session row and `New session` write them with the rail hidden (`Ctrl+B`).
         applyRailAnswers(state, m.railW);
-    // The inspector (task 29, views/inspector.h): the frame derived its four inputs above; the
+    // The inspector (views/inspector.h): the frame derived its four inputs above; the
     // view draws the frame, the tab strip and the visible rows of the active tab into the
     // rectangle the layout answered, and the tab it asked for is applied in this same frame.
     //
-    // Paint order. A *floating* panel is an overlay, and D-OVERLAY puts overlays above the
+    // Paint order. A *floating* panel is an overlay, and the overlay rule puts overlays above the
     // tiling - the panel's rectangle spans from the top bar to the now bar (that is what keeps
     // its minimum height reachable at the floor), so it covers the composer as well as the
     // thread. Drawing it here, before the composer, let the composer paint over the panel's last
@@ -1335,13 +1329,13 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     if (layout.inspector.w > 0.0f && !inspectorFloats)
         renderInspector(state.inspector, state.ui.agents, layout.inspector, m,
                         /*acceptKeys=*/acceptInspectorKeys, state.ui.activity);
-    // The Raw Log's *drawer* (the pixel profile only, task 33): the layout reserves it between
+    // The Raw Log's *drawer* (the pixel profile only): the layout reserves it between
     // the thread and the composer, so it is drawn with the tiling, before the composer - which
-    // is also the proof that it cannot cover it (design §4.9). The grid's full-screen overlay is
+    // is also the proof that it cannot cover it. The grid's full-screen overlay is
     // an overlay and is drawn at the end of this function, above the floating inspector.
     if (state.rawLog.open && !state.rawLog.overlayShape)
         renderRawLog(state.rawLog, layout.rawLogOverlay, m, ring, /*ownsKeyboard=*/false);
-    // The composer (task 27, views/composer.h): the frame derives its inputs from the
+    // The composer (views/composer.h): the frame derives its inputs from the
     // store and the chips, the view draws the container, the field, the meter and the
     // action into the rectangle the layout answered - and reports its own grown height,
     // which `layoutPrefsFor()` reserves on the next frame. The answers (a send, a cancel,
@@ -1351,25 +1345,25 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
         applyComposerAnswers(state);
     }
     if (layout.nowBar.h > 0.0f) {
-        // The now bar (task 28, views/nowbar.h): the frame derived the row's inputs above
+        // The now bar (views/nowbar.h): the frame derived the row's inputs above
         // (and kept them on `frame.nowBar`), the view draws them into the rectangle the
         // layout answered. Compact mode is the layout's answer, not the view's guess: it
         // decides whether the chips collapse and whether the `RAW` badge lives here (the
         // top bar is folded away then).
         views::renderNowBar(frame.nowBar, layout.nowBar, m);
     }
-    // The floating rail panel first (it is the bottom of the overlay stack, D-OVERLAY), then the
+    // The floating rail panel first (it is the bottom of the overlay stack), then the
     // floating inspector, then the Raw Log's full-screen overlay: the same order the layout's
     // `top` uses, so the last thing drawn is the surface `Esc` would close first.
     if (railFloats)
         drawRail();
     // The floating panel, last but for the Raw Log overlay: it is an overlay above the tiling, so
-    // it must paint after everything it covers (D-OVERLAY). Its keys are gated by the same
+    // it must paint after everything it covers. Its keys are gated by the same
     // predicate as the other views', and a press the frame already spent is not spent twice.
     if (inspectorFloats)
         renderInspector(state.inspector, state.ui.agents, layout.inspector, m,
                         /*acceptKeys=*/acceptInspectorKeys, state.ui.activity);
-    // The Raw Log's full-screen overlay last (task 33): D-OVERLAY's order is palette > settings >
+    // The Raw Log's full-screen overlay last: the overlay order is palette > settings >
     // Raw Log > inspector, and everything above it in that list draws later (`renderOverlays()`
     // paints the palette and the settings sheet). The overlay is where the developer stream is
     // *read*, so it takes the keyboard only while it is the topmost surface - the view's own
@@ -1401,7 +1395,7 @@ void renderOverlays(TuiState& state, ShellFrame& frame) {
             overlayLayoutFor(frame, state.palette.open, state.settingsSheet.open, state.help.open);
 
     const ui::Metrics m = ui::metricsFor();
-    // D-OVERLAY's z-order, bottom first: the settings sheet (task 34) under the palette, and only
+    // The overlay z-order, bottom first: the settings sheet under the palette, and only
     // the topmost surface takes the keyboard. The Raw Log's full-screen overlay and the floating
     // inspector are painted inside `renderShell()` (they are drawn under this layer), so the
     // surfaces that can be *above* them are exactly the ones here.
@@ -1413,7 +1407,7 @@ void renderOverlays(TuiState& state, ShellFrame& frame) {
     }
     if (state.palette.open)
         renderPalette(state.palette, state, frame.layout.paletteOverlay);
-    // The help page next, above everything it explains (task 42). Its own `Close` control is the
+    // The help page next, above everything it explains. Its own `Close` control is the
     // pointer's way out; closing is the same step `Esc` performs, keyboard included.
     if (state.help.open) {
         renderHelp(state.help, frame.layout.helpOverlay, m,
@@ -1423,7 +1417,7 @@ void renderOverlays(TuiState& state, ShellFrame& frame) {
             returnKeyboardBelow(state);
         }
     }
-    // The feedback stack last, above everything it may explain (task 45): it is chrome, not a
+    // The feedback stack last, above everything it may explain: it is chrome, not a
     // surface - it takes no key, closes nothing and never joins the tiling - so it is drawn after
     // every page that could cover it. The area it may use is the display down to the composer's
     // top: the one region it must never cover is the field the user types into, and the row below
@@ -1436,7 +1430,7 @@ void renderOverlays(TuiState& state, ShellFrame& frame) {
 }
 
 bool escStepClosesOverlay(const TuiState& state) {
-    // The help page first (task 42): it is the top of the stack, so it is the surface an `Esc`
+    // The help page first: it is the top of the stack, so it is the surface an `Esc`
     // answers before anything under it.
     if (state.help.open)
         return true;
@@ -1444,28 +1438,28 @@ bool escStepClosesOverlay(const TuiState& state) {
     // keyboard, so while it is up nothing below it can also be the answer.
     if (state.palette.open)
         return true;
-    // The settings sheet (task 34): modal, above the Raw Log and the inspector panel and below
-    // the palette (D-OVERLAY).
+    // The settings sheet: modal, above the Raw Log and the inspector panel and below
+    // the palette.
     if (state.settingsSheet.open)
         return true;
-    // The Raw Log's full-screen overlay (task 33): modal on the grid, so `Esc` closes it. The
-    // pixel profile's *drawer* is one of the tiled regions (D-OVERLAY) and is closed by its
+    // The Raw Log's full-screen overlay: modal on the grid, so `Esc` closes it. The
+    // pixel profile's *drawer* is one of the tiled regions and is closed by its
     // button, so it is deliberately not here - `Esc` there belongs to the run and the composer.
     if (state.ui.rawLogOpen && state.rawLog.overlayShape)
         return true;
     // The inspector answers only while it *floats*: the docked column is one of the six
-    // regions, and `Esc` beside it belongs to the run and the composer (D-ESC's later steps).
+    // regions, and `Esc` beside it belongs to the run and the composer.
     if (state.inspector.open && state.inspector.overlay)
         return true;
     // ...and the rail panel, the bottom of the stack: the only surface that can cover the
-    // composer while it is up, so a press has to reach it (`ui::OverlayLayer::Rail`, task 17's
+    // composer while it is up, so a press has to reach it (`ui::OverlayLayer::Rail`
     // z-order). The docked column and the collapsed strip are part of the tiling and are not.
     return state.ui.rail.overlay;
 }
 
 bool railOwnsEscape(const TuiState& state) {
     const model::RailState& rail = state.ui.rail;
-    // Focus mode hides the rail (task 43): a view that is not drawn stops refreshing its own
+    // Focus mode hides the rail: a view that is not drawn stops refreshing its own
     // latches (`renderRail()` is what clears `filterFocus`/`menuRowId`), so a hidden rail cannot
     // own a press it has no control on screen to spend - the field would go keyboard-dead behind a
     // panel nobody can see.
@@ -1484,7 +1478,7 @@ bool railOwnsEscape(const TuiState& state) {
 }
 
 void pressReservedDigit(TuiState& state) {
-    // Focus mode hides the panel and its strip (task 43), so the digit addresses nothing: arming a
+    // Focus mode hides the panel and its strip, so the digit addresses nothing: arming a
     // notice the user cannot read and opening a panel on the way out would be the mode writing the
     // preferences it promises to leave alone (`model::regionControlsApply`). A no-op there, like
     // the two region toggles.
@@ -1499,7 +1493,7 @@ void pressReservedDigit(TuiState& state) {
 }
 
 ui::OverlayLayer closeTopOverlay(TuiState& state) {
-    // The help page (task 42), the top of the stack: closing it hands the keyboard to whatever is
+    // The help page, the top of the stack: closing it hands the keyboard to whatever is
     // under it - which is the composer in every state the page can be opened from.
     if (state.help.open) {
         closeHelp(state.help);
@@ -1510,7 +1504,7 @@ ui::OverlayLayer closeTopOverlay(TuiState& state) {
         views::closePalette(state.palette, state);
         return ui::OverlayLayer::Palette;
     }
-    // The settings sheet, below the palette and above the Raw Log (D-OVERLAY). Closing it hands
+    // The settings sheet, below the palette and above the Raw Log. Closing it hands
     // the keyboard to whatever is under it (`returnKeyboardBelow()`), so a closed sheet never
     // leaves the keyboard nowhere.
     if (state.settingsSheet.open) {
@@ -1519,7 +1513,7 @@ ui::OverlayLayer closeTopOverlay(TuiState& state) {
         return ui::OverlayLayer::Settings;
     }
     // The Raw Log's full-screen overlay, below the palette and above the inspector panel
-    // (D-OVERLAY). The drawer shape is not closeable this way: it is part of the tiling.
+    // The drawer shape is not closeable this way: it is part of the tiling.
     if (state.ui.rawLogOpen && state.rawLog.overlayShape) {
         closeRawLog(state);
         return ui::OverlayLayer::RawLog;
@@ -1560,10 +1554,10 @@ void uiConfFrame(model::UiState& ui, bool& loaded, const std::string& iniFilenam
     } else {
         model::flushUiConf(ui.prefs, iniFilename, nowSeconds);
     }
-    // The read-only-directory rule (design §5.3, task 22): a write that fails is reported once and
+    // The read-only-directory rule: a write that fails is reported once and
     // the settings stay in memory, so the failure can never turn into a retry loop. The module
     // keeps one line per failed window; this is its one consumer, and it posts it as an Activity
-    // warning - the tab the user opens to ask "what went wrong" (D-ACTIVITY). It runs *after* the
+    // warning - the tab the user opens to ask "what went wrong". It runs *after* the
     // flush, so the warning is published in the frame whose write produced it (and a line left by
     // the quit path's save is published by the next frame).
     std::string warning;
@@ -1573,7 +1567,7 @@ void uiConfFrame(model::UiState& ui, bool& loaded, const std::string& iniFilenam
         record.level = model::kActivityLevelWarn;
         record.message = warning;
         // `visible` is false: the sheet's own write path is not the Activity tab, so a warning it
-        // produced counts as unread until the user looks at the tab (D-UNREAD's rule for the
+        // produced counts as unread until the user looks at the tab (the rule for the
         // record stream).
         model::appendActivity(ui, record, model::kActivityLevelWarn, /*visible=*/false);
     }

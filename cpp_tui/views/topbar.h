@@ -1,16 +1,17 @@
-/// The top bar (`views/topbar.cpp`): identity and the global controls (design §4.2, FR-02).
+/// The top bar (`views/topbar.cpp`): identity and the global controls.
 ///
 /// One row - one cell on the text grid, 48 px in the pixel profile - carrying the
-/// wordmark, the inline-editable session title, the palette hint, the run pill, the `RAW`
-/// badge and the settings entry:
+/// wordmark, the inline-editable session title, the palette hint, the `?` help affordance,
+/// the `RAW` badge and the settings entry (the run's clock and state live on the now bar,
+/// the row that owns the run's story, and the bar keeps one signal per fact):
 ///
-///     [mark] llmfun | <title>                  Ctrl+K commands   (pill)   RAW   Settings
+///     [mark] llmfun | <title>              Ctrl+K commands  Shift+?  RAW  Settings
 ///
 /// Five states (idle `Ready`, running, waiting, failed, raw-log open) and one
 /// degradation: the fixed parts are reserved first, the title takes what is left and is
-/// cut with the profile's ellipsis, and when even that has no room the palette hint, the
-/// wordmark and the settings entry drop in that order. The mark, the run pill and the
-/// `RAW` badge never drop - a bar that hides the safety signal to fit a hint is worse
+/// cut with the profile's ellipsis, and when even that has no room the palette hint with
+/// its `?` sibling, the wordmark and the settings entry drop in that order. The mark and
+/// the `RAW` badge never drop - a bar that hides the safety signal to fit a hint is worse
 /// than a bar with no hint.
 ///
 /// Contract: a view is a geometry taker. The bar receives `ShellLayout::topBar` and a
@@ -23,7 +24,7 @@
 /// *answers* (`renameCommitted`/`renamedTitle`, `escapeConsumed`) that the frame layer
 /// applies; the rename then goes through `queueSessionAction(SessionActionType::Rename,
 /// ...)` - the very call the rail makes - so both entry points produce one
-/// `SessionAction{Rename, id, title}` (design §6.2: "one registry entry").
+/// `SessionAction{Rename, id, title}` - one registry entry.
 ///
 /// Layering: `ui/` and imgui only - no `tui.h`, no `model/`, no v4 type. That is what lets
 /// `./test_topbar` draw the bar into a 100x30 cell grid with no application state.
@@ -42,10 +43,10 @@ struct Rect;
 
 namespace llmfun::tui::views {
 
-/// The bar's five states (design §4.2).
+/// The bar's five states.
 ///
 /// The first four are the run's; the fifth is a *mode* of the bar rather than a run state -
-/// the raw log opens while a run is in flight, and the pill has to keep reporting that
+/// the raw log opens while a run is in flight, and the state has to keep reporting that
 /// run. `TopBarState::run` therefore only ever holds the first four, and `barState()`
 /// folds the flag in for the one value a golden, a log line or a test can name.
 enum class RunState { Idle = 0, Running, Waiting, Failed, RawLogOpen };
@@ -54,11 +55,11 @@ enum class RunState { Idle = 0, Running, Waiting, Failed, RawLogOpen };
 ///
 /// One writer (the frame thread). The first group is derived from the aggregate once per
 /// frame (`views/shell.cpp` owns that derivation: the run state comes from the busy flag
-/// and the cancel latch until task 39 supplies `RuntimeStatus::phase`), the second group is
+/// and the cancel latch, with the phase `RuntimeStatus::phase` carries), the second group is
 /// the bar's own edit state and survives across frames, and the third is consumed by the
 /// frame layer in the same frame it is set.
 struct TopBarState {
-    // --- what the frame tells the bar, once per frame -----------------------
+    // what the frame tells the bar, once per frame
     /// The session the title belongs to; "" while D has sent no snapshot (or no active
     /// row). An empty id is also "nothing to rename": the title is not a hit target then.
     std::string sessionId;
@@ -71,8 +72,9 @@ struct TopBarState {
     std::string sessionTitle;
     /// `Idle`, `Running`, `Waiting` or `Failed`; never `RawLogOpen` (see `barState()`).
     RunState run = RunState::Idle;
-    /// The running pill's clock, in milliseconds. Ignored by the two states that do not
-    /// count (`Ready`, `failed`), so a stale value cannot leak into their label.
+    /// The run's clock, in milliseconds (drawn by the now bar's clock; the field stays
+    /// because `barState()`'s run story and the frame's derivation are unchanged). Ignored
+    /// by the two states that do not count (`Ready`, `failed`).
     long long elapsedMs = 0;
     /// The Raw Log overlay is up: the `RAW` badge is drawn exactly while this holds.
     bool rawLogOpen = false;
@@ -81,14 +83,14 @@ struct TopBarState {
     /// refuse.
     bool canRename = true;
     /// Keys **and** clicks reach the bar: false while an overlay owns the keyboard (so `Esc`
-    /// closes the overlay first and the rename box second, D-ESC: one step per press) and false
+    /// closes the overlay first and the rename box second - one step per press) and false
     /// on a frame whose key press a view-local handler already claimed (the frame's
     /// `escapeConsumed` latch), so the bar cannot take a press that has been spent. It gates
     /// the title's click as well as the box's `Esc`: an overlay that owns the keyboard must not
     /// lose it to a click on the bar underneath.
     bool acceptKeys = true;
 
-    // --- the inline rename box (the bar's own state) ------------------------
+    // the inline rename box (the bar's own state)
     bool renaming = false;
     /// The session the *open* box belongs to, captured when it opened: a session switch
     /// while it is up cannot rename the new session (the rail's `renameRowId` rule).
@@ -110,7 +112,7 @@ struct TopBarState {
     /// ImGui's stale edit state for the same id.
     int renameSeq = 0;
 
-    // --- what the bar answers, consumed by the frame layer ------------------
+    // what the bar answers, consumed by the frame layer
     /// Set for one frame when the user committed a rename (Enter, a non-empty title, a live
     /// target and `canRename`). The frame enqueues `SessionAction{Rename, renameId,
     /// renamedTitle}` and clears both.
@@ -119,11 +121,17 @@ struct TopBarState {
     /// Set for one frame when the box took the `Esc` press, so the frame-level `Esc` steps
     /// (close the overlay, cancel the run) stand down for that press.
     bool escapeConsumed = false;
-    /// Set for one frame when the `Settings` entry was clicked (design §4.2: "gear opens
+    /// Set for one frame when the `Settings` entry was clicked ("gear opens
     /// Settings"). The frame opens the sheet with it - `views::openSettings()` - in the same frame,
     /// so the click that asked for the surface is the frame that draws it. One of the sheet's two
-    /// entry points; the palette's `open settings` row (task 35) is the other.
+    /// entry points; the palette's `open settings` row is the other.
     bool settingsRequested = false;
+    /// Set for one frame when the `?` help affordance was clicked. The pixel
+    /// profile's affordance is the control; on the grid it is only the advertisement, so nothing
+    /// there sets this. The frame opens the help page with it - `views::openHelp()`, the very
+    /// call the keymap's `Shift+/` row and the grid's typed `?` make - in the same frame, the
+    /// same wiring the sheet's `settingsRequested` uses.
+    bool helpRequested = false;
 };
 
 /// The state's name, for tests and log lines ("idle", "running", "waiting", "failed",
@@ -131,17 +139,9 @@ struct TopBarState {
 const char* runStateName(RunState state);
 
 /// The bar's five-state view: `RunState::RawLogOpen` while the badge is up, else `run`.
-/// The pill keeps the run state either way - the badge and the pill are two signals, and
+/// The run state is kept either way - the badge and the state are two signals, and
 /// the design's fifth state is the bar's mode, not a fifth kind of run.
 RunState barState(const TopBarState& state);
-
-/// The running pill's label: `Ready`, `running 00:12`, `waiting 00:12`, `failed`.
-///
-/// One word per state, always beside the state's glyph and in the state's colour
-/// (NFR-16: a mark is never the only carrier of meaning), and the clock only in the two
-/// states that are counting - `00:00` beside `Ready` would claim a run that is not
-/// happening.
-std::string pillLabel(RunState state, long long elapsedMs);
 
 /// `ms` as `mm:ss`, or as `h:mm:ss` past the first hour. Negative, NaN-free by contract
 /// (`long long`) and absurdly large values are all answered, because the clock is wall
@@ -169,8 +169,8 @@ struct TopBarPart {
 
 /// The bar's parts, in the bar's own coordinates: what `renderTopBar()` draws into.
 ///
-/// An empty part is one this bar is too narrow to draw (`hint`, `wordmark`, `rule` and `gear`
-/// are the ones that drop; `mark`, `pill` and `badge` only when the region itself is
+/// An empty part is one this bar is too narrow to draw (`hint`, `help`, `wordmark`, `rule` and
+/// `gear` are the ones that drop; `mark` and `badge` only when the region itself is
 /// degenerate). `titleText` is the title cut to `title` (`ui::truncate`, so the grid gets
 /// `…`/`...` and never a half glyph), and `titleTruncated` says the cut happened - the
 /// tooltip, the golden and the tests read it.
@@ -180,7 +180,7 @@ struct TopBarParts {
     TopBarPart rule;
     TopBarPart title;
     TopBarPart hint;
-    TopBarPart pill;
+    TopBarPart help;
     TopBarPart badge;
     TopBarPart gear;
     std::string titleText;

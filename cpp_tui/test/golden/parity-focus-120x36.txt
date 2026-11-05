@@ -36,10 +36,10 @@ text:
 
 
 
-   Ask anything...  / commands                                                                                    none
-  0                                                                                                           Send
+   Ask anything...  / commands
+                                                                                                              Send
 
-  ✓ Ready                                                Esc leave focus | Ctrl+K commands  ctx 0/0   -   none   Ready
+  ✓ Ready                                                                         Esc leave focus ctx ░░░░░░ 0/0  none
 fills:
 0: 15-15=183, 16-104=17
 1: 15-104=17
@@ -76,4 +76,4 @@ fills:
 32: 0-0=59, 1-118=23, 119-119=59
 33: 0-0=59, 1-105=23, 106-117=111, 118-118=23, 119-119=59
 34: 0-119=59
-35: 0-0=146, 91-99=23, 101-103=23, 105-110=23, 112-118=23
+35: 0-0=146, 113-118=23

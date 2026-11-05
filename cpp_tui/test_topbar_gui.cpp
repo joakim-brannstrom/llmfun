@@ -12,6 +12,8 @@
 //   - the symptom, from the pixels: the wordmark and the palette hint fill their boxes, i.e. the
 //     last glyph is drawn instead of clipped ("llmfun", not "llmfu"; "Ctrl+K Search", not "Ctrl+K
 //     Sear"). A text-grid check cannot fail this way, which is why the mismatch shipped.
+//   - the `?` affordance is the control in this profile: a click on it opens the help page
+//     through the shell's own answer wiring, which the text grid cannot prove.
 //
 // Needs a display; runs headless under xvfb:
 //   xvfb-run -s "-screen 0 1280x820x24" ./test_topbar_gui [--out DIR]
@@ -224,6 +226,23 @@ int main(int argc, char** argv) {
     check(hintInk >= static_cast<int>(parts.hint.w) - 2,
           "the palette hint is drawn in full (" + std::to_string(hintInk) + " px of " +
               std::to_string(static_cast<int>(parts.hint.w)) + ")");
+
+    // The pixel profile's affordance is the control: a click on it opens the help
+    // page through the real shell wiring - `renderTopBar` sets the answer, the frame applies it
+    // with the very `views::openHelp()` call the keymap's `Shift+/` row answers. The events are
+    // queued *before* `newFrame()`, because that is when ImGui consumes them (the text-grid
+    // harness's rule).
+    const ImVec2 hit(parts.help.x + 4.0f, parts.help.y + parts.help.h * 0.5f);
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMousePosEvent(hit.x, hit.y);
+    frameOnce(false, ""); // the hover registers
+    io.AddMousePosEvent(hit.x, hit.y);
+    io.AddMouseButtonEvent(0, true);
+    frameOnce(false, "");
+    io.AddMouseButtonEvent(0, false);
+    frameOnce(false, "");
+    frameOnce(false, ""); // the answer is applied the frame the click landed
+    check(state.help.open, "a click on the ? affordance opens the help page");
 
     if (g_failures != 0) {
         std::fprintf(stderr, "FAIL: %d check(s) failed\n", g_failures);

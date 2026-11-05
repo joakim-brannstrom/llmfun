@@ -15,7 +15,7 @@ text:
   Explain the failing test
   in tui_chat.cpp
   and fix it
-  42k  Busy · 38.1 tok/s      Stop
+                              Stop
 
 
 fills:

@@ -9,7 +9,7 @@ lane: '  planner | ✓ done | 00:12'
 lane: '▸ coder | ◐ running' (focused)
 lane: '  reviewer | ○ queued'
 text:
-   llmfun                                            Ctrl+K commands  ◐ running 00:00    Settings
+   llmfun                                                      Ctrl+K commands Shift+?   Settings
   Search                    Back to main   coder                         [5] Agents [6] Activity
                           coder: reading the parser                      planner ✓ -> coder ◐ -> r…
  No sessions yet                                                           planner | ✓ done | 00:12
@@ -35,12 +35,12 @@ text:
 
    + New session                                                          Stop all
 
-   Ask anything...  / commands                                                                none
-  0  thinking                                                                             Stop
+   Ask anything...  / commands
+                                                                                          Stop
 
-  ◐ thinking | 00:00                        Esc stop | Ctrl+K commands  ctx 0/0   -   none   Ready
+  ◐ thinking | 00:00                                                 Esc stop ctx ░░░░░░ 0/0  none
 fills:
-0: 1-1=111, 10-10=102, 69-85=23, 87-98=23
+0: 1-1=111, 10-10=102, 87-98=23
 1: 0-0=17, 1-24=23, 25-25=17, 26-41=23, 72-72=17, 73-82=111, 83-99=17
 2: 0-25=17, 72-99=17
 3: 0-25=17, 72-99=17
@@ -69,4 +69,4 @@ fills:
 26: 0-0=67, 1-1=23, 2-2=231, 3-98=23, 99-99=67
 27: 0-0=67, 1-98=23, 99-99=67
 28: 0-99=67
-29: 0-0=111, 71-79=23, 81-83=23, 85-90=23, 92-98=23
+29: 0-0=111, 93-98=23

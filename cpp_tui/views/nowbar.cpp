@@ -4,11 +4,11 @@
 ///   * it does not read the aggregate, the display size or the profile flag - the row
 ///     is a geometry taker, so `./test_nowbar` can draw it into a cell grid with no
 ///     application state;
-///   * it does not format a chip: the four values arrive as strings (`model::StatusChips`)
+///   * it does not format a chip: the values arrive as strings (`model::StatusChips`)
 ///     and are drawn verbatim, which is what keeps this row and the status sentence
-///     from ever showing two different numbers for one status (§6.3);
+///     from ever showing two different numbers for one status;
 ///   * it does not write a glyph or a colour literal: marks come from `ui/icons.h` and
-///     colours from `ui::color()`, like every other view (D-THEME).
+///     colours from `ui::color()`, like every other view.
 ///
 /// Layering note (`tools/gate_ratchet.txt`): no profile branch of its own (`m.textGrid`
 /// is data the metrics handed it), no hand-made colour, no v4 type and no display size,
@@ -24,11 +24,15 @@
 #include "ui/text.h"
 #include "ui/tokens.h"
 #include "views/chrome.h"   // kRawBadge
+#include "views/composer.h" // kMeterSegmentsGrid, meterLevel(), contextFraction() - the
+                            // meter's own vocabulary
 #include "views/feedback.h" // feedbackLook() - the flash's mark and ink
 #include "views/topbar.h"   // elapsedLabel() - the one clock formatter
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,9 +43,7 @@ namespace {
 using ui::ColorToken;
 using ui::Icon;
 
-// ---------------------------------------------------------------------------
 // Text helpers (the two every one-row view carries: one measure, one clipped line)
-// ---------------------------------------------------------------------------
 
 /// `text`'s width in the profile's own unit: cells on the grid (a wide glyph counts
 /// two) and pixels in the pixel profile (the atlas).
@@ -92,9 +94,7 @@ ui::Rect rectOf(const NowBarPart& part, const ui::Metrics& m) {
     return ui::Rect{part.x, part.y, part.w, part.h, m.textGrid};
 }
 
-// ---------------------------------------------------------------------------
 // The row's vocabulary
-// ---------------------------------------------------------------------------
 
 /// The join between two already-finished segments: ` | ` on the grid and the design's
 /// ` · ` in the pixel profile.
@@ -104,10 +104,10 @@ ui::Rect rectOf(const NowBarPart& part, const ui::Metrics& m) {
 /// punctuation, so the two rows that show the same facts read alike.
 const char* separatorText(const ui::Metrics& m) { return m.textGrid ? " | " : " \u00b7 "; }
 
-/// The "there is more below" mark (design §5.11's `↓ latest`).
+/// The "there is more below" mark.
 ///
 /// Not the design's `↓`: `ui/icons.h` owns every state mark and the down arrow has no
-/// row there, so a literal here would be the second home D-THEME forbids - and U+2193 is
+/// row there, so a literal here would be a second home for a mark - and U+2193 is
 /// East-Asian *Ambiguous*, which is why the grid would need an ASCII form of its own
 /// anyway. `DisclosureOpen` is the table's "opens downward" mark: `▾` on a surface that
 /// draws the glyphs, `v` on one that gets the ASCII column, and the word says the rest.
@@ -115,13 +115,12 @@ std::string latestHint(const ui::Metrics& m) {
     return std::string(ui::icon(Icon::DisclosureOpen, glyphSetFor(m))) + " latest";
 }
 
-/// One mark and one ink per phase (NFR-16: the word is always beside the mark, so the
-/// colour is redundant with two other signals).
+/// One mark and one ink per phase: the word is always beside the mark, so the
+/// colour is redundant with two other signals.
 ///
-/// Idle reuses the top bar's idle pill (`Ok`/`textMid`) and a failed run its `failed`
-/// pill (`Error`/`stateDanger`); the three working phases draw the live accent the design
-/// gives a run (§4.2's running pill), a waiting one the amber the top bar uses for the
-/// same fact (§4.8's `Pending` mark), and an unreachable model the danger token the
+/// Idle draws `Ok`/`textMid` and a failed run `Error`/`stateDanger`; the three working
+/// phases draw the live accent of a run in flight, a waiting one the amber the top bar
+/// uses for the same fact, and an unreachable model the danger token the
 /// thread's offline card shows for it - the card and this row are never on screen with
 /// two severities for one status.
 struct Look {
@@ -151,7 +150,7 @@ Look lookFor(model::Phase phase) {
 ///
 /// The model's absence value is U+2014, which is East-Asian *Ambiguous*: imtui measures
 /// it one cell and a CJK terminal may draw it two, so the grid gets the ASCII floor
-/// (`-`). The *rule* is untouched - a missing number is never `0` (design §6.3) - only
+/// (`-`). The *rule* is untouched - a missing number is never `0` - only
 /// its glyph is the profile's.
 std::string chipValue(const ui::Metrics& m, const std::string& value) {
     if (value != model::kMissingChipValue)
@@ -160,7 +159,7 @@ std::string chipValue(const ui::Metrics& m, const std::string& value) {
 }
 
 /// The compact context chip: the pair's *used* half (`42k/128k` → `42k`, the design's
-/// compact form in §4.7).
+/// compact form).
 ///
 /// Cut at the separator instead of reformatted from `contextUsed`: the number is already
 /// formatted and this view must not own a second rounding of it, so the compact chip can
@@ -175,7 +174,7 @@ std::string compactContext(const std::string& context) {
 ///
 /// The words are the producer's (a path, a block's label, the reason a write failed) and this
 /// row never rebuilds them - it only puts the mark in front, which is what makes the severity
-/// readable on a surface that cannot show the ink (NFR-16: a state is a mark *and* a word).
+/// readable on a surface that cannot show the ink (a state is a mark *and* a word).
 std::string flashTextFor(const NowBarInput& input, const ui::Metrics& m) {
     if (input.flash.empty())
         return {};
@@ -189,7 +188,7 @@ std::string flashTextFor(const NowBarInput& input, const ui::Metrics& m) {
 /// is the one that applies now - and never a fragment: a hint cut mid-word ("Esc s…")
 /// advertises nothing, and the dangling separator a cut list leaves behind advertises less.
 ///
-/// The "there is more below" mark (§5.11) is a one-part list: the one thing the row must say
+/// The "there is more below" mark is a one-part list: the one thing the row must say
 /// while the thread is not following is that the answer continued below the fold.
 std::vector<std::string> hintPartsFor(const NowBarInput& input, const ui::Metrics& m) {
     std::vector<std::string> parts;
@@ -201,7 +200,6 @@ std::vector<std::string> hintPartsFor(const NowBarInput& input, const ui::Metric
         parts.emplace_back(kNowBarHintStop);
     if (input.focusMode)
         parts.emplace_back(kNowBarHintLeaveFocus);
-    parts.emplace_back(kNowBarHintPalette);
     return parts;
 }
 
@@ -227,7 +225,7 @@ std::string packHints(const std::vector<std::string>& parts, const ui::Metrics& 
 /// What the row says after the phase word: the current step and the run's clock.
 ///
 /// `running` decides whether the clock is part of the row at all (idle has none: a time
-/// beside `Ready` would claim a run, the top bar's pill rule), `clock` what it reads.
+/// beside `Ready` would claim a run), `clock` what it reads.
 /// `elapsedLabel()` is the top bar's formatter (and is called once per frame, by the
 /// caller), so two clocks in one window cannot round or wrap differently.
 ///
@@ -247,12 +245,18 @@ std::string tailFor(const NowBarInput& input, const ui::Metrics& m, const std::s
     return text;
 }
 
-/// The chip strip's width for a full four-chip form.
-float fullChipsWidth(const ui::Metrics& m, const std::string& ctx, const std::string& speed,
-                     const std::string& model, const std::string& state) {
-    const float gap = m.gu;
-    return ui::measureChip(m, ctx).w + gap + ui::measureChip(m, speed).w + gap +
-           ui::measureChip(m, model).w + gap + ui::measureChip(m, state).w;
+/// The context meter's ink: the thresholds are `meterLevel()`'s, the colour is this
+/// row's choice, and both profiles draw the same rule.
+ColorToken meterInk(long long used, long long max) {
+    switch (meterLevel(used, max)) {
+    case MeterLevel::Normal:
+        return ColorToken::accent;
+    case MeterLevel::Warn:
+        return ColorToken::stateWarn;
+    case MeterLevel::Danger:
+        return ColorToken::stateDanger;
+    }
+    return ColorToken::accent;
 }
 
 } // namespace
@@ -264,7 +268,7 @@ NowBarParts nowBarMeasure(const NowBarInput& input, const ui::Rect& bar, const u
     if (bar.w <= 0.0f || bar.h <= 0.0f || !ui::rectMatchesProfile(bar, m))
         return parts;
 
-    // The row draws at the meta step (design §4.6's type table), so it measures at it too
+    // The row draws at the meta step, so it measures at it too
     // - a measure taken outside a draw answers the numbers the drawn row uses. A no-op on
     // the text grid, where a cell has one size.
     const ui::TypeScope metaType(ui::TypeStep::meta, m.textGrid);
@@ -272,7 +276,7 @@ NowBarParts nowBarMeasure(const NowBarInput& input, const ui::Rect& bar, const u
     const float pad = m.pad1;
     const float rowY = bar.y + std::floor((bar.h - m.row) * 0.5f);
 
-    // --- the left side: the rule, the mark, the state -----------------------
+    // the left side: the rule, the mark, the state
     // The rule is one cell on the grid and the design's 2 px in the pixel profile: a cell
     // cannot be divided, and two hairlines is the narrowest pixel rule that reads beside a
     // 24-px row (the composer's focus ring is the same pair).
@@ -284,16 +288,16 @@ NowBarParts nowBarMeasure(const NowBarInput& input, const ui::Rect& bar, const u
     parts.mark = NowBarPart{x, rowY, markSize.w, m.row};
     x = parts.mark.right() + pad;
 
-    // The state is reserved first and never cut: it is the row's reason to exist (design
-    // §4.7, "truncate hints first, never the state").
+    // The state is reserved first and never cut: it is the row's reason to exist
+    // ("truncate hints first, never the state").
     parts.stateText = model::phaseWord(input.phase);
     parts.state = NowBarPart{x, rowY, textUnits(m, parts.stateText), m.row};
     const float leftEnd = parts.state.right();
 
-    // --- the right side: the badge, then the chips --------------------------
+    // the right side: the badge, then the chips
     // The badge belongs to a folded top bar: in the full tiling the bar carries it, and a
     // second copy of one signal on one screen is noise. Where the bar is folded away - compact
-    // mode, or focus mode (task 43) - this row is the only place it can be.
+    // mode, or focus mode - this row is the only place it can be.
     float right = bar.right() - pad;
     if ((input.compact || input.topBarFolded) && input.rawLogOpen) {
         const float badgeW = ui::measureChip(m, kRawBadge).w;
@@ -301,66 +305,164 @@ NowBarParts nowBarMeasure(const NowBarInput& input, const ui::Rect& bar, const u
         right = parts.badge.x - pad;
     }
 
-    // The chip values. All four arrive formatted (task 6, and task 39 for the structured
-    // path); everything this file does with them is a join.
-    const std::string ctx = std::string(kNowBarContextLabel) + chipValue(m, input.chips.context);
-    const std::string ctxCompact =
-        std::string(kNowBarContextLabel) + chipValue(m, compactContext(input.chips.context));
-    const std::string speed = chipValue(m, input.chips.speed);
+    // The right side's values. They arrive formatted, and everything this file does with
+    // them is a join or a cut at the separator.
+    const std::string countFull = chipValue(m, input.chips.context);
+    const std::string countCompact = chipValue(m, compactContext(input.chips.context));
+    const bool modelKnown =
+        !input.chips.model.empty() && input.chips.model != model::kMissingChipValue;
     const std::string model = chipValue(m, input.chips.model);
-    const std::string state = chipValue(m, input.chips.state);
+    const bool speedKnown =
+        !input.chips.speed.empty() && input.chips.speed != model::kMissingChipValue;
+    const std::string speed = chipValue(m, input.chips.speed);
 
     const float gap = m.gu;
-    const float markW = ui::measureIconMark(m).w;
-    const float fullW = fullChipsWidth(m, ctx, speed, model, state);
-    const float compactW = ui::measureChip(m, ctxCompact).w + gap + markW;
-
-    // The ladder (design §4.7): compact mode collapses the chips to `ctx 42k` + the state
-    // mark, and a row that cannot fit four chips takes the same form - a chip drawn
-    // half-length is a number nobody can read. Nothing fits: the state mark alone, which
-    // is the chip the design never drops.
-    //
-    // An open question compresses the chips the same way: the question is the one thing
-    // the row is waiting for an answer to, and the state is what must stay beside it
-    // (task 11's note) - so the three metric chips yield before the question is cut.
-    const float roomForChips = right - leftEnd - pad;
-    const bool wantCompact = input.compact || !input.prompt.empty() || fullW > roomForChips;
-    parts.compactChips = wantCompact;
-    if (!wantCompact) {
-        const float stateW = ui::measureChip(m, state).w;
-        const float modelW = ui::measureChip(m, model).w;
-        const float speedW = ui::measureChip(m, speed).w;
-        const float ctxW = ui::measureChip(m, ctx).w;
-        float left = right - stateW;
-        parts.chipState = NowBarPart{left, rowY, stateW, m.row};
-        parts.chipStateText = state;
-        left -= gap + modelW;
-        parts.chipModel = NowBarPart{left, rowY, modelW, m.row};
-        parts.chipModelText = model;
-        left -= gap + speedW;
-        parts.chipSpeed = NowBarPart{left, rowY, speedW, m.row};
-        parts.chipSpeedText = speed;
-        left -= gap + ctxW;
-        parts.chipCtx = NowBarPart{left, rowY, ctxW, m.row};
-        parts.chipCtxText = ctx;
-    } else if (compactW <= roomForChips) {
-        const float ctxW = ui::measureChip(m, ctxCompact).w;
-        parts.chipCtx = NowBarPart{right - ctxW - gap - markW, rowY, ctxW, m.row};
-        parts.chipCtxText = ctxCompact;
-        parts.chipState = NowBarPart{right - markW, rowY, markW, m.row};
-    } else if (markW <= roomForChips) {
-        parts.chipState = NowBarPart{right - markW, rowY, markW, m.row};
-    }
-
-    // --- the middle: the step and the clock, then the hints -----------------
-    float chipsStart = !parts.chipCtx.empty()     ? parts.chipCtx.x
-                       : !parts.chipState.empty() ? parts.chipState.x
-                                                  : right;
+    const float labelW = textUnits(m, kNowBarContextLabel);
+    const int segments = m.textGrid ? kMeterSegmentsGrid : kNowBarMeterSegmentsGui;
+    const ui::Size barSize = ui::measureMeter(m, segments);
+    const float countFullW = textUnits(m, countFull);
+    const float countCompactW = textUnits(m, countCompact);
+    const float modelW = modelKnown ? ui::measureChip(m, model).w : 0.0f;
+    const float modelChunk = modelKnown ? gap + modelW : 0.0f;
+    const float speedW = speedKnown ? ui::measureChip(m, speed).w : 0.0f;
+    const float speedChunk = speedKnown ? gap + speedW : 0.0f;
 
     // The clock is the one number this row formats, and it is formatted once per frame
     // (both forms of the tail read it), so a second `snprintf` per frame cannot creep back
     // in with the degradation step below.
     const std::string clock = input.running ? elapsedLabel(input.elapsedMs) : std::string();
+    const float clockW = textUnits(m, clock);
+
+    // The ladder: the hints yield first, then the speed chip, then the count
+    // compacts (`42k/128k` -> `42k`), then the model chip yields, then the meter's bar -
+    // the `ctx` label and the count are the last right-side part standing, and the meter
+    // never disappears while the chips' numbers are known. When even that does not fit,
+    // the row says nothing on the right rather than a fragment of a number.
+    //
+    // The pixel profile also drops the bar below the full-meter breakpoint
+    // (`kComposerFullMeterGu`): a bar squeezed into fewer cells is number-shaped noise.
+    // On the grid the bar yields only when it cannot fit.
+    const bool fullBar = m.textGrid || bar.w >= static_cast<float>(kComposerFullMeterGu) * m.gu;
+
+    // A bar needs a fraction to fill, and an unknown context has none: its forms draw the
+    // count alone, a missing capacity drops the bar and keeps `ctx -`, so the absence
+    // glyph lands beside the label instead of after six empty segments.
+    const bool contextKnown =
+        !input.chips.context.empty() && input.chips.context != model::kMissingChipValue;
+
+    // Compact mode starts one rung down - the count is the compact form from the start
+    // (compact mode is asked for below the breakpoint, not earned cell by
+    // cell). An open question is not compact mode: it yields the meter rung by rung below.
+    const bool startCompact = input.compact;
+    struct Form {
+        bool bar;
+        bool compact;
+        bool speed;
+        bool model;
+        float w;
+    };
+    auto forms = std::array<Form, 5>{{
+        {true, false, true, true,
+         labelW + m.pad1 + barSize.w + m.pad1 + countFullW + speedChunk + modelChunk},
+        {true, false, false, true, labelW + m.pad1 + barSize.w + m.pad1 + countFullW + modelChunk},
+        {true, true, false, true,
+         labelW + m.pad1 + barSize.w + m.pad1 + countCompactW + modelChunk},
+        {true, true, false, false, labelW + m.pad1 + barSize.w + m.pad1 + countCompactW},
+        {false, true, false, false, labelW + m.pad1 + countCompactW},
+    }};
+    if (!contextKnown) {
+        for (Form& form : forms) {
+            if (!form.bar)
+                continue;
+            form.bar = false;
+            form.w -= barSize.w + m.pad1;
+        }
+    }
+
+    // The right cluster is placed from the right edge inwards, so a form's width is the
+    // distance from `right` to the `ctx` label - the left edge the middle's tenant (the
+    // tail, the hints, the question) measures its room against.
+    const auto chipsStartFor = [&](const Form& form) { return right - form.w; };
+
+    // An open question is never a fragment, so the meter yields rung by rung to keep a slot
+    // for it: the fullest form that still leaves room for the question's full text, else the
+    // fullest form that leaves room for its short form. The walk stops above the bare-count
+    // floor: a meter reduced to `ctx 42k` is the narrow-row form, and below that the
+    // question owns the row instead (the floor's behaviour at `40 cells`).
+    const bool hasPrompt = !input.prompt.empty();
+    const std::string& shortPrompt = input.promptShort.empty() ? input.prompt : input.promptShort;
+    int promptChoice = 0; // 0 no host, 1 the full prompt, 2 the short form
+    auto chosen = forms.end();
+    if (hasPrompt) {
+        const float hintsStart = leftEnd + pad; // the tail is empty while a question is up
+        const float fullW = textUnits(m, input.prompt);
+        const float shortW = textUnits(m, shortPrompt);
+        const auto last = std::prev(forms.end()); // the bare-count floor never hosts the question
+        for (auto it = fullBar ? forms.begin() : last; it != last; ++it) {
+            if (startCompact && !it->compact)
+                continue; // the full count is not this frame's form
+            const float room = chipsStartFor(*it) - pad - hintsStart;
+            if (fullW <= room) {
+                chosen = it;
+                promptChoice = 1;
+                break;
+            }
+            if (shortW <= room) {
+                chosen = it;
+                promptChoice = 2;
+                break;
+            }
+        }
+    } else {
+        // The clock keeps its slot against the speed chip: the speed rung is admitted
+        // only if the clock still fits beside it, so the rate can only take width the
+        // clock is not using. The narrower rungs keep the ladder - the clock yields
+        // before the count compacts.
+        const float clockChunk = clockW > 0.0f ? clockW + m.pad1 : 0.0f;
+        const float roomForMeter = right - leftEnd - pad;
+        const auto floor = std::prev(forms.end());
+        for (auto it = fullBar ? forms.begin() : floor; it != forms.end(); ++it) {
+            if (startCompact && !it->compact)
+                continue; // the full count is not this frame's form
+            const float w = it->w + (it->speed ? clockChunk : 0.0f);
+            if (w <= roomForMeter) {
+                chosen = it;
+                break;
+            }
+        }
+    }
+    parts.compactChips = chosen != forms.begin();
+    if (chosen != forms.end()) {
+        const Form& form = *chosen;
+        const std::string& count = form.compact ? countCompact : countFull;
+        const float countW = form.compact ? countCompactW : countFullW;
+        // Placed from the right edge inwards: the model chip is the row's rightmost part,
+        // then the speed chip, then the meter reads left to right - label, bar, count.
+        float x = right;
+        if (form.model) {
+            parts.chipModel = NowBarPart{x - modelW, rowY, modelW, m.row};
+            parts.chipModelText = model;
+            x -= modelChunk;
+        }
+        if (form.speed) {
+            parts.chipSpeed = NowBarPart{x - speedW, rowY, speedW, m.row};
+            parts.chipSpeedText = speed;
+            x -= speedChunk;
+        }
+        parts.meterCount = NowBarPart{x - countW, rowY, countW, m.row};
+        parts.meterCountText = count;
+        x -= countW + m.pad1;
+        if (form.bar) {
+            parts.meterBar = NowBarPart{
+                x - barSize.w, rowY + std::floor((m.row - barSize.h) * 0.5f), barSize.w, barSize.h};
+            x -= barSize.w + m.pad1;
+        }
+        parts.meterLabel = NowBarPart{x - labelW, rowY, labelW, m.row};
+        parts.meterLabelText = kNowBarContextLabel;
+    }
+
+    // the middle: the step and the clock, then the hints
+    float chipsStart = !parts.meterLabel.empty() ? parts.meterLabel.x : right;
 
     // The tail takes what it needs from the left; the detail yields first, because a clock
     // is a fixed short number and a tool name is not. An open question owns the middle
@@ -379,8 +481,8 @@ NowBarParts nowBarMeasure(const NowBarInput& input, const ui::Rect& bar, const u
         parts.tail = NowBarPart{leftEnd, rowY, tailW, m.row};
 
     // The right side's second claim, right-aligned against the chips (the design's right
-    // cluster is "hints, then the chips"; the top bar's hint lands directly left of its pill
-    // for the same reason, so the row does not open a gap in the middle).
+    // cluster is "hints, then the chips"; the top bar's hint lands directly left of its
+    // `RAW` badge for the same reason, so the row does not open a gap in the middle).
     //
     // It is a question when one is open, and then it is *never* a fragment: the prompt's
     // tail is the instruction ("press Ctrl+Q again"), so cutting it would leave the one
@@ -389,38 +491,25 @@ NowBarParts nowBarMeasure(const NowBarInput& input, const ui::Rect& bar, const u
     const float hintsStart = leftEnd + pad + tailW;
     std::string rightText;
     if (!input.prompt.empty()) {
-        float room = chipsStart - pad - hintsStart;
-        if (textUnits(m, input.prompt) <= room) {
-            rightText = input.prompt;
-        } else if (!input.promptShort.empty() && textUnits(m, input.promptShort) <= room) {
-            rightText = input.promptShort;
+        if (promptChoice != 0) {
+            // The form walk hosts the question beside the meter, and the form it picked
+            // decided which form the question takes (full where it fits, short below that).
+            rightText = promptChoice == 1 ? input.prompt : shortPrompt;
         } else {
-            // Even the shortest form needs the metric chips' room. They step aside whole -
+            // Even the shortest form needs the meter's room. It steps aside whole -
             // and the state keeps its word, its mark and its rule, so the row still says
             // what the run is doing while it waits for the answer.
-            parts.chipCtx = NowBarPart{};
-            parts.chipCtxText.clear();
-            parts.chipSpeed = NowBarPart{};
-            parts.chipSpeedText.clear();
-            parts.chipModel = NowBarPart{};
-            parts.chipModelText.clear();
-            parts.chipState = NowBarPart{};
-            parts.chipStateText.clear();
-            parts.compactChips = true;
-            chipsStart = right;
-            room = chipsStart - pad - hintsStart;
-            const std::string& shortest =
-                input.promptShort.empty() ? input.prompt : input.promptShort;
-            parts.hintsTruncated = textUnits(m, shortest) > room;
+            const float room = chipsStart - pad - hintsStart;
+            parts.hintsTruncated = textUnits(m, shortPrompt) > room;
             // The grid cuts in cells and marks the cut; the pixel profile draws the whole
             // string and its clip rect cuts it (the top bar's title rule) - `room` is in
             // pixels there, so it cannot be handed to the cell-based `truncate()`.
             rightText = parts.hintsTruncated && m.textGrid
-                            ? ui::truncate(shortest, static_cast<int>(std::max(0.0f, room)))
-                            : shortest;
+                            ? ui::truncate(shortPrompt, static_cast<int>(std::max(0.0f, room)))
+                            : shortPrompt;
         }
     } else {
-        // The flash (task 45) owns the hint slot while it is up: it is the answer to a press the
+        // The flash owns the hint slot while it is up: it is the answer to a press the
         // user made, and the hints advertise presses. Two forms, longest first - the flash with the
         // key that clears a persistent item, then the flash alone - and both drawn *whole*: a path
         // cut in half is a path nobody can find, and a cut warning is one nobody can act on.
@@ -441,6 +530,10 @@ NowBarParts nowBarMeasure(const NowBarInput& input, const ui::Rect& bar, const u
             const std::vector<std::string> hintParts = hintPartsFor(input, m);
             if (room >= static_cast<float>(kNowBarMinHintGu) * m.gu)
                 rightText = packHints(hintParts, m, room, parts.hintsTruncated);
+            else
+                // Below the floor the whole list is dropped - and "the right side is not
+                // the full list" is exactly what happened, so the flag says so.
+                parts.hintsTruncated = !hintParts.empty();
         }
     }
 
@@ -474,8 +567,8 @@ void renderNowBar(const NowBarInput& input, const ui::Rect& bar, const ui::Metri
         ui::rule(m, edge, ColorToken::lineSoft);
     }
 
-    // The one colour the row spends on a background is the state rule at the far left
-    // (design §4.7), drawn in the phase's ink so a run and a failure read before any word
+    // The one colour the row spends on a background is the state rule at the far left,
+    // drawn in the phase's ink so a run and a failure read before any word
     // does.
     ui::rule(m, rectOf(parts.rule, m), look.ink);
     ui::iconMark(m, rectOf(parts.mark, m), look.mark, look.ink);
@@ -483,8 +576,8 @@ void renderNowBar(const NowBarInput& input, const ui::Rect& bar, const ui::Metri
     line(m, rectOf(parts.tail, m), parts.tailText, ColorToken::textMid);
     // The hints are the dimmest ink that still clears the text bar - except while the
     // thread is not following (then the one thing the row says is actionable and it wears
-    // the accent, design §5.11), and except while a question is up (then the row is waiting
-    // for the user and says so in the warning ink). A flash (task 45) is an answer to a press,
+    // the accent), and except while a question is up (then the row is waiting
+    // for the user and says so in the warning ink). A flash is an answer to a press,
     // not a hint: it keeps the severity's ink, so a saved path never reads as a key and a failed
     // save reads like the failure it is.
     ColorToken hintInk = input.following ? ColorToken::textLow : ColorToken::accent;
@@ -494,27 +587,40 @@ void renderNowBar(const NowBarInput& input, const ui::Rect& bar, const ui::Metri
         hintInk = feedbackLook(input.flashKind).ink;
     line(m, rectOf(parts.hints, m), parts.hintsText, hintInk);
 
-    // The canonical chips: the numbers on a raised surface in the readable ink, the state
-    // chip in the phase's own ink (the v4 status row's rule, one step brighter because
-    // on this row the numbers are the contract rather than a footnote).
-    if (!parts.chipCtx.empty())
-        ui::chip(m, rectOf(parts.chipCtx, m), parts.chipCtxText, ColorToken::textMid,
-                 ColorToken::raised);
+    // The right side: the context meter (the numbers the row exists to keep visible), the
+    // speed chip and the model chip on a raised surface. The meter's bar and count read in
+    // the readable ink and the label in the dimmest ink
+    // that still clears the text bar; the bar never carries a surface (it is a rule, not
+    // a chip).
+    if (!parts.meterBar.empty()) {
+        const int segments = m.textGrid ? kMeterSegmentsGrid : kNowBarMeterSegmentsGui;
+        const ui::Rect bar = rectOf(parts.meterBar, m);
+        ui::meter(m, bar, segments,
+                  contextFraction(input.chips.contextUsed, input.chips.contextMax),
+                  meterInk(input.chips.contextUsed, input.chips.contextMax));
+        // The compaction threshold, when the app knows one (`NowBarInput::compactAt`):
+        // a one-unit tick across the bar's own row.
+        if (input.compactAt > 0 && input.chips.contextMax > 0) {
+            const float tickX =
+                bar.x +
+                std::floor(contextFraction(input.compactAt, input.chips.contextMax) * bar.w);
+            ImDrawList* tickList = ImGui::GetWindowDrawList();
+            tickList->AddRectFilled(
+                ImVec2(std::max(bar.x, tickX - m.border * 0.5f), bar.y),
+                ImVec2(std::max(bar.x, tickX - m.border * 0.5f) + m.border, bar.y + bar.h),
+                ImGui::GetColorU32(ui::color(ColorToken::textHi)));
+        }
+    }
+    if (!parts.meterLabel.empty())
+        line(m, rectOf(parts.meterLabel, m), parts.meterLabelText, ColorToken::textLow);
+    if (!parts.meterCount.empty())
+        line(m, rectOf(parts.meterCount, m), parts.meterCountText, ColorToken::textLow);
     if (!parts.chipSpeed.empty())
         ui::chip(m, rectOf(parts.chipSpeed, m), parts.chipSpeedText, ColorToken::textMid,
                  ColorToken::raised);
     if (!parts.chipModel.empty())
         ui::chip(m, rectOf(parts.chipModel, m), parts.chipModelText, ColorToken::textMid,
                  ColorToken::raised);
-    if (!parts.chipState.empty()) {
-        if (parts.chipStateText.empty()) {
-            // Compact: the state as its mark, beside the one chip that fits.
-            ui::iconMark(m, rectOf(parts.chipState, m), look.mark, look.ink);
-        } else {
-            ui::chip(m, rectOf(parts.chipState, m), parts.chipStateText, look.ink,
-                     ColorToken::raised);
-        }
-    }
 
     // The `RAW` badge: the developer log is open, and the mark never drops while it is.
     if (!parts.badge.empty())

@@ -15,7 +15,7 @@ text:
 
 
    Ask...
-  42k                         Send
+                              Send
 
 
 fills:

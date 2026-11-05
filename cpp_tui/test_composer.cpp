@@ -1,7 +1,7 @@
 // test_composer.cpp
 //
-// The composer (views/composer.h, design §4.6 / FR-09, task 27): the paste policy, the
-// send rule, the submit handshake, history, auto-grow, the meter, and the view drawn
+// The composer (views/composer.h): the paste policy, the
+// send rule, the submit handshake, history, auto-grow, and the view drawn
 // through the real text backend.
 //
 // What this binary proves, in order:
@@ -10,7 +10,7 @@
 //      `tuiIsTextGrid()`), writes no colour literal, reads no display size, names no v4
 //      type and does not include `tui.h` - the layering every view is held to
 //      (`tools/gate_ratchet.txt`);
-//   2. the paste policy (D-PASTE). A CRLF payload folds to LF, a lone CR too, the
+//   2. the paste policy. A CRLF payload folds to LF, a lone CR too, the
 //      per-character fold agrees with the whole-payload one, and a payload over 5000
 //      characters asks before it is inserted;
 //   3. the send rule. The action button always sends; no key does while the key gate is
@@ -22,11 +22,12 @@
 //   6. auto-grow. The row count follows the draft, is clamped to 1..8, and the layout
 //      reserves the reported height at every supported size - the composer is never
 //      overlapped, and the thread keeps its three rows;
-//   7. the meter. The thresholds are 70 %/90 %, an unknown capacity is not 0, and the
-//      count the meter prints is the same `formatCount` string the `ctx` chip carries;
+//   7. the meter's vocabulary. The thresholds are 70 %/90 %, an unknown capacity is not
+//      0, and the count the chips carry is the same `formatCount` string (the meter
+//      itself is the now bar's);
 //   8. the view. Empty, draft, busy, offline and the paste question drawn into a cell
-//      grid: the placeholder and its compact form, `Send`/`Stop`/`Stopping`/`Insert`, the
-//      phase and speed while busy, nothing painted outside the composer's rect;
+//      grid: the placeholder and its compact form, `Send`/`Stop`/`Stopping`/`Insert`,
+//      and nothing painted outside the composer's rect;
 //   9. the interaction. A queued burst is inserted (never submitted), `\r\n` is folded, a
 //      trailing newline does not send, a >5000 payload asks and only `Insert` applies it,
 //      `Esc` clears then blurs, a busy `Esc` cancels and keeps the draft, `↑` recalls;
@@ -109,9 +110,7 @@ std::string num(float v) {
     return text;
 }
 
-// ---------------------------------------------------------------------------
 // The cell grid the text backend writes
-// ---------------------------------------------------------------------------
 
 ImTui::TScreen g_screen;
 
@@ -297,9 +296,7 @@ observing(views::ComposerState& state, ClickAnswers& out,
     };
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 /// The composer's store plus its view state, wired the way `views/shell.cpp` wires them.
 struct Fixture {
@@ -318,9 +315,6 @@ struct Fixture {
         input.draft = &draft;
         input.handoff = &handoff;
         input.state = &state;
-        input.contextUsed = 42000;
-        input.contextMax = 128000;
-        input.model = "qwen3-coder";
         input.nowMs = 1000;
     }
 
@@ -328,8 +322,6 @@ struct Fixture {
         input.busy = false;
         input.stopping = false;
         input.offline = false;
-        input.phase.clear();
-        input.speed.clear();
     }
 };
 
@@ -347,15 +339,11 @@ ui::Rect composerRect(int w, int h, const ui::Metrics& m, float composerH = 0.0f
 
 /// A one-scene body: the composer drawn into the layout's rectangle.
 std::function<void(const ui::Metrics&)> bodyFor(Fixture& fixture, ui::Rect& rect) {
-    return [&fixture, &rect](const ui::Metrics& m) {
-        fixture.input.contextKnown = true;
-        views::renderComposer(fixture.input, rect, m);
-    };
+    return
+        [&fixture, &rect](const ui::Metrics& m) { views::renderComposer(fixture.input, rect, m); };
 }
 
-// ---------------------------------------------------------------------------
 // 1. The source
-// ---------------------------------------------------------------------------
 
 std::string readWhole(const std::string& path) {
     std::ifstream in(path);
@@ -369,13 +357,12 @@ void checkSource() {
     check(!source.empty(), "views/composer.cpp is readable");
     check(source.find("tuiIsTextGrid") == std::string::npos,
           "the composer takes the profile from the metrics, never from tuiIsTextGrid()");
-    check(source.find("ImVec4(") == std::string::npos,
-          "the composer writes no colour literal (D-THEME)");
+    check(source.find("ImVec4(") == std::string::npos, "the composer writes no colour literal");
     check(source.find("DisplaySize") == std::string::npos,
           "the composer reads no display size (a view is a geometry taker)");
     check(source.find("ChatMessage") == std::string::npos &&
               source.find("RenderGroup") == std::string::npos,
-          "the composer names no v4 type (D-ADAPTER)");
+          "the composer names no v4 type");
     check(source.find("#include \"tui.h\"") == std::string::npos,
           "the composer does not include tui.h (views/ names no aggregate)");
     check(source.find("IsKeyPressed(ImGuiKey_UpArrow") == std::string::npos,
@@ -418,9 +405,7 @@ void checkSource() {
           "the action labels live in the view (Send/Stopping)");
 }
 
-// ---------------------------------------------------------------------------
-// 2. The paste policy (D-PASTE)
-// ---------------------------------------------------------------------------
+// 2. The paste policy
 
 void checkPaste() {
     check(views::normalisePaste("a\r\nb") == "a\nb", "CRLF folds to one LF");
@@ -526,9 +511,7 @@ void checkPaste() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 3. The send rule (D-KEYGATE's fallback)
-// ---------------------------------------------------------------------------
+// 3. The send rule
 
 void checkSendRule() {
     using model::SendKey;
@@ -572,15 +555,13 @@ void checkSendRule() {
           "a click still sends while a paste is in flight (a click is not a payload)");
     check(views::sendTrigger(false, true, false, false, SendKey::Enter, /*pasteInFlightNow=*/true,
                              false, true) == views::SendTrigger::None,
-          "a paste in flight blocks the keyboard send (D-PASTE)");
+          "a paste in flight blocks the keyboard send");
     check(views::sendTrigger(false, true, false, false, SendKey::Enter, false,
                              /*composing=*/true, true) == views::SendTrigger::None,
           "an IME composition never sends");
 }
 
-// ---------------------------------------------------------------------------
 // 4. The submit handshake - byte for byte what tui_chat.cpp does
-// ---------------------------------------------------------------------------
 
 void checkSubmit() {
     std::string out;
@@ -599,9 +580,7 @@ void checkSubmit() {
           "a multi-line draft keeps its inner lines");
 }
 
-// ---------------------------------------------------------------------------
 // 5. History
-// ---------------------------------------------------------------------------
 
 void checkHistory() {
     std::vector<std::string> entries = {"first", "second", "third"};
@@ -612,29 +591,29 @@ void checkHistory() {
     check(!views::historyRecall(entries, pos, draft, "draft", -1, -1, 1, out),
           "no caret means no recall (the field is not being edited)");
     check(!views::historyRecall(entries, pos, draft, "draft", -1, 1, 3, out),
-          "↑ in the middle of a draft is a caret move, not history");
+          "PgUp in the middle of a draft does not recall (the recall keeps its line gate)");
     check(!views::historyRecall(entries, pos, draft, "draft", 1, 0, 3, out),
-          "↓ on the first line of three is a caret move, not history");
+          "PgDn on the first line of three does not recall");
 
     check(views::historyRecall(entries, pos, draft, "draft", -1, 0, 1, out) && out == "third",
-          "↑ on the first line recalls the newest query");
+          "PgUp recalls the newest query");
     check(draft == "draft", "the draft is stashed on the first recall");
     check(pos == 0, "the history cursor moved one entry");
     check(views::historyRecall(entries, pos, draft, out, -1, 0, 1, out) && out == "second",
-          "a second ↑ recalls the one before it");
+          "a second PgUp recalls the one before it");
     check(views::historyRecall(entries, pos, draft, out, -1, 0, 1, out) && out == "first",
           "the oldest query is reachable");
     check(!views::historyRecall(entries, pos, draft, out, -1, 0, 1, out),
-          "↑ at the oldest entry does not wrap");
+          "PgUp at the oldest entry does not wrap");
     check(views::historyRecall(entries, pos, draft, out, 1, 0, 1, out) && out == "second",
-          "↓ walks back down");
+          "PgDn walks back down");
     check(views::historyRecall(entries, pos, draft, out, 1, 0, 1, out) && out == "third",
           "down to the newest entry");
     check(views::historyRecall(entries, pos, draft, out, 1, 0, 1, out) && out == "draft",
           "past the newest entry the draft comes back");
     check(draft.empty() && pos == -1, "the stash is consumed and the cursor is back to live");
     check(!views::historyRecall(entries, pos, draft, "x", 1, 0, 1, out),
-          "↓ with no recall in progress is the caret's");
+          "PgDn with no recall in progress does nothing");
 
     std::vector<std::string> empty;
     int emptyPos = -1;
@@ -643,9 +622,7 @@ void checkHistory() {
           "an empty history recalls nothing");
 }
 
-// ---------------------------------------------------------------------------
 // 6. Auto-grow and the layout
-// ---------------------------------------------------------------------------
 
 void checkRows() {
     check(views::draftLines("") == 1, "an empty draft is one line");
@@ -726,9 +703,8 @@ void checkRows() {
           "an empty draft asks for the minimum height again");
 }
 
-// ---------------------------------------------------------------------------
-// 7. The meter
-// ---------------------------------------------------------------------------
+// 7. The meter's vocabulary (the meter itself is the now bar's; the thresholds
+//    and the fraction stay here, the vocabulary both bars read)
 
 void checkMeter() {
     check(views::meterLevel(0, 128000) == views::MeterLevel::Normal, "an empty context is normal");
@@ -743,7 +719,7 @@ void checkMeter() {
     check(views::contextFraction(200, 100) == 1.0f, "the fraction is clamped to one");
     check(views::contextFraction(-5, 100) == 0.0f, "a negative count is an empty meter");
 
-    // The composer's count and the `ctx` chip must be the same string for the same
+    // The `ctx` chip and the now bar's meter must be the same string for the same
     // numbers: both use `ui::formatCount`, which is the whole reason the splitter keeps
     // the numbers (`StatusChips::contextUsed/contextMax`).
     const std::string sentences[] = {"Context: 42000/128000 tokens | Model: qwen3-coder | Ready",
@@ -761,9 +737,7 @@ void checkMeter() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 8. The view, drawn
-// ---------------------------------------------------------------------------
 
 /// A scene the goldens pin: a fixture at one size.
 struct Scene {
@@ -795,18 +769,11 @@ void sceneFixture(const Scene& scene, Fixture& fixture) {
     fixture.historyPos = -1;
     fixture.state = views::ComposerState{};
     fixture.resetInput();
-    fixture.input.contextUsed = 42000;
-    fixture.input.contextMax = 128000;
-    fixture.input.contextKnown = true;
-    fixture.input.model = "qwen3-coder";
     fixture.input.nowMs = 1000;
     if (scene.draft)
         fixture.buffer = "Explain the failing test\nin tui_chat.cpp\nand fix it";
-    if (scene.busy) {
+    if (scene.busy)
         fixture.input.busy = true;
-        fixture.input.phase = "Busy";
-        fixture.input.speed = "38.1 tok/s";
-    }
     fixture.input.offline = scene.offline;
 }
 
@@ -814,7 +781,7 @@ void checkView() {
     const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
     parkPointer(); // no hover in a capture
 
-    // --- empty at 100x30 --------------------------------------------------
+    // empty at 100x30
     {
         g_w = 100;
         g_h = 30;
@@ -826,9 +793,10 @@ void checkView() {
               "the empty composer shows the placeholder");
         check(grid.hasText("Send"), "the empty composer shows a real Send action");
         check(!grid.hasText("Stop"), "no Stop while nothing runs");
-        check(grid.hasText("qwen3-coder"), "the model is right-aligned on the text line");
-        check(grid.hasText("42k"), "the meter shows the used context (42k)");
-        check(grid.hasText("ctx"), "the full meter form appears at 100 cells");
+        // The model name and the meter are the now bar's - the text line is the
+        // mode's alone, and the MVP has no mode.
+        check(!grid.hasText("qwen3-coder"), "no model on the composer (it is the now bar's)");
+        check(!grid.hasText("ctx"), "no meter on the composer (it is the now bar's)");
         // Nothing outside the region: the view is a geometry taker, and a cell outside its
         // rect would be a composer painted where the layout did not put it.
         bool outside = false;
@@ -843,7 +811,7 @@ void checkView() {
         check(!outside, "the composer paints nothing outside its rect");
     }
 
-    // --- empty at 40x15: the compact placeholder, no mode/model -----------
+    // empty at 40x15: the compact placeholder, no mode/model
     {
         g_w = 40;
         g_h = 15;
@@ -854,13 +822,12 @@ void checkView() {
         check(grid.hasText("Ask..."), "a 40-cell composer shortens the placeholder");
         check(!grid.hasText("Ask anything"), "the long placeholder does not fit at 40 cells");
         check(grid.hasText("Send"), "Send survives the narrow composer");
-        check(!grid.hasText("qwen3-coder"), "the model drops before the field does");
-        check(grid.hasText("42k"), "the count survives the narrow composer");
-        check(!grid.hasText("ctx"), "the bar drops below 80 cells (design §4.6)");
+        check(!grid.hasText("qwen3-coder"), "the model is not the composer's");
+        check(!grid.hasText("ctx"), "the meter is not the composer's");
         check(rect.h >= 4.0f, "a 40x15 composer keeps 1 text row + 1 meta row");
     }
 
-    // --- a draft grows the field ------------------------------------------
+    // a draft grows the field
     {
         g_w = 100;
         g_h = 30;
@@ -877,25 +844,23 @@ void checkView() {
         check(fixture.state.rows == 3, "three lines means three text rows");
     }
 
-    // --- busy: Stop, the phase and the speed ------------------------------
+    // busy: Stop, and no leftover chrome
     {
         g_w = 100;
         g_h = 30;
         Fixture fixture;
         fixture.buffer = "one";
         fixture.input.busy = true;
-        fixture.input.phase = "Busy";
-        fixture.input.speed = "38.1 tok/s";
         ui::Rect rect = composerRect(g_w, g_h, m);
         const auto body = bodyFor(fixture, rect);
         const Grid grid = frame(body);
         check(grid.hasText("Stop"), "a running agent turns the action into Stop");
         check(!grid.hasText("Send"), "Send is gone while the run is active");
-        check(grid.hasText("38.1 tok/s"), "the speed is shown in the middle while busy");
-        check(grid.hasText("Busy"), "the phase word is shown while busy");
+        check(!grid.hasText("tok/s"), "the speed is not the composer's");
+        check(!grid.hasText("Busy"), "the phase word is not the composer's");
     }
 
-    // --- stopping: the action is disabled ---------------------------------
+    // stopping: the action is disabled
     {
         g_w = 100;
         g_h = 30;
@@ -908,7 +873,7 @@ void checkView() {
         check(grid.hasText("Stopping"), "a requested stop reads Stopping");
     }
 
-    // --- offline: Send stays, disabled, and the field explains itself ------
+    // offline: Send stays, disabled, and the field explains itself
     {
         g_w = 100;
         g_h = 30;
@@ -922,7 +887,7 @@ void checkView() {
         check(grid.hasText("kept"), "the offline draft stays visible");
     }
 
-    // --- the paste question ------------------------------------------------
+    // the paste question
     {
         g_w = 100;
         g_h = 30;
@@ -939,7 +904,7 @@ void checkView() {
         check(!grid.hasText("kept draft"), "the draft is not drawn behind the question");
     }
 
-    // --- the placement against the layout, at every size -------------------
+    // the placement against the layout, at every size
     for (const Scene& scene : scenes()) {
         g_w = scene.w;
         g_h = scene.h;
@@ -960,16 +925,14 @@ void checkView() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 9. The interaction
-// ---------------------------------------------------------------------------
 
 void checkInteraction() {
     const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
     g_w = 100;
     g_h = 30;
 
-    // --- Send: the answer the frame applies -------------------------------
+    // Send: the answer the frame applies
     {
         Fixture fixture;
         fixture.buffer = "  hello there  ";
@@ -987,7 +950,7 @@ void checkInteraction() {
         check(!answers.pasteAsked, "a send leaves no paste question behind");
     }
 
-    // --- Tab-send answers and stays clean ---------------------------------
+    // Tab-send answers and stays clean
     {
         Fixture fixture;
         fixture.buffer = "tab draft";
@@ -1002,7 +965,7 @@ void checkInteraction() {
         check(!answers.palette, "a tab-send never opens the palette");
     }
 
-    // --- Send with a whitespace-only draft --------------------------------
+    // Send with a whitespace-only draft
     {
         Fixture fixture;
         fixture.buffer = "   ";
@@ -1018,7 +981,7 @@ void checkInteraction() {
               "the view still answers submit: the *frame* decides what a blank draft means");
     }
 
-    // --- Stop: the cancel request -----------------------------------------
+    // Stop: the cancel request
     {
         Fixture fixture;
         fixture.input.busy = true;
@@ -1035,7 +998,7 @@ void checkInteraction() {
         check(!answers.submit, "Stop never sends");
     }
 
-    // --- a burst too small to be a paste is *typing* ----------------------
+    // a burst too small to be a paste is *typing*
     {
         // Two characters in one frame (a fast typist on a slow frame, an auto-repeat, an
         // IME commit) must land at the caret, not at the end of the draft: only a burst
@@ -1063,7 +1026,7 @@ void checkInteraction() {
               "a burst split over frames keeps its order (" + fixture.buffer + ")");
     }
 
-    // --- a real burst pastes at the caret ---------------------------------
+    // a real burst pastes at the caret
     {
         Fixture fixture;
         fixture.buffer = "XY";
@@ -1082,7 +1045,7 @@ void checkInteraction() {
               "a captured paste lands at the caret, not at the end (" + fixture.buffer + ")");
     }
 
-    // --- a paste through the character queue ------------------------------
+    // a paste through the character queue
     {
         Fixture fixture;
         ui::Rect rect = composerRect(g_w, g_h, m);
@@ -1099,7 +1062,7 @@ void checkInteraction() {
         check(!fixture.state.paste.ask, "a short paste does not ask");
     }
 
-    // --- a paste with CRLF ------------------------------------------------
+    // a paste with CRLF
     {
         Fixture fixture;
         ui::Rect rect = composerRect(g_w, g_h, m);
@@ -1112,7 +1075,7 @@ void checkInteraction() {
         check(fixture.buffer == "a\nb", "a CRLF paste is folded to LF (" + fixture.buffer + ")");
     }
 
-    // --- a paste ending in a newline --------------------------------------
+    // a paste ending in a newline
     {
         Fixture fixture;
         ui::Rect rect = composerRect(g_w, g_h, m);
@@ -1131,7 +1094,7 @@ void checkInteraction() {
               "a small paste still opens the flight window");
     }
 
-    // --- a paste over the limit asks; Insert applies it -------------------
+    // a paste over the limit asks; Insert applies it
     {
         Fixture fixture;
         fixture.buffer = "before:";
@@ -1153,7 +1116,7 @@ void checkInteraction() {
         const auto insert = grid.findText("Insert");
         check(insert.first >= 0, "the question draws an Insert control");
         // The action keeps its own label while the question is up: a running agent must
-        // not lose its Stop control to a paste question (D-CANCEL).
+        // not lose its Stop control to a paste question.
         check(grid.hasText("Send"), "the idle action stays Send while the question is up");
         // Send would send the pre-paste draft and drop the pending payload, so it is
         // disabled while the question is up (Stop, for a busy composer, keeps its state).
@@ -1173,7 +1136,7 @@ void checkInteraction() {
         check(!fixture.state.paste.ask, "the question is gone after the insert");
     }
 
-    // --- a paste delivered in several reads is one payload -----------------
+    // a paste delivered in several reads is one payload
     {
         // A terminal hands a big paste over in finite reads (the tty buffer is
         // bounded). The run accumulates the chunks and inserts them once, at the
@@ -1208,7 +1171,7 @@ void checkInteraction() {
         check(!fixture.state.paste.ask, "40 characters do not ask first");
     }
 
-    // --- a CRLF split across two reads still folds once --------------------
+    // a CRLF split across two reads still folds once
     {
         Fixture fixture;
         ui::Rect rect = composerRect(g_w, g_h, m);
@@ -1229,7 +1192,7 @@ void checkInteraction() {
               "a CRLF split across reads folds to one newline (" + fixture.buffer + ")");
     }
 
-    // --- a paste delivered in several reads is still limited as one ---------
+    // a paste delivered in several reads is still limited as one
     {
         Fixture fixture;
         fixture.buffer = "draft:";
@@ -1257,7 +1220,7 @@ void checkInteraction() {
                   std::to_string(fixture.state.paste.pending.size()) + ")");
     }
 
-    // --- a captured paste over a selection replaces it ---------------------
+    // a captured paste over a selection replaces it
     {
         Fixture fixture;
         fixture.buffer = "hello world";
@@ -1285,7 +1248,7 @@ void checkInteraction() {
               "a captured paste replaces the selection (" + fixture.buffer + ")");
     }
 
-    // --- a paste question does not take the Stop control away -------------
+    // a paste question does not take the Stop control away
     {
         Fixture fixture;
         fixture.input.busy = true;
@@ -1310,7 +1273,7 @@ void checkInteraction() {
         }
     }
 
-    // --- a paste over the limit, discarded with Esc -----------------------
+    // a paste over the limit, discarded with Esc
     {
         Fixture fixture;
         ui::Rect rect = composerRect(g_w, g_h, m);
@@ -1331,7 +1294,7 @@ void checkInteraction() {
         check(answers.escaped, "the press is spent on the question");
     }
 
-    // --- Esc: cancel (busy), clear, blur ----------------------------------
+    // Esc: cancel (busy), clear, blur
     {
         Fixture fixture;
         fixture.buffer = "half-written query";
@@ -1360,7 +1323,7 @@ void checkInteraction() {
         check(!fixture.state.focused, "the blur released the field");
     }
 
-    // --- history keys ------------------------------------------------------
+    // history keys
     {
         Fixture fixture;
         fixture.history = {"older query", "newer query"};
@@ -1368,40 +1331,31 @@ void checkInteraction() {
         ui::Rect rect = composerRect(g_w, g_h, m);
         const auto body = bodyFor(fixture, rect);
         focusField(rect, body);
-        pressKey(ImGuiKey_UpArrow, body);
+        pressKey(ImGuiKey_PageUp, body);
         check(fixture.buffer == "newer query",
-              "↑ on the first line recalls the newest query (" + fixture.buffer + ")");
+              "PgUp recalls the newest query (" + fixture.buffer + ")");
         check(fixture.draft == "my draft", "the draft is stashed");
         check(fixture.historyPos == 0, "the history cursor moved");
         frame(body);
-        pressKey(ImGuiKey_UpArrow, body);
-        check(fixture.buffer == "older query", "a second ↑ recalls the older query");
+        pressKey(ImGuiKey_PageUp, body);
+        check(fixture.buffer == "older query", "a second PgUp recalls the older query");
         frame(body);
-        pressKey(ImGuiKey_DownArrow, body);
-        check(fixture.buffer == "newer query", "↓ walks back down");
+        pressKey(ImGuiKey_PageDown, body);
+        check(fixture.buffer == "newer query", "PgDn walks back down");
         frame(body);
-        pressKey(ImGuiKey_DownArrow, body);
-        check(fixture.buffer == "my draft", "↓ past the newest entry hands the draft back");
+        pressKey(ImGuiKey_PageDown, body);
+        check(fixture.buffer == "my draft", "PgDn past the newest entry hands the draft back");
         check(fixture.historyPos == -1, "the cursor is live again");
 
-        // `Ctrl+Up` is the shipped alias. The modifier and the arrow are separate frames:
-        // ImGui's input trickle applies one transition per key per frame.
+        // In the field the arrows are caret keys; the history gesture is the page
+        // keys: a plain `Up` in the field is a caret move and recalls nothing.
         frame(body);
-        frame(body, [](ImGuiIO& io) { io.AddKeyEvent(ImGuiMod_Ctrl, true); });
-        frame(body, [](ImGuiIO& io) {
-            io.AddKeyEvent(ImGuiMod_Ctrl, true);
-            io.AddKeyEvent(ImGuiKey_UpArrow, true);
-        });
-        check(fixture.buffer == "newer query",
-              "Ctrl+Up is the shipped alias (" + fixture.buffer + ")");
-        frame(body, [](ImGuiIO& io) {
-            io.AddKeyEvent(ImGuiMod_Ctrl, true);
-            io.AddKeyEvent(ImGuiKey_UpArrow, false);
-        });
-        frame(body, [](ImGuiIO& io) { io.AddKeyEvent(ImGuiMod_Ctrl, false); });
+        pressKey(ImGuiKey_UpArrow, body);
+        check(fixture.buffer == "my draft", "Up is a caret key, not a history key");
+        frame(body);
 
-        // The grid's own history path: the two real buttons (the arrows and their
-        // modifiers are not delivered by that backend - plan/key_gate.md §4b).
+        // The grid's own history path: the two real buttons. `PgUp`/`PgDn` arrive on
+        // that backend too, but the visible affordance stays.
         fixture.historyPos = -1;
         fixture.draft.clear();
         fixture.buffer = "my draft";
@@ -1417,7 +1371,7 @@ void checkInteraction() {
         }
     }
 
-    // --- `/` on an empty line opens the command palette ---------------------
+    // `/` on an empty line opens the command palette
     {
         Fixture fixture;
         ui::Rect rect = composerRect(g_w, g_h, m);
@@ -1479,7 +1433,7 @@ void checkInteraction() {
                   ")");
     }
 
-    // --- a hand-off fills the composer without sending ---------------------
+    // a hand-off fills the composer without sending
     {
         Fixture fixture;
         fixture.handoff = "Plan a feature";
@@ -1494,9 +1448,7 @@ void checkInteraction() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 10. The shell wiring
-// ---------------------------------------------------------------------------
 
 views::ShellFrame shellFrame(tui::TuiState& state,
                              const std::function<void(ImGuiIO&)>& inject = nullptr) {
@@ -1537,8 +1489,9 @@ void checkShell() {
     state.sessionPanel.sessions.push_back(tui::SessionEntry{"s1", "Demo session", "", 3, true});
     state.sessionPanel.activeId = "s1";
 
-    // The composer's inputs are derived from the aggregate: the chips' numbers, the run
-    // state and the send-key preference.
+    // The composer's inputs are derived from the aggregate: the draft, the run
+    // state and the send-key preference (the chips' numbers and the model name
+    // are the now bar's inputs, not the composer's).
     state.statusChips = model::splitStatusText("Context: 42000/128000 tokens | 38.1 tok/s | "
                                                "Model: 'qwen3-coder' | Ready");
     state.userQuery.inputBuf = "shell draft";
@@ -1548,8 +1501,6 @@ void checkShell() {
           "the shell gives the composer a rectangle");
     check(state.composer.rows == 1, "a one-line draft is one row in the shell's frame");
     check(grid.hasText("shell draft"), "the shell's composer draws the aggregate's draft");
-    check(grid.hasText("42k"), "the shell's composer reads the chips' numbers");
-    check(grid.hasText("qwen3-coder"), "the shell's composer reads the chips' model");
 
     // A grown draft is reserved on the *next* frame: the view reports, the layout takes.
     state.userQuery.inputBuf = "one\ntwo\nthree";
@@ -1625,7 +1576,7 @@ void checkShell() {
 
     // One `Esc` in the shell is one step end to end: the composer spends the press, and
     // `applyComposerAnswers()` marks `state.escapeConsumed` so the frame-level chain
-    // stands down (D-ESC). Without that the frame would cancel *and* the composer would
+    // stands down. Without that the frame would cancel *and* the composer would
     // clear on the same press.
     state.escapeConsumed = false;
     state.userQuery.inputBuf = "a draft to clear";
@@ -1638,9 +1589,7 @@ void checkShell() {
     state.escapeConsumed = false;
 }
 
-// ---------------------------------------------------------------------------
 // 10b. The pixel profile's clipboard paste (ImGui's own insertion)
-// ---------------------------------------------------------------------------
 
 std::string g_clipboard;
 
@@ -1649,7 +1598,7 @@ void clipboardSet(void*, const char* text) { g_clipboard = text != nullptr ? tex
 
 /// Ctrl+V is ImGui's clipboard insertion (`stb_textedit_paste`), not a burst of queued
 /// characters: the composer sees the characters through its filter but never gets to
-/// hold them back. The post-widget size guard is what applies D-PASTE's limit there, so
+/// hold them back. The post-widget size guard is what applies the paste limit there, so
 /// the test drives the real shortcut with a local clipboard.
 void checkClipboardPaste() {
     g_w = 100;
@@ -1812,9 +1761,7 @@ void checkClipboardPaste() {
     io.SetClipboardTextFn = nullptr;
 }
 
-// ---------------------------------------------------------------------------
 // 11. The goldens
-// ---------------------------------------------------------------------------
 
 std::string goldenText(const Scene& scene) {
     const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);

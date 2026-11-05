@@ -29,8 +29,8 @@ text:
 
 
 
-   Ask anything...  / commands                                                         qwen3-coder
-  ctx █░░░░░ 42k                                                                          Send
+   Ask anything...  / commands
+                                                                                          Send
 
 
 fills:

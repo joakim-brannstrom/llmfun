@@ -1,7 +1,7 @@
 // test_nowbar.cpp
 //
-// The now bar (views/nowbar.h, design §4.7 / FR-11 / D-PHASE / D-FOLLOW, task 28): the
-// seven phases, the four canonical chips, the degradation ladder and the `↓ latest` hint.
+// The now bar (views/nowbar.h): the
+// seven phases, the context meter, the degradation ladder and the `↓ latest` hint.
 //
 // What this binary proves, in order:
 //
@@ -13,21 +13,22 @@
 //   3. the chips. The structured status and the sentence splitter produce byte-identical
 //      chips for the same numbers, and a number the status does not carry is `—`, never `0`;
 //   4. the mapping. One case per phase: the word on the left, the mark beside it, the clock
-//      only while a run is in flight;
-//   5. the ladder. The hints go first, then the detail, then the chips collapse - and the
-//      state is never cut, at 100, 60 and 40 cells;
-//   6. the hints. `Esc stop` exactly while the Esc cancel step is open, `Ctrl+K commands`
-//      always, and the "there is more below" mark in place of both while the thread is not
-//      following (D-FOLLOW);
+//      only while a run is in flight, and the context meter, the speed chip and the model
+//      chip on the right;
+//   5. the ladder. The hints go first, then the detail, then the right side yields rung by
+//      rung (the speed chip first, then the count compacts) - and the state is never cut,
+//      at 100, 60 and 40 cells;
+//   6. the hints. `Esc stop` exactly while the Esc cancel step is open, and the "there is
+//      more below" mark in place of it while the thread is not following;
 //   7. the badge. `RAW` from `UiState::rawLogOpen`, in compact mode - the one layout whose
 //      top bar is folded away - and nowhere else;
 //   8. the colours. The state rule clears 3:1 against the row's surface in every phase, and
-//      every chip ink clears 4.5:1 against its own fill;
+//      the meter's ink clears 4.5:1 against the row's fill;
 //   9. the screen. The row drawn through the real text backend: one row, nothing painted
 //      outside it, the mark of every phase, and `-` where a number is missing;
 //  10. the shell. `renderShell()` derives the row from the aggregate (the phase table, the
 //      clock, the chips), projects the chips for the composer, and answers the compact
-//      layout's collapsed chip form;
+//      layout's collapsed meter;
 //  11. the goldens. Idle/running/offline at 100x30 and 60x20, each pinning the measured
 //      parts and the painted fills as well as the glyphs.
 //
@@ -114,9 +115,7 @@ std::string num(float v) {
 
 std::string quoted(const std::string& text) { return "'" + text + "'"; }
 
-// ---------------------------------------------------------------------------
 // The cell grid the text backend writes (the `TScreen` pattern)
-// ---------------------------------------------------------------------------
 
 ImTui::TScreen g_screen;
 
@@ -233,9 +232,7 @@ Grid frame(const std::function<void(const ui::Metrics&)>& body,
     return capture();
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures and helpers
-// ---------------------------------------------------------------------------
 
 /// The row the layout engine hands the view at `w x h` - the geometry the frame really
 /// answers for, not a rectangle this harness invented.
@@ -248,7 +245,7 @@ ui::Rect nowBarRect(int w, int h, const ui::Metrics& m) {
     return layout.nowBar;
 }
 
-/// The design's own numbers (§4.7's chip row), from the sentence - the split path.
+/// The design's own numbers (the chip row), from the sentence - the split path.
 model::StatusChips designChips() {
     return model::splitStatusText(
         "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Ready");
@@ -328,22 +325,19 @@ std::string readWhole(const std::string& path) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-// ---------------------------------------------------------------------------
 // 1. The source obeys the layering rules
-// ---------------------------------------------------------------------------
 
 void checkSource() {
     const std::string source = readWhole(TEST_NOWBAR_SOURCE);
     check(!source.empty(), "views/nowbar.cpp is readable");
     check(source.find("tuiIsTextGrid") == std::string::npos,
           "the now bar takes the profile from the metrics, never from tuiIsTextGrid()");
-    check(source.find("ImVec4(") == std::string::npos,
-          "the now bar writes no colour literal (D-THEME)");
+    check(source.find("ImVec4(") == std::string::npos, "the now bar writes no colour literal");
     check(source.find("DisplaySize") == std::string::npos,
           "the now bar reads no display size (a view is a geometry taker)");
     check(source.find("ChatMessage") == std::string::npos &&
               source.find("RenderGroup") == std::string::npos,
-          "the now bar names no v4 type (D-ADAPTER)");
+          "the now bar names no v4 type");
     check(source.find("#include \"tui.h\"") == std::string::npos,
           "the now bar does not include tui.h (views/ names no aggregate)");
     // The row must not reintroduce the v4 habit of formatting a number per frame: the
@@ -352,16 +346,14 @@ void checkSource() {
     check(source.find("splitStatusText") == std::string::npos,
           "the row draws the chips it is given instead of splitting the sentence itself");
     check(source.find("formatCount(") == std::string::npos,
-          "the row formats no count: the chips are canonical for the numbers (§6.3)");
+          "the row formats no count: the chips are canonical for the numbers");
     check(source.find("SetScrollHereY") == std::string::npos, "the row is not a scrolling surface");
 }
 
-// ---------------------------------------------------------------------------
-// 2. The phase vocabulary (D-PHASE)
-// ---------------------------------------------------------------------------
+// 2. The phase vocabulary
 
 void checkVocabulary() {
-    check(model::kPhaseCount == 7, "seven phases (design §4.7)");
+    check(model::kPhaseCount == 7, "seven phases");
 
     std::vector<std::string> words;
     std::vector<std::string> states;
@@ -397,19 +389,17 @@ void checkVocabulary() {
     check(model::phaseStateWord(model::Phase::Offline) == std::string("Offline"),
           "an unreachable model is not Busy");
 
-    // Unknown ordinals clamp instead of becoming a neighbour (task 39's rule).
+    // Unknown ordinals clamp instead of becoming a neighbour.
     for (const int ordinal : {-1, 7, 99, -1000}) {
         check(model::phaseFromOrdinal(ordinal) == model::Phase::Idle,
               "ordinal " + std::to_string(ordinal) + " clamps to idle");
     }
 }
 
-// ---------------------------------------------------------------------------
-// 3. The chips: one value, two paths (D-STATUS)
-// ---------------------------------------------------------------------------
+// 3. The chips: one value, two paths
 
 void checkChips() {
-    // The structured status D will send (task 39), with the sentence's own numbers.
+    // The structured status D sends, with the sentence's own numbers.
     model::RuntimeStatus status;
     status.phase = model::phaseOrdinal(model::Phase::Idle);
     status.contextUsed = 42000;
@@ -458,9 +448,7 @@ void checkChips() {
     check(!(busy == split), "and operator== agrees");
 }
 
-// ---------------------------------------------------------------------------
 // 4. The mapping: one case per phase
-// ---------------------------------------------------------------------------
 
 void checkMapping() {
     struct Case {
@@ -495,11 +483,13 @@ void checkMapping() {
         const Grid grid = drawFor(in, 100, 30);
         check(grid.hasText(std::string(item.mark) + " " + item.word),
               where + ": the screen shows the mark beside the word");
-        check(grid.hasText("ctx 42k/128k"), where + ": the context chip is on the row");
+        // The meter carries the context pair (the bar glyphs sit between the label and the
+        // count), then the speed chip and the model chip follow it. The state is the row's
+        // word, drawn on the left.
+        check(grid.hasText("ctx"), where + ": the meter has its label on the row");
+        check(grid.hasText("42k/128k"), where + ": the meter's count is on the row");
         check(grid.hasText("38.1 tok/s"), where + ": the speed chip is on the row");
         check(grid.hasText("qwen3-coder"), where + ": the model chip is on the row");
-        check(grid.hasText(model::phaseStateWord(item.phase)),
-              where + ": the state chip is on the row");
     }
 }
 
@@ -531,9 +521,7 @@ void checkClock() {
           "the step comes before the clock");
 }
 
-// ---------------------------------------------------------------------------
 // 5. The ladder: hints, then the detail, then the chips - never the state
-// ---------------------------------------------------------------------------
 
 void checkLadder() {
     const views::NowBarInput in = runningRow(model::Phase::Writing);
@@ -543,45 +531,53 @@ void checkLadder() {
     check(!wide.hintsText.empty(), "100 cells: the hints are drawn");
     check(wide.hintsText.find("Esc stop") != std::string::npos,
           "100 cells: the stop hint is drawn while a run is in flight");
-    check(wide.hintsText.find("Ctrl+K") != std::string::npos,
-          "100 cells: the palette hint is drawn");
-    check(!wide.compactChips, "100 cells: the four chips are the full form");
-    check(!wide.chipCtx.empty() && !wide.chipSpeed.empty() && !wide.chipModel.empty() &&
-              !wide.chipState.empty(),
-          "100 cells: all four chips have a slot");
+    check(!wide.compactChips, "100 cells: the meter and the model chip are the full form");
+    check(!wide.meterBar.empty() && !wide.meterCount.empty() && !wide.chipModel.empty(),
+          "100 cells: the meter and the model chip have a slot");
+    check(!wide.chipSpeed.empty(), "100 cells: the speed chip has a slot");
+    check(wide.meterCount.right() <= wide.chipSpeed.x + 0.01f &&
+              wide.chipSpeed.right() <= wide.chipModel.x + 0.01f,
+          "100 cells: the speed chip sits between the count and the model chip");
 
-    // 60 cells: the state is never cut, and the hints are what gives way when they must.
-    // (At this edge the four chips no longer fit beside the state even with no hints and
-    // no clock, so they take their compact form here - "below 60" is where that becomes
-    // necessary, not where the design first allows it.)
+    // 60 cells: the state is never cut, and the hint is what gives way when they must -
+    // dropped whole below the hint floor (`kNowBarMinHintGu`), while the numbers keep
+    // the meter with room to spare (the right side keeps the numbers it owns).
     const views::NowBarParts narrow = measureFor(in, 60, 20);
     check(narrow.stateText == std::string(model::phaseWord(in.phase)),
           "60 cells: the state word is not cut");
-    check(!narrow.chipCtx.empty() || !narrow.chipState.empty(),
-          "60 cells: the numbers keep a chip");
+    check(!narrow.meterLabel.empty() && !narrow.meterCount.empty(),
+          "60 cells: the numbers keep their meter");
+    check(narrow.hintsText.empty() && narrow.hintsTruncated,
+          "60 cells: the hint yields whole, never a fragment");
 
-    // 80 cells: the four chips fit, so the hints are the ones that give way - never the
-    // state (design §4.7's degradation order). A hint is dropped whole: no ellipsis, no
-    // dangling separator, no half a word.
+    // 80 cells: the meter fits in full beside the hint. The list is the one contextual hint -
+    // the top bar owns `Ctrl+K` - so nothing has to give way here.
     const views::NowBarParts medium = measureFor(in, 80, 24);
-    check(!medium.compactChips, "80 cells: the four chips are still the full form");
+    check(!medium.compactChips, "80 cells: the meter and the model chip are still the full form");
     check(medium.stateText == std::string(model::phaseWord(in.phase)),
           "80 cells: the state word is not cut");
-    check(medium.hintsTruncated, "80 cells: the hint list is not drawn in full");
-    check(medium.hintsText == std::string(views::kNowBarHintStop),
-          "80 cells: only the whole, most contextual hint is drawn (" + medium.hintsText + ")");
-    check(medium.hintsText.find(ui::icon(ui::Icon::Ellipsis, ui::GlyphSet::Glyphs)) ==
-              std::string::npos,
-          "80 cells: and it is not cut (no ellipsis in a hint list)");
+    check(!medium.hintsTruncated && medium.hintsText == std::string(views::kNowBarHintStop),
+          "80 cells: the single hint fits whole beside the full meter");
 
-    // 40 cells: the floor. The state survives, the chips collapse.
+    // 40 cells: the floor. The state survives, the meter collapses to its count.
     const views::NowBarParts floorRow = measureFor(in, 40, 15);
     check(floorRow.stateText == std::string(model::phaseWord(in.phase)),
           "40 cells: the state word still is whole");
-    check(floorRow.compactChips, "40 cells: the chips are the collapsed form");
-    check(!floorRow.chipCtx.empty(), "40 cells: the ctx chip survives");
-    check(floorRow.chipStateText.empty() && !floorRow.chipState.empty(),
-          "40 cells: the state is a mark, not a word, in the collapsed chip");
+    check(floorRow.compactChips, "40 cells: the meter is the collapsed form");
+    check(!floorRow.meterCount.empty(), "40 cells: the count survives");
+    check(floorRow.chipSpeed.empty(), "40 cells: the speed chip has yielded");
+
+    // The speed chip yields before the count compacts: a full count without the rate is
+    // one rung of the ladder between the full form and the compact one.
+    bool speedYielded = false;
+    for (int cells = 99; cells >= 41 && !speedYielded; --cells) {
+        const views::NowBarParts row = measureFor(in, cells, 20);
+        if (row.chipSpeed.empty() && row.meterCountText == std::string("42k/128k")) {
+            speedYielded = true;
+            check(!row.chipModel.empty(), "the model chip outlives the speed chip");
+        }
+    }
+    check(speedYielded, "some width drops the speed chip before the count compacts");
 
     // Nothing overlaps, and nothing leaves the row, at every supported size.
     for (const int size : {120, 100, 80, 60, 40}) {
@@ -593,9 +589,10 @@ void checkLadder() {
             const ui::Rect bar = nowBarRect(size, height, m);
             check(parts.rule.x >= bar.x - 0.01f && parts.state.right() <= bar.right() + 0.01f,
                   "row " + std::to_string(size) + ": the state stays inside the row");
-            const views::NowBarPart all[] = {
-                parts.rule,  parts.mark,    parts.state,     parts.tail,      parts.hints,
-                parts.badge, parts.chipCtx, parts.chipSpeed, parts.chipModel, parts.chipState};
+            const views::NowBarPart all[] = {parts.rule,       parts.mark,     parts.state,
+                                             parts.tail,       parts.hints,    parts.badge,
+                                             parts.meterLabel, parts.meterBar, parts.meterCount,
+                                             parts.chipSpeed,  parts.chipModel};
             bool allInside = true;
             for (const views::NowBarPart& part : all)
                 allInside = allInside && inside(part, bar);
@@ -618,9 +615,7 @@ void checkLadder() {
           "and drops the tool name instead of cutting the clock");
 }
 
-// ---------------------------------------------------------------------------
-// 6. The hints (D-ESC's stop step, D-FOLLOW's "more below")
-// ---------------------------------------------------------------------------
+// 6. The hints (the stop step, and "more below")
 
 void checkHints() {
     // `Esc stop` is drawn exactly while the Esc cancel step is open.
@@ -635,22 +630,20 @@ void checkHints() {
     const views::NowBarParts stopClosed = measureFor(stopping, 100, 30);
     check(stopClosed.hintsText.find(views::kNowBarHintStop) == std::string::npos,
           "no `Esc stop` once the stop has been requested (the press would act twice)");
-    check(stopClosed.hintsText.find("Ctrl+K") != std::string::npos, "the palette hint stays");
+    check(stopClosed.hintsText.empty(),
+          "with the stop gone there is nothing else to advertise on the row");
 
     const views::NowBarParts idle = measureFor(idleRow(), 100, 30);
-    check(idle.hintsText.find(views::kNowBarHintStop) == std::string::npos,
-          "an idle row advertises no stop");
-    check(idle.hintsText == std::string(views::kNowBarHintPalette),
-          "an idle row's only hint is the palette");
+    check(idle.hintsText.empty(), "an idle row has nothing to advertise");
 
     // Not following the newest content: the hints make way for the one thing the row has
-    // to say then (design §5.11, D-FOLLOW).
+    // to say then.
     views::NowBarInput reading = runningRow(model::Phase::Writing);
     reading.following = false;
     const views::NowBarParts notFollowing = measureFor(reading, 100, 30);
     check(notFollowing.hintsText.find("latest") != std::string::npos,
           "a row that is not following says there is more below");
-    check(notFollowing.hintsText.find("Ctrl+K") == std::string::npos,
+    check(notFollowing.hintsText.find(views::kNowBarHintStop) == std::string::npos,
           "and replaces the contextual hints instead of joining them");
     check(notFollowing.hintsText.rfind(ui::icon(ui::Icon::DisclosureOpen, ui::GlyphSet::Glyphs),
                                        0) == 0,
@@ -663,7 +656,7 @@ void checkHints() {
 
     // An open question owns the hint slot, and outranks both of the above. It is never a
     // fragment: the prompt's tail is the instruction, so a narrow row says its short form
-    // (and, below that, takes the metric chips' room) rather than "run active - press Ctrl+…".
+    // (and, below that, takes the meter's room) rather than "run active - press Ctrl+…".
     views::NowBarInput asked = runningRow(model::Phase::Thinking);
     asked.prompt = tui::kQuitConfirmHint;
     asked.promptShort = tui::kQuitConfirmShort;
@@ -674,9 +667,9 @@ void checkHints() {
           "and names the key that answers it");
     check(prompt.stateText == std::string("thinking"), "the state is still on the row");
     check(prompt.tailText.empty(), "the step and the clock step aside for the question");
-    check(!prompt.chipState.empty(), "and the state chip keeps its slot");
+    check(!prompt.meterCount.empty(), "and the meter keeps its slot while the question is up");
 
-    // The size ladder: full prompt, then the short form, then the chips' room - the key is
+    // The size ladder: full prompt, then the short form, then the meter's room - the key is
     // named at every size, including the plan's 40x15 floor.
     for (const int size : {120, 100, 80, 60, 50, 40}) {
         const int height = size >= 80 ? 30 : (size >= 60 ? 20 : 15);
@@ -693,14 +686,13 @@ void checkHints() {
               "and the question never runs into the state at " + std::to_string(size) + " cells");
     }
 
-    // At 60 the question is the short form; at 40 it has taken the metric chips' room.
+    // At 60 the question is the short form; at 40 it has taken the meter's room.
     const views::NowBarParts sixty = measureFor(asked, 60, 20);
     check(sixty.hintsText == std::string(tui::kQuitConfirmShort),
           "60 cells: the question takes its short form (" + sixty.hintsText + ")");
-    check(!sixty.chipCtx.empty(), "60 cells: the ctx chip is still there");
+    check(!sixty.meterCount.empty(), "60 cells: the meter is still there");
     const views::NowBarParts forty = measureFor(asked, 40, 15);
-    check(forty.chipCtx.empty() && forty.chipState.empty(),
-          "40 cells: the metric chips step aside for the question");
+    check(forty.meterCount.empty(), "40 cells: the meter steps aside for the question");
     check(forty.hintsText == std::string(tui::kQuitConfirmShort),
           "40 cells: and the short form fits whole");
 
@@ -710,9 +702,7 @@ void checkHints() {
           "a question outranks the `more below` mark too");
 }
 
-// ---------------------------------------------------------------------------
-// 7. The `RAW` badge (D-RAWLOG)
-// ---------------------------------------------------------------------------
+// 7. The `RAW` badge
 
 void checkBadge() {
     views::NowBarInput compactOpen = idleRow();
@@ -734,8 +724,9 @@ void checkBadge() {
     check(!drawFor(wideOpen, 100, 30).hasText(views::kRawBadge),
           "the full tiling leaves the badge to the top bar, where it already is");
 
-    // Focus mode (task 43) hides the top bar without collapsing anything else, so the badge moves
-    // here while the four chips stay whole: hiding a region may not hide a safety signal.
+    // Focus mode hides the top bar without collapsing anything else, so the badge moves
+    // here while the meter and the model chip stay whole: hiding a region may not hide a safety
+    // signal.
     views::NowBarInput focusOpen = idleRow();
     focusOpen.topBarFolded = true;
     focusOpen.rawLogOpen = true;
@@ -749,9 +740,7 @@ void checkBadge() {
           "focus mode and a closed Raw Log: no badge");
 }
 
-// ---------------------------------------------------------------------------
-// 7b. The `Esc leave focus` hint (task 43)
-// ---------------------------------------------------------------------------
+// 7b. The `Esc leave focus` hint
 
 /// With the mode on, the next `Esc` leaves it - so that is what the row must say. It is the one
 /// hint that survives the mode, because the terminal's way *in* (the palette's row) is not on
@@ -765,8 +754,8 @@ void checkFocusHint() {
           "focus hint: the row names the mode's exit (\"" + idleParts.hintsText + "\")");
     check(drawFor(idle, 120, 30).hasText(views::kNowBarHintLeaveFocus),
           "focus hint: ...and it is drawn");
-    check(idleParts.hintsText.find(views::kNowBarHintPalette) != std::string::npos,
-          "focus hint: the palette hint still follows it");
+    check(idleParts.hintsText == std::string(views::kNowBarHintLeaveFocus),
+          "focus hint: the mode's exit is the row's only hint");
 
     // The mode plus a run: the mode's exit wins the slot, because that is the press that happens.
     views::NowBarInput busy = idleRow();
@@ -786,9 +775,7 @@ void checkFocusHint() {
           "focus hint: the ordinary row does not mention the mode");
 }
 
-// ---------------------------------------------------------------------------
 // 8. The colours
-// ---------------------------------------------------------------------------
 
 void checkColours() {
     // The state rule is a non-text boundary: 3:1 against the row's own fill.
@@ -815,10 +802,10 @@ void checkColours() {
         check(grid.bgAt(0, row) != 0, std::string("the ") + ink.what + " state rule is painted");
     }
 
-    // Every chip ink clears the 4.5:1 text bar against the chip fill it is drawn on.
+    // The meter's ink clears the 4.5:1 text bar against the row's fill.
     const ImVec4 metricInk = ui::color(ui::ColorToken::textMid);
     check(contrastRatio(metricInk, raised) >= 4.5f,
-          "the metric chips' ink clears 4.5:1 on their fill");
+          "the meter's ink clears 4.5:1 on the row's fill");
     for (const Ink& ink : inks) {
         const ImVec4 markInk =
             ui::color(ink.phase == model::Phase::Idle      ? ui::ColorToken::textMid
@@ -835,9 +822,7 @@ void checkColours() {
           "the hints' dim ink still clears 4.5:1 on the row");
 }
 
-// ---------------------------------------------------------------------------
 // 9. The screen: one row, nothing outside it, missing values as `-`
-// ---------------------------------------------------------------------------
 
 void checkScreen() {
     views::NowBarInput in = runningRow(model::Phase::Thinking);
@@ -867,7 +852,7 @@ void checkScreen() {
     const Grid missingGrid = drawFor(missing, 100, 30);
     const std::string missingText = missingGrid.rowText(missingGrid.ny - 1);
     check(missingText.find("ctx -") != std::string::npos,
-          "a missing context renders the grid's absence glyph beside `ctx`");
+          "a missing context renders the grid's absence glyph beside the meter's label");
     check(missingText.find("0") == std::string::npos, "and never a 0");
     check(!missingText.empty() && missingGrid.hasText("Ready"), "the state word is still drawn");
 
@@ -886,9 +871,7 @@ void checkScreen() {
           "a zero rectangle paints nothing");
 }
 
-// ---------------------------------------------------------------------------
 // 10. The shell: the derivation, the composer's phase word, compact mode
-// ---------------------------------------------------------------------------
 
 views::ShellFrame shellFrame(tui::TuiState& state, int w, int h) {
     views::ShellFrame out;
@@ -953,7 +936,7 @@ void checkShell() {
         views::renderShell(state, ImVec2(static_cast<float>(g_w), static_cast<float>(g_h)));
     });
     check(grid.hasText("thinking"), "the composer's meta row says `thinking`, not `Busy`");
-    check(grid.hasText("38.1 tok/s"), "and the same speed chip as the now bar");
+    check(grid.hasText("qwen3-coder"), "and the same model chip as the now bar");
 
     // Compact mode: the layout's answer, and the collapsed chip form with it.
     state.readyStatus = true;
@@ -969,7 +952,7 @@ void checkShell() {
     // The `RAW` badge in compact mode comes from the aggregate's own flag.
     //
     // The row is drawn directly here rather than through `renderShell()`: an *open* Raw Log is
-    // the text grid's full-screen overlay (task 33), so a shell frame with the surface up paints
+    // the text grid's full-screen overlay, so a shell frame with the surface up paints
     // over the now bar - that is what "full-screen" means, and `./test_rawlog` pins it. What this
     // check is about is the row's half: the flag reaches the badge.
     views::NowBarInput badgeIn = views::NowBarInput{};
@@ -1004,7 +987,7 @@ void checkStopHint() {
 }
 
 /// The same rule, one step up the chain: focus mode owns the press before the cancel step does, so
-/// a run in the mode advertises *the mode's exit*, not `Esc stop` (task 43, the review's I1). This
+/// a run in the mode advertises *the mode's exit*, not `Esc stop`. This
 /// is the derivation end to end - `deriveNowBar()` asks `model::escapeStopsRun`, and the assertion
 /// is on the drawn row, so a hint that read the run's state directly fails here.
 void checkFocusStopHint() {
@@ -1024,11 +1007,6 @@ void checkFocusStopHint() {
           "focus mode: ...so the row stops promising `Esc stop`");
     check(capture().hasText(views::kNowBarHintLeaveFocus),
           "focus mode: it names the press it will perform instead");
-    // The row keeps its ladder: the mode's hint is the *first* part, so the palette hint follows it
-    // wherever both fit (140 cells here, so both do).
-    check(capture().hasText(views::kNowBarHintPalette),
-          "focus mode: and the palette hint still follows it");
-
     state.ui.focusMode = false;
     shellFrame(state, 100, 30);
     check(capture().hasText(views::kNowBarHintStop),
@@ -1058,10 +1036,10 @@ void checkOverlayHint() {
 }
 
 void checkQuitPrompt() {
-    // Task 28's note: the v4 status row has to hide the four chips to show the quit
-    // confirmation, so the run state disappears from the screen. This row has room for
-    // both - and it keeps the *question* whole, which is the half the v4 row gets right
-    // and a naive truncation would not: the prompt's tail is the instruction.
+    // The quit prompt takes the right side's room, so the run state leaves the screen for
+    // the prompt's frames. The row keeps the *question* whole: the prompt's tail is the
+    // instruction, the one string on this row a user has to act on, and a mid-word cut
+    // would leave it saying nothing.
     tui::TuiState state;
     tui::tuiSetStatusText(
         state, "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Busy");
@@ -1073,10 +1051,9 @@ void checkQuitPrompt() {
     check(grid.hasText("Ctrl+Q"), "an armed quit confirmation is visible in the now bar");
     check(grid.hasText("run active - press"), "100 cells: the whole sentence fits");
     check(grid.hasText("thinking"), "the phase word survives it");
-    // The chips compress to their key form rather than the question being cut: the state
-    // keeps its mark at the row's right end (measured in `checkHints`) and the one number
-    // everybody reads stays.
-    check(grid.hasText("ctx 42k"), "and the numbers survive in their compact form");
+    // The meter collapses to its key form rather than the question being cut: the state
+    // keeps its slot and the one number everybody reads stays on the row.
+    check(grid.hasText("42k/128k"), "and the numbers survive on the row");
     check(!grid.hasText(views::kNowBarHintStop), "the prompt takes the hint slot");
 
     // The size ladder, end to end: every size names the key. A fragment ("run acti…") is
@@ -1098,9 +1075,7 @@ void checkQuitPrompt() {
     check(capture().hasText(views::kNowBarHintStop), "and the hints come back once it is disarmed");
 }
 
-// ---------------------------------------------------------------------------
 // 11. The goldens
-// ---------------------------------------------------------------------------
 
 struct Scene {
     const char* name;
@@ -1109,7 +1084,7 @@ struct Scene {
     bool offline;
     bool rawLogOpen;
     int w, h;
-    /// The feedback item the scene raises before the shell draws (task 45): nullptr for the
+    /// The feedback item the scene raises before the shell draws: nullptr for the
     /// ordinary scenes, so their goldens pin the row without a flash.
     const char* flash = nullptr;
     model::ToastKind flashKind = model::ToastKind::Info;
@@ -1123,11 +1098,11 @@ std::vector<Scene> scenes() {
         {"nowbar-idle", model::Phase::Idle, false, false, false, 60, 20},
         {"nowbar-running", model::Phase::Writing, true, false, false, 60, 20},
         {"nowbar-offline", model::Phase::Offline, false, true, false, 60, 20},
-        // Compact (below 60 cells): the top bar is folded away, so the chips collapse and
+        // Compact (below 60 cells): the top bar is folded away, so the meter collapses and
         // the `RAW` badge is this row's - the one place the design puts it there.
         {"nowbar-compact", model::Phase::Writing, true, false, true, 50, 20},
-        // The flash (task 45): a transient answer at 100 cells and a persistent one at 60, where
-        // the row can no longer afford the key that clears it and draws the message alone.
+        // The flash: a transient answer at 100 cells and a persistent one at 60, where
+        // the row cannot afford the key that clears it and draws the message alone.
         {"nowbar-flash", model::Phase::Idle, false, false, false, 100, 30, "Copied ANSWER",
          model::ToastKind::Success},
         {"nowbar-flash", model::Phase::Writing, true, false, false, 60, 20, "Save failed: EACCES",
@@ -1138,8 +1113,8 @@ std::vector<Scene> scenes() {
 std::string goldenText(const Scene& scene) {
     // A golden must not inherit the previous check's interaction state. The composer's border is
     // ImGui's nav cursor, and a check that drew frames before this one leaves it visible - which is
-    // how a check inserted ahead of the goldens silently changed the idle 100x30 golden during
-    // task 39. Nothing in a golden is focused or navigated and the pointer is nowhere, so pinning
+    // how a check inserted ahead of the goldens silently changed the idle 100x30 golden.
+    // Nothing in a golden is focused or navigated and the pointer is nowhere, so pinning
     // both off is the honest baseline rather than a mask over a defect.
     ImGui::SetNavCursorVisible(false);
     ImGui::GetIO().MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
@@ -1161,13 +1136,13 @@ std::string goldenText(const Scene& scene) {
     }
     state.ui.offline = scene.offline;
     // The scene's feedback item, raised before the shell derives the row - the frame reads the
-    // queue, so this is the same path a copy or a save takes (task 45).
+    // queue, so this is the same path a copy or a save takes.
     if (scene.flash != nullptr)
         model::raiseToast(state.ui, model::Toast{scene.flashKind, scene.flash, {}},
                           /*nowMs=*/1000, /*textGrid=*/true);
 
-    // The compact Raw Log scene. An *open* Raw Log is the text grid's full-screen overlay
-    // (task 33), so a shell frame with the surface up paints over the row this scene exists to
+    // The compact Raw Log scene. An *open* Raw Log is the text grid's full-screen overlay,
+    // so a shell frame with the surface up paints over the row this scene exists to
     // pin. The tiling is drawn first with the surface closed - the derivation is the shell's own,
     // not a fixture rebuilt here - and the row is then drawn on its own with the badge flag set.
     // The screen is therefore the row by itself: one draw, no overdraw, and the badge's pixels
@@ -1198,9 +1173,9 @@ std::string goldenText(const Scene& scene) {
     text += " compact: " + std::string(frameOut.layout.compact ? "1" : "0");
     text += "\nparts: rule=" + num(parts.rule.w) + " mark=" + num(parts.mark.w) +
             " state=" + num(parts.state.w) + " tail=" + num(parts.tail.w) +
-            " hints=" + num(parts.hints.w) + " ctx=" + num(parts.chipCtx.w) +
-            " speed=" + num(parts.chipSpeed.w) + " model=" + num(parts.chipModel.w) +
-            " stateChip=" + num(parts.chipState.w) + " badge=" + num(parts.badge.w) +
+            " hints=" + num(parts.hints.w) + " meterLabel=" + num(parts.meterLabel.w) +
+            " meterBar=" + num(parts.meterBar.w) + " meterCount=" + num(parts.meterCount.w) +
+            " model=" + num(parts.chipModel.w) + " badge=" + num(parts.badge.w) +
             " truncated=" + (parts.hintsTruncated ? "1" : "0");
     text += "\ntext:\n";
     for (int y = 0; y < grid.ny; ++y) {
@@ -1251,9 +1226,7 @@ bool writeFile(const std::string& path, const std::string& text) {
     return out.good();
 }
 
-// ---------------------------------------------------------------------------
-// 13. The ABI: the numbers arrive through the C surface D calls (task 39)
-// ---------------------------------------------------------------------------
+// 13. The ABI: the numbers arrive through the C surface D calls
 
 /// One structured status, filled the way D fills it: the four chips' numbers plus the run's
 /// clock and step.
@@ -1289,7 +1262,7 @@ void checkRuntimeStatusAbi() {
     shellFrame(state, 100, 30);
     check(state.ui.chips == designChips(), "the sentence's chips are what the row draws");
 
-    // The workbench stores it and formats the four chips from the numbers (§6.3): the identity
+    // The workbench stores it and formats the four chips from the numbers: the identity
     // test, through the surface D actually calls rather than through the model function.
     TuiRuntimeStatus inbound = abiStatus(0, "");
     tuiSetRuntimeStatus(&handle, &inbound);
@@ -1355,7 +1328,7 @@ void checkRuntimeStatusAbi() {
     shellFrame(state, 100, 30);
     check(state.ui.chips == state.statusChips, "and the frame keeps projecting them");
 
-    // A session switch clears it too (§5.4): the numbers described the session the user left.
+    // A session switch clears it too: the numbers described the session the user left.
     tuiSetRuntimeStatus(&handle, &inbound);
     check(state.ui.status.structured, "set again before the switch");
     tui::tuiClearOutput(state);
@@ -1363,7 +1336,7 @@ void checkRuntimeStatusAbi() {
     check(state.ui.chips == state.statusChips, "and the row falls back to the sentence");
 }
 
-/// The row's clock (task 39, D-STATUS). It runs after the goldens on purpose: a frame that draws
+/// The row's clock. It runs after the goldens on purpose: a frame that draws
 /// a busy composer leaves ImGui's active-item state different, and the idle golden's caret is one
 /// cell of that state - a check that draws before the goldens must not feed them.
 void checkRuntimeStatusClock() {
@@ -1389,12 +1362,10 @@ void checkRuntimeStatusClock() {
     check(settled.nowBar.elapsedMs == 1234, "and D's settled duration is what idle shows");
 }
 
-// ---------------------------------------------------------------------------
-// 12. The flash (task 45, design §5.25, FR-29)
-// ---------------------------------------------------------------------------
+// 12. The flash
 
 /// A feedback item on the row: it owns the hint slot, wears the severity's mark and ink, and is
-/// drawn whole or not at all - the same rule the Raw Log's save answer followed, now for every
+/// drawn whole or not at all - the same rule the Raw Log's save answer follows for every
 /// answer the UI gives (a copy, a save, a settings write).
 void checkFlash() {
     views::NowBarInput info = idleRow();
@@ -1404,16 +1375,15 @@ void checkFlash() {
     check(infoParts.flashDrawn, "a flash takes the row's hint slot");
     check(infoParts.hintsText.find("Copied ANSWER") != std::string::npos,
           "the item's own words are drawn (got '" + infoParts.hintsText + "')");
-    check(infoParts.hintsText.find(views::kNowBarHintPalette) == std::string::npos,
+    check(infoParts.hintsText.find(views::kNowBarHintStop) == std::string::npos,
           "and the hints step aside while it is up");
     check(infoParts.hintsText.find(ui::icon(ui::Icon::Info, ui::textGlyphSet())) !=
               std::string::npos,
-          "an info item is drawn with the info mark (NFR-16: a mark beside the word)");
+          "an info item is drawn with the info mark (a mark beside the word)");
     const Grid infoGrid = drawFor(info, 100, 30);
     const std::string infoRow = infoGrid.rowText(infoGrid.ny - 1);
     check(infoRow.find("Copied ANSWER") != std::string::npos, "the row draws the flash");
-    check(infoRow.find(views::kNowBarHintPalette) == std::string::npos,
-          "and no palette hint beside it");
+    check(infoRow.find(views::kNowBarHintStop) == std::string::npos, "and no other hint beside it");
 
     // A success wears the ok mark, and a persistent item names the key that answers it.
     views::NowBarInput saved = idleRow();
@@ -1484,7 +1454,7 @@ void checkFlash() {
     check(shellGrid.rowText(shellGrid.ny - 1).find("Copied ANSWER") != std::string::npos,
           "and a whole frame draws it on the row");
 
-    // The `x` key is the frame's answer (task 45, plan/key_gate.md §4i): one press clears the item
+    // The `x` key is the frame's answer: one press clears the item
     // the row is showing, and it is read as a character (the terminal delivers no key for it).
     //
     // The composer holds the keyboard at startup, and `ui::takeCharacter` refuses while a text
@@ -1544,7 +1514,7 @@ void checkFlash() {
           "`x` answers the item the row named, not the one behind it (got " +
               std::to_string(state.ui.toasts.size()) + " left)");
 
-    // The save's answer comes through the same queue (task 45): the Raw Log's surface writes one
+    // The save's answer comes through the same queue: the Raw Log's surface writes one
     // notice, the frame publishes it as one item, and nothing else prints it - the two
     // presentations read the same queue. The surface's answers are applied at the *end* of the
     // frame (`applyRawLogAnswers`), so the item reaches the row on the next one, like every other
@@ -1564,8 +1534,8 @@ void checkFlash() {
     model::dismissShownToast(state.ui);
     const views::ShellFrame cleared = shellFrame(state, 100, 30);
     check(cleared.nowBar.flash.empty(), "an acknowledged item leaves no flash behind");
-    check(drawFor(cleared.nowBar, 100, 30).hasText(views::kNowBarHintPalette),
-          "and the hints return to the row");
+    check(!drawFor(cleared.nowBar, 100, 30).hasText("Saved to /tmp/llmfun-raw.log"),
+          "and the row draws no flash once the queue is empty");
 }
 
 void checkGoldens(bool update) {

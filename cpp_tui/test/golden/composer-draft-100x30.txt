@@ -27,10 +27,10 @@ text:
 
 
 
-  Explain the failing test                                                             qwen3-coder
+  Explain the failing test
   in tui_chat.cpp
   and fix it
-  ctx █░░░░░ 42k                                                                          Send
+                                                                                          Send
 
 
 fills:

@@ -2,9 +2,9 @@ name: nowbar-running
 screen: 60x20
 nowbar: 0,19 60x1
 phase: writing compact: 0
-parts: rule=1 mark=1 state=7 tail=8 hints=26 ctx=9 speed=0 model=0 stateChip=1 badge=0 truncated=0
+parts: rule=1 mark=1 state=7 tail=8 hints=0 meterLabel=3 meterBar=6 meterCount=8 model=13 badge=0 truncated=1
 text:
-   llmfun                     ◐ running 00:12    Settings
+   llmfun              Ctrl+K commands Shift+?   Settings
 
 
   llmfun
@@ -20,12 +20,12 @@ text:
 
 
 
-   Ask anything...  / commands                 qwen3-coder
-  42k  writing · 38.1 tok/s                       Stop
+   Ask anything...  / commands
+                                                  Stop
 
-  ◐ writing | 00:12  Esc stop | Ctrl+K commands  ctx 42k  ◐
+  ◐ writing | 00:12       ctx █░░░░░ 42k/128k  qwen3-coder
 fills:
-0: 1-1=111, 10-10=102, 29-45=23, 47-58=23
+0: 1-1=111, 10-10=102, 47-58=23
 1: 
 2: 
 3: 
@@ -44,4 +44,4 @@ fills:
 16: 0-0=67, 1-1=23, 2-2=231, 3-58=23, 59-59=67
 17: 0-0=67, 1-58=23, 59-59=67
 18: 0-59=67
-19: 0-0=111, 48-56=23
+19: 0-0=111, 46-58=23

@@ -1,11 +1,10 @@
 /// Status chips: the four status facts as data, independent of any renderer.
 ///
 /// The status area answers four questions — how much context, how fast, which
-/// model, what state — and shows one chip per answer. Until D sends structured
-/// status (task 39) the only source is the one line D formats in
+/// model, what state — and shows one chip per answer. When D has not sent structured
+/// status, the only source is the one line D formats in
 /// `formatStatusText()` (`source/llm/app_agent/ui.d:421-425`), so this module
-/// owns the documented split of that sentence into the four chips (design §6.3,
-/// FR-12).
+/// owns the split of that sentence into the four chips.
 ///
 /// Layering: `model` depends on nothing app-specific — no ImGui, no `tui.h`, no
 /// `ChatMessage` — so the splitter is testable without a renderer
@@ -18,15 +17,16 @@
 
 namespace llmfun::tui::model {
 
-/// The UI's one phase vocabulary (D-PHASE, design §4.7/§5.11): seven states, one
+/// The UI's one phase vocabulary: seven states, one
 /// word each, shared by the now bar, the status chips, the composer's phase line and
 /// the rail's running mark. It lives here, beside `RuntimeStatus`, because
 /// `RuntimeStatus::phase` *is* this vocabulary's ordinal - and because a view that
 /// reads the bars must not have to include the whole state aggregate for it.
 ///
-/// The ordinal is the ABI's (`TuiRuntimeStatus.phase`, task 39), and it is *mapped*,
-/// never cast: an ordinal this build does not know answers `Idle` instead of turning
-/// into whichever phase happens to sit next to it.
+/// The numbers match D's `TuiRuntimeStatus.phase`, so a run status crosses the
+/// surface without a translation table. A number this build has no member for
+/// answers `Idle` (`phaseFromOrdinal()`).
+// TODO: bad design. This should instead be exposed to the D side via ImportC
 enum class Phase : int {
     Idle = 0,
     Thinking = 1,
@@ -40,8 +40,10 @@ enum class Phase : int {
 /// Seven, spelled out so a new phase trips the walk in `./test_nowbar`.
 inline constexpr int kPhaseCount = 7;
 
-/// The phase an ABI ordinal names; anything outside `0..6` is `Idle` (task 39:
-/// "unknown phases clamp to idle with a debug log, never a crash").
+/// The `Phase` the run status's phase number names. D reports the phase as a
+/// plain int, and the number can name a phase this build has no member for.
+/// Such a number answers `Idle`, so the UI shows "Ready" instead of a phase
+/// it cannot name.
 Phase phaseFromOrdinal(int ordinal);
 
 /// The ordinal of `phase` - the inverse of `phaseFromOrdinal()`, for the one place a
@@ -49,12 +51,11 @@ Phase phaseFromOrdinal(int ordinal);
 /// can be written as a `switch` over named phases instead of a second copy of the numbers.
 constexpr int phaseOrdinal(Phase phase) { return static_cast<int>(phase); }
 
-/// The one word a phase is called by: the now bar's left side, the composer's phase
-/// line, a log line. `Ready` for idle and lower case for the six others - the top
-/// bar's pill vocabulary (`views::pillLabel`), so one state is never two words.
+/// The one word a phase is called by: the now bar's left side, a log line.
+/// `Ready` for idle and lower case for the six others, so one state is never two words.
 const char* phaseWord(Phase phase);
 
-/// The coarse state for the fourth chip (`Ready|Busy`, design §4.7).
+/// The coarse state for the fourth chip (`Ready|Busy`).
 ///
 /// The design gives that chip two words, and a run is `Busy` in all four of its
 /// phases - the fine-grained phase belongs to the now bar's left side, not to the
@@ -65,13 +66,13 @@ const char* phaseWord(Phase phase);
 /// mapping.
 const char* phaseStateWord(Phase phase);
 
-/// The structured status D will send (task 39 → `tuiSetRuntimeStatus`).
-/// Numbers, not sentences (design §6.3): the view formats them once per value
+/// The structured status D sends (`tuiSetRuntimeStatus`).
+/// Numbers, not sentences: the view formats them once per value
 /// change. `phase` is the ordinal of the UI's own phase vocabulary (see `Phase`
 /// above); `structured == false` means the chips came from the sentence
 /// splitter instead of this struct.
 struct RuntimeStatus {
-    int phase = 0;      ///< phase ordinal (task 28's `Phase`)
+    int phase = 0;      ///< phase ordinal (`Phase`)
     std::string detail; ///< current tool or model step, one line
     long long contextUsed = 0;
     long long contextMax = 0;
@@ -91,9 +92,9 @@ inline constexpr std::size_t kStatusChipNameCount =
 
 /// The four chips — the values only. The `ctx ` label and the separators belong
 /// to the view: it is the view that decides which chips fit on the row, and a
-/// value must not change with that decision. Task 39's structured path has to
-/// reproduce these strings byte-for-byte for identical numbers (design §6.3:
-/// "both paths must produce identical chips for the same values").
+/// value must not change with that decision. The structured path has to
+/// reproduce these strings byte-for-byte for identical numbers: both paths
+/// must produce identical chips for the same values.
 struct StatusChips {
     std::string context; ///< "42k/128k" — used/max, abbreviated (never "ctx …")
     std::string speed;   ///< "38.1 tok/s"
@@ -101,7 +102,7 @@ struct StatusChips {
     std::string state;   ///< "Ready", "Busy", or an unmatched sentence verbatim
 
     /// The numbers `context` was formatted from, kept so a *view* that needs the
-    /// fraction (the composer's mini meter, design §4.6) does not have to parse the
+    /// fraction (the composer's mini meter) does not have to parse the
     /// chip back - a second grammar for the same sentence is a second answer waiting
     /// to disagree with the first. `contextMax == 0` means the sentence carried no
     /// usable pair (the chip is then `kMissingChipValue` or a partial pair), and a
@@ -116,8 +117,8 @@ static_assert(sizeof(StatusChips) == 4 * sizeof(std::string) + 2 * sizeof(long l
               "a new chip needs a name in kStatusChipNames (and its own prose)");
 
 /// The chip value for a field the sentence does not carry — absent *or* present
-/// but empty (`Context: 1/ tokens`). A missing value is never rendered as "0"
-/// (design §6.3): zero is a number, this is its absence. The view may draw an
+/// but empty (`Context: 1/ tokens`). A missing value is never rendered as "0":
+/// zero is a number, this is its absence. The view may draw an
 /// ASCII floor glyph for it in the text grid (U+2014 is East-Asian *Ambiguous*,
 /// so a CJK terminal could render it two cells wide); the model value is always
 /// this one.
@@ -144,12 +145,12 @@ inline constexpr const char* kDefaultStatusSentence = "Context: 0/0 tokens | Mod
 StatusChips splitStatusText(std::string_view sentence);
 
 /// The chips as a value: two sets are equal when every field agrees. The
-/// structured/split identity test (design §6.3) and the frame layer's "did the
+/// structured/split identity test and the frame layer's "did the
 /// chip source change" test both compare instead of re-deriving.
 bool operator==(const StatusChips& a, const StatusChips& b);
 bool operator!=(const StatusChips& a, const StatusChips& b);
 
-/// The chips for a structured status (task 39's `TuiRuntimeStatus`, D-STATUS).
+/// The chips for a structured status (`TuiRuntimeStatus`).
 ///
 /// Formatted with the splitter's own formatters, so the two paths cannot produce
 /// two different strings for the same numbers (`./test_nowbar` pins the identity):

@@ -33,9 +33,7 @@ namespace {
 
 using ui::ColorToken;
 
-// ---------------------------------------------------------------------------
 // Text helpers (the top bar's two: one measure, one clipped line)
-// ---------------------------------------------------------------------------
 
 /// `text`'s width in the profile's own unit: cells on the grid (a wide glyph counts
 /// two) and pixels in the pixel profile (the atlas).
@@ -157,9 +155,7 @@ private:
     bool active_ = false;
 };
 
-// ---------------------------------------------------------------------------
 // The field's ImGui callback: the resize hook and the paste fold
-// ---------------------------------------------------------------------------
 
 /// What the field's callback needs between calls. `capture` non-null switches the
 /// character filter into *capture* mode: this frame's characters are a large paste, so
@@ -176,7 +172,7 @@ struct FieldContext {
     std::string* capture = nullptr;
     bool afterCr = false;
     /// Set when a `/` on an empty line asked for the command palette: the character is
-    /// taken instead of inserted (design §4.6).
+    /// taken instead of inserted.
     bool* palette = nullptr;
     std::size_t charsSeen = 0;
     int firstCaret = 0;
@@ -228,7 +224,7 @@ int fieldCallback(ImGuiInputTextCallbackData* data) {
             ctx->firstHadSelection = data->SelectionStart != data->SelectionEnd;
         }
         ++ctx->charsSeen;
-        // `/` on an empty line is the palette's command entry (design §4.6). It is taken,
+        // `/` on an empty line is the palette's command entry. It is taken,
         // not inserted, so the query never starts with a slash the user meant as a
         // command - and a `/` inside a line stays an ordinary character.
         //
@@ -264,9 +260,10 @@ int fieldCallback(ImGuiInputTextCallbackData* data) {
 
 /// The caret's line in the *widget's* text, or -1 when the field is not being edited.
 ///
-/// Read before the widget is called: `↑` on the first line is a history recall, and by
+/// Read before the widget is called: the history recall is gated on the caret's
+/// line (the first/last rule), and by
 /// the time the widget has processed the press the caret may already have moved to
-/// that line (which would turn one press into "move up, then recall").
+/// that line (which would turn one press into "move the caret, then recall").
 int caretLineOf(ImGuiID id) {
     ImGuiInputTextState* state = ImGui::GetInputTextState(id);
     if (state == nullptr)
@@ -365,7 +362,7 @@ void parkPaste(PasteState& paste, const PastePlan& plan, std::size_t insertAt,
     paste.question = "Paste " + std::to_string(plan.chars) + " characters?";
 }
 
-/// The placeholder this profile and this width show (design §4.6's degradation).
+/// The placeholder this profile and this width show.
 const char* placeholderFor(const ui::Metrics& m, float w) {
     const bool compact = w < static_cast<float>(kComposerFullPlaceholderGu) * m.gu;
     if (m.textGrid)
@@ -375,9 +372,7 @@ const char* placeholderFor(const ui::Metrics& m, float w) {
 
 } // namespace
 
-// ---------------------------------------------------------------------------
 // The paste policy
-// ---------------------------------------------------------------------------
 
 std::string normalisePaste(std::string_view raw) {
     std::string out;
@@ -419,7 +414,7 @@ bool foldPasteChar(bool& afterCr, char32_t in, char32_t& out) {
 PastePlan planPaste(std::string_view raw) {
     PastePlan plan;
     plan.text = normalisePaste(raw);
-    // D-PASTE counts *characters*: a byte threshold would ask about a third of the CJK
+    // The paste rule counts *characters*: a byte threshold would ask about a third of the CJK
     // text it promises (`ui::utf8Count`).
     plan.chars = static_cast<std::size_t>(ui::utf8Count(plan.text));
     plan.ask = plan.chars > kPasteAskAboveChars;
@@ -554,9 +549,7 @@ bool pasteInFlight(const PasteState& paste, long long nowMs) {
     return nowMs > 0 && nowMs < paste.inFlightUntilMs;
 }
 
-// ---------------------------------------------------------------------------
 // The rest of the input policy
-// ---------------------------------------------------------------------------
 
 int draftLines(std::string_view draft) {
     int lines = 1;
@@ -601,7 +594,7 @@ SendTrigger sendTrigger(bool actionPressed, bool enterPressed, bool tabPressed,
     // The action is a click, so it can never be part of a payload or a composition.
     if (actionPressed)
         return SendTrigger::Action;
-    // A paste's own newline is not the user's send (D-PASTE), and a composition's Enter
+    // A paste's own newline is not the user's send, and a composition's Enter
     // accepts the candidate (it is not a send). Then the capability: a key that cannot
     // send never sends, whatever the setting says.
     if (composing || pasteInFlightNow)
@@ -650,8 +643,9 @@ bool historyRecall(const std::vector<std::string>& entries, int& pos, std::strin
     if (entries.empty() || step == 0)
         return false;
     // History is the field's: a press with no caret (the field is not being edited)
-    // recalls nothing, and the caret's line is the gate that keeps `↑`/`↓` caret
-    // commands inside a multi-line draft.
+    // recalls nothing, and the caret's line is the gate: inside a multi-line draft
+    // the recall only fires from the draft's first and last lines; everywhere else
+    // the keys stay caret commands.
     if (caretLineIndex < 0)
         return false;
     if (step < 0 && caretLineIndex != 0)
@@ -677,7 +671,7 @@ bool historyRecall(const std::vector<std::string>& entries, int& pos, std::strin
         ++pos;
     } else {
         if (pos < 0)
-            return false; // not navigating: ↓ is the caret's
+            return false; // not navigating: below the last line PgDn is a caret move
         --pos;
     }
     if (pos >= 0) {
@@ -706,9 +700,7 @@ float contextFraction(long long used, long long max) {
     return static_cast<float>(std::clamp(fraction, 0.0, 1.0));
 }
 
-// ---------------------------------------------------------------------------
 // The view
-// ---------------------------------------------------------------------------
 
 void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::Metrics& m) {
     ComposerState* state = in.state;
@@ -771,7 +763,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
     const bool hasMeta =
         innerW > 0.0f && textH > 0.0f && metaY + metaH <= region.bottom() - border + 0.01f;
 
-    // --- the container -----------------------------------------------------
+    // the container
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ui::panel(dl, m, region, ColorToken::raised, true);
     blankCells(m, region, ColorToken::raised);
@@ -839,7 +831,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
     const std::string draftBeforeEsc =
         (escPressed || overlayEscPressed) ? *in.buffer : std::string();
 
-    // The composer's own keys, resolved through the one table (D-KEYMAP): the view asks
+    // The composer's own keys, resolved through the one table: the view asks
     // the registry what a pressed chord *means* and never assigns a chord of its own.
     const model::Action action =
         in.acceptKeys ? model::resolvePressed(
@@ -869,53 +861,41 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         st.submit = true;
     const bool keySent = keyTrigger == SendTrigger::Enter || keyTrigger == SendTrigger::Tab;
 
-    // --- the mode/model text, on the text line -----------------------------
+    // the mode text, on the text line
     // Hidden, not truncated, when the field would fall below `kComposerMinTextGu`: the
-    // query is the point of the row (design §4.6's degradation). Nothing is invented
-    // for a mode the app does not have - an empty mode simply drops the separator.
-    const char* separator = ui::icon(ui::Icon::DisclosureClosed, glyphSetFor(m));
-    std::string modeModel;
-    if (!in.mode.empty())
-        modeModel = in.mode;
-    const bool modelKnown = !in.model.empty() && in.model != model::kMissingChipValue;
-    if (modelKnown) {
-        if (!modeModel.empty()) {
-            modeModel += ' ';
-            modeModel += separator;
-            modeModel += ' ';
-        }
-        modeModel += in.model;
-    }
-    float modeModelW = textUnits(m, modeModel);
-    // The field keeps its minimum *and* the gap: the model name is the less important
-    // half of the text line (design §4.6's degradation), and a field narrower than
+    // query is the point of the row. Nothing is invented
+    // for a mode the app does not have - an empty mode draws nothing (the model
+    // name is the now bar's chip, not this row's second half).
+    std::string mode = in.mode;
+    float modeW = textUnits(m, mode);
+    // The field keeps its minimum *and* the gap: the mode word is the less important
+    // half of the text line, and a field narrower than
     // `kComposerMinTextGu` is a field the user cannot read their query in.
-    if (modeModelW > 0.0f &&
-        innerW - (modeModelW + m.pad2) < static_cast<float>(kComposerMinTextGu) * m.gu) {
-        modeModel.clear();
-        modeModelW = 0.0f;
+    if (modeW > 0.0f && innerW - (modeW + m.pad2) < static_cast<float>(kComposerMinTextGu) * m.gu) {
+        mode.clear();
+        modeW = 0.0f;
     }
-    const float modeModelGap = modeModelW > 0.0f ? m.pad2 : 0.0f;
+    const float modeGap = modeW > 0.0f ? m.pad2 : 0.0f;
 
     ui::Rect textArea;
     textArea.x = innerX;
     textArea.y = textY;
-    textArea.w = std::max(0.0f, innerW - modeModelW - modeModelGap);
+    textArea.w = std::max(0.0f, innerW - modeW - modeGap);
     textArea.h = textH;
     textArea.cells = m.textGrid;
-    if (modeModelW > 0.0f) {
-        // Right-aligned on the text line's first row: the design's `Plan ▸ qwen3-coder`.
+    if (modeW > 0.0f) {
+        // Right-aligned on the text line's first row: the `Plan` word.
         lineRight(m, ui::Rect{innerX, textY, innerW, m.row, m.textGrid}, innerX + innerW, textY,
-                  modeModel, ColorToken::textLow);
+                  mode, ColorToken::textLow);
     }
 
-    // --- the text area, or the paste question ------------------------------
+    // the text area, or the paste question
     if (st.paste.ask) {
         // The question *replaces* the field: nothing is edited while it is up, so there
         // is no half-applied payload and `Esc` has exactly one meaning (discard). Its
         // answer is a real button beside it, and the action keeps its own label: a
-        // running agent must not lose its `Stop` control because a question is up
-        // (D-CANCEL is independent of the paste state).
+        // running agent must not lose its `Stop` control because a question is up:
+        // the cancel rule is independent of the paste state.
         const ui::ButtonSpec insertSpec{"Insert", true, false, false};
         const float insertW =
             std::min(ui::measureButton(m, insertSpec).w, std::max(0.0f, textArea.w - m.pad1));
@@ -988,8 +968,8 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         //
         // Neither backend reports bracketed paste: nothing asks the terminal for `?2004h`
         // (the ncurses/imtui backends never send it), and the payload's newline arrives as
-        // an `Enter` *key* event rather than a character - `plan/key_gate.md` §8 leaves
-        // bracketed paste out of scope for the gate, so the burst is the signal there is.
+        // an `Enter` *key* event rather than a character - the key gate's rules leave
+        // bracketed paste out of scope, so the burst is the signal there is.
         if (capture && st.paste.runRaw.empty()) {
             st.paste.runAt = std::string::npos;
             st.paste.runRemoved = 0;
@@ -1039,7 +1019,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
                             ImVec2(textArea.right(), textArea.bottom()), true);
         ImGui::SetCursorScreenPos(ImVec2(textArea.x, textArea.y));
         if (in.offline) {
-            // Disabled controls are dimmed, not removed (design §4.11); the active id has
+            // Disabled controls are dimmed, not removed; the active id has
             // to be released by hand, or the field keeps a keyboard it appears not to
             // have (the shipped composer's note).
             if (fieldActive)
@@ -1091,7 +1071,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         }
 
         // The payload this frame's characters were folded into, applied the one way
-        // D-PASTE allows: normalised, asked about above the limit, never sent, and placed
+        // the paste rule allows: normalised, asked about above the limit, never sent, and placed
         // where the paste started. The run is buffered rather than inserted chunk by
         // chunk: a multi-frame paste must be one payload, or its chunks would land in
         // frame order and the limit would be judged on one frame's slice.
@@ -1106,7 +1086,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
             // profile's clipboard paste is ImGui's own insertion (`stb_textedit_paste`),
             // so the text is already in when the view sees it. The edit is the difference
             // between the two drafts; over the limit it is undone and asked about, exactly
-            // like a captured payload (D-PASTE applies to both profiles).
+            // like a captured payload (the rule applies to both profiles).
             const TextEdit edit = diffText(draftBefore, *in.buffer);
             const PastePlan plan = planPaste(edit.inserted);
             if (plan.ask) {
@@ -1118,7 +1098,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         }
     }
 
-    // --- the Esc chain's last two steps (D-ESC) ----------------------------
+    // the Esc chain's last two steps
     // Steps 1 and 2 (close the overlay, cancel the run) belong to the frame layer; the
     // *last two* have to run here, after the widget, because ImGui's cancel_edit has
     // already reverted the buffer inside the call. The chain's order is
@@ -1145,7 +1125,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
                 // ImGui's cancel_edit released the field on this press. The chain's next
                 // steps (clear, then blur) are *presses*, so the keyboard goes back to the
                 // field the user was typing in - only the blur step leaves it released
-                // (D-ESC: one step per press, not one step per focus).
+                // (one step per press, not one step per focus).
                 st.focusRequested = true;
             } else if (step == model::Action::ClearInput) {
                 in.buffer->clear();
@@ -1161,8 +1141,8 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
                 st.focusedLastFrame = false;
                 st.escapeConsumed = true;
             } else if (step == model::Action::ExitFocusMode) {
-                // The step is the frame's (task 43); the widget's cancel_edit is the field's, so
-                // the draft goes back and the keyboard stays - D-ESC's rule that only the blur
+                // The step is the frame's; the widget's cancel_edit is the field's, so
+                // the draft goes back and the keyboard stays - the rule that only the blur
                 // step leaves the field. `escapeConsumed` stays false because the frame is the
                 // one that performs this step, and a press may only be spent once.
                 if (*in.buffer != draftBeforeEsc)
@@ -1182,7 +1162,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         st.focusRequested = true;
     }
 
-    // --- history (design §4.6) ---------------------------------------------
+    // history
     // After the widget, because the buffer is rewritten and the widget ignores a write
     // to a buffer it is editing: the active id is dropped and the one-shot focus
     // request re-reads the recalled text on the next frame (the shipped composer's
@@ -1201,11 +1181,10 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         }
     }
 
-    // --- the meta row -------------------------------------------------------
-    // Left: the mini context meter. Middle: the phase and the speed while a run is
-    // active. Right: the one action. The now bar's chips stay canonical for the
-    // numbers; this row only ever *reads* the same pair (`StatusChips::contextUsed/
-    // contextMax`), so the two cannot disagree.
+    // the meta row
+    // Left: the history buttons (text grid only). Right: the one action (the
+    // meter, the phase and the speed live on the now bar, the row that owns the
+    // run's numbers).
     const char* actionLabel = "Send";
     bool actionPrimary = true;
     bool actionEnabled = !in.offline;
@@ -1215,8 +1194,8 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         actionEnabled = actionEnabled && !in.stopping;
     }
     // A pending paste question does *not* take this control over: its `Insert` lives
-    // beside the question, so a running agent keeps its `Stop` (D-CANCEL is independent
-    // of the paste state). The idle `Send` *is* disabled while the question is up: it
+    // beside the question, so a running agent keeps its `Stop` (the cancel rule is
+    // independent of the paste state). The idle `Send` *is* disabled while the question is up: it
     // would send the pre-paste draft and `applyComposerAnswers()` drops the pending
     // payload, which is not an answer to the question. Stop keeps its state.
     if (st.paste.ask && !in.busy)
@@ -1233,75 +1212,9 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
     if (hasMeta) {
         ui::Rect metaRow{innerX, metaY, innerW, metaH, m.textGrid};
 
-        // The meter. The full form (`ctx ████░░ 42k`) needs ~18 cells, so the grid drops
-        // the bar below 80 cells and keeps the count (design §4.6); the pixel profile
-        // always has room for its ten segments.
-        const bool fullMeter =
-            !m.textGrid || region.w >= static_cast<float>(kComposerFullMeterGu) * m.gu;
-        if (st.meterUsed != in.contextUsed || st.meterMax != in.contextMax ||
-            st.meterKnown != in.contextKnown) {
-            st.meterUsed = in.contextUsed;
-            st.meterMax = in.contextMax;
-            st.meterKnown = in.contextKnown;
-            // A missing capacity is not "0 tokens": the count is the used value only
-            // when the sentence carried a pair to abbreviate *from*.
-            if (!in.contextKnown) {
-                // U+2014 is East-Asian *Ambiguous*: a CJK terminal may draw it two
-                // cells wide, so the grid gets the ASCII floor (the model's own rule
-                // for the chips' missing value).
-                st.meterText = m.textGrid ? "-" : std::string(model::kMissingChipValue);
-            } else {
-                st.meterText = ui::formatCount(in.contextUsed);
-            }
-        }
-        float meterX = metaRow.x;
-        if (fullMeter && in.contextKnown && in.contextMax > 0) {
-            const int segments = m.textGrid ? kMeterSegmentsGrid : kMeterSegmentsGui;
-            const char* label = "ctx";
-            lineAt(m, metaRow, meterX, metaRow.y, label, ColorToken::textLow);
-            meterX += textUnits(m, label) + m.pad1;
-            const ui::Size barSize = ui::measureMeter(m, segments);
-            ui::Rect bar{meterX, metaRow.y + std::floor((metaRow.h - barSize.h) * 0.5f), barSize.w,
-                         barSize.h, m.textGrid};
-            ColorToken barInk = ColorToken::accent;
-            switch (meterLevel(in.contextUsed, in.contextMax)) {
-            case MeterLevel::Normal:
-                break;
-            case MeterLevel::Warn:
-                barInk = ColorToken::stateWarn;
-                break;
-            case MeterLevel::Danger:
-                barInk = ColorToken::stateDanger;
-                break;
-            }
-            ui::meter(m, bar, segments, contextFraction(in.contextUsed, in.contextMax), barInk);
-            // The compaction threshold, when the app knows one: a one-unit tick across
-            // the bar's own row (`compactAt == 0` is "unknown" and draws nothing).
-            if (in.compactAt > 0 && in.contextMax > 0) {
-                const float fraction = contextFraction(in.compactAt, in.contextMax);
-                const float tickX = bar.x + std::floor(fraction * bar.w);
-                ImDrawList* tickList = ImGui::GetWindowDrawList();
-                tickList->AddRectFilled(
-                    ImVec2(std::max(bar.x, tickX - m.border * 0.5f), bar.y),
-                    ImVec2(std::max(bar.x, tickX - m.border * 0.5f) + m.border, bar.y + bar.h),
-                    ImGui::GetColorU32(ui::color(ColorToken::textHi)));
-            }
-            meterX = bar.right() + m.pad1;
-        }
-        lineAt(m, metaRow, meterX, metaRow.y, st.meterText, ColorToken::textLow);
-
         // History, on the text grid: two real 1-row buttons beside the action.
-        //
-        // `plan/key_gate.md` §4b measured that this backend delivers *neither* `↑`/`↓`
-        // (they arrive as `Escape` + `[A`, which also releases the field) *nor*
-        // `Ctrl+Up`/`Ctrl+Down` (no key event at all) - so a chord that nobody receives
-        // is not a history path, and the two buttons the shipped composer draws stay
-        // here (D-KEYGATE: the fallback column is a legitimate outcome). The pixel
-        // profile has no use for them: both chords are delivered there, and the arrow
-        // keys are the design's own gesture.
         const ui::ButtonSpec prevSpec{"Prev", true, false, false};
         const ui::ButtonSpec nextSpec{"Next", true, false, false};
-        float historyLeft = actionX;
         bool prevPressed = false;
         bool nextPressed = false;
         if (m.textGrid && !in.history->empty() && hasMeta) {
@@ -1309,41 +1222,21 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
             const float nextW = ui::measureButton(m, nextSpec).w;
             const float nextX = actionX - m.pad1 - nextW;
             const float prevX = nextX - prevW;
-            // Only when the row can hold them beside the count and the action: a history
-            // button that eats the action would trade a control for a hint.
-            if (prevX >= meterX + textUnits(m, st.meterText) + m.pad1) {
+            // Only when the row can hold them beside the action: a history button that
+            // eats the action would trade a control for a hint.
+            if (prevX >= metaRow.x + m.pad1) {
                 ui::Rect prevRect{prevX, metaRow.y, prevW, metaRow.h, m.textGrid};
                 ui::Rect nextRect{nextX, metaRow.y, nextW, metaRow.h, m.textGrid};
                 ui::button(prevSpec, m, prevRect);
                 prevPressed = ui::buttonPressed(prevSpec, m, prevRect);
                 ui::button(nextSpec, m, nextRect);
                 nextPressed = ui::buttonPressed(nextSpec, m, nextRect);
-                historyLeft = prevX;
-            }
-        }
-
-        // Middle: the phase and the speed, only while a run is active. Two already
-        // formatted values joined - the numbers themselves are never reformatted here.
-        if (in.busy) {
-            std::string busy = in.phase;
-            if (!in.speed.empty() && in.speed != model::kMissingChipValue) {
-                if (!busy.empty())
-                    busy += " \u00b7 ";
-                busy += in.speed;
-            }
-            if (!busy.empty()) {
-                const float middleX = meterX + textUnits(m, st.meterText) + m.pad2;
-                const float middleRoom = historyLeft - m.pad2 - middleX;
-                if (middleRoom > 0.0f) {
-                    ui::Rect middle{middleX, metaRow.y, middleRoom, metaRow.h, m.textGrid};
-                    lineAt(m, middle, middleX, metaRow.y, busy, ColorToken::textMid);
-                }
             }
         }
 
         // A button press is the user's whole gesture, so it does not need the caret gate
         // the arrow keys need: `(0, 1)` says "the draft is one line and the caret is on
-        // it", which allows both directions (design §4.6's gate is about *keys* that
+        // it", which allows both directions (the gate is about *keys* that
         // double as caret movement).
         if (prevPressed || nextPressed) {
             std::string recalled;
@@ -1357,11 +1250,11 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
             }
         }
 
-        // Right: the action. It is a real item (the read-only-`InputText` fake is gone):
+        // Right: the action. It is a real item:
         // `Send` sends, `Stop` requests the cancel the frame turns into the shipped
-        // `stopAgent()` path (D-CANCEL), `Stopping` is disabled until the run ends. A
+        // `stopAgent()` path, `Stopping` is disabled until the run ends. A
         // pending paste question does not take it over: its `Insert` sits beside the
-        // question, so D-CANCEL never depends on the paste state.
+        // question, so the cancel never depends on the paste state.
         if (actionW > 0.0f) {
             ui::Rect actionRect{actionX, metaY + std::floor((metaH - m.row) * 0.5f), actionW, m.row,
                                 m.textGrid};

@@ -26,7 +26,7 @@
 ///    *anywhere* row while a text field has the keyboard, so typing `m` or `?` into the
 ///    composer cannot reach a rail binding or open the help page (task 42). A row scoped to
 ///    `Focus::Composer` is the field's own key and is the
-///    one exception (`↑`/`↓` history, task 27): it can only fire while the field
+///    one exception (`PgUp`/`PgDn` history): it can only fire while the field
 ///    owns the keyboard, and it is what the composer's own resolve asks for. A *function*
 ///    key (`F1`-`F12`) is the rule's other exception: it types nothing and means nothing to a
 ///    field, so a plain function-key row fires in the composer too - which is what makes `F11`
@@ -88,12 +88,14 @@ enum class Action {
     /// page the focusable `Load earlier` row reveals, so one press is one page
     /// whatever put the thread on screen.
     LoadEarlier,
-    /// Recall the previous (older) composer query: `↑` on the draft's first line,
-    /// or its `Ctrl+Up` alias (design §4.6, task 27). Performed by the composer,
-    /// which is the only region that knows where the caret is.
+    /// Recall the previous (older) composer query: `PgUp` while the composer
+    /// owns the keyboard. Performed by the composer, which is the only region
+    /// that knows where the caret is.
     HistoryPrev,
     /// Recall the next (newer) query, or hand the draft back past the newest entry:
-    /// `↓` on the draft's last line, or its `Ctrl+Down` alias.
+    /// `PgDn` while the composer owns the keyboard. Outside the composer the same
+    /// plain keys are `LoadEarlier`'s - the exact-region row wins over the
+    /// `anywhere` one, which is the collision the resolver's order answers.
     HistoryNext,
     /// Show or hide the inspector panel (`Ctrl+O`). The press is an
     /// explicit choice, so it writes 0 or 1 into `ShellPrefs::inspectorOpen` and never back

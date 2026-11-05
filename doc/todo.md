@@ -25,24 +25,12 @@
 - a /c must also remove all nudges from latest message and up to hmm ten messages back in the history. This is because sometimes a nudge has been added because of a network failure and if the network then comes back online the model/agent becomes confused.
 
 # ui
-- NFR-15: copy/expansion are not keyboard-only. The block row and the Copy chip are `InvisibleButton`s
-    (`ImGuiItemFlags_NoNav`) and no action moves `ui.thread.focus`, so `y` needs a pointer click first
-    and expansion has no keyboard path. Options: `ImGuiButtonFlags_EnableNav` on the row (then find a
-    usable way into the thread window - Ctrl+Tab/Tab are not distinguishable in the grid) plus a test
-    that focuses and copies with keys only; or a dedicated "focus next/previous block" action. Until
-    then restate NFR-15.
 - add UI where an agent can query the user for input.
 - make it easy to create a simple, straight pipeline from the TUI as a chat message.
 - add a tab which show a live stream of tool use
 - add a menu item to open a separate window to show more detailed statistic about LLM such as latency, token use in total etc
 - add a menu item to navigate the RAG database
-- the title in the GUI should contain the session name
 - the session sometimes have a system prompt as its description
-- make the colors configurable for user/agent/answer
-- make the whole color schema swappable/configurable
-- make it so that a new instance with --local-setup inherit the central configuration
-- make Pin persistent
-- make it possible to control how much is printed when it is working such as "minimal" where you only see it is working compared to "maximum" where you see everything.
 
 # pipeline
 - must support resuming where a pipeline was last interrupted
