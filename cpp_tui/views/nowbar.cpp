@@ -335,13 +335,10 @@ NowBarParts nowBarMeasure(const NowBarInput& input, const ui::Rect& bar, const u
 
     // The ladder: the hints yield first, then the speed chip, then the count
     // compacts (`42k/128k` -> `42k`), then the model chip yields, then the meter's bar -
-    // the `ctx` label and the count are the last right-side part standing, and the meter
-    // never disappears while the chips' numbers are known. When even that does not fit,
-    // the row says nothing on the right rather than a fragment of a number.
-    //
-    // The pixel profile also drops the bar below the full-meter breakpoint
-    // (`kComposerFullMeterGu`): a bar squeezed into fewer cells is number-shaped noise.
-    // On the grid the bar yields only when it cannot fit.
+    // the `ctx` label and the count are the last right-side part standing. When even
+    // that does not fit, the row says nothing on the right rather than a fragment of
+    // a number. The pixel profile also drops the bar below the full-meter breakpoint
+    // (`kComposerFullMeterGu`): a squeezed bar is number-shaped noise.
     const bool fullBar = m.textGrid || bar.w >= static_cast<float>(kComposerFullMeterGu) * m.gu;
 
     // A bar needs a fraction to fill, and an unknown context has none: its forms draw the

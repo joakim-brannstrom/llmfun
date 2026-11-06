@@ -169,7 +169,7 @@ does) so they never leak into production or pollute other tests.
 |-------|---------|
 | Public (plugin contract) | `SlashCommand`, `SlashCommandRegistry`, `SlashArgMode`, `AgentStatus`, `addStartupSlashCommand`, `AgentApp.registerSlashCommand`, `AgentApp.slashCommands()`, `AgentApp.sendChatMessage` |
 | Package (`llm.app_agent` only) | The five group registrars, `AgentApp`'s command-facing members (`llmConf`, `rag`, `monitor`, `agent_`, `sessionStore`, `activeSession`, `pendingDeleteId`, `lastServerStat`, `debugMode`, `conf_`, `uiMsg`, `skillManager_`, `slashCommands_`, `doCompress`, `doListSessions`, `doCreateSession`, `doRenameSession`, `doDeleteSession`, `switchToSession`, `commitActiveSession`, `shortSessionId`, `pickFallbackAfterDelete`, `makeStreamCallback`, `makePipelineStreamCallback`, `printHelp`), `PendingDeleteAction`, `decideDeleteCommand` |
-| Private | `runAgent`, `run`, `oneShotQuery`, `uiTid`, `dispose`, `processChatMessage`, `processResult`, `activateSession`, `setStatusText`, `progressCallback`, `sendChatThinkMessage`, `updateRagMemory`, `setupSession` |
+| Private | `runAgent`, `run`, `oneShotQuery`, `uiTid`, `dispose`, `processChatMessage`, `processResult`, `activateSession`, `sendRuntimeStatus`, `progressCallback`, `sendChatThinkMessage`, `updateRagMemory`, `setupSession` |
 
 `package` protection extends to the package tree but not outside it (empirically verified); the promotion table is the single reviewed boundary.
 

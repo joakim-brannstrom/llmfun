@@ -42,7 +42,7 @@ std::string formatCount(long long value) {
 }
 
 /// "38.1 tok/s": one decimal and the suffix, one formatter so a chip can never
-/// disagree with itself about rounding (design §6.3).
+/// disagree with itself about rounding.
 std::string formatRate(double value) {
     char text[40];
     const std::size_t length = formatFixed1(value, text, sizeof(text) - (sizeof(" tok/s") - 1));

@@ -766,7 +766,7 @@ void tuiAddOutputLine(TuiState& state, const ChatMessage& msg);
 /// Clear all output lines.
 void tuiClearOutput(TuiState& state);
 
-/// Offer one stream snapshot (design FR-08, task 38): the store's write path and its update
+/// Offer one stream snapshot: the store's write path and its update
 /// throttle in one call.
 ///
 /// D calls this on every stream tick - up to ~100 times a second, while the thread it feeds is

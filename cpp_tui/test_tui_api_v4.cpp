@@ -1020,7 +1020,7 @@ void casePipelineLaneFields() {
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
     static_assert(TUI_API_VERSION == 6 || TUI_API_VERSION == 7,
-                  "the lane fields landed inside v5 (additive, no re-bump)");
+                  "the lane fields are additive, no re-bump");
     static_assert(sizeof(SessionItem) == 80, "SessionItem is unaffected by the lane fields");
 
     // NULL-safe, and an empty agent id still registers nothing.

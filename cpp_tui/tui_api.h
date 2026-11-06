@@ -40,39 +40,8 @@ extern "C" {
 
 /* TUI_API_VERSION - API generation marker. Documentation only: no runtime
  * behavior depends on it (the contract tests pin the current value with
- * static_assert so a bump stays deliberate). Bump it (with a comment
- * listing the additions) whenever the C API surface grows.
- *
- * Version history:
- *   1 - original API
- *   2 - session sidebar: SessionItem, TuiSessionActionType, SessionAction,
- *       tuiSetSessionList, tuiIsSessionActionReady, tuiGetSessionAction
- *   3 - max width: tuiSetMaxWidth (cap the rendered width in columns;
- *       0 = unlimited). No signature or struct-layout changes to existing
- *       symbols.
- *   4 - single handle: TuiBackendMode/TuiBackendKind, tuiInit(state, mode),
- *       per-state frame calls, None-safe tuiRender, tuiBackendActive/Note,
- *       destroy-tears-down; TuiScreen + tuiShutdown removed.
- *   5 - MVP additive surface: tuiSetUiGeneration (1); tuiRequestCancel/
- *       tuiTakeCancel (3); TuiLogRecord/tuiAddLogRecord + tuiAddLogMessageEx
- *       wrapper (32); TuiRuntimeStatus/tuiSetRuntimeStatus (39);
- *       SessionItem.updatedAtMs/flags (24); tuiSetRawLogOpen/tuiIsRawLogOpen
- *       (33); PipelineChatMessage.currentTool/contextUsed/contextMax/reserved
- *       (39a). One bump for the whole workbench MVP: the later symbols land
- *       inside v5 without re-bumping (task 32 asserts the pin is still 5).
- *   6 - legacy renderer removed (task 41): TuiUiGeneration and
- *       tuiSetUiGeneration are gone, so a caller that still sets a generation
- *       fails to build instead of silently rendering nothing. The workbench is
- *       the only renderer; every other symbol is unchanged. This is the one
- *       deliberate *removal* in the header's history - the v5 note above still
- *       records what v5 added.
- *   7 - the status sentence is gone (D-STATUS v5 finalized): TuiRuntimeStatus
- *       gains `model` (the model chip now comes from the status, not from a
- *       sentence the C++ side would have to parse), and tuiSetStatusText is
- *       removed together with its sentence splitter - a sender still sending a
- *       sentence fails to build instead of silently formatting nothing. Struct
- *       layout change: sizeof(TuiRuntimeStatus) is now 88 (was 72), pinned by
- *       static_assert on both sides of the boundary.
+ * static_assert so a bump stays deliberate). Bump it whenever the C API
+ * surface grows.
  */
 #define TUI_API_VERSION 7
 
@@ -164,14 +133,12 @@ typedef struct ChatMessageParam {
  * Layout (64-bit): 6x String{ptr(8) + size_t(8)} + 3x int64(8) = 120 bytes, no tail padding.
  * All fields are naturally aligned.
  *
- * The last four fields are the v5 additions (task 39a). They are *appended*, so every earlier
- * offset is unchanged and a caller recompiled against this header that leaves them zero still
- * sends a valid update (no tool name, no context reading).
+ * The last four fields are *appended*, so every earlier offset is unchanged and a caller
+ * recompiled against this header that leaves them zero still sends a valid update (no tool
+ * name, no context reading).
  *
- * `status` is the v4 status sentence. It is kept because removing it would move every offset
- * below it (the v6 note's "every other symbol is unchanged"), and nothing in C++ reads it since
- * task 41 removed the renderer that showed it: this UI reads the numbers below it and never
- * parses that text (D-STATUS: numbers are the contract).
+ * `status` is an ABI placeholder. Removing it would move every offset below it, and nothing
+ * in C++ reads it: this UI reads the numbers below it and never parses that text.
  *
  *   * `currentTool` — the newest tool this agent has called in the response ("" = none yet);
  *   * `contextUsed` / `contextMax` — tokens in the context, and the model's context size. A
@@ -187,7 +154,7 @@ typedef struct PipelineChatMessage {
     String reasoning;    /* offset 16,  size 16 */
     String role;         /* offset 32,  size 16 */
     String finishReason; /* offset 48,  size 16 */
-    String status;       /* offset 64,  size 16 - the v4 sentence; unread since task 41 */
+    String status;       /* offset 64,  size 16 - placeholder; nothing reads it */
     String currentTool;  /* offset 80,  size 16 - newest tool of this response; "" = none yet */
     int64_t contextUsed; /* offset 96,  size 8  - tokens in context; 0 is a value */
     int64_t contextMax;  /* offset 104, size 8  - the model's ceiling; 0 = unknown. It is only
@@ -219,19 +186,18 @@ _Static_assert(sizeof(PipelineChatMessage) == 120, "PipelineChatMessage is a 120
  *   naturally aligned; the padding after `isActive` is what lifts `updatedAtMs` to
  *   its 8-byte boundary.
  *
- * The three fields after `isActive` are the v5 additions (task 24). They are
- * *appended*, so every pre-v5 offset is unchanged and a caller that is
- * recompiled against this header and leaves them zero (a `{0}`-style
- * initializer) still produces a valid snapshot:
+ * The three fields after `isActive` are *appended*, so every earlier offset
+ * is unchanged and a caller that is recompiled against this header and
+ * leaves them zero (a `{0}`-style initializer) still produces a valid
+ * snapshot:
  * `updatedAtMs == 0` means "unknown", which the rail renders as a flat list
  * with no fabricated dates, and `flags == 0` means no row is marked running.
  *
- * That compatibility is **source-level**. `TUI_API_VERSION` is documentation
- * only (nothing checks it at run time) and D and C++ ship together (C-02, C-11),
- * so an object file compiled against the pre-v5 64-byte struct and linked
- * against this library would stride 64 bytes through an 80-byte array. "Append
- * only" means no *recompiled* caller changes behaviour; it is not a promise that
- * a stale binary keeps working.
+ * That compatibility is **source-level**. D and C++ ship together, so an
+ * object file compiled against an older, smaller layout of this struct and
+ * linked against this library would stride the wrong number of bytes through
+ * the array. "Append only" means no *recompiled* caller changes behaviour; it
+ * is not a promise that a stale binary keeps working.
  *
  * Example initialization:
  *   SessionItem item = {
@@ -298,7 +264,7 @@ typedef struct SessionAction {
 } SessionAction;               /* total size: 40 bytes */
 
 /* TuiState — Opaque handle to the internal TUI state; the single lifecycle
- * object of the v4 API.
+ * object of the C API.
  * Created via tuiCreateState(), a backend is attached via tuiInit(), and the
  * whole state is torn down via tuiDestroyState().
  */
@@ -418,9 +384,9 @@ void tuiBackendRender(TuiState* state);
  * window), 1 otherwise. The caller should break the main loop when this
  * returns 0.
  *
- * None-safety (deliberate asymmetry): tuiRender(NULL) returns 0 (the v3 exit
- * convention), while a valid state with no backend attached is inert and
- * returns 1 (continue). No ImGui access happens in either case.
+ * None-safety (deliberate asymmetry): tuiRender(NULL) returns 0, while a valid
+ * state with no backend attached is inert and returns 1 (continue). No ImGui
+ * access happens in either case.
  */
 int tuiRender(TuiState* state);
 
@@ -534,7 +500,7 @@ void tuiInitQueryHistory(TuiState* state, const String* history, size_t count);
  */
 void tuiAddLogMessage(TuiState* state, String summary, String text);
 
-/* Structured log records (v5, task 32, design §5.2 / §6.4)
+/* Structured log records
  *
  * The log crossed this ABI as two formatted strings, which cannot carry the fields the
  * Raw Log needs (module, function, file, line) and forced D to format a line the UI then
@@ -670,7 +636,7 @@ void tuiStreamChatMessageClear(TuiState* state);
  * If agent is not yet registered, it is auto-registered as the latest
  * discovered agent. If MaxPipelineAgents is exceeded, the agent with
  * the oldest lastUpdate time is silently dropped.
- * Updates content, reasoning, role, finishReason, status and the v5
+ * Updates content, reasoning, role, finishReason, status and the
  * `currentTool`/`contextUsed`/`contextMax` fields for the agent identified by
  * agentId. All String members are inbound — their data is copied internally.
  * The lane row mirrors the numbers and never parses `status` (see
@@ -695,10 +661,10 @@ void tuiPipelineAgentDone(TuiState* state, String agentId);
  */
 void tuiPipelineClear(TuiState* state);
 
-/* TuiRuntimeStatus — the run's status as numbers (v5, task 39 / D-STATUS).
+/* TuiRuntimeStatus — the run's status as numbers.
  *
  * The contract is numbers, not a sentence: the UI formats them once per update and never
- * parses them back (design §6.3). `tokensPerSecond == 0` and `contextMax == 0` are the
+ * parses them back. `tokensPerSecond == 0` and `contextMax == 0` are the
  * *absence* values (the row draws `—`, not `0 tok/s` or `42k/0`), and an empty `model` is
  * "no name reported". `phase` is the ordinal of the UI's phase vocabulary
  * (`idle|thinking|tooling|writing|waiting|error|offline` = 0..6); an ordinal this build does not
@@ -872,10 +838,10 @@ int tuiIsSessionActionReady(TuiState* state);
  */
 SessionAction tuiGetSessionAction(TuiState* state);
 
-/* Run cancellation (MVP, task 3).
-
- * The composer's Stop button (and, from task 11, Esc while a run is active)
- * asks the UI loop to stop the running agent. The MVP adds no agent cancel
+/* Run cancellation.
+ *
+ * The composer's Stop button (and Esc while a run is active)
+ * asks the UI loop to stop the running agent. There is no agent cancel
  * API: the flag is consumed once per frame by the D UI loop, which calls the
  * same stopAgent() the typed "/stop" command uses (D-CANCEL), so partial
  * output is kept by the existing stop path rather than by a second one.
@@ -897,7 +863,7 @@ void tuiRequestCancel(TuiState* state);
  */
 int tuiTakeCancel(TuiState* state);
 
-/* Raw Log access (v5, task 33). */
+/* Raw Log access. */
 
 /* Open or close the Raw Log surface.
  *

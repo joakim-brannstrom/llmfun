@@ -1529,7 +1529,7 @@ void checkFocusMode(bool update) {
     // trailing space in `ctx ` keeps the pin on the meter's own label, not any `ctx` a
     // fixture string could carry.
     check(h.last.hasText("Ready") && h.last.hasText("ctx "),
-          "focus: the now bar still carries the state and the context pair (NFR-16)");
+          "focus: the now bar still carries the state and the context pair");
     check(h.last.findText("YOU", x, y) && x == 16,
           "focus: the transcript is the centred 90-cell column (YOU at cell " + std::to_string(x) +
               ")");

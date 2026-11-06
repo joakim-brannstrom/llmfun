@@ -332,6 +332,8 @@ void renderModelText(std::string_view text, const MarkdownTheme& theme, bool sel
 
 MarkdownCounters markdownCounters() { return gCounters; }
 
+void notePlainTextFallback() { ++gCounters.plainTextFallbacks; }
+
 std::string fencedCodeOf(std::string_view body) {
     // A fence is a line that starts with three or more backticks (or tildes); the
     // body is *one* code block when the first non-blank line opens a fence and the
@@ -436,141 +438,108 @@ std::string fencedCodeOf(std::string_view body) {
     return {}; // unterminated fence
 }
 
+bool hasUnclosedFence(std::string_view body, FenceScanState& state) {
+    // One line's effect on the scan: the blockquote stripping, the indentation
+    // and the marker run are the whole rule set. `into` is a scratch state, so
+    // the scan can classify the body's last line tentatively and still keep its
+    // settled answer for the next call.
+    const auto classifyLine = [](std::string_view line, FenceScanState& into) {
+        // Leading blockquote markers (`>` plus one optional space, each preceded
+        // by up to three spaces) come off before any fence test - outside a
+        // fence always, and inside one only when the opener itself was
+        // blockquote-prefixed: md4c parses no block quotes in a fenced block.
+        // Unfollowed spaces stay: they are the four-space rule's indentation.
+        bool quoted = false;
+        std::size_t at = 0;
+        if (!into.inFence || into.quotedFence) {
+            for (;;) {
+                std::size_t spaces = 0;
+                while (spaces < 3 && at + spaces < line.size() &&
+                       (line[at + spaces] == ' ' || line[at + spaces] == '\t'))
+                    ++spaces;
+                if (at + spaces < line.size() && line[at + spaces] == '>') {
+                    quoted = true;
+                    at += spaces + 1;
+                    if (at < line.size() && line[at] == ' ')
+                        ++at;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        std::size_t indent = 0;
+        while (indent < 4 && at + indent < line.size() &&
+               (line[at + indent] == ' ' || line[at + indent] == '\t'))
+            ++indent;
+        if (at + indent >= line.size() || indent >= 4)
+            return; // blank, or an indented code block - neither opens nor closes a fence
+
+        const char c = line[at + indent];
+        if (c != '`' && c != '~')
+            return; // prose, or a shorter run - inline markers are not fences
+        std::size_t run = at + indent;
+        while (run < line.size() && line[run] == c)
+            ++run;
+        const std::size_t runLen = run - (at + indent);
+        if (into.inFence) {
+            // A closer is the same marker at least as long, with nothing but
+            // whitespace after it; anything else inside the fence is content.
+            if (runLen < 3 || runLen < into.markerLen || c != into.markerChar)
+                return;
+            for (std::size_t p = run; p < line.size(); ++p) {
+                const char rest = line[p];
+                if (rest != ' ' && rest != '\t' && rest != '\r')
+                    return;
+            }
+            into.inFence = false;
+        } else if (runLen >= 3) {
+            into.inFence = true;
+            into.markerChar = c;
+            into.markerLen = runLen;
+            into.quotedFence = quoted; // its own closer only strips markers if so
+        }
+    };
+
+    // A body that shrank below the remembered offset is a restarted stream:
+    // start over rather than answer from a stale state. Defense only - the
+    // contract (see the header) is that a new body arrives with a zeroed state,
+    // so the caller resets on stream restart regardless of length.
+    if (state.scanOffset > body.size())
+        state = FenceScanState{};
+
+    // The scan walks newline-terminated lines from where the previous call
+    // stopped. The line the body ends mid-way through is the only one an append
+    // can still change, so its classification is tentative: it counts here and
+    // is read again, whole, on the next one. `committed` goes back into the
+    // state; `live` is the answer for the body as it stands.
+    FenceScanState committed = state;
+    FenceScanState live = state;
+    std::size_t pos = state.scanOffset;
+    while (pos < body.size()) {
+        std::size_t lineEnd = body.find('\n', pos);
+        const bool terminated = lineEnd != std::string_view::npos;
+        if (!terminated)
+            lineEnd = body.size();
+
+        classifyLine(body.substr(pos, lineEnd - pos), live);
+        if (terminated) {
+            committed = live;
+            committed.scanOffset = lineEnd + 1;
+            pos = lineEnd + 1;
+        } else {
+            break;
+        }
+    }
+    state = committed;
+    return live.inFence;
+}
+
 std::string copyText(std::string_view body, bool codeBlock) {
     if (!codeBlock)
         return std::string(body);
     const std::string code = fencedCodeOf(body);
     return code.empty() ? std::string(body) : code;
-}
-
-namespace {
-
-/// A line's last rendered row, trimmed of its surrounding blanks.
-std::string_view trimmedLine(std::string_view line) {
-    while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
-        line.remove_prefix(1);
-    while (!line.empty() && (line.back() == ' ' || line.back() == '\t'))
-        line.remove_suffix(1);
-    return line;
-}
-
-/// Whether `line` opens or closes a code fence: three or more backticks or tildes, after the
-/// line's indentation. The same rule `fencedCodeOf()` scans with.
-bool isFenceDelimiter(std::string_view line) {
-    const std::string_view text = trimmedLine(line);
-    if (text.size() < 3 || (text.front() != '`' && text.front() != '~'))
-        return false;
-    std::size_t run = 0;
-    while (run < text.size() && text[run] == text.front())
-        ++run;
-    return run >= 3;
-}
-
-/// Whether `line` is a thematic break or a setext underline: three or more marks of one kind and
-/// nothing else. A thematic break may be spaced (`- - -`, `* * *`), which CommonMark allows and a
-/// model occasionally writes; a setext underline is one unbroken run.
-bool isRuleLine(std::string_view line) {
-    const std::string_view text = trimmedLine(line);
-    if (text.size() < 3)
-        return false;
-    const char mark = text.front();
-    if (mark != '-' && mark != '=' && mark != '*' && mark != '_')
-        return false;
-    std::size_t marks = 0;
-    for (const char c : text) {
-        if (c == mark)
-            ++marks;
-        else if (mark == '=' || (c != ' ' && c != '\t'))
-            return false;
-    }
-    return marks >= 3;
-}
-
-/// Whether appending `caret` to a body would change which tables `findGfmTables()` reports, given
-/// the spans it reports for the body itself.
-///
-/// Only a caret that is itself a row line can: the ASCII column's `|`, appended to a prose line
-/// right after a table, turns that line into one more row (a table runs on while its lines carry
-/// a separator), so the sentence would move into the table for as long as the blink is on. The
-/// scan is the answer rather than a guess about where a table can end.
-bool changesTables(const std::vector<GfmTableSpan>& spans, std::string_view body,
-                   std::string_view caret) {
-    if (spans.empty() || !ui::isTableRowLine(caret))
-        return false;
-    std::string appended(body);
-    appended.append(caret);
-    const std::vector<GfmTableSpan> after = findGfmTables(appended);
-    if (spans.size() != after.size())
-        return true;
-    for (std::size_t i = 0; i < spans.size(); ++i)
-        if (spans[i].begin != after[i].begin || spans[i].end != after[i].end)
-            return true;
-    return false;
-}
-
-} // namespace
-
-std::string withStreamingCaret(std::string_view body, std::string_view caret) {
-    if (body.empty() || caret.empty())
-        return std::string(body);
-    std::string out(body);
-    // The caret continues the *last rendered line*: trailing line breaks are dropped first, so
-    // a body that currently ends with a newline puts the caret at the end of its last line
-    // instead of opening an empty one. That is what keeps the drawn height stable while the
-    // caret blinks (`./test_streaming` measures it).
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
-        out.pop_back();
-    if (out.empty())
-        return std::string(caret);
-    std::string_view last(out);
-    const std::size_t lineStart = last.rfind('\n');
-    if (lineStart != std::string::npos)
-        last = last.substr(lineStart + 1);
-    const std::string_view text = trimmedLine(last);
-
-    // Three shapes get the caret on a line of its own, because a glyph after them changes what
-    // the line *means* - the caret is worth a row, never a different document:
-    //
-    //   * a fence delimiter - appending would leave the fence unterminated and swallow the rest
-    //     of the thread;
-    //   * a thematic break / setext underline - `---` plus a glyph is a paragraph and `- - -`
-    //     plus one is a list, so a rule would flicker into text;
-    //   * a table row the bridge reads as one - a trailing glyph after the row's last pipe
-    //     changes how the row and the delimiter row parse, so for one revision the bridge would
-    //     stop detecting the table and the text grid would fall back to rich_md's native
-    //     renderer (C-05's hazard); inside a grid cell the glyph is dropped anyway.
-    //
-    // The table question is asked of the scanner, not of "does the line carry a pipe": prose
-    // (`ls | grep`) and a code line inside a fence carry one too, and neither is a row. A body
-    // with no pipe cannot hold a table at all (`blockHasTable()`'s own guard), so the scan is
-    // skipped for the common case.
-    const bool fence = isFenceDelimiter(text);
-    const bool rule = isRuleLine(text);
-    const bool rowLine = ui::isTableRowLine(text);
-    const bool caretRow = ui::isTableRowLine(caret);
-    std::vector<GfmTableSpan> spans;
-    if ((rowLine || caretRow) && out.find('|') != std::string::npos)
-        spans = findGfmTables(out);
-    const bool tableRow = rowLine && !spans.empty() && spans.back().end == out.size();
-    const bool tableBreak =
-        !fence && !rule && (tableRow || (!rowLine && changesTables(spans, out, caret)));
-    if (!fence && !rule && !tableBreak) {
-        out.append(caret);
-        return out;
-    }
-    // A table needs a blank line first: both readers run a table on while its lines look like
-    // rows, and md4c takes *any* non-blank line, so a caret directly under a row is an empty row
-    // of that table - invisible, and an ASCII `|` would even extend the table over the prose.
-    // Nothing else needs one: a fence and a rule end at their own line, so the caret line is a
-    // separate block already (inside an open fence it is a code line).
-    out.append(tableBreak ? "\n\n" : "\n");
-    // The caret line keeps the last line's indentation, so inside a list item or a blockquote it
-    // belongs to the container its text does instead of starting a block at the left margin.
-    const std::size_t content = last.find_first_not_of(" \t");
-    if (content != std::string_view::npos)
-        out.append(last.substr(0, content));
-    out.append(caret);
-    return out;
 }
 
 } // namespace llmfun::tui::ui

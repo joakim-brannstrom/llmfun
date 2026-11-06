@@ -552,9 +552,9 @@ void storeStreamSnapshot(TuiState& state, const std::string& text, const std::st
     model::StreamState& stream = state.ui.thread.stream;
     stream.lastAppliedMs = nowMs;
     ++stream.applied;
-    // The clock, the caret and the cancel mark are derived from the text that is in the store
-    // now - not from a snapshot's arrival, which the throttle may have detached from what is on
-    // screen. A frame derives them again; this keeps the store self-consistent without one.
+    // The clock and the cancel mark are derived from the text that is in the store now - not
+    // from a snapshot's arrival, which the throttle may have detached from what is on screen.
+    // A frame derives them again; this keeps the store self-consistent without one.
     model::refreshStreamClock(stream, /*hasStream=*/true, /*hasText=*/!text.empty(),
                               /*hasThinking=*/!thinking.empty(), nowMs, state.cancelRequested);
 }
@@ -775,9 +775,9 @@ bool tuiRender(TuiState& state) {
     // frame that ends an item's life is the frame it stops being drawn.
     model::expireToasts(state.ui, model::agentClockMs());
 
-    // A stream snapshot the update throttle parked (task 38): the window has had a frame to
-    // elapse, so a coalesced update lands here - before anything reads the thread, which is
-    // what keeps `revision`, the caret and the store the same age on screen.
+    // A stream snapshot the update throttle parked: the window has had a frame to elapse, so a
+    // coalesced update lands here - before anything reads the thread, which is what keeps
+    // `revision` and the store the same age on screen.
     flushPendingStream(state, model::agentClockMs());
 
     // The metrics seam's input, set for THIS frame and before any window is

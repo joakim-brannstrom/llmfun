@@ -33,8 +33,8 @@
 ///
 /// Decisions this file implements: paste is captured, folded and asked
 /// about, never submitted; the `Esc` chain's last two steps are clear and blur,
-/// and this view is its entry point; the key gate's fallback is `Enter` =
-/// newline with the action button as the send; and every colour and distance
+/// and this view is its entry point; with no gate match, `Enter` is a
+/// newline and the action button sends; and every colour and distance
 /// is a token.
 #pragma once
 

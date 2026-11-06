@@ -968,8 +968,8 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         //
         // Neither backend reports bracketed paste: nothing asks the terminal for `?2004h`
         // (the ncurses/imtui backends never send it), and the payload's newline arrives as
-        // an `Enter` *key* event rather than a character - the key gate's rules leave
-        // bracketed paste out of scope, so the burst is the signal there is.
+        // an `Enter` *key* event rather than a character - so the burst is the signal
+        // there is.
         if (capture && st.paste.runRaw.empty()) {
             st.paste.runAt = std::string::npos;
             st.paste.runRemoved = 0;

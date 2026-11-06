@@ -566,6 +566,12 @@ void ThreadStoreAdapter::sync() const {
         groups_.clear();
         indexById_.clear();
         synced_ = false;
+        // The cached stream answers go with the binding: whatever the next
+        // state streams is a body the scans have never seen, and a stale open
+        // flag must not survive the rebind.
+        streamTextFence_ = {};
+        streamThinkingFence_ = {};
+        streamFingerprint_ = 0;
         return;
     }
     // Non-const: a group that has just appeared gets its one-shot expansion
@@ -584,7 +590,24 @@ void ThreadStoreAdapter::sync() const {
     const size_t fingerprint = streamFingerprint(chat);
     if (fingerprint != streamFingerprint_) {
         streamFingerprint_ = fingerprint;
+        // A stream whose group is only now born is a body the scans have never
+        // seen: they start from zero rather than resume. The fingerprint is a
+        // mutation hint, so it cannot tell a replaced body from a grown one;
+        // the assumption is that a stream is replaced only through
+        // clearStream()/reset()/a rebind, and those zero the caches.
+        if (streamGroupId_ == 0) {
+            streamTextFence_ = {};
+            streamThinkingFence_ = {};
+        }
         ++streamRevision_;
+        // The unclosed-fence classification rides the change key's cadence:
+        // one suffix scan per stream snapshot, never a whole-body rescan and
+        // never a scan per frame. `open` is the answer for the body as it
+        // stands - the scanner's return value - because the body's final line
+        // can already be the fence opener or closer it does not carry yet.
+        streamTextFence_.open = ui::hasUnclosedFence(chat.streamMsg.text, streamTextFence_.scan);
+        streamThinkingFence_.open =
+            ui::hasUnclosedFence(chat.streamMsg.thinking, streamThinkingFence_.scan);
     }
 
     if (synced_ && count == syncedCount_ && front == syncedFront_ && back == syncedBack_ &&
@@ -705,6 +728,10 @@ void ThreadStoreAdapter::sync() const {
             // counted an answer that is over, so it goes with the group id (task 38).
             model::resetStreamClock(state_->ui.thread.stream);
         }
+        // The ended stream's fence answers go with it: whatever streams next is
+        // a body the scans have never seen.
+        streamTextFence_ = {};
+        streamThinkingFence_ = {};
         streamGroupId_ = 0;
     }
 
@@ -1014,9 +1041,9 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
         // *only* thinking must still show it). The body row is always present - it is the
         // stream's stable role row - and has a body only once there is text to draw.
         const auto& stream = chat.streamMsg;
-        // The live answer's clock (design FR-08, task 38), derived once per frame by the frame
-        // layer: this file formats nothing and reads no wall clock, so the header cannot
-        // disagree with the elapsed time the now bar shows.
+        // The stream's timing, derived once per frame by the frame layer: this file
+        // formats nothing and reads no wall clock, so the thinking row's duration
+        // cannot disagree with the elapsed time the now bar shows.
         const model::StreamState& clock = state_->ui.thread.stream;
         if (block->thinking) {
             out.label = "Thinking";
@@ -1029,10 +1056,10 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
         }
         out.hasBody = !stream.text.empty();
         out.label = roleLabel(stream.type);
-        // `AGENT · writing · 00:12` / `AGENT · thinking` / `AGENT · cancelled · 00:07`: the
-        // phase word is the model's vocabulary (`streamPhaseWord`), the clock is the frame's.
+        // `AGENT · writing` / `AGENT · thinking` / `AGENT · cancelled`: the phase
+        // word is the model's vocabulary (`streamPhaseWord`) and is event-driven, so
+        // the header text changes only when the phase does.
         out.phase = model::streamPhaseWord(clock, !stream.text.empty());
-        out.elapsedMs = clock.elapsedMs;
         return out;
     }
     if (block->message >= chat.outputLines.size())
@@ -1169,29 +1196,14 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
     }
     if (body.empty())
         return;
-    // The live answer's caret (design FR-08, §4.5; task 38). Three facts decide it and all
-    // three are the *frame's*: only the body row of a live stream carries one, only while the
-    // clock says the answer is still arriving, and only in the half of the blink this frame
-    // falls in (`StreamState::caretOn`, derived from the clock - never from a frame counter,
-    // so the blink rate does not follow the frame rate).
-    //
-    // The off half is a space of the caret's own width, not nothing: the two halves of the
-    // blink append the same number of cells, so a caret on the last line cannot make the group
-    // grow and shrink twice a second.
-    //
-    // A stream whose clock was never derived (a store-only harness, no frame) draws no caret:
-    // `startedMs == 0` means no frame has said this stream is live, and inventing one here
-    // would put the blink on the wall clock of a test.
-    if (entry.stream && !thinking) {
-        const model::StreamState& clock = state_->ui.thread.stream;
-        if (clock.active() && !clock.cancelled) {
-            const ui::Metrics m = ui::metricsFor();
-            const ui::GlyphSet glyphs = m.textGrid ? ui::textGlyphSet() : ui::pixelGlyphSet();
-            body = ui::withStreamingCaret(body,
-                                          clock.caretOn ? ui::icon(ui::Icon::Rule, glyphs) : " ");
-        }
-    }
-    // The table bridge (design §6.8, task 37) is applied by `renderBodyText()` - the one place
+    // While a streamed markdown body is inside an unclosed fence it draws as
+    // plain text: the half-arrived construct under the fence would flip shapes
+    // from snapshot to snapshot, and the fence's raw lines are what a reader
+    // can hold steady. The flag is the snapshot's cached answer, so this draw
+    // scans nothing; a stored body is classified once and drawn as it is.
+    const bool plainText =
+        entry.stream && markdown && (thinking ? streamThinkingFence_.open : streamTextFence_.open);
+    // The table bridge is applied by `renderBodyText()` - the one place
     // a markdown body is drawn - and the block's own `s` toggle is what it needs from here: the
     // source flag names the block by its stable id, so a redraw after a paging change or a
     // stream update asks the same question.
@@ -1199,15 +1211,20 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
     const bool showTableSource =
         state_->ui.thread.tableSource.find(blockId) != state_->ui.thread.tableSource.end();
 
+    // While the plain-text fallback is active the block's `s` toggle is a
+    // visual no-op: the body is already raw text. A future "the toggle does
+    // nothing" report lands here, not on the toggle.
+    if (plainText)
+        ui::notePlainTextFallback();
     ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
     if (thinking) {
         // The dim body of a disclosure: `textMid` is the quiet ink that still clears the
         // contrast bar, and the end mark closes the region the header opened.
         ImGui::PushStyleColor(ImGuiCol_Text, ui::color(ui::ColorToken::textMid));
-        renderBodyText(body, true, showTableSource);
+        renderBodyText(body, !plainText, showTableSource);
         ImGui::PopStyleColor();
     } else {
-        renderBodyText(body, markdown, showTableSource);
+        renderBodyText(body, markdown && !plainText, showTableSource);
     }
     ImGui::PopTextWrapPos();
 }
@@ -1281,9 +1298,9 @@ void ThreadStoreAdapter::endGroup(size_t k, const ui::Rect& cell) {
     const float drawnH = std::max(m.row, ImGui::GetCursorScreenPos().y - groupTop_);
     // The live answer may grow while it streams and must never *shrink* within one revision
     // (design FR-08: "the group height may grow but never shrink within a revision"). Two
-    // frames of the same text can still measure differently - the caret's half of the blink,
-    // a wrap boundary a hair's breadth away, rich_md re-laying out the last fragment - and a
-    // hint that followed them down would make the follower jump back and forth. A taller
+    // frames of the same text can still measure differently - a wrap boundary a hair's
+    // breadth away, rich_md re-laying out the last fragment - and a hint that followed them
+    // down would make the follower jump back and forth. A taller
     // measurement always wins; the next revision is free to be shorter.
     //
     // "The same revision" includes the **box**: a hint is a statement about the width, the line
@@ -1325,14 +1342,19 @@ void ThreadStoreAdapter::clearStream() {
     streamRevision_ = 0;
     streamFingerprint_ = 0;
     syncedStream_ = 0;
+    // The stream's cached fence answers go with it: the next stream's body is
+    // not a growth of this one, and a fallback flag left behind would draw a
+    // body that no longer holds a fence as raw text.
+    streamTextFence_ = {};
+    streamThinkingFence_ = {};
     // Clearing the id alone is not enough: sync()'s guard compares `hasStreamMsg`
     // with `(streamGroupId_ != 0)`, and a clear that has already set both to false
     // would make the guard skip the rebuild and leave the old stream group drawn.
     // A forced rebuild drops it and lets the next stream allocate a fresh group id.
     synced_ = false;
-    // The live answer's clock goes with the stream it was counting (task 38): a new stream
-    // starts at 00:00, uncancelled, with its caret's phase free to begin at the beginning.
-    // `refreshStreamClock()` re-stamps `startedMs` on the new stream's first sighting.
+    // The live answer's clock goes with the stream it was counting: a new stream starts at
+    // 00:00 and uncancelled. `refreshStreamClock()` re-stamps `startedMs` on the new stream's
+    // first sighting.
     if (state_ != nullptr)
         model::resetStreamClock(state_->ui.thread.stream);
 }
@@ -1377,6 +1399,10 @@ void ThreadStoreAdapter::reset() {
     syncedFront_ = 0;
     syncedBack_ = 0;
     syncedStream_ = 0;
+    // The cached fence answers go with the thread: the next stream's body is
+    // not a growth of the one they describe.
+    streamTextFence_ = {};
+    streamThinkingFence_ = {};
     // The thread is being replaced: the live answer's clock counted an answer of the thread
     // that is going away (task 38), so the next stream starts its own.
     if (state_ != nullptr)

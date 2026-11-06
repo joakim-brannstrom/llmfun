@@ -30,7 +30,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <string>
 
 namespace llmfun::tui::model {
@@ -130,14 +129,10 @@ struct BlockDesc {
     /// preview - its body is being written under it).
     bool streaming = false;
 
-    /// The live answer's phase word, and its clock in milliseconds (design FR-08, task 38):
-    /// the streaming row's header reads `AGENT · writing · 00:12`. Empty and 0 for every
-    /// stored block - a message that is not being written has a duration (`timingS`), not a
-    /// phase - so the row draws the same header it always did for them. `elapsedMs` is a
-    /// *clock* (`mm:ss`, the top bar's formatter) where `timingS` is a duration ("1.2 s"):
-    /// the live row counts up, a step's row states what it took.
+    /// The live answer's phase word: the streaming row's header reads
+    /// `AGENT · writing`. Empty for every stored block - a message that is not
+    /// being written has a duration (`timingS`), not a phase.
     std::string phase;
-    std::int64_t elapsedMs = 0;
 
     /// The block's identity; `group == 0` means the descriptor did not come from a
     /// group, so the returned id is invalid.

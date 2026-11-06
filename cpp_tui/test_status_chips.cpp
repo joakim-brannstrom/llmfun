@@ -1,15 +1,15 @@
 // test_status_chips.cpp
 //
-// Headless unit tests for the status-chip formatter (task 6, design §6.3 / FR-12,
-// D-STATUS v5): the structured status D sends every tick (`tuiSetRuntimeStatus`,
-// `TuiRuntimeStatus`) becomes the four chips the status row shows.
+// Headless unit tests for the status-chip formatter: the structured status D
+// sends every tick (`tuiSetRuntimeStatus`) becomes the four chips the status row
+// shows.
 //
 // What is pinned here, case by case:
 //   - the documented numbers map to the documented chips (`42k/128k`, `38.1 tok/s`,
 //     `qwen3-coder`, `Ready`) and `Busy` is a state like `Ready`;
 //   - a number the status does not carry (`contextMax == 0`, `tokensPerSecond == 0`,
 //     an empty `model`) renders "—", never "0" (a number and its absence must stay
-//     distinguishable — the composer's mini meter shows the same numbers, task 27);
+//     distinguishable — the composer's mini meter shows the same numbers);
 //   - the seven phases name the four state words, and an unknown phase ordinal
 //     answers `Idle`, never a neighbouring phase;
 //   - the numbers the context chip was formatted from are carried back on the
@@ -116,9 +116,9 @@ void scenario2_absences() {
            "an absent pair carries no meter numbers");
 }
 
-// The number format itself: the chips are canonical for the numbers (task 27's meter
-// shows the same used/max), so the abbreviation is part of the contract. The numbers
-// are carried back on the struct.
+// The number format itself: the chips are canonical for the numbers (the
+// composer's meter shows the same used/max), so the abbreviation is part of the
+// contract. The numbers are carried back on the struct.
 void scenario3_countFormat() {
     g_scenario = 3;
     phase("used/max abbreviation");
@@ -238,9 +238,9 @@ int main() {
     scenario6_equality();
     // Nothing in the formatter may look at LC_NUMERIC. The app adopts the user's
     // locale (`tui_api.cpp` setlocale(LC_ALL, "")), and a comma-decimal locale
-    // used to turn `42k` into `42,0k` through snprintf.
-    // The image only ships C/POSIX/C.utf8, so this is a no-op where the locale is
-    // missing and a real check on a desktop that has it.
+    // would otherwise turn `42k` into `42,0k` through snprintf. The image only
+    // ships C/POSIX/C.utf8, so this is a no-op there and a real check on a
+    // desktop that has the locale.
     if (std::setlocale(LC_NUMERIC, "de_DE.UTF-8") != nullptr) {
         scenario1_fullStatus();
         scenario3_countFormat();

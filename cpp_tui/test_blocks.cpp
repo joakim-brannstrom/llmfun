@@ -17,7 +17,8 @@
 //      grid's ASCII separator instead of the middle dot;
 //   5. the fence/copy helpers in the markdown wrapper: a body that is one fenced code
 //      block answers its *code*, and everything else answers nothing - so a copy can
-//      never paste fences or half a document;
+//      never paste fences or half a document - and `hasUnclosedFence()` answers, one
+//      appended chunk at a time, whether a body ends inside an open fence;
 //   6. the anatomy, drawn. Each kind is rendered into a real 100x30 cell grid and read
 //      back: the rule is one cell, the label and the state glyph are where the row
 //      says they are, a compact row's summary is on its second line, a collapsed block
@@ -539,6 +540,71 @@ void checkCopyHelpers() {
     check(ui::copyText("plain text", false) == "plain text", "a body copies verbatim");
     check(ui::copyText("not a fence", true) == "not a fence",
           "a code block whose fences do not parse falls back to the body (never an empty paste)");
+}
+
+// The incremental fence scanner (`hasUnclosedFence`): one check per rule the
+// markdown routing stands on, plus the resume across appends. Its rules must
+// match what the renderer sees as a fence, so every rule is named in its check.
+void checkFenceScanner() {
+    ui::FenceScanState state;
+    check(ui::hasUnclosedFence("```", state), "an opened fence leaves the body inside it");
+    state = ui::FenceScanState{};
+    check(!ui::hasUnclosedFence("```\ncode\n```\n", state),
+          "a closed fence leaves the body outside it");
+    state = ui::FenceScanState{};
+    check(ui::hasUnclosedFence("~~~\ncode", state), "a tilde fence opens like a backtick one");
+    state = ui::FenceScanState{};
+    check(ui::hasUnclosedFence("````\ncode\n```\n", state),
+          "a closer shorter than the opener does not close");
+    state = ui::FenceScanState{};
+    check(ui::hasUnclosedFence("```\ncode\n``` extra\n", state),
+          "trailing content on a closer line is content inside the fence");
+    state = ui::FenceScanState{};
+    check(!ui::hasUnclosedFence("    ```\n", state),
+          "a line indented four spaces is an indented code block, not a fence");
+    state = ui::FenceScanState{};
+    check(ui::hasUnclosedFence("> ```\n> code", state), "a blockquote-prefixed fence opens");
+    state = ui::FenceScanState{};
+    check(!ui::hasUnclosedFence("> ```\n> code\n> ```\n", state),
+          "a blockquote-prefixed fence closes");
+    state = ui::FenceScanState{};
+    check(ui::hasUnclosedFence("```\n> code\n> ```\n", state),
+          "a top-level fence's quoted-looking lines are content, not a closer");
+    state = ui::FenceScanState{};
+    check(!ui::hasUnclosedFence("```\n> ```\n```\n", state),
+          "the real closer still closes after quoted-looking content in a top-level fence");
+    state = ui::FenceScanState{};
+    check(!ui::hasUnclosedFence("``~~~``", state), "a mixed marker run never delimits");
+    state = ui::FenceScanState{};
+    check(ui::hasUnclosedFence("```rust\nfn main() {}", state),
+          "an opener may carry an info string");
+    state = ui::FenceScanState{};
+    check(ui::hasUnclosedFence("  ```\ncode", state),
+          "fence markers may sit on up to three spaces");
+    state = ui::FenceScanState{};
+    check(!ui::hasUnclosedFence("use ```inline``` here\n", state),
+          "fence markers inside prose are not a fence");
+    state = ui::FenceScanState{};
+    check(ui::hasUnclosedFence("```\ncode\n```\nprose\n~~~\nmore\n", state),
+          "a body can close one fence and open another");
+    state = ui::FenceScanState{};
+    check(!ui::hasUnclosedFence("", state), "an empty body holds no fence");
+
+    // Appends split fence lines at arbitrary bytes, so the resume has to read
+    // the body's last line again from its start: each call answers for the body
+    // it saw, and the state carries only what settled lines decided.
+    ui::FenceScanState incremental;
+    check(!ui::hasUnclosedFence("``", incremental),
+          "an append's first half marker opens nothing yet");
+    check(ui::hasUnclosedFence("```\nint x", incremental),
+          "the completed marker opens the fence the split hid");
+    check(!ui::hasUnclosedFence("```\nint x\n```", incremental),
+          "the closing append ends the fence");
+    ui::FenceScanState wholeScan;
+    check(!ui::hasUnclosedFence("```\nint x\n```", wholeScan),
+          "the incremental answer matches one whole-body scan");
+    check(incremental.scanOffset == std::string_view("```\nint x\n").size(),
+          "the state advanced over the settled lines, not back to zero");
 }
 
 // ---------------------------------------------------------------------------
@@ -1798,6 +1864,7 @@ int main(int argc, char** argv) {
     checkTiming();
     checkHeaderText();
     checkCopyHelpers();
+    checkFenceScanner();
     checkAnatomy();
     checkThreadDrawsEveryKind();
     checkStreaming();

@@ -179,6 +179,23 @@ void renderModelText(std::string_view text, const MarkdownTheme& theme, bool sel
 /// and neither caller parses a fence.
 std::string fencedCodeOf(std::string_view body);
 
+/// One line of the scanner's carried state: where the previous scan stopped
+/// and what fence it is still inside of.
+struct FenceScanState {
+    std::size_t scanOffset = 0; // next body offset to scan from
+    bool inFence = false;       // an opened fence is still open
+    char markerChar = 0;        // the open fence's marker (` or ~)
+    std::size_t markerLen = 0;  // the open fence's marker run length
+    bool quotedFence = false;   // the open fence's opener was blockquote-prefixed
+};
+
+/// Whether `body` ends inside an unclosed code fence. Incremental: pass the
+/// state from the previous call (zeroed for a fresh body) and the scan resumes
+/// where it stopped; between calls the body must only ever grow - a new body
+/// means a zeroed state. The rules mirror md4c's fence recognition, with known
+/// conservative divergences each pinned by a test - not a markdown parser.
+bool hasUnclosedFence(std::string_view body, FenceScanState& state);
+
 /// What a block's copy action puts on the clipboard (task 26, S-13: `y` on the
 /// focused block, and the row's own copy control).
 ///
@@ -189,27 +206,6 @@ std::string fencedCodeOf(std::string_view body);
 /// for, and an empty clipboard is worse than an unfenced one.
 std::string copyText(std::string_view body, bool codeBlock);
 
-/// `body` with the live answer's caret appended to its last rendered line (design FR-08,
-/// §4.5; task 38).
-///
-/// `caret` is the glyph the profile draws - `ui::icon(Icon::Rule, …)`, i.e. "▌" on a surface
-/// that carries the marks and "|" on the ASCII one - resolved by the caller, because which
-/// column a surface can draw is the icon table's business and not markdown's. The *off* half
-/// of the blink is a space of the same width, so the caret costs the same cells on and off
-/// and the row's height cannot oscillate with the blink.
-///
-/// Trailing line breaks are dropped before the append, so the caret sits at the end of the
-/// content's last line rather than on an empty line of its own. Three shapes get a line of their
-/// own instead, because a glyph after them would change what the body *means*: a fence delimiter
-/// (appending would leave the fence unterminated), a rule line (`---`, `- - -`), and a table row
-/// (a table runs on while its lines look like rows, so the caret would land in a cell - and the
-/// caret line needs a blank line before it to end the table, because the ASCII column's `|` is a
-/// separator itself). The caret line copies the last line's indentation, so it stays in the
-/// container the text belongs to. An empty body has no caret at all - the streaming row's header
-/// says `writing` before the first character arrives, and a caret with no text under it would
-/// claim otherwise.
-std::string withStreamingCaret(std::string_view body, std::string_view caret);
-
 /// What the wrapper has done since the process started - the seam a test reads
 /// instead of poking at rich_md's internals:
 ///
@@ -218,14 +214,25 @@ std::string withStreamingCaret(std::string_view body, std::string_view caret);
 ///   droppedRenders   renders that drew nothing (no rich context, no ImGui context, or
 ///                    no frame)
 ///   unscopedRenders  renders outside `beginBlock()` (ids not stable)
+///   plainTextFallbacks streamed bodies a caller drew as plain text because an
+///                    unclosed fence was open, reported through
+///                    `notePlainTextFallback()`
 ///   lastSelectable   the `selectable` the last render ran with
 struct MarkdownCounters {
     unsigned styleApplies = 0;
     unsigned renders = 0;
     unsigned droppedRenders = 0;
     unsigned unscopedRenders = 0;
+    unsigned plainTextFallbacks = 0;
     bool lastSelectable = false;
 };
 MarkdownCounters markdownCounters();
+
+/// One streamed body drawn as plain text because an unclosed fence was open.
+/// The routing decision lives in the store - it is the caller that knows the
+/// body is streaming, is markdown, and is inside a fence - and the wrapper
+/// never sees that decision, so the store reports each fallback draw here and
+/// "why is my body raw text" stays one counter read away.
+void notePlainTextFallback();
 
 } // namespace llmfun::tui::ui

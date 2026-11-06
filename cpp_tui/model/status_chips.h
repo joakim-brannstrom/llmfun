@@ -24,7 +24,8 @@ namespace llmfun::tui::model {
 /// The numbers match D's `TuiRuntimeStatus.phase`, so a run status crosses the
 /// surface without a translation table. A number this build has no member for
 /// answers `Idle` (`phaseFromOrdinal()`).
-// TODO: bad design. This should instead be exposed to the D side via ImportC
+// TODO: share this enum with D directly (via ImportC) instead of keeping the
+// numbers in sync by hand.
 enum class Phase : int {
     Idle = 0,
     Thinking = 1,
@@ -112,11 +113,10 @@ static_assert(sizeof(StatusChips) == 4 * sizeof(std::string) + 2 * sizeof(long l
               "a new chip needs a name in kStatusChipNames (and its own prose)");
 
 /// The chip value for a field the status does not carry - a `contextMax` of 0
-/// (no capacity known) or a `tokensPerSecond` of 0 (no rate yet). A missing
-/// value is never rendered as "0": zero is a number, this is its absence. The
-/// view may draw an ASCII floor glyph for it in the text grid (U+2014 is
-/// East-Asian *Ambiguous*, so a CJK terminal could render it two cells wide);
-/// the model value is always this one when D sends no name.
+/// (no capacity known), a `tokensPerSecond` of 0 (no rate yet) or an empty
+/// `model`. A missing value is never rendered as "0": zero is a number, this
+/// is its absence. The view may draw an ASCII floor glyph instead (U+2014 is
+/// East-Asian *Ambiguous*, so a CJK terminal could render it two cells wide).
 inline constexpr const char* kMissingChipValue = "\u2014"; // em dash
 
 /// The chips as a value: two sets are equal when every field agrees. The frame

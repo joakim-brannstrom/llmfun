@@ -616,8 +616,8 @@ void deriveAgents(TuiState& state, std::int64_t nowMs) {
 /// the facts are the store's (`hasStreamMsg`, whether the streamed message already carries
 /// prose or reasoning), this frame's reading of the wall clock and the user's stop. Views read
 /// `UiState::thread.stream` and never ask for a clock of their own, which is what keeps the
-/// live row's `00:12`, the now bar's clock and the caret's blink phase the *same* numbers on
-/// screen instead of three approximations of one moment.
+/// live row's phase word and the reasoning row's `Thinking · 3.2 s` reading the *same* clock
+/// this frame instead of two approximations of one moment.
 ///
 /// Runs whether or not the thread has a rectangle (compact mode never folds the thread away,
 /// but a surface may) and before anything draws, because the now bar's inputs are derived
@@ -1121,7 +1121,7 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     // frame where that shows.
     deriveAgents(state, frameClockMs());
     // The live answer's clock: the same one-per-frame rule as the lanes', and derived before
-    // anything draws - the thread's caret and the live row's header read it this frame.
+    // anything draws - the thread's phase word and the reasoning row read it this frame.
     deriveStream(state, frameClockMs());
     deriveInspector(state, layout);
     // The rail's two derived flags, one region over: `open` is "the region has a rectangle",

@@ -76,7 +76,7 @@ void seedSessions(llmfun::tui::TuiState& state, long long nowMs) {
         {"s01", "Session rail v2", "draw the visible window", 0, false, true},
         {"s02", "Composer paste handling", "bracketed paste", 2, false, false},
         {"s03", "Table bridge", "text grid renderer", 26, false, false},
-        {"s04", "Streaming v2", "caret and elapsed", 30, false, false},
+        {"s04", "Streaming v2", "phase and clock", 30, false, false},
         {"s05", "Activity tab", "severity glyphs", 52, false, false},
         {"s06", "Inspector frame", "two tabs", 76, false, false},
         {"s07", "Palette completion", "every action", 100, false, false},
@@ -511,12 +511,9 @@ int main(int argc, char** argv) {
     // (k) the run flag reaches the rail. `deriveRail()` is the *only* reader of
     //     `SessionItem::flags` (bit 0 = running), and the rail draws a running row with
     //     the static run mark in place of its time label. Nothing else in the suite
-    //     crosses that hop - `./test_rail` sets `SessionRow::running` directly - so a
-    //     wrong bit, an inverted test or a deleted line would pass every gate with the
-    //     field carried, unit-tested at the ABI boundary and visually dead. The GUI has
-    //     no cells to read, so the assertion is the pair of frames: the mark is static
-    //     by design, so two consecutive captures of the running frame are
-    //     identical pixels, and the flag's one local change sits inside the row's band.
+    //     crosses that hop (`./test_rail` sets `SessionRow::running` directly), so a
+    //     wrong or deleted bit would be visually dead: two consecutive captures of
+    //     the running frame must be identical pixels.
     const auto captureFrame = [&](const std::string& name) {
         Ppm shot;
         const std::string path = outDir + "/" + name;

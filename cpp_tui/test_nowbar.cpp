@@ -13,13 +13,11 @@
 //   3. the chips. The chips are formatted from the structured status once per update, and
 //      a number the status does not carry is `—`, never `0`;
 //   4. the mapping. One case per phase: the word on the left, the mark beside it, the clock
-//      only while a run is in flight, and the context meter, the speed chip and the model
-//      chip on the right;
-//   5. the ladder. The hints go first, then the detail, then the right side yields rung by
-//      rung (the speed chip first, then the count compacts) - and the state is never cut,
-//      at 100, 60 and 40 cells;
-//   6. the hints. `Esc stop` exactly while the Esc cancel step is open, and the "there is
-//      more below" mark in place of it while the thread is not following;
+//      only while a run is in flight, plus the right-side chips;
+//   5. the ladder. The hints, then the detail, then the right side yields rung by rung -
+//      the state is never cut, at 100, 60 and 40 cells;
+//   6. the hints. `Esc stop` while the Esc cancel step is open, else the "more below" mark
+//      while the thread is not following;
 //   7. the badge. `RAW` from `UiState::rawLogOpen`, in compact mode - the one layout whose
 //      top bar is folded away - and nowhere else;
 //   8. the colours. The state rule clears 3:1 against the row's surface in every phase, and
@@ -245,7 +243,7 @@ ui::Rect nowBarRect(int w, int h, const ui::Metrics& m) {
     return layout.nowBar;
 }
 
-/// The design's own numbers (the chip row), formatted from the structured status.
+/// The chip row's own numbers, formatted from the structured status.
 model::StatusChips designChips() {
     model::RuntimeStatus status;
     status.phase = model::phaseOrdinal(model::Phase::Idle);
@@ -256,7 +254,7 @@ model::StatusChips designChips() {
     status.tokensPerSecond = 38.1;
     return model::chipsFromStatus(status);
 }
-/// The structured status D sends, as the ABI would deliver it: the design's numbers
+/// The structured status D sends, as the ABI would deliver it: the same numbers
 /// with `phase` and `detail` on top, and a sampled clock.
 model::RuntimeStatus statusOf(model::Phase phase, const char* detail = "") {
     model::RuntimeStatus status;
