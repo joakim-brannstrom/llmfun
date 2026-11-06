@@ -1,4 +1,4 @@
-/// The v4 thread store, behind a narrow adapter (design §4.4, D-ADAPTER).
+/// The v4 thread store, behind a narrow adapter.
 ///
 /// The v4 payload (`ChatMessage`, `ChatMessageType`, `RenderGroup`) lives in `tui.h`; this
 /// module is the only code that reads it, and `views/` sees `GroupView` and
@@ -49,12 +49,18 @@
 #include <utility>
 #include <vector>
 
+// TODO: should never use relative paths that traverse backwards.
 // Relative, not `"model/block.h"`: this header travels inside `tui.h`, and several
 // test targets include `tui.h` with no `cpp_tui/` on the include path (they rely on a
 // header resolving its own neighbours - the same reason `model/ui_state.h` names
 // `session_rows.h` without a directory). A `"../"` include is resolved relative to
 // *this* file first, so it works with and without that path.
 #include "../model/block.h"
+
+// `ui::FenceScanState` travels by value in the streaming cache below. Relative
+// like its neighbour above, and resolved relative to this file first, so it
+// works with and without the `cpp_tui/` include path.
+#include "../ui/markdown.h"
 
 namespace llmfun::tui {
 struct TuiState;
@@ -131,6 +137,8 @@ public:
         syncedFront_ = 0;
         syncedBack_ = 0;
         syncedStream_ = 0;
+        streamTextFence_ = {};
+        streamThinkingFence_ = {};
         hintWidth_ = 0.0f;
         hintCompact_ = false;
         expandedGroup_ = 0;
@@ -154,7 +162,7 @@ public:
     /// out of range (never a crash, never a neighbour's data).
     GroupView groupAt(size_t k) const;
 
-    /// Whether the thread ends with the live answer (design FR-08, task 38). The stream
+    /// Whether the thread ends with the live answer. The stream
     /// group is the *last* one while a stream runs, so this is also "index
     /// `storedGroupCount()` exists".
     bool hasStream() const;
@@ -266,6 +274,13 @@ public:
     size_t groupBuilds() const { return groupBuilds_; }
     size_t entryWalks() const { return entryWalks_; }
 
+    /// Where the streamed answer body's fence scan resumes, as the last stream
+    /// snapshot left it. An observation for the incremental-scan contract:
+    /// while the body only appends the offset only moves forward, and it never
+    /// restarts from zero - a snapshot pays for its appended suffix, not for
+    /// the body the previous snapshots already classified.
+    size_t streamFenceScanOffset() const { return streamTextFence_.scan.scanOffset; }
+
     /// The table bridge itself lives in `ui/table.h` (`bridgeBodyForProfile()`); this class only
     /// asks it in `renderBodyText()`, the one place a markdown body is drawn, so every block row
     /// goes through the same function and no two surfaces can disagree about what a table is.
@@ -358,6 +373,18 @@ private:
     mutable size_t syncedFront_ = 0;
     mutable size_t syncedBack_ = 0;
     mutable uint64_t syncedStream_ = 0;
+
+    /// The streamed bodies' cached unclosed-fence answer, one per body (the
+    /// answer text and the reasoning carry independent fences). `scan`
+    /// resumes where the previous snapshot stopped - a snapshot pays for its
+    /// appended suffix only - and `open` is the flag the body draw reads, so a
+    /// frame scans nothing. Both reset when the stream is replaced, not grown.
+    struct StreamFence {
+        ui::FenceScanState scan;
+        bool open = false;
+    };
+    mutable StreamFence streamTextFence_;
+    mutable StreamFence streamThinkingFence_;
 
     /// Height hints used to live here; they are `UiState::thread.hints` now (the
     /// cache is view state, and it must be dropped by a session switch that this

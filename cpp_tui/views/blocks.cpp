@@ -26,7 +26,6 @@
 #include "ui/primitives.h"
 #include "ui/text.h"
 #include "ui/tokens.h"
-#include "views/topbar.h" // elapsedLabel(): the one clock formatter, shared with the top bar
 
 #include "imgui/imgui.h"
 
@@ -201,17 +200,14 @@ std::string blockHeaderText(const BlockView& block, const BlockDraw& draw, bool 
     const std::string timing = blockTimingLabel(block.timingS);
     if (!timing.empty())
         text += separator(textGrid) + timing;
-    // The live answer's header (design FR-08, task 38): the phase word the model's vocabulary
-    // gives the row and the run's clock - `AGENT · writing · 00:12`, `AGENT · cancelled · 00:07`.
-    // The clock is a reading of the frame's clock, not a duration, so it is the top bar's own
-    // formatter (`mm:ss`) instead of `blockTimingLabel`'s ("1.2 s"): two clocks in one window
-    // must not spell the same moment two ways. Both parts are the descriptor's (the adapter
-    // derived them once per frame), so a row that is not streaming draws exactly what it did.
+    // The live answer's header: the phase word the model's vocabulary gives the
+    // row - `AGENT · writing`, `AGENT · cancelled`. The phase is event-driven,
+    // so the header changes only when the phase does, and the run's clock lives
+    // in the top bar and the now bar. The phase is the descriptor's, so a row
+    // that is not streaming draws label and timing only.
     if (block.streaming && !block.phase.empty()) {
         text += separator(textGrid);
         text += block.phase;
-        if (block.elapsedMs > 0)
-            text += separator(textGrid) + elapsedLabel(block.elapsedMs);
     }
     if (block.kind == BlockKind::WorkGroup) {
         // The group says how many steps it holds - the one number that tells a

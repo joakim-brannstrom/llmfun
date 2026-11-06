@@ -282,15 +282,14 @@ struct ThreadState {
     /// it. That is the rail's `menuRowId` rule (`views/rail.cpp`), in thread state.
     BlockId menuBlockId;
 
-    /// The live answer's clock, caret and cancel mark (design FR-08, task 38).
+    /// The live answer's clock and cancel mark.
     ///
     /// The stream itself is the store's (`ChatTab::hasStreamMsg` + `streamMsg`, one copy the
     /// adapter reads), so this carries only what a clock can tell: how long the answer has
-    /// run, how long the model reasoned, whether the user stopped it and which half of the
-    /// caret's blink this frame falls in. `refreshStreamClock()` is the one writer, called
-    /// by the frame layer once per frame and by a harness with its own clock - and
-    /// `resetStreamClock()` is the lifecycle clear, so a new stream never inherits the
-    /// previous answer's start time.
+    /// run, how long the model reasoned and whether the user stopped it.
+    /// `refreshStreamClock()` is the one writer, called by the frame layer once per frame and
+    /// by a harness with its own clock - and `resetStreamClock()` is the lifecycle clear, so
+    /// a new stream never inherits the previous answer's start time.
     StreamState stream;
 };
 
@@ -441,12 +440,10 @@ struct UiState {
     ///
     /// One store, one producer: the ABI (`tuiSetRuntimeStatus`, `tui.cpp`) writes the
     /// numbers D sends, and views read this member - never a sentence, never a
-    /// derivation from message text.
-    ///
-    /// The default is the row D's first tick replaces: no numbers yet (the chips show
-    /// the absence value, never `0`) and the model placeholder D itself sends when it
-    /// has no model. Every construction path gets the same seed, so a state built
-    /// outside `tuiCreateState` draws the same first frame.
+    /// derivation from message text. The default is the row D's first tick replaces:
+    /// no numbers yet (the chips show the absence value, never `0`) and the model
+    /// placeholder D itself sends when it has no model, so a state built outside
+    /// `tuiCreateState` draws the same first frame.
     RuntimeStatus status = [] {
         RuntimeStatus seeded;
         seeded.model = "none";
@@ -456,7 +453,7 @@ struct UiState {
     /// The four status chips the row draws (`model::StatusChips`), formatted once per
     /// value change by `tuiSetRuntimeStatus` when the structured status arrives. No
     /// render path reformats them: the values inside this member are
-    /// canonical for the numbers (§6.3), and a view reads the aggregate instead of
+    /// canonical for the numbers, and a view reads the aggregate instead of
     /// reaching into the state.
     StatusChips chips = chipsFromStatus(status);
 
@@ -530,9 +527,7 @@ struct UiState {
     int unreadActivity = 0;
 };
 
-// ---------------------------------------------------------------------------
-// Focus mode (task 43, FR-28)
-// ---------------------------------------------------------------------------
+// Focus mode
 
 /// Show or hide focus mode.
 ///
@@ -621,12 +616,10 @@ void refreshAgentLanes(UiState& ui, std::int64_t nowMs);
 // not in `tui_api.cpp`, because they are model answers (what a lane *is*) rather than a
 // binding of the C surface, and because a headless test can drive them with no ABI in the way.
 //
-// Nothing here reads the agent's stream text (task 39a, D-STATUS: numbers, not sentences).
-// The count and the tool name are fields on `PipelineChatMessage`, so a change to the way D
-// formats the lane's status sentence, or to the `--- Tool ---` layout
-// `PipelineStreamMessageUpdater` writes, cannot silently zero or mislabel a row. (The run-level
-// status is structured since D-STATUS v5 and has no sentence to parse anywhere; the *pipeline*
-// lane sentence keeps no reader either since task 41 removed the renderer that showed it.)
+// Nothing here reads the agent's stream text (numbers, not sentences). The count and the
+// tool name are fields on `PipelineChatMessage`, so a change to the way D formats the
+// lane's status sentence, or to the `--- Tool ---` layout
+// `PipelineStreamMessageUpdater` writes, cannot silently zero or mislabel a row.
 
 /// Apply one `tuiPipelineAgentUpdate` to the lane list, creating the lane on first sight.
 ///

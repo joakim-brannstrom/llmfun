@@ -714,12 +714,6 @@ bool bodyHasTable(bool textGrid, std::string_view body) {
 // Parse
 // ---------------------------------------------------------------------------
 
-bool isTableRowLine(std::string_view line) {
-    // One reader of "what a row is" (`splitRow`): a top-level separator, a `|` outside inline
-    // code. The table search above and the live answer's caret both come through here.
-    return splitRow(line).separated;
-}
-
 bool parseGfmTable(std::string_view block, Table& out) {
     const std::vector<Line> lines = splitLines(block);
     std::size_t first = 0;

@@ -403,12 +403,10 @@ target_link_libraries(test_theme_contrast PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
-# Headless unit test for the status-chip formatter (task 6, D-STATUS v5): the
-# structured status D sends (tuiSetRuntimeStatus, TuiRuntimeStatus) -> the four
-# chips the status row shows, with "—" for a field the status does not carry.
-# Compiles model/status_chips.cpp directly and links nothing else (like
-# test_settings), which also pins the module's layering: no ImGui, no tui.h, no
-# ChatMessage. Invoke from the build dir: ./test_status_chips
+# Headless unit test for the status-chip formatter: the structured status D
+# sends (tuiSetRuntimeStatus) -> the four chips, with the missing-value dash
+# for a field the status does not carry. Compiles model/status_chips.cpp
+# directly (like test_settings): no ImGui, no tui.h, no ChatMessage.
 add_executable(test_status_chips
     test_status_chips.cpp
     model/status_chips.cpp
@@ -946,17 +944,11 @@ target_link_libraries(test_blocks PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
-# Streaming v2 (task 38, design FR-08 / §4.5). The live answer's clock, its caret, the store's
-# update throttle and the stable block identity, on a fake clock where the arithmetic is exact:
-# one streaming frame against NFR-02's 8 ms, the `Load earlier` window that does not budget for
-# the live answer, and four goldens (the caret, a cancelled answer, a reasoning-only stream and a
-# stream whose last line is a table row).
-#
-# Like test_blocks it draws `views::renderThread()` into the real text backend, with the
-# text-mode markdown profile armed (initMarkdownTextMode before ImTui_ImplText_Init), so a
-# golden is what the terminal would show. The markdown-heavy answer it streams is a file
-# (`test/fixtures/streaming.md`), fed one growing prefix per update.
-# Invoke from the build dir: ./test_streaming [-v] [--update] [--dump]
+# Streaming tests: the live answer's clock, the store's update throttle and the
+# stable block identity, on a fake clock where the arithmetic is exact; one
+# streaming frame against the 8 ms text-grid budget. Like test_blocks it draws
+# `views::renderThread()` into the real text backend; the streamed answer is
+# `test/fixtures/streaming.md`, one growing prefix per update. Invoke: ./test_streaming [-v] [--update] [--dump]
 add_executable(test_streaming
     test_streaming.cpp
 )

@@ -231,20 +231,7 @@ struct GfmTableSpan {
 /// trailing carriage return, so a body that came from a file still parses.
 std::vector<GfmTableSpan> findGfmTables(std::string_view body);
 
-/// Whether one *line* is a GFM table row, as the bridge above reads rows: it carries a
-/// top-level separator - a `|` outside inline code and outside an escape - which is exactly
-/// `splitRow(line).separated` in `table.cpp`. A blank line is not a row.
-///
-/// Exposed for the live answer's caret (task 38): a glyph appended after a row's last pipe
-/// changes how the row and the delimiter row parse, so `ui::withStreamingCaret()` puts the caret
-/// on the next line instead. A row line is necessary but not sufficient - prose (`ls | grep`) and
-/// a code line inside a fence carry a pipe too - so the caret asks this question as a cheap
-/// pre-check and then asks the scanner whether the body's last line is inside a table span.
-bool isTableRowLine(std::string_view line);
-
-// ---------------------------------------------------------------------------
-// Bridge (design section 6.8, task 37)
-// ---------------------------------------------------------------------------
+// Bridge
 
 /// `body` with every GFM table replaced by a fenced block, written to `out`.
 ///

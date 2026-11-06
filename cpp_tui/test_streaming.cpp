@@ -1,18 +1,16 @@
 // test_streaming.cpp
 //
-// Streaming v2 (task 38, design FR-08 / §4.5): the live answer made legible and cheap.
+// Streaming v2: the live answer made legible and cheap.
 //
 // What this binary proves, in order:
 //
 //   1. the sources   the streaming state is the frame's (`refreshStreamClock` is called once per
-//                    frame in `views/shell.cpp`), the caret is the markdown wrapper's
-//                    (`ui::withStreamingCaret`, the one place that knows what a fence is), no
-//                    view names a v4 type, a profile flag or a display size, and the bounded
-//                    window counts the *stored* groups (`storedGroupCount`).
-//   2. the clock     a fake clock drives every number: the answer's elapsed time, the reasoning's
-//                    duration (0 while it is still reasoning, frozen when the answer begins) and
-//                    the caret's blink phase, which changes twice a second and never once per
-//                    frame - 30 reads of one half-period answer the same value.
+//                    frame in `views/shell.cpp`), no view names a v4 type, a profile flag or a
+//                    display size, and the bounded window counts the *stored* groups
+//                    (`storedGroupCount`).
+//   2. the clock     a fake clock drives every number: the answer's elapsed time and the
+//                    reasoning's duration (0 while it is still reasoning, frozen when the answer
+//                    begins).
 //   3. the throttle  the store accepts one snapshot per window (~30 fps), parks the newest inside
 //                    it, and treats a byte-identical resend as no repaint at all; a stop applies
 //                    a parked snapshot before the clock freezes, so the partial answer is never
@@ -20,23 +18,21 @@
 //   4. the identity  across 300 updates of a markdown-heavy answer the stream group's id and its
 //                    two blocks (`{group, kStreamMessageId, Thinking}` and `... Assistant`) never
 //                    move, and the group's `revision` advances exactly when the text does.
-//   5. the caret     drawn only while the answer is arriving: on the body's last line, absent in
-//                    the blink's off half (which holds the same cells, so the *drawn* last row
-//                    does not move), absent for a cancelled or finished answer, and never inside a
-//                    fence delimiter, a table row or a rule line.
-//   6. the header    `AGENT · writing · 00:12`, still `thinking` (with the run's clock) before the
-//                    first character, `cancelled · 00:12` after a stop, and `Thinking · 3.2 s`
-//                    once the reasoning has ended.
-//   7. the height    within one revision the group's height never shrinks (the caret's blink and
-//                    a disclosure toggled at the same text are the two cases), so a live answer
+//   5. the header    the body row names the phase and nothing else - `AGENT · thinking` before
+//                    the first character, `AGENT · writing` while the answer grows, `AGENT ·
+//                    cancelled` after a stop - and never a clock, while the reasoning row keeps
+//                    `Thinking · 3.2 s` once it has ended, streamed or stored.
+//   6. the height    within one revision the group's height never shrinks, so a live answer
 //                    cannot oscillate.
-//   8. the window    the live answer is drawn after the bounded window, not inside it: three
+//   7. the window    the live answer is drawn after the bounded window, not inside it: three
 //                    stored groups plus the stream is four drawn groups and the paging count is
 //                    the stored conversation's.
-//   9. the cost      one streaming frame stays inside NFR-02's text-grid budget (8 ms).
-//  10. the goldens   the live answer with a caret, the cancelled answer, a reasoning-only
-//                    stream, and a stream whose last line is a table row (the caret gets its
-//                    own line there, so the table keeps being a table), as text+inks screens.
+//   8. the cost      one streaming frame over a 100 KB answer stays inside the 8 ms text-grid
+//   budget.
+//   9. the goldens   the live answer, the cancelled answer, a reasoning-only stream, a stream
+//                    whose last line is a table row, and a stream inside an unclosed fence.
+//  10. the fallback  a streamed body inside an unclosed fence draws as plain text and the stored
+//                    ones never do: the scan resumes where the last snapshot stopped.
 //
 // The grid is the real text backend (the `TScreen` pattern of `test_session_filter_smoke.cpp`)
 // with the real text-mode markdown profile, so a golden is what the terminal would show.
@@ -125,8 +121,8 @@ ImTui::TScreen g_screen;
 constexpr int kScreenW = 100;
 constexpr int kScreenH = 30;
 
-/// The fake clock every clock check uses: a whole number of blink half-periods, so which half a
-/// reading falls in is stated in the check instead of depending on the wall clock.
+/// The fake clock every clock check uses: the checks state their offsets outright (`kT0 + 3200`,
+/// say), so what a reading means depends on nothing the wall clock decides.
 constexpr long long kT0 = 1000000;
 
 /// How much of the answer's clock one fixture update advances (the stream test's cadence).
@@ -434,14 +430,10 @@ void checkSource() {
     if (readWholeFile(dir + "/views/shell.cpp", shell))
         check(shell.find("refreshStreamClock") != std::string::npos,
               "the frame layer derives the live answer's clock once per frame");
-    std::string markdown;
-    if (readWholeFile(dir + "/ui/markdown.cpp", markdown))
-        check(markdown.find("withStreamingCaret") != std::string::npos,
-              "the caret is appended by the markdown wrapper (the one place that knows a fence)");
 }
 
 // ---------------------------------------------------------------------------
-// 2. The clock: elapsed, the reasoning's duration and the blink - with a fake clock
+// 2. The clock: elapsed and the reasoning's duration - with a fake clock
 // ---------------------------------------------------------------------------
 
 void checkClock() {
@@ -450,28 +442,14 @@ void checkClock() {
     check(!s.active(), "a fresh clock is inactive");
 
     model::refreshStreamClock(s, /*hasStream=*/false, false, false, kT0, false);
-    check(!s.active() && s.elapsedMs == 0 && !s.caretOn, "no stream answers 00:00 and no caret");
+    check(!s.active() && s.elapsedMs == 0, "no stream answers 00:00");
 
     // The first sighting of a stream *is* its start.
     model::refreshStreamClock(s, /*hasStream=*/true, /*hasText=*/false, /*hasThinking=*/true, kT0,
                               false);
     check(s.startedMs == kT0, "the first sighting starts the clock");
     check(s.elapsedMs == 0, "the answer begins at 00:00");
-    check(s.caretOn, "the caret's first half-period is on");
     check(s.thinkingElapsedMs == 0, "the reasoning's duration is 0 while it is still reasoning");
-
-    // A blink is not a per-frame toggle: thirty reads inside one half-period answer the same.
-    bool same = true;
-    for (int i = 1; i <= 30; ++i) {
-        model::refreshStreamClock(s, true, false, true, kT0 + i * 10, false);
-        same = same && s.caretOn;
-    }
-    check(same, "30 frames inside one half-period keep the caret on (not a per-frame flip)");
-    model::refreshStreamClock(s, true, false, true, kT0 + model::kStreamCaretHalfPeriodMs, false);
-    check(!s.caretOn, "the next half-period turns it off");
-    model::refreshStreamClock(s, true, false, true, kT0 + 2 * model::kStreamCaretHalfPeriodMs,
-                              false);
-    check(s.caretOn, "and the one after that turns it back on");
 
     // Elapsed is the injected clock's own arithmetic.
     model::refreshStreamClock(s, true, false, true, kT0 + 12000, false);
@@ -488,12 +466,11 @@ void checkClock() {
     model::refreshStreamClock(s, true, true, true, kT0 + 20000, false);
     check(s.thinkingElapsedMs == 15200, "a later frame does not extend the reasoning's duration");
 
-    // A stop freezes the clock where the text stopped arriving and takes the caret away.
+    // A stop freezes the clock where the text stopped arriving.
     model::refreshStreamClock(s, true, true, true, kT0 + 27000, /*cancelRequested=*/true);
     check(s.cancelled, "a cancel request marks the answer cancelled");
     check(s.elapsedMs == 27000,
           "the clock freezes at the stop (got " + toString(s.elapsedMs) + ")");
-    check(!s.caretOn, "a cancelled answer has no caret");
     model::refreshStreamClock(s, true, true, true, kT0 + 40000, true);
     check(s.elapsedMs == 27000, "and stays frozen while the run winds down");
 
@@ -512,8 +489,8 @@ void checkClock() {
     // A stream that ends leaves nothing behind.
     model::StreamState ended = s;
     model::refreshStreamClock(ended, /*hasStream=*/false, false, false, kT0 + 50000, false);
-    check(!ended.active() && ended.elapsedMs == 0 && !ended.cancelled && !ended.caretOn,
-          "the stream's end clears the clock, the cancel mark and the caret");
+    check(!ended.active() && ended.elapsedMs == 0 && !ended.cancelled,
+          "the stream's end clears the clock and the cancel mark");
 }
 
 // ---------------------------------------------------------------------------
@@ -625,10 +602,10 @@ void checkIdentityAndHeight() {
         const std::string text =
             step <= kReasoningUpdates ? std::string() : document.substr(0, prefix);
         const std::string reasoning = "First, read the document, then answer it in order.";
-        // Four seconds of the answer's clock per update: the height samples below span two and a
-        // half blinks, so they fit inside one step and the clock only ever moves forward - the
-        // derivation treats a reading older than the last one as the same moment (a wall clock can
-        // step back). One update per four seconds is slow for a stream and right for a clock test.
+        // Four seconds of the answer's clock per update: the height samples below span several
+        // readings of one revision and the clock only ever moves forward - the derivation treats
+        // a reading older than the last one as the same moment (a wall clock can step back). One
+        // update per four seconds is slow for a stream and right for a clock test.
         now = kT0 + static_cast<long long>(step) * kStreamStepMs;
         if (step == 1)
             fixture.stream("", reasoning, now);
@@ -654,14 +631,14 @@ void checkIdentityAndHeight() {
 
         // The height within this revision. A markdown construct (a fenced code block, a bridged
         // table) needs a few frames to settle, so what must never happen is a *shrink* (the row
-        // would move under the reader) and it must stop growing. Six samples 500 ms apart cover
-        // two and a half blink periods, i.e. both halves of the caret's cycle twice.
+        // would move under the reader) and it must stop growing. Six samples 100 ms apart read
+        // the same revision at several clock readings.
         constexpr int kSamples = 6;
         float heights[kSamples] = {};
         for (int pass = 0; pass < kSamples; ++pass) {
             fixture.draw();
             heights[pass] = fixture.state.threadAdapter.measureHint(groupId);
-            fixture.tick(now + static_cast<long long>(pass) * model::kStreamCaretHalfPeriodMs);
+            fixture.tick(now + static_cast<long long>(pass) * 100);
         }
         for (int pass = 1; pass < kSamples; ++pass) {
             if (heights[pass] < heights[pass - 1] - 0.01f) {
@@ -684,8 +661,9 @@ void checkIdentityAndHeight() {
     check(revisionMonotone, "the group's revision never goes backwards");
     check(previousRevision >= 250, "and it advanced with the text (final revision " +
                                        std::to_string(previousRevision) + ")");
-    check(heightStableWithinRevision,
-          "within one revision the height never shrinks and settles (the blink does not move it)");
+    check(
+        heightStableWithinRevision,
+        "within one revision the height never shrinks and settles (the content does not move it)");
 
     // The reasoning's duration is the frame's, and it stops when the answer began.
     const model::StreamState& clock = fixture.state.ui.thread.stream;
@@ -711,170 +689,7 @@ void checkIdentityAndHeight() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. The caret, drawn
-// ---------------------------------------------------------------------------
-
-/// The caret's glyph as the text grid draws it (`Icon::Rule`'s Unicode form, "▌").
-constexpr uint32_t kCaret = 0x258C;
-
-void checkCaretDrawn() {
-    phase("caret");
-    Fixture fixture;
-    fixture.addStored(message(1, tui::ChatMessageType::User, "[1] hello [0.1s]", "hello"));
-
-    // A marked answer with the caret in its on half.
-    fixture.stream("The live answer is still being written", "", kT0);
-    Grid grid = fixture.draw();
-    check(grid.countCell(kCaret) == 1, "the live answer draws exactly one caret (got " +
-                                           std::to_string(grid.countCell(kCaret)) + ")");
-    const int caretRow = [&grid]() {
-        for (int y = 0; y < grid.ny; ++y)
-            if (grid.rowContains(y, "\xE2\x96\x8C"))
-                return y;
-        return -1;
-    }();
-    check(caretRow >= 0 && grid.rowContains(caretRow, "written"),
-          "the caret is on the body's last line (row " + std::to_string(caretRow) + ")");
-
-    // The off half of the blink: no caret, and the *drawn* row does not move. `measureHint()` is
-    // the wrong instrument here - the no-shrink rule pins it while the revision is unchanged, so
-    // it would pass even if the glyph wrapped differently - so this reads the captured grid: the
-    // same last row, the same rows of text, and the caret's cell holding a blank instead.
-    fixture.tick(kT0 + model::kStreamCaretHalfPeriodMs);
-    Grid offGrid = fixture.draw();
-    check(offGrid.countCell(kCaret) == 0, "the blink's off half draws no caret");
-    check(offGrid.lastInkRow() == grid.lastInkRow(),
-          "and the drawn content keeps its last row (" + std::to_string(grid.lastInkRow()) +
-              " vs " + std::to_string(offGrid.lastInkRow()) + ")");
-    std::string caretRowOn = grid.rowText(caretRow);
-    const std::size_t caretAt = caretRowOn.find("\xE2\x96\x8C");
-    if (caretAt != std::string::npos)
-        caretRowOn.replace(caretAt, 3, 1, ' ');
-    check(caretRow >= 0 && offGrid.rowText(caretRow) == caretRowOn,
-          "and the caret's own row is the row that was drawn: the blink changes one cell");
-
-    // Before a single character arrives there is nothing to put a caret after.
-    Fixture empty;
-    empty.stream("", "reasoning only", kT0);
-    Grid emptyGrid = empty.draw();
-    check(emptyGrid.countCell(kCaret) == 0, "a body-less stream draws no caret");
-    check(emptyGrid.contains("thinking"), "its row says the model is still thinking");
-
-    // A cancelled answer keeps its text and loses the caret.
-    Fixture stopped;
-    stopped.stream("The answer that was cut", "", kT0);
-    stopped.tick(kT0 + 7000, /*cancelRequested=*/true);
-    Grid stoppedGrid = stopped.draw();
-    check(stoppedGrid.countCell(kCaret) == 0, "a cancelled answer has no caret");
-    check(stoppedGrid.contains("The answer that was cut"), "but keeps every character it had");
-
-    // The committed answer is a stored message again: no stream, no caret.
-    Fixture finished;
-    finished.stream("The answer that finished", "", kT0);
-    tui::tuiStreamChatMessageClear(finished.state);
-    finished.addStored(message(2, tui::ChatMessageType::FinalAnswer, "[2] answer [1.0s]",
-                               "The answer that finished"));
-    Grid finishedGrid = finished.draw();
-    check(finishedGrid.countCell(kCaret) == 0, "a finished answer has no caret");
-    check(finishedGrid.contains("The answer that finished"), "and it is drawn as a stored message");
-}
-
-/// The pure half of the caret: `ui::withStreamingCaret()` (the fence rule is markdown's).
-void checkCaretAppend() {
-    phase("caret-append");
-    const std::string caret = ui::icon(ui::Icon::Rule, ui::GlyphSet::Glyphs);
-    check(caret == "\xE2\x96\x8C", "the caret's glyph is the icon table's `▌`");
-    check(std::string(ui::icon(ui::Icon::Rule, ui::GlyphSet::Ascii)) == "|",
-          "and the ASCII column's `|` (design FR-08's fallback)");
-    check(ui::withStreamingCaret("", caret).empty(), "no body, no caret");
-    check(ui::withStreamingCaret("abc", caret) == "abc" + caret,
-          "the caret continues the last line");
-    check(ui::withStreamingCaret("abc\n\n", caret) == "abc" + caret,
-          "trailing line breaks do not open a line for it");
-    check(ui::withStreamingCaret("a\n```", caret) == "a\n```\n" + caret,
-          "a fence delimiter is never appended to (that would swallow the thread)");
-    check(ui::withStreamingCaret("```py\nprint(1", caret) == "```py\nprint(1" + caret,
-          "inside a fence the caret continues the code line");
-    check(ui::withStreamingCaret("abc", " ") == "abc ", "the blink's off half is a space");
-
-    // A table row is the second shape that is never appended to: a glyph after the row's last pipe
-    // changes how the row and the delimiter row parse, so the caret goes on a line of its own -
-    // after a blank line, because both readers run a table on while its lines look like rows and
-    // md4c takes *any* non-blank line (a caret directly under a row would be an empty row of it).
-    const std::string table = "| a | b |\n| --- | --- |";
-    const std::string withRowCaret = ui::withStreamingCaret(table, caret);
-    check(withRowCaret == table + "\n\n" + caret,
-          "a table row puts the caret after a blank line (got '" + withRowCaret + "')");
-    check(ui::findGfmTables(table + caret).empty(),
-          "appending to the row would stop it being a table (the hazard the rule removes)");
-    const auto rowSpans = ui::findGfmTables(withRowCaret);
-    check(rowSpans.size() == 1 && rowSpans.back().end == table.size(),
-          "with the caret on its own line the table is still a table and the caret is outside it");
-    const std::string bodyRows = "| a | b |\n| --- | --- |\n| 1 | 2 |";
-    check(ui::withStreamingCaret(bodyRows, caret) == bodyRows + "\n\n" + caret,
-          "and the same for a body row");
-
-    // GFM does not require the outer pipes, so `a | b` is a row too: the rule is the scanner's
-    // answer, not "does the line start or end with a pipe".
-    const std::string pipeLess = "a | b\n--- | ---";
-    const std::string pipeLessCaret = ui::withStreamingCaret(pipeLess, caret);
-    check(pipeLessCaret == pipeLess + "\n\n" + caret,
-          "a pipe-less delimiter row gets the same own line (got '" + pipeLessCaret + "')");
-    check(ui::findGfmTables(pipeLess + caret).empty(),
-          "appending to it stops the table (the defect this rule closes)");
-    const auto pipeLessSpans = ui::findGfmTables(pipeLessCaret);
-    check(pipeLessSpans.size() == 1 && pipeLessSpans.back().end == pipeLess.size(),
-          "and the pipe-less table survives the caret");
-    const std::string pipeLessBody = "a | b\n--- | ---\n1 | 2";
-    check(ui::withStreamingCaret(pipeLessBody, caret) == pipeLessBody + "\n\n" + caret,
-          "a pipe-less body row too");
-    // The own line keeps the last line's indentation: a table in a list item keeps its caret in
-    // the item instead of starting a paragraph at the left margin.
-    const std::string nested = "- item\n\n    | a | b |\n    | --- | --- |";
-    const std::string nestedCaret = ui::withStreamingCaret(nested, caret);
-    check(nestedCaret == nested + "\n\n    " + caret,
-          "a nested table's caret line keeps the container's indent (got '" + nestedCaret + "')");
-
-    // The other half of the rule: a line that merely *carries* a pipe is not a table row, so the
-    // caret stays on it. (Dropping the old outer-pipe gate instead would move it onto a line of
-    // its own here.)
-    const std::string prose = "use a | b as a separator";
-    check(ui::withStreamingCaret(prose, caret) == prose + caret,
-          "prose with a top-level pipe keeps the caret on its line (got '" +
-              ui::withStreamingCaret(prose, caret) + "')");
-    const std::string code = "```\nls | grep x";
-    check(ui::withStreamingCaret(code, caret) == code + caret, "and so does a pipe inside a fence");
-
-    // A thematic break / setext underline is the third: `---` plus a glyph is a paragraph and
-    // `- - -` plus one is a list.
-    check(ui::withStreamingCaret("text\n---", caret) == "text\n---\n" + caret,
-          "a rule line puts the caret on the next line");
-    check(ui::withStreamingCaret("text\n- - -", caret) == "text\n- - -\n" + caret,
-          "a spaced thematic break gets the same line (got '" +
-              ui::withStreamingCaret("text\n- - -", caret) + "')");
-    check(ui::withStreamingCaret("Heading\n===", caret) == "Heading\n===\n" + caret,
-          "and so does a setext underline");
-
-    // The ASCII column's caret is a separator itself: on a line of its own it is one more row of
-    // the table above, and appended to a prose line right after a table it drags that line into
-    // it - the blank line the table rule writes is what keeps both paragraphs.
-    const std::string asciiCaret = ui::icon(ui::Icon::Rule, ui::GlyphSet::Ascii);
-    check(asciiCaret == "|", "the ASCII caret is the pipe");
-    const std::string asciiAfterTable = ui::withStreamingCaret(table, asciiCaret);
-    check(asciiAfterTable == table + "\n\n|",
-          "the ASCII caret gets its own paragraph after a table (got '" + asciiAfterTable + "')");
-    const auto asciiSpans = ui::findGfmTables(asciiAfterTable);
-    check(asciiSpans.size() == 1 && asciiSpans.back().end == table.size(),
-          "so it is not an empty row of that table");
-    const std::string proseAfterTable = table + "\nand that is all";
-    const std::string asciiAfterProse = ui::withStreamingCaret(proseAfterTable, asciiCaret);
-    const auto proseSpans = ui::findGfmTables(asciiAfterProse);
-    check(proseSpans.size() == 1 && proseSpans.back().end == table.size(),
-          "and a prose line after a table is not dragged into it (got '" + asciiAfterProse + "')");
-}
-
-// ---------------------------------------------------------------------------
-// 6. The header: phase, clock and the reasoning's duration
+// 5. The header: the phase word and the reasoning's duration
 // ---------------------------------------------------------------------------
 
 void checkHeader() {
@@ -886,13 +701,6 @@ void checkHeader() {
               "')");
     check(headerOf(fixture, 1) == "AGENT - thinking",
           "and the body row says the model is still thinking (got '" + headerOf(fixture, 1) + "')");
-    // The answer's clock runs while the model reasons too (FR-08's elapsed time), so the row is
-    // `AGENT · thinking · 00:02` a moment in - the phase word is what changes, never the clock's
-    // absence.
-    fixture.tick(kT0 + 2400);
-    check(headerOf(fixture, 1) == "AGENT - thinking - 00:02",
-          "the run's clock is drawn beside the thinking phase as well (got '" +
-              headerOf(fixture, 1) + "')");
 
     // The answer begins 3.2 s in and the frame lands 12 s in.
     fixture.stream("The answer", "Let me think", kT0 + 3200);
@@ -900,13 +708,22 @@ void checkHeader() {
     check(headerOf(fixture, 0) == "Thinking - 3.2 s",
           "once the reasoning ends its row keeps the duration (got '" + headerOf(fixture, 0) +
               "')");
-    check(headerOf(fixture, 1) == "AGENT - writing - 00:12",
-          "the live row prints `AGENT · writing · mm:ss` (got '" + headerOf(fixture, 1) + "')");
+    const std::string writing = headerOf(fixture, 1);
+    check(writing == "AGENT - writing",
+          "the live row prints `AGENT · writing` (got '" + writing + "')");
 
-    // A stop freezes the clock and names what happened.
+    // The phase word is event-driven, so seconds passing moves the header not one character:
+    // three ticks a second apart is the smallest sequence a per-second clock segment would fail.
+    fixture.tick(kT0 + 13000);
+    fixture.tick(kT0 + 14000);
+    fixture.tick(kT0 + 15000);
+    check(headerOf(fixture, 1) == writing,
+          "the live row holds still across three seconds of ticking (flicker-free)");
+
+    // A stop names what happened, and the clock is gone with it.
     fixture.tick(kT0 + 19000, /*cancelRequested=*/true);
-    check(headerOf(fixture, 1) == "AGENT - cancelled - 00:19",
-          "a stopped answer says so and keeps its clock (got '" + headerOf(fixture, 1) + "')");
+    check(headerOf(fixture, 1) == "AGENT - cancelled",
+          "a stopped answer says so and keeps no clock (got '" + headerOf(fixture, 1) + "')");
     check(headerOf(fixture, 0) == "Thinking - 3.2 s",
           "the reasoning's row is unchanged by the stop (got '" + headerOf(fixture, 0) + "')");
 
@@ -917,10 +734,84 @@ void checkHeader() {
     check(views::blockHeaderText(desc, views::BlockDraw{true, false}, true) == "ANSWER - 2.5 s",
           "a stored answer's header is a duration, not a phase (got '" +
               views::blockHeaderText(desc, views::BlockDraw{true, false}, true) + "')");
+
+    // A stored reasoning keeps its duration too: the summary's `[2.5s]` is the disclosure's.
+    stored.addStored(message(2, tui::ChatMessageType::FinalAnswer, "[2] reasoned [2.5s]",
+                             "reasoned", "the reasoning"));
+    const model::BlockDesc reasoning = stored.state.threadAdapter.blockAt(1, 0);
+    check(reasoning.kind == model::BlockKind::Thinking,
+          "a stored message's reasoning is its own block");
+    check(views::blockHeaderText(reasoning, views::BlockDraw{true, false}, true) ==
+              "Thinking - 2.5 s",
+          "and a stored reasoning row keeps its duration (got '" +
+              views::blockHeaderText(reasoning, views::BlockDraw{true, false}, true) + "')");
 }
 
 // ---------------------------------------------------------------------------
-// 8. The live answer is drawn after the bounded window, not inside it
+// 6. The plain-text fence fallback: the open flip, the close flip, the guards
+// ---------------------------------------------------------------------------
+
+void checkFenceFallback() {
+    phase("fence fallback");
+    // The open flip: markdown-shaped lines above an unclosed fence draw raw, because a heading
+    // or a list item still under the fence would change shape from snapshot to snapshot as the
+    // renderer re-classifies it. The first snapshot settles three lines; the second appends the
+    // fence opener, and the scan must continue from the first snapshot's end.
+    Fixture fixture;
+    fixture.stream("## Heading\n\n- item\n", "", kT0);
+    fixture.draw();
+    const std::size_t settled = fixture.state.threadAdapter.streamFenceScanOffset();
+    check(settled > 0, "the fence scan advances past the lines it settled (got " +
+                           std::to_string(settled) + ")");
+    fixture.stream("## Heading\n\n- item\n\n```python\n", "", kT0 + 1000);
+    Grid grid = fixture.draw();
+    const std::size_t resumed = fixture.state.threadAdapter.streamFenceScanOffset();
+    check(resumed > settled,
+          "the next snapshot resumed the scan where the last stopped, it did not restart");
+    check(grid.contains("## Heading"),
+          "a streamed body inside an open fence draws its heading raw");
+    check(grid.contains("```python"), "and the fence's own opener is on the screen, not swallowed");
+    const ui::MarkdownCounters open = ui::markdownCounters();
+    check(open.plainTextFallbacks > 0, "the fallback draw reports itself");
+
+    // The close flip: once the fence closes the body is markdown again - the heading loses its
+    // `##` to the renderer, the fence markers disappear into the code block, and no fallback
+    // draw happens for a body that is not inside a fence.
+    fixture.stream("## Heading\n\n- item\n\n```python\nx = 1\n```\n", "", kT0 + 2000);
+    grid = fixture.draw();
+    const ui::MarkdownCounters closed = ui::markdownCounters();
+    check(!grid.contains("```python"), "once the fence closes the body is markdown again");
+    check(!grid.contains("## Heading"), "and the heading is rendered, not printed raw");
+    check(closed.plainTextFallbacks == open.plainTextFallbacks,
+          "and the closing draw took no fallback");
+
+    // The reasoning's body is under the same rule: a stream whose thinking sits inside an
+    // unclosed fence draws raw too (the disclosure starts open when the stream is born).
+    Fixture reasoning;
+    reasoning.stream("", "Notes on the answer:\n\n```python\n", kT0);
+    Grid thinkGrid = reasoning.draw();
+    check(thinkGrid.contains("```python"),
+          "a streamed reasoning body inside an open fence draws raw as well");
+    check(ui::markdownCounters().plainTextFallbacks > open.plainTextFallbacks,
+          "and its fallback draw reports itself too");
+
+    // A stored message with an unterminated fence is a finished message: its body belongs to
+    // the markdown renderer whatever it holds.
+    Fixture stored;
+    stored.addStored(
+        message(1, tui::ChatMessageType::FinalAnswer, "[1] code [2.0s]", "```python\nx = 1\n"));
+    stored.draw();
+    const ui::MarkdownCounters first = ui::markdownCounters();
+    stored.draw();
+    const ui::MarkdownCounters second = ui::markdownCounters();
+    check(second.renders > first.renders,
+          "a stored body still goes through the markdown renderer every draw");
+    check(second.plainTextFallbacks == first.plainTextFallbacks,
+          "and a stored message never takes the plain-text fallback");
+}
+
+// ---------------------------------------------------------------------------
+// 7. The live answer is drawn after the bounded window, not inside it
 // ---------------------------------------------------------------------------
 
 void checkWindow() {
@@ -970,15 +861,23 @@ void checkWindow() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. The cost of one streaming frame (NFR-02: TUI <= 8 ms)
+// 9. The cost of one streaming frame (TUI <= 8 ms)
 // ---------------------------------------------------------------------------
 
 void checkCost() {
     phase("cost");
-    const std::string document = fixtureDocument();
+    // The fixture document alone is far under the budget, so the measured body is the document
+    // repeated until it crosses the large-body size: the streaming path must stay flat as the
+    // answer grows, not merely cheap while it is small.
+    const std::string base = fixtureDocument();
+    std::string document = base;
+    while (document.size() < 100 * 1024)
+        document += base;
     Fixture fixture;
     fixture.addStored(message(1, tui::ChatMessageType::User, "[1] stream [0.1s]", "stream"));
     fixture.stream(document, "reasoning", kT0);
+    check(document.size() >= 100 * 1024, "the measured answer is a large body (got " +
+                                             std::to_string(document.size()) + " bytes)");
     // Warm up (the atlas and rich_md's cache), then measure the best of five draws: a loaded
     // machine must not turn a budget check into a coin toss.
     fixture.draw();
@@ -990,7 +889,7 @@ void checkCost() {
         const double ms = std::chrono::duration<double, std::milli>(stop - start).count();
         best = std::min(best, ms);
     }
-    check(best <= 8.0, "one streaming frame stays within NFR-02 (8 ms, measured " +
+    check(best <= 8.0, "one streaming frame over the large body stays within 8 ms (measured " +
                            std::to_string(best) + " ms)");
     if (g_verbose)
         std::printf("     streaming frame: %.2f ms (best of 5, %zu-byte answer)\n", best,
@@ -998,7 +897,7 @@ void checkCost() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. The goldens
+// 10. The goldens
 // ---------------------------------------------------------------------------
 
 struct GoldenScene {
@@ -1011,10 +910,10 @@ std::vector<GoldenScene> scenes() {
     list.push_back({"live", [](Fixture& f) {
                         f.stream("", "Read the request.", kT0);
                         f.stream("The answer is **still** arriving.\n\nA second paragraph, so the "
-                                 "caret has a line to sit on.",
+                                 "body has more than one line.",
                                  "Read the request.", kT0 + 3200);
                         f.stream("The answer is **still** arriving.\n\nA second paragraph, so the "
-                                 "caret has a line to sit on.",
+                                 "body has more than one line.",
                                  "Read the request.", kT0 + 12000);
                     }});
     list.push_back({"cancelled", [](Fixture& f) {
@@ -1024,12 +923,9 @@ std::vector<GoldenScene> scenes() {
                     }});
     list.push_back({"table", [](Fixture& f) {
                         // The revision every streamed table passes through: the last line is a
-                        // table row, so the caret must not be appended to it (review finding 2) -
-                        // the grid still draws and the caret gets a row of its own, one blank
-                        // line below the table. The blank line is what ends the table for md4c,
-                        // and on the grid the block gap it opens is under a cell, so the caret
-                        // keeps the row it had.
-                        f.stream("| Tick | Text | Caret |\n| ---- | ---- | ----- |\n"
+                        // table row, so the body ends inside the table while it streams - and
+                        // the table keeps being a table, on the grid as in the scanner.
+                        f.stream("| Tick | Text | State |\n| ---- | ---- | ----- |\n"
                                  "| 1 | `Streaming v2` | on |",
                                  "", kT0);
                         f.tick(kT0 + 3000);
@@ -1037,6 +933,13 @@ std::vector<GoldenScene> scenes() {
     list.push_back({"thinking", [](Fixture& f) {
                         f.stream("", "Working out what to say next.", kT0);
                         f.tick(kT0 + 2400);
+                    }});
+    list.push_back({"fence", [](Fixture& f) {
+                        // The revision that flips the body to plain text: the fence opener is
+                        // the last line, so the heading and the list item above it hold the
+                        // shape they arrived in instead of being re-classified mid-stream.
+                        f.stream("## Heading\n\n- item\n\n```python\n", "", kT0);
+                        f.tick(kT0 + 3000);
                     }});
     return list;
 }
@@ -1143,9 +1046,8 @@ int main(int argc, char** argv) {
     checkSource();
     checkClock();
     checkThrottle();
-    checkCaretAppend();
     checkHeader();
-    checkCaretDrawn();
+    checkFenceFallback();
     checkIdentityAndHeight();
     checkWindow();
     checkCost();

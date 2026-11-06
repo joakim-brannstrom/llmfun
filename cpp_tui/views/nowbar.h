@@ -7,31 +7,24 @@
 ///     (60 cells: the model chip yields)
 ///
 /// Left: a state rule (1 cell on the text grid, 2 px in the pixel profile), the phase's
-/// mark, the phase word, then the detail (the current tool or step) and the run's
-/// clock. Right: the contextual key hints, the context meter (`ctx`, the segmented bar
-/// and the count - the meter that owns the numbers), the speed chip and the model chip -
-/// and, wherever the top bar draws no row (compact mode, where it is folded into this
-/// row, and focus mode, where it is hidden), the `RAW` badge (`views/chrome.h`). The
-/// coarse state word is not this row's business: the phase word on the left is the one
-/// state, one place for each fact.
+/// mark, the phase word, then the detail and the run's clock. Right: the contextual key
+/// hints, the context meter (the meter that owns the numbers), the speed chip and the
+/// model chip - and the `RAW` badge (`views/chrome.h`) wherever the top bar draws no row.
+/// The coarse state word is not this row's business: the phase word is the one state.
 ///
 /// Three things this row must never do:
 ///
 ///   * **lose the state.** The phase word is the row's reason to exist, so it is
 ///     reserved first and is never passed through `ui::truncate()`; when the row is too
-///     narrow for everything the hints go first, then the detail, then the speed chip
-///     yields (the clock keeps its slot against the rate, but yields before the count
-///     compacts), then the count compacts, then the model chip yields, then the
-///     meter's bar - the `ctx` label and the count are the last right-side part standing:
-///     the state. An open question is the one exception that reaches wider: it takes the
-///     hints' and the middle's room, and only then the right side's.
+///     narrow for everything the hints go first, then the detail, then the speed chip,
+///     then the count compacts, then the model chip yields, then the meter's bar - the
+///     `ctx` label and the count stand last; an open question is the one exception
+///     that reaches wider.
 ///   * **reformat a number.** The chip values arrive formatted (`model::StatusChips`)
-///     and are drawn verbatim - the same strings the status sentence carries, and the
-///     chips are canonical for the numbers; the meter's bar is drawn from the chips' own
-///     numbers, never from a second copy of them. The clock is the one number this row
-///     formats (`views::elapsedLabel`, the top bar's formatter, called once per frame -
-///     it is a value that changes every frame); every other string here is a join
-///     of finished parts.
+///     and are drawn verbatim; the meter's bar is drawn from the chips' own numbers,
+///     never from a second copy of them. The clock is the one number this row formats
+///     (`views::elapsedLabel`, once per frame); every other string is a join of
+///     finished parts.
 ///   * **half-answer a question.** A hint is dropped whole, never cut mid-word, and an open
 ///     question is drawn in a form that still names the key that answers it - even at the
 ///     40x15 floor, where the right side gives up its room for it. The one thing worse
@@ -230,12 +223,11 @@ struct NowBarPart {
 /// never drawn as a fragment) or a question had to be cut to the row's last cells. It is a
 /// diagnostic for a harness and a golden, never a state the row acts on.
 ///
-/// `compactChips` records which form the right side drew: the full meter (`ctx`, the
-/// bar, the full pair, the speed chip and the model chip) or a narrower one - the speed
-/// gone, the compact count, the model chip gone, the bar gone, or nothing at all (a
-/// question took the room). A golden can pin the rung without re-deriving it.
-/// `meterLabelText`/`meterCountText`/`chipSpeedText`/`chipModelText` hold the labels;
-/// `meterBar` is empty exactly when the bar was the rung that yielded.
+/// `compactChips` records which form the right side drew: the full meter or a
+/// narrower one - the speed gone, the compact count, the model chip gone, the bar
+/// gone, or nothing at all (a question took the room); a golden pins the rung
+/// without re-deriving it. `meterLabelText`/`meterCountText`/`chipSpeedText`/
+/// `chipModelText` hold the labels; `meterBar` is empty when the bar yielded.
 struct NowBarParts {
     NowBarPart rule;
     NowBarPart mark;
@@ -274,11 +266,8 @@ struct NowBarParts {
 /// The claims on the row, in order: the state rule, the phase mark and word (never cut),
 /// the `RAW` badge and the right side from the right (full meter + speed chip + model
 /// chip, else full meter + model chip, else the compact count, else no model chip, else
-/// no bar - the `ctx` label and the count are the last standing), the detail and the
-/// clock, and last the hints - the longest prefix of
-/// the hint list that fits *whole*, dropped entirely below `kNowBarMinHintGu`. The hints
-/// yield before the right side compacts: a hint that does not apply is worth less than
-/// a number the user is reading.
+/// no bar), the detail and the clock, and last the hints - the longest prefix that fits
+/// *whole*, dropped entirely below `kNowBarMinHintGu`: a hint is worth less than a number.
 ///
 /// An open question takes the hint slot and the detail/clock room, and then the right
 /// side's room too if that is what it takes to still name the key that answers it: a

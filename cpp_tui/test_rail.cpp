@@ -766,10 +766,9 @@ void checkDrawnRail() {
     // The run mark is static by design: a run in flight is state, not
     // animation, so the time slot reads the same a spinner cycle apart - and it
     // is always frame 0, `◐`, on EVERY `running` row. The fixture makes the row
-    // non-active (the choice is per draw site, not per row state;
-    // today only the non-active path can reach `Running`, and this pins it so an
-    // active-only branch cannot sneak back in). The rows carry no timestamps, so
-    // the clock cannot reach the frame any other way and the comparison is exact.
+    // non-active (the choice is per draw site, not per row state) so an
+    // active-only branch cannot sneak back in, and with no timestamps the
+    // clock cannot reach the frame any other way: the comparison is exact.
     std::vector<model::SessionRow> runRows = mixedFixture();
     for (model::SessionRow& r : runRows)
         r.updatedAtMs = 0; // no relative time: the right-hand slot is the mark alone

@@ -139,9 +139,7 @@ bool anyLiveAgentLane(const std::vector<AgentLane>& lanes) {
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// The live answer's clock (stream_state.h owns the contract, task 38)
-// ---------------------------------------------------------------------------
+// The live answer's clock (stream_state.h owns the contract).
 
 void resetStreamClock(StreamState& stream) { stream = StreamState{}; }
 
@@ -161,13 +159,12 @@ void refreshStreamClock(StreamState& stream, bool hasStream, bool hasText, bool 
         stream.elapsedMs = 0;
         stream.thinkingElapsedMs = 0;
         stream.cancelled = false;
-        stream.caretOn = false;
         return;
     }
     // The wall clock is not monotone (an NTP step can move it backwards), and a clock that runs
-    // backwards would print a shrinking elapsed time and flip the caret's phase. The stream's
-    // reading never goes back: a frame that arrives "before" the last one is treated as the same
-    // moment, exactly as the store's update window treats it (`tui.cpp`'s `streamWindowElapsed`).
+    // backwards would print a shrinking elapsed time. The stream's reading never goes back: a
+    // frame that arrives "before" the last one is treated as the same moment, exactly as the
+    // store's update window treats it (`tui.cpp`'s `streamWindowElapsed`).
     const std::int64_t now = std::max(nowMs, stream.lastSeenMs);
     stream.lastSeenMs = now;
     if (stream.startedMs == 0)
@@ -200,10 +197,6 @@ void refreshStreamClock(StreamState& stream, bool hasStream, bool hasText, bool 
     stream.thinkingElapsedMs = stream.thinkingEndedMs > stream.thinkingStartedMs
                                    ? stream.thinkingEndedMs - stream.thinkingStartedMs
                                    : 0;
-    // The blink is a function of the clock, not of the frame: on for the first half-period,
-    // off for the second. A stopped answer has no caret - the text stopped arriving, and a
-    // blinking mark would claim it had not.
-    stream.caretOn = !stream.cancelled && (until / kStreamCaretHalfPeriodMs) % 2 == 0;
 }
 
 const char* streamPhaseWord(const StreamState& stream, bool hasText) {

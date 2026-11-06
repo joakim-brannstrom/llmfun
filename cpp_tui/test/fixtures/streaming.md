@@ -20,10 +20,10 @@ text, a fence without its closing line.
 2. a bulleted list;
 3. a fenced block;
 4. a block quote;
-5. a table, which the text grid draws as a grid (`ui/table.*`, task 37) and the
+5. a table, which the text grid draws as a grid (`ui/table.*`) and the
    pixel profile draws with rich_md's own renderer.
 
-> A quote is a bar plus a paragraph. The caret must not land on the bar.
+> A quote is a bar plus a paragraph.
 
 ```cpp
 int live_answer(int tick) {
@@ -32,7 +32,7 @@ int live_answer(int tick) {
 }
 ```
 
-| Tick | Text | Caret |
+| Tick | Text | State |
 | ---- | ---- | ----- |
 | 1 | `Streaming v2` | on |
 | 2 | `Streaming v2 - the live answer` | on |
@@ -40,5 +40,5 @@ int live_answer(int tick) {
 
 ### The last line
 
-The caret belongs at the end of this line, because this is the line the model is
-still writing when the fixture's 300th update arrives.
+The model is still writing this line when the fixture's 300th update arrives,
+so the test sees every prefix of it as well.
