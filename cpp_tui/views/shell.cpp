@@ -89,94 +89,27 @@ std::int64_t runElapsedMs(const TuiState& state) {
     return ms > 0 ? ms : 0;
 }
 
-/// The phase for the *fallback* path: the facts the frame owns, used only while no structured
-/// status has arrived.
-///
-/// `RuntimeStatus::phase` arrives as an ordinal from D and `deriveNowBar()` then stops
-/// deriving a phase at all, so this function is what a state with no structured update draws -
-/// and what it draws for the whole run if the sender is an older D.
-///
-/// From the frame's own facts it answers five of the seven phases honestly: the model is
-/// unreachable (`Offline`), no run is in flight (`Idle`), a stop has been requested and the UI is
-/// waiting for it to wind down (`Waiting`), and otherwise the run is working: `Writing` once the
-/// answer's text has started to arrive, `Thinking` before that. Two are deliberately unreachable
-/// rather than guessed:
-///   * `Tooling` - nothing in the v4 store says that a tool call is the *current* step. The
-///     nearest fact is "the newest stored message is a tool call", and a bar that says `tooling`
-///     while the model is answering is worse than one that says `writing`.
-///   * `Error` - a failed run simply ends (`readyStatus` again); the failure itself is in the
-///     thread.
-///
-/// Once a structured status owns the row this function is dead for the run, and that is the point:
-/// `Waiting` here meant "the user asked to stop", which D's vocabulary uses for a pending question.
-/// The UI's own stop stays visible without it - the `Esc stop` hint, the composer's `Stopping`
-/// latch and the top bar's running pill all read `cancelRequested` directly.
-model::Phase phaseOf(const TuiState& state) {
-    if (state.ui.offline)
-        return model::Phase::Offline;
-    if (state.readyStatus)
-        return model::Phase::Idle;
-    if (state.cancelRequested)
-        return model::Phase::Waiting;
-    // The answer's text has started to arrive. `hasStreamMsg` is the live-stream flag
-    // (`ChatTab`), and the text is what separates a run that is writing from one that is
-    // still thinking.
-    const bool writing = state.chat.hasStreamMsg && !state.chat.streamMsg.text.empty();
-    return writing ? model::Phase::Writing : model::Phase::Thinking;
-}
-
 /// The frame's clock, in unix milliseconds (defined below; declared here because the lane, the
 /// stream and the feedback derivations in this file read it).
 std::int64_t frameClockMs();
 
 /// The status the now bar reads and the chips both it and the composer draw.
 ///
-/// One writer (the frame thread), like every other derivation here, and one precedence
-/// ("`RuntimeStatus` when available, else the legacy status sentence"):
+/// One writer (the frame thread), one source: the structured status D sends (`tuiSetRuntimeStatus`
+/// stores the numbers and formats the chips into `ui.chips` once per status update). This
+/// function formats nothing: putting four strings and two number formats on the render path of
+/// every frame is exactly what the "formatted once per value change" rule forbids.
 ///
-///   * `ui.status.structured` - `tuiSetRuntimeStatus` fills the numbers, raises
-///     the flag and formats the chips into `ui.chips` (`model::chipsFromStatus`, once per
-///     status update); this function then leaves both alone. Formatting them *here* would
-///     put four strings and two number formats on the render path of every frame, which is
-///     the thing the "formatted once per value change" rule forbids;
-///   * otherwise the provisional phase above and the chips `tuiSetStatusText` derived when
-///     the sentence changed - projected into `ui.chips` so a view reads the
-///     aggregate, with the comparison keeping a settled set from churning its strings every
-///     frame.
-///
-/// The clock is the frame's while a run is in flight, structured or not: D's `elapsedMs` is
-/// sampled when a status is released, and a run with no tick (a slow first token, a tool call)
-/// would otherwise freeze the row while the top bar keeps counting. D's value is the settled
-/// duration, shown once the run is over.
+/// The clock is the frame's while a run is in flight: D's `elapsedMs` is sampled when a status is
+/// released, and a run with no tick (a slow first token, a tool call) would otherwise freeze the
+/// row while the top bar keeps counting. D's value is the settled duration, shown once the run is
+/// over - and a 0 means "not sampled", which the frame's clock also covers.
 ///
 /// The projection is written whether or not the row has a rectangle: compact mode can
 /// fold the top bar away but never this row, and the composer's meter reads the same
 /// chips.
 views::NowBarInput deriveNowBar(TuiState& state, const ui::Metrics& m) {
     model::UiState& ui = state.ui;
-    if (!ui.status.structured) {
-        ui.status.phase = model::phaseOrdinal(phaseOf(state));
-        // No step yet: nothing in this frame says which tool is running, and only the
-        // structured status will.
-        ui.status.detail.clear();
-        ui.status.elapsedMs = runElapsedMs(state);
-        ui.status.tokensPerSecond = 0.0; // the sentence's chip stays the formatter's
-        ui.status.contextUsed = state.statusChips.contextUsed;
-        ui.status.contextMax = state.statusChips.contextMax;
-        ui.status.compactAt = 0;
-
-        // The sentence path's chips, with the two phases the sentence has no word for kept
-        // from the phase: D's sentence still says `Ready` until the structured status
-        // exists, and a `Ready` chip beside an `offline` row would contradict the row it
-        // sits on. Every other phase keeps the sentence's word verbatim (a fragment
-        // the splitter does not recognise is never dropped and never replaced).
-        model::StatusChips chips = state.statusChips;
-        const model::Phase phase = model::phaseFromOrdinal(ui.status.phase);
-        if (phase == model::Phase::Offline || phase == model::Phase::Error)
-            chips.state = model::phaseStateWord(phase);
-        if (chips != ui.chips)
-            ui.chips = chips;
-    }
 
     views::NowBarInput in;
     in.phase = model::phaseFromOrdinal(ui.status.phase);
@@ -184,8 +117,10 @@ views::NowBarInput deriveNowBar(TuiState& state, const ui::Metrics& m) {
     // D's `elapsedMs` is a sampled value: it only advances when a status is released, so a run
     // that has not produced a tick yet (a slow first token) or one that is executing a tool would
     // freeze the row's clock while the top bar keeps counting. While the run is in flight the
-    // frame's own clock is the live one; D's value is the settled duration, shown when it ends.
-    in.elapsedMs = state.readyStatus ? ui.status.elapsedMs : runElapsedMs(state);
+    // frame's own clock is the live one; D's value is the settled duration, shown when it ends -
+    // and a 0 means "not sampled", never "0 ms elapsed".
+    in.elapsedMs =
+        state.readyStatus && ui.status.elapsedMs > 0 ? ui.status.elapsedMs : runElapsedMs(state);
     in.chips = ui.chips;
     in.compactAt = ui.status.compactAt;
     in.rawLogOpen = ui.rawLogOpen;

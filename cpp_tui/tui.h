@@ -412,20 +412,6 @@ struct TuiState {
 
     UserQueryState userQuery;
 
-    /// The raw status sentence D sent (`formatStatusText`). Write-only inside
-    /// C++: the view reads `statusChips`, not this string. `tuiSetStatusText` is
-    /// its only writer and returns early on an unchanged value, which is what
-    /// keeps the chip derivation off the per-render path.
-    std::string statusText;
-
-    /// The four status chips derived from `statusText` (task 6). Recomputed by
-    /// tuiSetStatusText — once per *change*, never per frame: D re-sends the same
-    /// sentence on every render and the setter drops the repeat, so a chip is a
-    /// formatted number computed once per value change (§6.3, and task 28's "no
-    /// per-frame formatting"). Seeded from the default sentence so a state that
-    /// never receives one still renders `ctx 0/0 | — | none | Ready`.
-    model::StatusChips statusChips = model::splitStatusText(model::kDefaultStatusSentence);
-
     /// Pending run-cancel request: set by the composer's Stop button (frame
     /// code, tuiRequestCancel), consumed once by the D frame loop
     /// (tuiTakeCancel -> the same stopAgent() the "/stop" command uses).
@@ -801,16 +787,12 @@ void tuiUpdateStreamChatMessage(TuiState& state, const ChatMessage& msg);
 
 void tuiStreamChatMessageClear(TuiState& state);
 
-/// Set the status line text.
-void tuiSetStatusText(TuiState& state, const std::string& text);
-
 /// Apply the run's structured status (task 39's `tuiSetRuntimeStatus`), or clear it.
 ///
-/// One entry point for both directions, because `model::RuntimeStatus::structured` is the
-/// flag the frame layer already reads: `structured == true` stores the numbers and formats
-/// the four chips from them (once per update, never per frame); `structured == false` hands
-/// the row back to the status sentence and drops the one fact only the numbers can carry
-/// (`TuiState::offline`). A clear cannot then forget half of the state.
+/// One entry point for both directions: the status is stored, the four chips are
+/// formatted from its numbers (once per update, never per frame) and the offline
+/// fact (`TuiState::offline`, the one only the phase can carry) is set or dropped.
+/// A clear cannot then forget half of the state.
 void tuiSetRuntimeStatus(TuiState& state, const model::RuntimeStatus& status);
 
 /// Get the current input buffer content.

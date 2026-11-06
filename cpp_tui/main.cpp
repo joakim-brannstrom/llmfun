@@ -130,7 +130,8 @@ int main(int argc, char** argv) {
     }
 
     tuiSetLogging(state, true);
-    tuiSetStatusText(state, makeStr("Context: 0/0 tokens | Model: none | Ready"));
+    // The status row is seeded by tuiCreateState (model chip "none", no numbers
+    // yet); the D app re-sends its own status on the first render tick.
 
     // Composer fixture (task 3): start with a run already active, applied
     // before the first frame, so a capture shows the same composer state a user
@@ -458,7 +459,11 @@ int main(int argc, char** argv) {
         // in the Log tab (stderr would corrupt the live ncurses screen) and
         // shows the same status text.
         if (tuiTakeCancel(state) != 0) {
-            tuiSetStatusText(state, makeStr("Stopping agent"));
+            // The same status the D loop shows on a stop: waiting, with the step named.
+            TuiRuntimeStatus stopping;
+            stopping.phase = 4; /* waiting */
+            stopping.detail = makeStr("Stopping agent");
+            tuiSetRuntimeStatus(state, &stopping);
             tuiAddLogMessage(state, makeStr("cancel requested"), makeStr("Send/Stop button"));
         }
 

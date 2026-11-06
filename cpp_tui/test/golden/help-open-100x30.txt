@@ -34,4 +34,4 @@ text:
    Ask any
                                                                                           Send
 
-  ✓ Ready                                                                     ctx ░░░░░░ 0/0  none
+  ✓ Ready                                                                              ctx -  none

@@ -240,6 +240,10 @@ TuiState* tuiCreateState(void) {
 
     try {
         inner = new ::llmfun::tui::TuiState();
+        // The status row is never empty: `UiState` seeds itself with the model
+        // placeholder ("none" - the name D itself reports when no model is configured)
+        // and the chips formatted from it, so a state built anywhere draws the same
+        // first frame: `ctx — | — | none | Ready`.
         TuiState* state = new TuiState{inner};
         return state;
     } catch (const std::bad_alloc&) {
@@ -529,18 +533,11 @@ void tuiStreamChatMessageClear(TuiState* state) {
     ::llmfun::tui::tuiStreamChatMessageClear(*state->inner);
 }
 
-void tuiSetStatusText(TuiState* state, String text) {
-    if (!state || !state->inner)
-        return;
-    std::string s(text.data ? text.data : "", text.data ? text.len : 0);
-    ::llmfun::tui::tuiSetStatusText(*state->inner, s);
-}
-
 void tuiSetRuntimeStatus(TuiState* state, const TuiRuntimeStatus* status) {
     // Copied field by field across the boundary, so the layout is a wire contract: the D side
     // pins the same size (`llm/tui/package.d`), and `tui_api.h` states it ("reserved keeps
     // 8-byte alignment explicit").
-    static_assert(sizeof(TuiRuntimeStatus) == 72,
+    static_assert(sizeof(TuiRuntimeStatus) == 88,
                   "TuiRuntimeStatus layout changed: update the D mirror as well");
     if (!state || !state->inner)
         return;
@@ -570,13 +567,14 @@ void tuiSetRuntimeStatus(TuiState* state, const TuiRuntimeStatus* status) {
     // Every String is copied during the call, like every other inbound String in this API.
     inbound.detail.assign(status->detail.data ? status->detail.data : "",
                           status->detail.data ? status->detail.len : 0);
+    inbound.model.assign(status->model.data ? status->model.data : "",
+                         status->model.data ? status->model.len : 0);
     inbound.contextUsed = status->contextUsed;
     inbound.contextMax = status->contextMax;
     inbound.compactAt = status->compactAt;
     inbound.tokensPerSecond = status->tokensPerSecond;
     inbound.elapsedMs = status->elapsedMs;
     inbound.pendingQuestions = status->pendingQuestions;
-    inbound.structured = true;
     ::llmfun::tui::tuiSetRuntimeStatus(*state->inner, inbound);
 }
 

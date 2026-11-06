@@ -282,6 +282,7 @@ void caseRuntimeStatus() {
     TuiRuntimeStatus status{};
     status.phase = 2; /* tooling */
     status.detail = String{"read_file", 9};
+    status.model = String{"qwen3-coder", 11};
     status.contextUsed = 42000;
     status.contextMax = 128000;
     status.compactAt = 115200;
@@ -296,9 +297,9 @@ void caseRuntimeStatus() {
 
     // The state stores them, and the chips are formatted from them at the boundary.
     tuiSetRuntimeStatus(state, &status);
-    expect(state->inner->ui.status.structured, "the state stores the numbers");
     expect(state->inner->ui.status.phase == 2, "the phase ordinal crosses");
     expect(state->inner->ui.status.detail == "read_file", "the step is copied during the call");
+    expect(state->inner->ui.status.model == "qwen3-coder", "the model name is copied too");
     expect(state->inner->ui.status.contextUsed == 42000, "the used context crosses");
     expect(state->inner->ui.status.contextMax == 128000, "the model's context size crosses");
     expect(state->inner->ui.status.compactAt == 115200, "the compaction threshold crosses");
@@ -314,7 +315,7 @@ void caseRuntimeStatus() {
     expect(state->inner->ui.status.phase == 0, "an unknown phase folds to idle");
     expect(state->inner->ui.status.contextUsed == 42000, "and the numbers are still readable");
 
-    // `phase == 6` is the one fact the sentence cannot express: the offline card and the disabled
+    // `phase == 6` is the one fact only a number can carry: the offline card and the disabled
     // composer read this flag, and nothing else writes it.
     TuiRuntimeStatus offline = status;
     offline.phase = 6;
@@ -323,14 +324,14 @@ void caseRuntimeStatus() {
 
     // NULL clears, and drops the fact only the numbers can carry.
     tuiSetRuntimeStatus(state, nullptr);
-    expect(!state->inner->ui.status.structured, "NULL clears the structured status");
+    expect(state->inner->ui.status.contextUsed == 0, "NULL clears the stored numbers");
     expect(!state->inner->offline, "and the offline fact with it");
 
     // A clear is always honoured: the set above must be droppable again.
     tuiSetRuntimeStatus(state, &status);
-    expect(state->inner->ui.status.structured, "set again before the clear");
+    expect(state->inner->ui.status.contextUsed == 42000, "set again before the clear");
     tuiSetRuntimeStatus(state, nullptr);
-    expect(!state->inner->ui.status.structured, "and the clear drops it");
+    expect(state->inner->ui.status.contextUsed == 0, "and the clear drops it");
 
     tuiDestroyState(state);
 }
@@ -352,7 +353,10 @@ void caseDestroyBasics() {
 
     TuiState* st = tuiCreateState();
     expect(st != nullptr, "tuiCreateState succeeds with a harness context alive");
-    tuiSetStatusText(st, makeStr("harness context alive")); // data path works
+    TuiRuntimeStatus alive{};
+    alive.phase = 0;
+    alive.model = makeStr("harness context alive");
+    tuiSetRuntimeStatus(st, &alive); // data path works
     tuiDestroyState(st);
 
     expect(ImGui::GetCurrentContext() == harness,
@@ -1015,7 +1019,8 @@ void casePipelineLaneFields() {
     static_assert(sizeof(PipelineChatMessage::contextUsed) == 8 &&
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
-    static_assert(TUI_API_VERSION == 6, "the lane fields landed inside v5 (additive, no re-bump)");
+    static_assert(TUI_API_VERSION == 6 || TUI_API_VERSION == 7,
+                  "the lane fields landed inside v5 (additive, no re-bump)");
     static_assert(sizeof(SessionItem) == 80, "SessionItem is unaffected by the lane fields");
 
     // NULL-safe, and an empty agent id still registers nothing.
@@ -1427,7 +1432,7 @@ int main(int argc, char** argv) {
             (void)std::remove("llmfun_ui_log.txt");
     });
 
-    static_assert(TUI_API_VERSION == 6, "this contract test pins the current API generation (v6)");
+    static_assert(TUI_API_VERSION == 7, "this contract test pins the current API generation (v7)");
 
     caseNoneStateInert();
     caseLogRecords();

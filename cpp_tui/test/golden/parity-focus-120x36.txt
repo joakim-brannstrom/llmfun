@@ -39,7 +39,7 @@ text:
    Ask anything...  / commands
                                                                                                               Send
 
-  ✓ Ready                                                                         Esc leave focus ctx ░░░░░░ 0/0  none
+  ✓ Ready                                                                                  Esc leave focus ctx -  none
 fills:
 0: 15-15=183, 16-104=17
 1: 15-104=17

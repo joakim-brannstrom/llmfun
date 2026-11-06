@@ -66,8 +66,15 @@ extern "C" {
  *       the only renderer; every other symbol is unchanged. This is the one
  *       deliberate *removal* in the header's history - the v5 note above still
  *       records what v5 added.
+ *   7 - the status sentence is gone (D-STATUS v5 finalized): TuiRuntimeStatus
+ *       gains `model` (the model chip now comes from the status, not from a
+ *       sentence the C++ side would have to parse), and tuiSetStatusText is
+ *       removed together with its sentence splitter - a sender still sending a
+ *       sentence fails to build instead of silently formatting nothing. Struct
+ *       layout change: sizeof(TuiRuntimeStatus) is now 88 (was 72), pinned by
+ *       static_assert on both sides of the boundary.
  */
-#define TUI_API_VERSION 6
+#define TUI_API_VERSION 7
 
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
@@ -89,7 +96,7 @@ typedef enum TuiChatMessageType {
  *
  * Ownership rules:
  *   - String values passed TO mutating API functions (tuiAddOutputLine,
- *     tuiSetStatusText, etc.) are NOT copied; the caller must ensure the
+ *     tuiAddChatMessage, etc.) are NOT copied; the caller must ensure the
  *     underlying buffer lives long enough for the call to complete.
  *   - String_New() is an exception: it copies the input buffer via
  *     malloc, so the caller's original buffer can be freed immediately.
@@ -691,11 +698,9 @@ void tuiPipelineClear(TuiState* state);
 /* TuiRuntimeStatus — the run's status as numbers (v5, task 39 / D-STATUS).
  *
  * The contract is numbers, not a sentence: the UI formats them once per update and never
- * parses them back (design §6.3). The structured path and the status-sentence fallback agree
- * chip for chip on the numbers both can express; where they cannot, the structured path is the
- * stricter one and says so - `tokensPerSecond == 0` and `contextMax == 0` are the *absence*
- * values (the row draws `—`, not `0 tok/s` or `42k/0`), while the sentence renders whatever it
- * was given. `phase` is the ordinal of the UI's phase vocabulary
+ * parses them back (design §6.3). `tokensPerSecond == 0` and `contextMax == 0` are the
+ * *absence* values (the row draws `—`, not `0 tok/s` or `42k/0`), and an empty `model` is
+ * "no name reported". `phase` is the ordinal of the UI's phase vocabulary
  * (`idle|thinking|tooling|writing|waiting|error|offline` = 0..6); an ordinal this build does not
  * know renders as idle, never as a neighbouring phase.
  *
@@ -705,8 +710,9 @@ void tuiPipelineClear(TuiState* state);
  * the settled duration and runs the frame's own clock while a run is in flight, so the row and the
  * top bar cannot disagree between two status updates.
  *
- * The struct carries no model name: a model changes when the user changes it, not per status
- * tick, so that one chip keeps coming from the status sentence.
+ * `model` is the model display name the chips show ("none" when D has no model configured).
+ * It travels with the status because it is the status row's fourth fact - the UI has no other
+ * source for it and must not parse one out of a sentence.
  *
  * Sender contract (D-STATUS): the tick stream stays at or below 20 Hz, with two documented
  * exceptions - one update when a turn starts doing work (so the row does not keep the previous
@@ -714,47 +720,38 @@ void tuiPipelineClear(TuiState* state);
  * swallowed the newest values. Always send the final one when the turn ends. "Run" means the
  * user's turn, not one LLM request: a tool-calling turn is many requests, and an `idle` published
  * at a request boundary would be a lie for the rest of it - the flush carries the phase the last
- * tick had. A sender that has not been converted keeps working - the sentence stays the fallback.
+ * tick had.
  */
 typedef struct TuiRuntimeStatus {
     int32_t phase; /* 0 idle,1 thinking,2 tooling,3 writing,4 waiting,5 error,6 offline */
     String detail; /* current tool / model, one line; copied during the call */
+    String model;  /* model display name ("none" when none); copied during the call */
     int64_t contextUsed, contextMax, compactAt;
     double tokensPerSecond;
     int64_t elapsedMs;
+    /* Forward-compat field: transported, copied and round-trip-tested, but no D
+     * sender sets it and no view reads it yet - it is the hook for the run's
+     * pending question count. Keep it 0 until that consumer exists. */
     int32_t pendingQuestions;
     int32_t reserved; /* zero; keeps 8-byte alignment explicit */
 } TuiRuntimeStatus;
 
-/* Set the run's structured status, or hand the chips back to the status sentence.
+/* Set the run's structured status, or clear it.
  *
- * Passing NULL clears it: the sentence splitter owns the chips again, which is also what a
+ * Passing NULL clears it: the chips fall back to their defaults, which is also what a
  * session switch does, so a status can never keep describing a session the user left (§5.4).
  *
- * `phase == 6` (offline) is the one fact the sentence cannot express - it also drives the
+ * `phase == 6` (offline) is the one fact with a consequence beyond the row - it also drives the
  * thread's offline card and the composer's disabled state, so it is the single trigger for
  * "the model is unreachable".
  *
- * A state that will never draw the numbers must not claim a structured status, and a clear is
- * always honoured - so a status set before a session switch is still dropped rather than kept
- * describing a session the user left.
+ * A clear is always honoured - so a status set before a session switch is still dropped rather
+ * than kept describing a session the user left.
  *
  * Every String in the struct is copied during the call. Frame-thread only, like every
  * mutating entry point. Null-safe: no-op if state or status is NULL.
  */
 void tuiSetRuntimeStatus(TuiState* state, const TuiRuntimeStatus* status);
-
-/* Set the text displayed in the status line at the bottom of the terminal.
- *
- * The status line is a single row below the input area, typically used for
- * context information (token counts, model name, status messages). The
- * `text` parameter is an inbound String — its data is copied internally.
- *
- * Null-safe: no-op if state is NULL.
- */
-void tuiSetStatusText(TuiState* state, String text);
-
-/* Input */
 
 /* Get the current content of the user's input buffer as an owned String.
  *

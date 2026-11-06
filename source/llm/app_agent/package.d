@@ -241,9 +241,10 @@ struct AgentApp {
                 TuiChatMessageType_Assistant);
     }
 
-    private void setStatusText(bool readyState) {
-        uiMsg.statusText(formatStatusText(readyState, agent_.modelContextSize,
-                lastServerStat, llmConf.activeModelDisplayName()));
+    private void sendRuntimeStatus(bool readyState) {
+        uiMsg.runtimeStatus(UiRuntimeStatus(phase: readyState ? TuiPhase.idle : TuiPhase.thinking, contextUsed: lastServerStat
+                .context, contextMax: agent_.modelContextSize, compactAt: (agent_.modelContextSize * 9) / 10, tokensPerSecond: lastServerStat
+                .predictedPerSecond, model: llmConf.activeModelDisplayName()));
     }
 
     package void doCompress(bool force) {
@@ -423,7 +424,7 @@ struct AgentApp {
         }
 
         activeSession = sf.meta;
-        setStatusText(true);
+        sendRuntimeStatus(true);
 
         llmConf.activeChatSessionId = id.get;
         llmConf.saveState();
@@ -1108,7 +1109,7 @@ class AppAgentActor {
         }
 
         app.sendSessionList();
-        app.setStatusText(true);
+        app.sendRuntimeStatus(true);
     }
 
     void userQuery(string s) {
@@ -1128,7 +1129,7 @@ class AppAgentActor {
             app.runInFlight = true;
             app.sendSessionList();
             clearStopAgent();
-            app.setStatusText(false);
+            app.sendRuntimeStatus(false);
             final switch (app.runAgent(query)) {
             case AgentStatus.active:
                 break;
@@ -1142,7 +1143,7 @@ class AppAgentActor {
             // uiAgentReady only clears the busy flag (Thinking indicator,
             // session-panel gating); without this call the status bar keeps
             // the last "Busy" text, so set the ready text explicitly.
-            app.setStatusText(true);
+            app.sendRuntimeStatus(true);
         }
     }
 

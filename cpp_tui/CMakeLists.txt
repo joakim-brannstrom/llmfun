@@ -403,12 +403,12 @@ target_link_libraries(test_theme_contrast PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
-# Headless unit test for the status-chip splitter (task 6): D's one-line status
-# sentence (formatStatusText, app_agent/ui.d:421-425) -> the four chips the status
-# row shows, with "—" for a field the sentence does not carry. Compiles
-# model/status_chips.cpp directly and links nothing else (like test_settings),
-# which also pins the module's layering: no ImGui, no tui.h, no ChatMessage.
-# Invoke from the build dir: ./test_status_chips
+# Headless unit test for the status-chip formatter (task 6, D-STATUS v5): the
+# structured status D sends (tuiSetRuntimeStatus, TuiRuntimeStatus) -> the four
+# chips the status row shows, with "—" for a field the status does not carry.
+# Compiles model/status_chips.cpp directly and links nothing else (like
+# test_settings), which also pins the module's layering: no ImGui, no tui.h, no
+# ChatMessage. Invoke from the build dir: ./test_status_chips
 add_executable(test_status_chips
     test_status_chips.cpp
     model/status_chips.cpp
@@ -706,6 +706,7 @@ target_link_libraries(test_primitives PRIVATE
 add_executable(test_toast
     test_toast.cpp
     model/toast.cpp
+    model/status_chips.cpp
     views/feedback.cpp
     ui/primitives.cpp
     ui/text.cpp
@@ -1059,8 +1060,9 @@ target_link_libraries(test_composer PRIVATE
     ${CMAKE_DL_LIBS}
 )
 # The now bar (task 28, design §4.7 / FR-11 / D-PHASE / D-FOLLOW): the seven phases and
-# their words, the ordinal round-trip and the clamping, the structured/split chip identity,
-# the degradation ladder (hints, then detail, then chips - never the state), `Esc stop`
+# their words, the ordinal round-trip and the clamping, the chip formatting from the
+# structured status, the degradation ladder (hints, then detail, then chips - never the
+# state), `Esc stop`
 # exactly while the Esc cancel step is open, the "there is more below" mark, the compact
 # `RAW` badge, the state rule's contrast, the row through the real text backend, the shell
 # derivation, and idle/running/offline goldens at 100x30 and 60x20. Rewrite them with
