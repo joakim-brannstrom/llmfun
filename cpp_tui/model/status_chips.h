@@ -1,19 +1,17 @@
 /// Status chips: the four status facts as data, independent of any renderer.
 ///
 /// The status area answers four questions — how much context, how fast, which
-/// model, what state — and shows one chip per answer. When D has not sent structured
-/// status, the only source is the one line D formats in
-/// `formatStatusText()` (`source/llm/app_agent/ui.d:421-425`), so this module
-/// owns the split of that sentence into the four chips.
+/// model, what state — and shows one chip per answer. The answers travel as the
+/// structured status D sends every tick (`tuiSetRuntimeStatus`), and this module
+/// owns the one formatting of those numbers into the four chips.
 ///
 /// Layering: `model` depends on nothing app-specific — no ImGui, no `tui.h`, no
-/// `ChatMessage` — so the splitter is testable without a renderer
+/// `ChatMessage` — so the formatter is testable without a renderer
 /// (`test_status_chips` compiles this TU with no other project source).
 #pragma once
 
 #include <cstddef>
 #include <string>
-#include <string_view>
 
 namespace llmfun::tui::model {
 
@@ -59,28 +57,27 @@ const char* phaseWord(Phase phase);
 ///
 /// The design gives that chip two words, and a run is `Busy` in all four of its
 /// phases - the fine-grained phase belongs to the now bar's left side, not to the
-/// chip. The two phases the *sentence* cannot express (a failed run, an unreachable
-/// model) keep a word of their own, because `Busy` would claim work that is not
-/// happening. This is also what lets the structured and the split path agree: D
-/// writes `Ready` for idle and `Busy` while a run is in flight, which is exactly this
-/// mapping.
+/// chip. The two phases the numbers cannot express as work (a failed run, an
+/// unreachable model) keep a word of their own, because `Busy` would claim work
+/// that is not happening.
 const char* phaseStateWord(Phase phase);
 
 /// The structured status D sends (`tuiSetRuntimeStatus`).
-/// Numbers, not sentences: the view formats them once per value
-/// change. `phase` is the ordinal of the UI's own phase vocabulary (see `Phase`
-/// above); `structured == false` means the chips came from the sentence
-/// splitter instead of this struct.
+/// Numbers, not sentences: the view formats them once per value change.
+/// `phase` is the ordinal of the UI's own phase vocabulary (see `Phase` above),
+/// and the struct mirrors the ABI's `TuiRuntimeStatus` field for field.
 struct RuntimeStatus {
     int phase = 0;      ///< phase ordinal (`Phase`)
     std::string detail; ///< current tool or model step, one line
+    std::string model;  ///< model display name, as D reports it ("none" when none)
     long long contextUsed = 0;
     long long contextMax = 0;
     long long compactAt = 0;
     double tokensPerSecond = 0.0;
     long long elapsedMs = 0;
+    /// Forward-compat: transported and round-trip-tested, but nothing sends it and
+    /// nothing reads it yet (the run's pending question count will). Stays 0.
     int pendingQuestions = 0;
-    bool structured = false; ///< false = derived from the status sentence
 };
 
 /// The four chips' names, in the row's order - the words a document, a golden or the help page
@@ -92,21 +89,19 @@ inline constexpr std::size_t kStatusChipNameCount =
 
 /// The four chips — the values only. The `ctx ` label and the separators belong
 /// to the view: it is the view that decides which chips fit on the row, and a
-/// value must not change with that decision. The structured path has to
-/// reproduce these strings byte-for-byte for identical numbers: both paths
-/// must produce identical chips for the same values.
+/// value must not change with that decision.
 struct StatusChips {
     std::string context; ///< "42k/128k" — used/max, abbreviated (never "ctx …")
     std::string speed;   ///< "38.1 tok/s"
     std::string model;   ///< "qwen3-coder", "none"
-    std::string state;   ///< "Ready", "Busy", or an unmatched sentence verbatim
+    std::string state;   ///< "Ready" or "Busy"
 
     /// The numbers `context` was formatted from, kept so a *view* that needs the
     /// fraction (the composer's mini meter) does not have to parse the
     /// chip back - a second grammar for the same sentence is a second answer waiting
-    /// to disagree with the first. `contextMax == 0` means the sentence carried no
-    /// usable pair (the chip is then `kMissingChipValue` or a partial pair), and a
-    /// meter must not divide by it.
+    /// to disagree with the first. `contextMax == 0` means the status carried no
+    /// usable pair (the chip is then `kMissingChipValue`), and a meter must not
+    /// divide by it.
     long long contextUsed = 0;
     long long contextMax = 0;
 };
@@ -116,54 +111,29 @@ struct StatusChips {
 static_assert(sizeof(StatusChips) == 4 * sizeof(std::string) + 2 * sizeof(long long),
               "a new chip needs a name in kStatusChipNames (and its own prose)");
 
-/// The chip value for a field the sentence does not carry — absent *or* present
-/// but empty (`Context: 1/ tokens`). A missing value is never rendered as "0":
-/// zero is a number, this is its absence. The view may draw an
-/// ASCII floor glyph for it in the text grid (U+2014 is East-Asian *Ambiguous*,
-/// so a CJK terminal could render it two cells wide); the model value is always
-/// this one.
+/// The chip value for a field the status does not carry - a `contextMax` of 0
+/// (no capacity known) or a `tokensPerSecond` of 0 (no rate yet). A missing
+/// value is never rendered as "0": zero is a number, this is its absence. The
+/// view may draw an ASCII floor glyph for it in the text grid (U+2014 is
+/// East-Asian *Ambiguous*, so a CJK terminal could render it two cells wide);
+/// the model value is always this one when D sends no name.
 inline constexpr const char* kMissingChipValue = "\u2014"; // em dash
 
-/// The sentence the UI falls back to while D has not sent one — `tuiCreateState`
-/// seeds it, and the splitter derives its chips from it, so the status row is
-/// never empty and never shows a placeholder the app does not mean.
-inline constexpr const char* kDefaultStatusSentence = "Context: 0/0 tokens | Model: none | Ready";
-
-/// Splits the status sentence into the four chips.
-///
-/// Grammar: `Context: <used>/<max> tokens | <x> tok/s | Model: '<m>' | Ready|Busy`.
-/// The colon after `Context` is optional (D writes the sentence without one),
-/// the quotes around the model are optional, and fields may be missing, empty or
-/// out of order. Fragments are split on the exact `" | "` separator; a quoted
-/// model name may contain it, in which case the splitter keeps reading until the
-/// closing quote rather than truncating the name. Numbers are decimal and
-/// locale-independent (no `strtod`/`snprintf`, so `LC_NUMERIC` cannot turn `38.1`
-/// into a rejected field or `42k` into `42,0k`). Every fragment that is not one
-/// of the three metrics is part of the `state` chip, verbatim and in source
-/// order, so nothing the sentence carries is dropped and nothing is invented. An
-/// empty sentence yields four `kMissingChipValue` chips.
-StatusChips splitStatusText(std::string_view sentence);
-
-/// The chips as a value: two sets are equal when every field agrees. The
-/// structured/split identity test and the frame layer's "did the
-/// chip source change" test both compare instead of re-deriving.
+/// The chips as a value: two sets are equal when every field agrees. The frame
+/// layer's "did the chip source change" test compares instead of re-deriving.
 bool operator==(const StatusChips& a, const StatusChips& b);
 bool operator!=(const StatusChips& a, const StatusChips& b);
 
-/// The chips for a structured status (`TuiRuntimeStatus`).
+/// The chips for one structured status.
 ///
-/// Formatted with the splitter's own formatters, so the two paths cannot produce
-/// two different strings for the same numbers (`./test_nowbar` pins the identity):
-/// `contextUsed/contextMax` → `42k/128k`, `tokensPerSecond` → `38.1 tok/s`, and the
-/// fourth chip from the phase (`phaseStateWord`).
-///
-/// `model` is the name the ABI struct does not carry: `TuiRuntimeStatus` has no
-/// model field (a model changes when the user changes it, not per status tick), so
-/// the sentence's chip stays the source for that one value.
+/// `contextUsed/contextMax` → `42k/128k`, `tokensPerSecond` → `38.1 tok/s`, the
+/// fourth chip from the phase (`phaseStateWord`), and the model chip straight
+/// from `status.model`.
 ///
 /// Absence is `kMissingChipValue`, never `0`: a `contextMax` of 0 is "no capacity
-/// known" and a `tokensPerSecond` of 0 is "no rate yet" - the rule the splitter
-/// applies to a field its sentence does not carry.
-StatusChips chipsFromStatus(const RuntimeStatus& status, const std::string& model);
+/// known", a `tokensPerSecond` of 0 is "no rate yet", and an empty `model` is
+/// "no name reported". Numbers are decimal and locale-independent (no
+/// `strtod`/`snprintf`, so `LC_NUMERIC` cannot turn `38.1` into `38,1`).
+StatusChips chipsFromStatus(const RuntimeStatus& status);
 
 } // namespace llmfun::tui::model

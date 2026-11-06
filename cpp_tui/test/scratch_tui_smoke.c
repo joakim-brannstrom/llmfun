@@ -10,7 +10,7 @@
 //         - stream contains "smoke ok: rendered N frames" (the app's own
 //           headless banner, written before endwin)
 //         - render markers: "Alpha session [3]" (sidebar row), "Beta session
-//           [5]", "hello" (chat text), "Context:" (status line)
+//           [5]", "hello" (chat text), "ctx " (now bar's context chip)
 //   clicksweep <app> <frames> <W> <H> <logdir>
 //       Fork `app --frames N`, feed an SGR+X10 mouse click sweep over the
 //       session-panel grid during the run, waitpid. Reports exit status and
@@ -256,7 +256,7 @@ static int mode_headless(int argc, char** argv) {
     printf("  marker_sidebar_row2=%d (Beta session [5])\n",
            contains((unsigned char*)plain, pn, "Beta session [5]"));
     printf("  marker_chat_text=%d (hello)\n", contains((unsigned char*)plain, pn, "hello"));
-    printf("  marker_status=%d (Context:)\n", contains((unsigned char*)plain, pn, "Context:"));
+    printf("  marker_status=%d (ctx )\n", contains((unsigned char*)plain, pn, "ctx "));
     printf("  marker_headings=%d (smurf)\n", contains((unsigned char*)plain, pn, "smurf"));
     printf("  marker_wrapped_long_line=%d (long cat)\n",
            contains((unsigned char*)plain, pn, "long cat"));
@@ -264,7 +264,7 @@ static int mode_headless(int argc, char** argv) {
     ok = ok && contains(st.buf, st.n, banner) &&
          contains((unsigned char*)plain, pn, "Alpha session [3]");
     ok = ok && contains((unsigned char*)plain, pn, "hello") &&
-         contains((unsigned char*)plain, pn, "Context:");
+         contains((unsigned char*)plain, pn, "ctx ");
     free(plain);
     free(st.buf);
     printf("  HEADLESS_%dx%d_%s\n", W, H, ok ? "PASS" : "FAIL");

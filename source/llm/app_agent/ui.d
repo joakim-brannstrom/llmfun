@@ -27,11 +27,11 @@ interface TuiSink {
     void chatMessage(string msg, TuiChatMessageType type, size_t nr, MessageTime time);
     void chatThinkMessage(string msg, string thinking, TuiChatMessageType type,
             size_t nr, MessageTime time);
-    void statusText(string status);
+    void runtimeStatus(UiRuntimeStatus status);
     void finalAnswer(string msg, size_t nr, MessageTime time);
     void clearChat();
     void logFile(bool useFile);
-    void streamStatusText(string status);
+    void streamRuntimeStatus(UiRuntimeStatus status);
     void streamChatMessage(string msg, string thinking);
     void streamChatDone();
     void pipelineStreamChatMessage(string agentId, string content, string thinking,
@@ -77,8 +77,8 @@ class TuiChannelSink : TuiSink {
         ch.uiMsg(UiChatThinkMessage(msg: msg, thinking: thinking, type: type, nr: nr, time: time));
     }
 
-    override void statusText(string status) {
-        ch.uiMsg(UiStatusText(status));
+    override void runtimeStatus(UiRuntimeStatus status) {
+        ch.uiMsg(status);
     }
 
     override void finalAnswer(string msg, size_t nr, MessageTime time) {
@@ -93,8 +93,8 @@ class TuiChannelSink : TuiSink {
         ch.uiMsg(UiLogFile(useFile));
     }
 
-    override void streamStatusText(string status) {
-        ch.uiMsg(UiStatusText(status));
+    override void streamRuntimeStatus(UiRuntimeStatus status) {
+        ch.uiMsg(status);
     }
 
     override void streamChatMessage(string msg, string thinking) {
@@ -154,7 +154,7 @@ class TuiBlockedSink : TuiSink {
         writeln(msg);
     }
 
-    override void statusText(string status) {
+    override void runtimeStatus(UiRuntimeStatus status) {
     }
 
     override void finalAnswer(string msg, size_t nr, MessageTime time) {
@@ -167,7 +167,7 @@ class TuiBlockedSink : TuiSink {
     override void logFile(bool useFile) {
     }
 
-    override void streamStatusText(string status) {
+    override void streamRuntimeStatus(UiRuntimeStatus status) {
     }
 
     override void streamChatMessage(string msg, string thinking) {
@@ -278,8 +278,8 @@ class TuiRecordingSink : TuiSink {
         record("chatThinkMessage", msg ~ "\n[thinking] " ~ thinking);
     }
 
-    override void statusText(string status) {
-        record("statusText", status);
+    override void runtimeStatus(UiRuntimeStatus status) {
+        record("runtimeStatus", status.detail);
     }
 
     override void finalAnswer(string msg, size_t nr, MessageTime time) {
@@ -295,8 +295,8 @@ class TuiRecordingSink : TuiSink {
         record("logFile", useFile ? "on" : "off");
     }
 
-    override void streamStatusText(string status) {
-        record("streamStatusText", status);
+    override void streamRuntimeStatus(UiRuntimeStatus status) {
+        record("streamRuntimeStatus", status.detail);
     }
 
     override void streamChatMessage(string msg, string thinking) {
@@ -382,8 +382,8 @@ class UiMessenger {
         sink.chatThinkMessage(msg, thinking, type, nr, time);
     }
 
-    void statusText(string status) {
-        sink.statusText(status);
+    void runtimeStatus(UiRuntimeStatus status) {
+        sink.runtimeStatus(status);
     }
 
     void finalAnswer(string msg) {
@@ -402,8 +402,8 @@ class UiMessenger {
         sink.logFile(useFile);
     }
 
-    void streamStatusText(string status) {
-        sink.streamStatusText(status);
+    void streamRuntimeStatus(UiRuntimeStatus status) {
+        sink.streamRuntimeStatus(status);
     }
 
     void streamChatMessage(string msg, string thinking) {
@@ -437,12 +437,6 @@ class UiMessenger {
     }
 }
 
-string formatStatusText(bool readyState, long contextSize, ServerStat stat, string model) {
-    return i"Context $(stat.context)/$(contextSize) tokens | $(
-            format!"%.1f"(stat.predictedPerSecond)) tok/s | Model: '$(model)' | $(
-            readyState ? "Ready" : "Busy")".text;
-}
-
 /// Forwards streaming model output to the TUI (single-agent queries).
 class StreamMessageUpdater : IStreamCallback {
     UiMessenger uiMsg;
@@ -457,6 +451,12 @@ class StreamMessageUpdater : IStreamCallback {
     }
 
     override void messageUpdate(StreamMessage msg, StreamToolCall[] tools, ServerStat stat) {
+        uiMsg.streamRuntimeStatus(UiRuntimeStatus(phase: !tools.empty ? TuiPhase.tooling
+                : msg.content.empty ? TuiPhase.thinking : TuiPhase.writing, detail: tools.empty
+                ? null : tools[$ - 1].toolName,
+                contextUsed: stat.context, contextMax: contextSize, compactAt: (contextSize * 9) / 10,
+                tokensPerSecond: stat.predictedPerSecond, model: modelName));
+
         string content = msg.content;
         if (!tools.empty) {
             foreach (tool; tools) {
@@ -466,7 +466,6 @@ class StreamMessageUpdater : IStreamCallback {
             }
         }
 
-        uiMsg.streamStatusText(formatStatusText(false, contextSize, stat, modelName));
         uiMsg.streamChatMessage(content, msg.reasoning);
     }
 

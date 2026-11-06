@@ -519,10 +519,10 @@ void tuiClearOutput(TuiState& state) {
     state.threadAdapter.reset();
     model::resetForSessionSwitch(state.ui);
     // The run status belongs to the session too (§5.4): its numbers describe a run in a
-    // conversation the user just left, so the status is cleared and the row falls back to the
-    // sentence splitter, which D re-sends for the new session. The setter's clear path is the
-    // one implementation of that, here as well as in the ABI - a second copy could forget the
-    // chips or the offline flag.
+    // conversation the user just left, so the status is cleared and the chips fall back to
+    // their defaults, which D re-sends for the new session. The setter's clear path is the
+    // one implementation of that, here as well as in the ABI - a second copy could forget
+    // the chips or the offline flag.
     tuiSetRuntimeStatus(state, model::RuntimeStatus{});
     // A pending paste question names text the user aimed at the session they just left,
     // and a history cursor without its draft is a stale mode: both belong to the switch.
@@ -626,47 +626,16 @@ void tuiStreamChatMessageClear(TuiState& state) {
     state.threadAdapter.clearStream();
 }
 
-void tuiSetStatusText(TuiState& state, const std::string& text) {
-    // D calls this unconditionally on every render (source/llm/tui/package.d:339),
-    // so the same sentence arrives up to ~100 times a second. Re-deriving the
-    // chips for an unchanged string would spend a sentence split, four strings
-    // and two number formats per tick for nothing — D-STATUS's status budget is
-    // 20 Hz, and tasks 28/39 build on this seam being cheap.
-    if (text == state.statusText)
-        return;
-    state.statusText = text;
-    // One derivation per change, never per frame: the chips are formatted
-    // numbers, so they belong to the update. An empty sentence means "nothing
-    // sent yet" and yields the default sentence's chips — TuiState seeds exactly
-    // those, so the first empty update returns above without work.
-    state.statusChips = model::splitStatusText(text.empty() ? model::kDefaultStatusSentence : text);
-    // While the numbers are structured they own the chips (§6.3): only the model chip is the
-    // sentence's, because the ABI struct carries no model name. Re-formatting all four here would
-    // spend a sentence's worth of formatting on every tick - exactly what the 20 Hz budget exists
-    // to avoid - so the one chip that cannot come from the numbers is copied instead.
-    if (state.ui.status.structured)
-        state.ui.chips.model = state.statusChips.model;
-}
-
 void tuiSetRuntimeStatus(TuiState& state, const model::RuntimeStatus& status) {
-    if (!status.structured) {
-        // Back to the sentence: the frame layer's projection (`deriveNowBar`) owns `ui.status`
-        // again, and the chips are the sentence's set as it stands. Clearing also drops the one
-        // fact only the numbers can express - an unreachable model - because a cleared status
-        // never claimed it.
-        state.ui.status = model::RuntimeStatus{};
-        state.ui.chips = state.statusChips;
-        state.offline = false;
-        return;
-    }
     state.ui.status = status;
-    // The chips are formatted *here*, once per update, by the splitter's own formatters: the
-    // two paths must produce byte-identical strings for the same numbers (§6.3). The model chip
-    // is the sentence's - the struct carries no model name (a model changes when the user
-    // changes it, not per status tick).
-    state.ui.chips = model::chipsFromStatus(state.ui.status, state.statusChips.model);
+    // The chips are formatted *here*, once per update, never per frame . D
+    // re-sends the status on every render tick, so a change check buys nothing
+    // here that the chip strings' identity does not: the frame layer compares
+    // `ui.chips` and skips the repaint when nothing moved.
+    state.ui.chips = model::chipsFromStatus(state.ui.status);
     // `offline` is the one phase with a consequence beyond the row: the thread's offline card
     // and the composer's disabled state read `TuiState::offline`, and nothing else writes it.
+    // Clearing also drops it, because a cleared status never claimed it.
     state.offline = model::phaseFromOrdinal(status.phase) == model::Phase::Offline;
 }
 

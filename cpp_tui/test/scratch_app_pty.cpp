@@ -120,7 +120,7 @@ int main() {
         return 1;
     }
     tuiSetLogging(state, true);
-    tuiSetStatusText(state, makeStr("Context: 0/0 tokens | Model: none | Ready"));
+    // The status row is seeded by tuiCreateState, as in the app's main.cpp.
 
     // Same headless seed as the app's main.cpp.
     const std::array<SessionItem, 3> sessions = {{

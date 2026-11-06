@@ -213,7 +213,7 @@ private final class TuiDriveFixture {
 
     /// One uiMsg round trip through both shells.
     void drive() {
-        dynSend(dActor.address, "uiMsg", UiStatusText("x"));
+        dynSend(dActor.address, "uiMsg", UiRuntimeStatus(TuiPhase.thinking, "x"));
         dActor.process();
         dListener.process();
     }
@@ -250,7 +250,8 @@ unittest {
     // stop-agent flag is raised and the status line tells the user.
     assert(f.listener.queries.length == 0, "/stop must not be forwarded");
     assert(isStopAgentTriggered(), "/stop must raise the stop-agent flag");
-    assert(f.actor.ui.statusText == "Stopping agent");
+    assert(f.actor.ui.runtimeStatus_.detail == "Stopping agent");
+    assert(f.actor.ui.runtimeStatus_.phase == TuiPhase.waiting);
     clearStopAgent(); // hygiene: do not leak the flag into other tests
     f.teardown();
 }
@@ -304,6 +305,21 @@ unittest {
     f.teardown();
 }
 
+@("TUI phase ordinals are the ABI's numbers")
+unittest {
+    // The C++ side pins this same literal table (test_status_chips.cpp, the
+    // "phase ordinals are the ABI table" expect): `TuiRuntimeStatus.phase`
+    // crosses as a raw int, so a reorder of either enum must break the other
+    // side's pin instead of silently rewording the row.
+    assert(TuiPhase.idle == 0);
+    assert(TuiPhase.thinking == 1);
+    assert(TuiPhase.tooling == 2);
+    assert(TuiPhase.writing == 3);
+    assert(TuiPhase.waiting == 4);
+    assert(TuiPhase.error == 5);
+    assert(TuiPhase.offline == 6);
+}
+
 @("TUI actor: hasPending peeks the mailbox without consuming")
 unittest {
     auto f = new TuiDriveFixture();
@@ -312,7 +328,7 @@ unittest {
     // non-destructive, and keep seeing it while the re-armed tick is in front
     // (the bootstrap tick was already dispatched; each process pops the tick,
     // peeks the queued message, renders non-parking, and re-arms).
-    dynSend(f.dActor.address, "uiMsg", UiStatusText("x"));
+    dynSend(f.dActor.address, "uiMsg", UiRuntimeStatus(TuiPhase.thinking, "x"));
     assert(f.actor.hasPending(), "a queued message must flag pending");
     assert(f.actor.hasPending(), "peek must be non-destructive");
     f.dActor.process(); // pops the re-armed tick: peek sees the message, renders
@@ -392,8 +408,8 @@ unittest {
     // At the final state (onSpawn queues the bootstrap tick and the fixture
     // dispatches it): the burst drains via the single re-arm chain - uiMsg
     // dispatches neither render nor re-arm, the ticks do.
-    dynSend(f.dActor.address, "uiMsg", UiStatusText("m1"));
-    dynSend(f.dActor.address, "uiMsg", UiStatusText("m2"));
+    dynSend(f.dActor.address, "uiMsg", UiRuntimeStatus(TuiPhase.thinking, "m1"));
+    dynSend(f.dActor.address, "uiMsg", UiRuntimeStatus(TuiPhase.thinking, "m2"));
     dynSend(f.dActor.address, "uiTick");
     f.dActor.process(); // pops the bootstrap tick (front): peek [m1, m2, tick] -> non-parking render; re-arm
     assert(f.actor.updateCycle == 2);

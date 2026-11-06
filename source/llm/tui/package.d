@@ -346,9 +346,9 @@ struct TextUserInterface {
 
     package {
         string query_;
-        string statusText;
-        // Last header summary computed by addChatMessage (test seam: the
-        // llm.tui.tests module is in package llm.tui and can read it).
+        // what D last sent, replayed to the C++ frame on every render tick.
+        UiRuntimeStatus runtimeStatus_;
+        // Last header summary computed by addChatMessage
         string lastChatSummary;
         // Set when the C frame reports user-terminated (GUI window close);
         // consumed by the actor's postProcess exit handshake.
@@ -406,8 +406,8 @@ struct TextUserInterface {
         tuiSetIniFilename(tuiState, s);
     }
 
-    void setStatusText(string s) {
-        statusText = s;
+    void setRuntimeStatus(UiRuntimeStatus s) @safe {
+        runtimeStatus_ = s;
     }
 
     void setMaxWidth(int w) {
@@ -552,8 +552,17 @@ struct TextUserInterface {
     }
 
     void render(bool blocking = false) {
-        auto status = String(statusText.ptr, statusText.length);
-        tuiSetStatusText(tuiState, status);
+        TuiRuntimeStatus rs = TuiRuntimeStatus.init;
+        rs.phase = runtimeStatus_.phase;
+        rs.detail = toTuiString(runtimeStatus_.detail);
+        rs.model = toTuiString(runtimeStatus_.model);
+        rs.contextUsed = runtimeStatus_.contextUsed;
+        rs.contextMax = runtimeStatus_.contextMax;
+        rs.compactAt = runtimeStatus_.compactAt;
+        rs.tokensPerSecond = runtimeStatus_.tokensPerSecond;
+        static assert(TuiRuntimeStatus.sizeof == 88,
+                "the D mirror of TuiRuntimeStatus must pin the ABI layout");
+        tuiSetRuntimeStatus(tuiState, &rs);
 
         if (tuiIsSubmitReady(tuiState) != 0) {
             String userQuery = tuiGetSubmitQuery(tuiState);
@@ -587,7 +596,7 @@ interface TUICommands {
     void uiMsg(UiChatMessage m);
     void uiMsg(UiChatThinkMessage m);
     void uiMsg(UiFinalAnswer m);
-    void uiMsg(UiStatusText m);
+    void uiMsg(UiRuntimeStatus m);
     void uiMsg(UiInitHistory m);
     void uiMsg(UiSessionList m);
     void uiMsg(UiStreamChatMessage m);
@@ -774,7 +783,7 @@ class TextUserInterfaceActor : TUICommands {
                 logger.info("UI backend note: ", note);
             ui.setUiAsStdLogger;
             if (!note.empty)
-                ui.setStatusText(note);
+                ui.setRuntimeStatus(UiRuntimeStatus(TuiPhase.idle, note));
             debugUiSpawnEdge();
         }
 
@@ -845,13 +854,13 @@ class TextUserInterfaceActor : TUICommands {
         // a UI cancel and a typed stop are indistinguishable to the agent.
         if (ui.takeCancel()) {
             stopAgent();
-            ui.setStatusText("Stopping agent");
+            ui.setRuntimeStatus(UiRuntimeStatus(TuiPhase.waiting, "Stopping agent"));
         }
 
         if (!query.strip.empty) {
             if (query == "/stop") {
                 stopAgent();
-                ui.setStatusText("Stopping agent");
+                ui.setRuntimeStatus(UiRuntimeStatus(TuiPhase.waiting, "Stopping agent"));
             } else {
                 listener.userQuery(query);
             }
@@ -909,8 +918,8 @@ class TextUserInterfaceActor : TUICommands {
         ui.addChatMessage(a.msg, null, TuiChatMessageType_FinalAnswer, a.nr, a.time);
     }
 
-    void uiMsg(UiStatusText a) {
-        ui.setStatusText(a.status);
+    void uiMsg(UiRuntimeStatus a) {
+        ui.setRuntimeStatus(a);
     }
 
     void uiMsg(UiInitHistory m) {
@@ -1012,8 +1021,44 @@ struct UiFinalAnswer {
 struct UiClearChat {
 }
 
-struct UiStatusText {
-    string status;
+/// The UI's phase vocabulary, mirrored from the C side's `model::Phase`
+/// (`cpp_tui/model/status_chips.h`)
+enum TuiPhase {
+    idle = 0,
+    thinking = 1,
+    tooling = 2,
+    writing = 3,
+    waiting = 4,
+    error = 5,
+    offline = 6,
+}
+
+/// The run's status as data (D-STATUS v5): the four facts the now bar's chips
+/// show, plus the phase and the current step. The C++ side formats the numbers
+/// into the chips and never parses them back, so the sentence form is gone -
+/// a value here is what the row says, not text for it to split.
+///
+/// Sender contract (the ABI's, `tui_api.h`): send on every render tick at or
+/// below 20 Hz, one update when a turn starts doing work, one flush at a request
+/// boundary when the window swallowed the newest values, and always the final one
+/// when the turn ends. `phase == offline` is the one value with a consequence
+/// beyond the row: it also drives the thread's offline card and the disabled
+/// composer. A capacity or rate of `0` is *absence* - the row draws the missing
+/// value, never `0` - so an unknown context or a stalled rate is sent as zero,
+/// not as a guess.
+struct UiRuntimeStatus {
+    int phase = TuiPhase.idle;
+    /// The current step: a tool name while tooling, one line.
+    string detail;
+    /// The model context's used/total tokens and the threshold the agent's
+    /// `needCompression` compares the used count with.
+    long contextUsed;
+    long contextMax;
+    long compactAt;
+    /// Generated tokens per second; `0` while none is known.
+    double tokensPerSecond;
+    /// The model display name, `"none"` when no model is configured.
+    string model = "none";
 }
 
 struct UiLogFile {

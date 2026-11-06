@@ -720,16 +720,30 @@ void checkMeter() {
     check(views::contextFraction(-5, 100) == 0.0f, "a negative count is an empty meter");
 
     // The `ctx` chip and the now bar's meter must be the same string for the same
-    // numbers: both use `ui::formatCount`, which is the whole reason the splitter keeps
+    // numbers: both use `ui::formatCount`, which is the whole reason the status keeps
     // the numbers (`StatusChips::contextUsed/contextMax`).
-    const std::string sentences[] = {"Context: 42000/128000 tokens | Model: qwen3-coder | Ready",
-                                     "Context 1/8192 tokens | 38.1 tok/s | Ready",
-                                     "Context: 0/0 tokens | Model: none | Ready",
-                                     "Context: 999/1000 tokens | Ready"};
-    for (const std::string& sentence : sentences) {
-        const model::StatusChips chips = model::splitStatusText(sentence);
+    const model::RuntimeStatus statuses[] = {
+        {model::phaseOrdinal(model::Phase::Idle),
+         {},
+         "qwen3-coder",
+         42000,
+         128000,
+         115200,
+         0.0,
+         0,
+         0},
+        {model::phaseOrdinal(model::Phase::Thinking), {}, {}, 1, 8192, 7372, 38.1, 0, 0},
+        {},
+        {model::phaseOrdinal(model::Phase::Idle), {}, {}, 999, 1000, 900, 0.0, 0, 0}};
+    for (const model::RuntimeStatus& status : statuses) {
+        const model::StatusChips chips = model::chipsFromStatus(status);
+        if (status.contextMax == 0) {
+            check(chips.context == model::kMissingChipValue,
+                  "no capacity is an absent chip, not a 0/0 count");
+            continue;
+        }
         const std::size_t slash = chips.context.find('/');
-        check(slash != std::string::npos, "the splitter produced a used/max chip");
+        check(slash != std::string::npos, "the formatter produced a used/max chip");
         check(chips.context.substr(0, slash) == ui::formatCount(chips.contextUsed),
               "the meter's count is the chip's used value (" + chips.context + ")");
         check(chips.context.substr(slash + 1) == ui::formatCount(chips.contextMax),
@@ -1492,8 +1506,13 @@ void checkShell() {
     // The composer's inputs are derived from the aggregate: the draft, the run
     // state and the send-key preference (the chips' numbers and the model name
     // are the now bar's inputs, not the composer's).
-    state.statusChips = model::splitStatusText("Context: 42000/128000 tokens | 38.1 tok/s | "
-                                               "Model: 'qwen3-coder' | Ready");
+    model::RuntimeStatus status; // the chips' numbers and the model name
+    status.model = "qwen3-coder";
+    status.contextUsed = 42000;
+    status.contextMax = 128000;
+    status.compactAt = 115200;
+    status.tokensPerSecond = 38.1;
+    state.ui.chips = model::chipsFromStatus(status);
     state.userQuery.inputBuf = "shell draft";
     views::ShellFrame shell;
     Grid grid = shellGrid(state, shell);

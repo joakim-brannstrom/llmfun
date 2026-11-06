@@ -19,4 +19,4 @@ text:
    Ask...
                               Send
 
-  ✓ Ready           ctx ░░░░░░ 0  none
+  ✓ Ready                  ctx -  none

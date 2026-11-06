@@ -10,8 +10,8 @@
 //      not include `tui.h` - the layering every view is held to (`tools/gate_ratchet.txt`);
 //   2. the vocabulary. Seven phases, seven distinct words, the ordinal round-trip, an
 //      unknown ordinal clamped to idle, and the fourth chip's `Ready|Busy` mapping;
-//   3. the chips. The structured status and the sentence splitter produce byte-identical
-//      chips for the same numbers, and a number the status does not carry is `—`, never `0`;
+//   3. the chips. The chips are formatted from the structured status once per update, and
+//      a number the status does not carry is `—`, never `0`;
 //   4. the mapping. One case per phase: the word on the left, the mark beside it, the clock
 //      only while a run is in flight, and the context meter, the speed chip and the model
 //      chip on the right;
@@ -245,10 +245,30 @@ ui::Rect nowBarRect(int w, int h, const ui::Metrics& m) {
     return layout.nowBar;
 }
 
-/// The design's own numbers (the chip row), from the sentence - the split path.
+/// The design's own numbers (the chip row), formatted from the structured status.
 model::StatusChips designChips() {
-    return model::splitStatusText(
-        "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Ready");
+    model::RuntimeStatus status;
+    status.phase = model::phaseOrdinal(model::Phase::Idle);
+    status.model = "qwen3-coder";
+    status.contextUsed = 42000;
+    status.contextMax = 128000;
+    status.compactAt = 115200;
+    status.tokensPerSecond = 38.1;
+    return model::chipsFromStatus(status);
+}
+/// The structured status D sends, as the ABI would deliver it: the design's numbers
+/// with `phase` and `detail` on top, and a sampled clock.
+model::RuntimeStatus statusOf(model::Phase phase, const char* detail = "") {
+    model::RuntimeStatus status;
+    status.phase = model::phaseOrdinal(phase);
+    status.detail = detail;
+    status.model = "qwen3-coder";
+    status.contextUsed = 42000;
+    status.contextMax = 128000;
+    status.compactAt = 115200;
+    status.tokensPerSecond = 38.1;
+    status.elapsedMs = 12000;
+    return status;
 }
 
 views::NowBarInput idleRow() {
@@ -396,37 +416,37 @@ void checkVocabulary() {
     }
 }
 
-// 3. The chips: one value, two paths
+// 3. The chips: the status formatted once, absences never zeros
 
 void checkChips() {
-    // The structured status D sends, with the sentence's own numbers.
+    // The structured status D sends.
     model::RuntimeStatus status;
     status.phase = model::phaseOrdinal(model::Phase::Idle);
+    status.model = "qwen3-coder";
     status.contextUsed = 42000;
     status.contextMax = 128000;
+    status.compactAt = 115200;
     status.tokensPerSecond = 38.1;
-    status.structured = true;
 
-    const model::StatusChips structured = model::chipsFromStatus(status, "qwen3-coder");
-    const model::StatusChips split = designChips();
-    check(structured == split,
-          "the structured and split paths produce byte-identical chips for the same numbers");
+    const model::StatusChips structured = model::chipsFromStatus(status);
+    const model::StatusChips design = designChips();
+    check(structured == design, "the chips derive from the status the ABI stores, field for field");
     check(structured.context == "42k/128k", "the structured context chip is 42k/128k");
     check(structured.speed == "38.1 tok/s", "the structured speed chip is 38.1 tok/s");
-    check(structured.model == "qwen3-coder", "the structured model chip is the sentence's");
+    check(structured.model == "qwen3-coder", "the structured model chip is the status's");
     check(structured.state == "Ready", "the structured state chip is the phase's");
 
-    // A busy phase against the sentence D writes while a run is in flight.
+    // A busy phase keeps the numbers and changes only the state word.
     status.phase = model::phaseOrdinal(model::Phase::Thinking);
-    const model::StatusChips busy = model::chipsFromStatus(status, "qwen3-coder");
-    check(busy == model::splitStatusText(
-                      "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Busy"),
-          "a thinking run and a `Busy` sentence produce the same chips");
+    const model::StatusChips busy = model::chipsFromStatus(status);
+    check(busy.state == "Busy", "a thinking run is Busy");
+    check(busy.context == structured.context && busy.speed == structured.speed &&
+              busy.model == structured.model,
+          "the phase changes no other chip");
 
     // A number the status does not carry is the absence value, never 0.
-    model::RuntimeStatus empty;
-    empty.structured = true;
-    const model::StatusChips missing = model::chipsFromStatus(empty, "");
+    const model::RuntimeStatus empty;
+    const model::StatusChips missing = model::chipsFromStatus(empty);
     check(missing.context == model::kMissingChipValue,
           "no capacity known renders the absence value, not 0/0");
     check(missing.speed == model::kMissingChipValue, "no rate known renders the absence value");
@@ -437,15 +457,15 @@ void checkChips() {
 
     // A used value of 0 with a real capacity is a *known* zero.
     model::RuntimeStatus fresh;
-    fresh.structured = true;
+    fresh.model = "m";
     fresh.contextMax = 8192;
-    const model::StatusChips freshChips = model::chipsFromStatus(fresh, "m");
+    const model::StatusChips freshChips = model::chipsFromStatus(fresh);
     check(freshChips.context == "0/8.2k",
           "an empty context with a real capacity keeps both halves");
 
     // The chip set is a value: the frame layer compares instead of re-deriving.
-    check(busy != split, "two different chip sets are not equal");
-    check(!(busy == split), "and operator== agrees");
+    check(busy != design, "two different chip sets are not equal");
+    check(!(busy == design), "and operator== agrees");
 }
 
 // 4. The mapping: one case per phase
@@ -848,7 +868,9 @@ void checkScreen() {
 
     // A missing number: `-` in the grid (U+2014 is East-Asian ambiguous), never `0`.
     views::NowBarInput missing = idleRow();
-    missing.chips = model::splitStatusText("Ready"); // the state, no numbers
+    model::RuntimeStatus stateOnly; // the state, no numbers
+    stateOnly.phase = model::phaseOrdinal(model::Phase::Idle);
+    missing.chips = model::chipsFromStatus(stateOnly);
     const Grid missingGrid = drawFor(missing, 100, 30);
     const std::string missingText = missingGrid.rowText(missingGrid.ny - 1);
     check(missingText.find("ctx -") != std::string::npos,
@@ -885,51 +907,33 @@ views::ShellFrame shellFrame(tui::TuiState& state, int w, int h) {
 
 void checkShell() {
     tui::TuiState state;
-    // The sentence D sends, through the API D uses (a direct write would also skip the
-    // setter's "unchanged sentence" rule, which is what keeps the chips off the frame path).
-    tui::tuiSetStatusText(
-        state, "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Ready");
+    // The status D sends, through the API D uses (a direct write would bypass the
+    // chips' single derivation point, which is what keeps them off the frame path).
+    const model::RuntimeStatus idle = statusOf(model::Phase::Idle);
+    tui::tuiSetRuntimeStatus(state, idle);
 
-    // Idle frame: the phase is idle and the chips are the sentence's.
+    // Idle frame: the phase and the chips are the status's, derived nowhere else.
     shellFrame(state, 100, 30);
-    check(state.ui.status.phase == model::phaseOrdinal(model::Phase::Idle),
-          "an idle frame derives the idle phase");
-    check(state.ui.chips == designChips(), "and projects the sentence's chips");
-    check(!state.ui.status.structured,
-          "a state that never received a structured status keeps the sentence path");
+    check(state.ui.status.phase == idle.phase, "the frame leaves the status's phase alone");
+    check(state.ui.chips == designChips(), "and the chips are the status's set");
+    check(state.ui.status.elapsedMs == idle.elapsedMs, "the sampled clock is stored as sent");
 
-    // A run: the phase follows the facts the frame owns.
+    // A running frame: the row's clock is the frame's, and the stored status keeps
+    // D's sampled value for the moment the run ends.
     state.readyStatus = false;
     shellFrame(state, 100, 30);
-    check(state.ui.status.phase == model::phaseOrdinal(model::Phase::Thinking),
-          "a run with no answer text yet is `thinking`");
-    check(state.ui.status.elapsedMs >= 0, "the clock is derived with it");
+    check(state.ui.status.phase == idle.phase, "the frame derives no phase of its own");
+    check(state.ui.status.elapsedMs == idle.elapsedMs, "D's sampled clock is not overwritten");
 
-    state.chat.hasStreamMsg = true;
-    state.chat.streamMsg.text = "partial answer";
+    // Offline: the phase carries through to the flag and to the chip.
+    tui::tuiSetRuntimeStatus(state, statusOf(model::Phase::Offline));
+    check(state.offline, "the offline phase raises the frame's offline flag");
     shellFrame(state, 100, 30);
-    check(state.ui.status.phase == model::phaseOrdinal(model::Phase::Writing),
-          "a run whose answer is arriving is `writing`");
-
-    state.cancelRequested = true;
-    shellFrame(state, 100, 30);
-    check(state.ui.status.phase == model::phaseOrdinal(model::Phase::Waiting),
-          "a requested stop is `waiting`");
-
-    state.chat.hasStreamMsg = false;
-    state.chat.streamMsg.text.clear();
-    state.ui.offline = true;
-    state.readyStatus = true;
-    shellFrame(state, 100, 30);
-    check(state.ui.status.phase == model::phaseOrdinal(model::Phase::Offline),
-          "an unreachable model is `offline`");
-    check(state.ui.chips.state == std::string("Offline"),
-          "and its state chip says Offline, not the sentence's Ready");
+    check(state.ui.chips.state == std::string("Offline"), "the state chip says Offline");
 
     // The composer's phase line reads the same word as the row (one vocabulary).
-    state.ui.offline = false;
+    tui::tuiSetRuntimeStatus(state, statusOf(model::Phase::Thinking));
     state.readyStatus = false;
-    state.cancelRequested = false;
     g_w = 100;
     g_h = 30;
     const Grid grid = frame([&](const ui::Metrics&) {
@@ -939,6 +943,7 @@ void checkShell() {
     check(grid.hasText("qwen3-coder"), "and the same model chip as the now bar");
 
     // Compact mode: the layout's answer, and the collapsed chip form with it.
+    tui::tuiSetRuntimeStatus(state, idle);
     state.readyStatus = true;
     const views::ShellFrame compact = shellFrame(state, 50, 20);
     check(compact.layout.compact, "a 50-cell display is compact");
@@ -972,8 +977,7 @@ void checkStopHint() {
     // that path). What is pinned here is the row's half of it - that the hint tracks the
     // step's availability end to end, from the aggregate through `cancelStepOpen()`.
     tui::TuiState state;
-    tui::tuiSetStatusText(
-        state, "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Busy");
+    tui::tuiSetRuntimeStatus(state, statusOf(model::Phase::Thinking));
     state.readyStatus = false;
     shellFrame(state, 100, 30);
     check(tui::cancelStepOpen(state), "a running, not-yet-stopped frame has the Esc step open");
@@ -992,8 +996,7 @@ void checkStopHint() {
 /// is on the drawn row, so a hint that read the run's state directly fails here.
 void checkFocusStopHint() {
     tui::TuiState state;
-    tui::tuiSetStatusText(
-        state, "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Busy");
+    tui::tuiSetRuntimeStatus(state, statusOf(model::Phase::Thinking));
     state.readyStatus = false;
     shellFrame(state, 100, 30);
     check(capture().hasText(views::kNowBarHintStop),
@@ -1018,8 +1021,7 @@ void checkOverlayHint() {
     // step (`resolveEscape({overlay, cancel, …})`), so while one is up the row stops
     // promising a stop - `Ctrl+K` over a running agent is the everyday case.
     tui::TuiState state;
-    tui::tuiSetStatusText(
-        state, "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Busy");
+    tui::tuiSetRuntimeStatus(state, statusOf(model::Phase::Thinking));
     state.readyStatus = false;
     shellFrame(state, 100, 30);
     check(capture().hasText(views::kNowBarHintStop), "a running frame advertises the stop");
@@ -1041,8 +1043,7 @@ void checkQuitPrompt() {
     // instruction, the one string on this row a user has to act on, and a mid-word cut
     // would leave it saying nothing.
     tui::TuiState state;
-    tui::tuiSetStatusText(
-        state, "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Busy");
+    tui::tuiSetRuntimeStatus(state, statusOf(model::Phase::Thinking));
     state.readyStatus = false;
     state.quitConfirmArmed = true; // what the Ctrl+Q chord sets while a run is active
 
@@ -1122,12 +1123,8 @@ std::string goldenText(const Scene& scene) {
     // The scene is drawn through the whole shell, so the golden pins where the row sits
     // and what the rest of the frame does around it.
     tui::TuiState state;
-    // A run's sentence ends in `Busy` - the fourth chip's word for all four of the working
-    // phases (D writes both, and the splitter keeps whichever it got).
-    tui::tuiSetStatusText(
-        state, scene.running
-                   ? "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Busy"
-                   : "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Ready");
+    // The scene's phase is the status's: D reports it, the shell does not derive it.
+    tui::tuiSetRuntimeStatus(state, statusOf(scene.phase));
     state.readyStatus = !scene.running;
     if (scene.running) {
         state.startProcesssingTime = std::chrono::system_clock::now() - std::chrono::seconds(12);
@@ -1234,6 +1231,7 @@ TuiRuntimeStatus abiStatus(int phase, const char* detail) {
     TuiRuntimeStatus status{};
     status.phase = phase;
     status.detail = String{detail, detail ? std::strlen(detail) : 0};
+    status.model = String{"qwen3-coder", 11};
     status.contextUsed = 42000;
     status.contextMax = 128000;
     status.compactAt = 115200;
@@ -1254,21 +1252,16 @@ void checkRuntimeStatusAbi() {
     // The C++ aggregate, wrapped in the ABI's handle - the shape `tui_api.cpp` keeps.
     tui::TuiState state;
     TuiState handle{&state};
-    tui::tuiSetStatusText(
-        state, "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Ready");
 
-    // The sentence is still the fallback: a frame with no structured status derives the chips
-    // from it, so D's plain `tuiSetStatusText` keeps working.
-    shellFrame(state, 100, 30);
-    check(state.ui.chips == designChips(), "the sentence's chips are what the row draws");
-
-    // The workbench stores it and formats the four chips from the numbers: the identity
+    // The workbench stores the status and formats the four chips from the numbers: the identity
     // test, through the surface D actually calls rather than through the model function.
     TuiRuntimeStatus inbound = abiStatus(0, "");
     tuiSetRuntimeStatus(&handle, &inbound);
-    check(state.ui.status.structured, "the workbench stores the structured status");
+    check(state.ui.status.contextUsed == 42000 &&
+              state.ui.status.model == std::string("qwen3-coder"),
+          "the workbench stores the status D sends");
     check(state.ui.chips == designChips(),
-          "and its chips are byte-identical to the sentence's for the same numbers");
+          "and its chips are what the model formats for the same numbers");
     check(state.ui.status.contextUsed == 42000 && state.ui.status.contextMax == 128000 &&
               state.ui.status.compactAt == 115200,
           "the context numbers round-trip");
@@ -1308,32 +1301,34 @@ void checkRuntimeStatusAbi() {
               model::ThreadView::Offline,
           "the thread's offline card follows from it");
 
-    // While the numbers own the chips, a frame never re-derives them - and a sentence that
-    // changes only re-formats the one chip the struct cannot carry (the model's name).
-    tui::tuiSetStatusText(state, "Context: 1/2 tokens | 0.0 tok/s | Model: 'other' | Ready");
-    check(state.ui.chips.context == std::string("42k/128k"),
-          "a changed sentence keeps the structured numbers");
-    check(state.ui.chips.model == std::string("other"), "but re-formats the model chip it owns");
+    // While the numbers own the chips, a frame never re-derives them - and a new status
+    // re-formats all four from its own numbers.
+    TuiRuntimeStatus other = abiStatus(0, "");
+    other.model = String{"other", 5};
+    tuiSetRuntimeStatus(&handle, &other);
+    check(state.ui.chips.model == std::string("other"), "a new status re-formats the model chip");
     shellFrame(state, 100, 30);
     check(state.ui.chips.context == std::string("42k/128k"),
           "and a frame leaves the chips alone (no per-frame formatting)");
     check(state.ui.status.contextUsed == 42000, "nor does it overwrite D's numbers");
     check(state.ui.status.elapsedMs == 1234, "nor D's clock");
 
-    // NULL hands the row back to the sentence splitter, and drops the fact only numbers can carry.
+    // NULL drops the row's facts: the chips return to their defaults, and the one fact only a
+    // number can carry (the offline card) goes with them.
     tuiSetRuntimeStatus(&handle, nullptr);
-    check(!state.ui.status.structured, "NULL clears the structured status");
+    check(state.ui.chips == model::chipsFromStatus(model::RuntimeStatus{}),
+          "NULL resets the chips to their defaults");
     check(!state.offline, "and the offline fact with it");
-    check(state.ui.chips == state.statusChips, "the splitter owns the chips again");
     shellFrame(state, 100, 30);
-    check(state.ui.chips == state.statusChips, "and the frame keeps projecting them");
+    check(state.ui.chips == model::chipsFromStatus(model::RuntimeStatus{}),
+          "and the frame keeps projecting them");
 
     // A session switch clears it too: the numbers described the session the user left.
     tuiSetRuntimeStatus(&handle, &inbound);
-    check(state.ui.status.structured, "set again before the switch");
+    check(state.ui.status.contextUsed == 42000, "set again before the switch");
     tui::tuiClearOutput(state);
-    check(!state.ui.status.structured, "a clear or a session switch drops the status");
-    check(state.ui.chips == state.statusChips, "and the row falls back to the sentence");
+    check(state.ui.chips == model::chipsFromStatus(model::RuntimeStatus{}),
+          "a clear or a session switch drops the status");
 }
 
 /// The row's clock. It runs after the goldens on purpose: a frame that draws
@@ -1344,7 +1339,7 @@ void checkRuntimeStatusClock() {
     TuiState handle{&state};
     TuiRuntimeStatus status = abiStatus(0, "");
     tuiSetRuntimeStatus(&handle, &status);
-    check(state.ui.status.structured, "the clock check starts from a structured status");
+    check(state.ui.status.elapsedMs == 1234, "the clock check starts from a sampled status");
 
     // A run that has not ticked for a while (a slow first token, a tool call) keeps the row's
     // clock moving: D's `elapsedMs` is only sampled when a status is released, so the frame's own
@@ -1438,8 +1433,7 @@ void checkFlash() {
     // The derivation: the shell reads the queue's newest item, so a raise anywhere in the frame
     // reaches the row without the view knowing what a toast is.
     tui::TuiState state;
-    tui::tuiSetStatusText(
-        state, "Context: 42000/128000 tokens | 38.1 tok/s | Model: 'qwen3-coder' | Ready");
+    tui::tuiSetRuntimeStatus(state, statusOf(model::Phase::Idle));
     model::raiseToast(state.ui, model::Toast{model::ToastKind::Success, "Copied ANSWER", {}},
                       /*nowMs=*/1000, /*textGrid=*/true);
     const views::ShellFrame frameOut = shellFrame(state, 100, 30);

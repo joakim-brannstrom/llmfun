@@ -160,7 +160,7 @@ void scenario4_scrollAndApiVersion() {
 
     // Documentation-only marker: the widened clear contract must not bump it.
     // 6 is the current generation (the legacy renderer's removal, task 41).
-    static_assert(TUI_API_VERSION == 6, "TUI_API_VERSION must stay at the current v6 generation");
+    static_assert(TUI_API_VERSION == 7, "TUI_API_VERSION must stay at the current v7 generation");
 }
 
 // Scenario 5: C-API null-safety preserved.

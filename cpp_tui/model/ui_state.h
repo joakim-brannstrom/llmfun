@@ -439,21 +439,26 @@ struct UiState {
     /// The run's status as the now bar reads it (task 28): the phase, the current
     /// step, the clock and the numbers.
     ///
-    /// One store, two producers, and `structured` says which one owns it: while it
-    /// is false the frame layer fills it from the facts the frame owns (the phase
-    /// table in `views/shell.cpp`), and once a structured status arrives (task 39's
-    /// `tuiSetRuntimeStatus`, `tui.cpp`) the ABI writes the numbers D sends and the
-    /// frame leaves them alone. Views read this member and never the sentence.
-    RuntimeStatus status;
+    /// One store, one producer: the ABI (`tuiSetRuntimeStatus`, `tui.cpp`) writes the
+    /// numbers D sends, and views read this member - never a sentence, never a
+    /// derivation from message text.
+    ///
+    /// The default is the row D's first tick replaces: no numbers yet (the chips show
+    /// the absence value, never `0`) and the model placeholder D itself sends when it
+    /// has no model. Every construction path gets the same seed, so a state built
+    /// outside `tuiCreateState` draws the same first frame.
+    RuntimeStatus status = [] {
+        RuntimeStatus seeded;
+        seeded.model = "none";
+        return seeded;
+    }();
 
     /// The four status chips the row draws (`model::StatusChips`), formatted once per
-    /// value change by whoever owns the status: the sentence splitter
-    /// (`tuiSetStatusText`, task 6) or the structured status task 39's `tuiSetRuntimeStatus`
-    /// formats when the update arrives. The frame layer only *projects* the sentence's set
-    /// into this member (once per change, never per frame), so a view reads the aggregate
-    /// instead of the v4 state - the values inside it are never reformatted on a render
-    /// path (§6.3: the chips are canonical for the numbers).
-    StatusChips chips;
+    /// value change by `tuiSetRuntimeStatus` when the structured status arrives. No
+    /// render path reformats them: the values inside this member are
+    /// canonical for the numbers (§6.3), and a view reads the aggregate instead of
+    /// reaching into the state.
+    StatusChips chips = chipsFromStatus(status);
 
     /// The feedback queue (design §5.25, FR-29, task 45): short-lived answers to actions whose
     /// outcome is not in the thread - a copy, a save, a settings write.
@@ -618,10 +623,10 @@ void refreshAgentLanes(UiState& ui, std::int64_t nowMs);
 //
 // Nothing here reads the agent's stream text (task 39a, D-STATUS: numbers, not sentences).
 // The count and the tool name are fields on `PipelineChatMessage`, so a change to the way D
-// formats its status sentence, or to the `--- Tool ---` layout
-// `PipelineStreamMessageUpdater` writes, cannot silently zero or mislabel a row. The run-level
-// sentence keeps its reader (the chips' `splitStatusText`); a *pipeline* sentence has none since
-// task 41 removed the renderer that showed it.
+// formats the lane's status sentence, or to the `--- Tool ---` layout
+// `PipelineStreamMessageUpdater` writes, cannot silently zero or mislabel a row. (The run-level
+// status is structured since D-STATUS v5 and has no sentence to parse anywhere; the *pipeline*
+// lane sentence keeps no reader either since task 41 removed the renderer that showed it.)
 
 /// Apply one `tuiPipelineAgentUpdate` to the lane list, creating the lane on first sight.
 ///

@@ -23,7 +23,7 @@ text:
    Ask anything...  / commands
                                                   Send
 
-  ✓ Ready                             ctx ░░░░░░ 0/0  none
+  ✓ Ready                                      ctx -  none
 fills:
 0: 1-1=111, 10-10=102, 47-58=23
 1: 0-0=183, 1-59=17

@@ -599,8 +599,11 @@ void renderNowBar(const NowBarInput& input, const ui::Rect& bar, const ui::Metri
                   contextFraction(input.chips.contextUsed, input.chips.contextMax),
                   meterInk(input.chips.contextUsed, input.chips.contextMax));
         // The compaction threshold, when the app knows one (`NowBarInput::compactAt`):
-        // a one-unit tick across the bar's own row.
-        if (input.compactAt > 0 && input.chips.contextMax > 0) {
+        // a one-unit tick across the bar's own row. The pixel profile only: the text
+        // grid's atom is the cell, and a threshold between cells cannot be drawn there
+        // without painting over the bar's own glyphs - on the grid the fill already
+        // carries the fraction.
+        if (!m.textGrid && input.compactAt > 0 && input.chips.contextMax > 0) {
             const float tickX =
                 bar.x +
                 std::floor(contextFraction(input.compactAt, input.chips.contextMax) * bar.w);
