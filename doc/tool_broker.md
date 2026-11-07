@@ -173,7 +173,115 @@ every member was already visible, so activation changes nothing.
 
 ---
 
-## 6. Known Gaps & Maintenance
+## 6. Filesystem Limits for File Tools
+
+The workarea file tools accept a second, opt-in guard layer: a per-category
+regex filter configured under `toolLimits.filesystem`. It is an accident guard
+on top of the existing containment checks, not a sandbox - the boundaries are
+stated below and in `doc/threat_model.md`.
+
+**Opt-in and entry-point agnostic.** When the `filesystem` block is absent no
+regex pattern is compiled (the runtime holder is built disabled) and every
+check is a no-op: behavior is identical to a
+build without the feature. Enforcement lives inside the tool layer
+(`pathToWorkarea`), so every entry point - direct calls, MCP (`mcp --stdio`),
+AgentPool - is covered automatically with no per-entry-point code.
+
+**Configuration.**
+
+```yaml
+toolLimits:
+  filesystem:
+    read:
+      include: ["^/workarea/llmfun/.*\\.md"]   # YAML double-quote: \\ = one regex backslash
+      exclude: ["/\\.git/"]
+    write:
+      include: []
+      exclude: []
+```
+
+**Semantics.**
+
+| Configuration | Effect |
+| :--- | :--- |
+| whole `filesystem` block absent | unrestricted (opt-in) |
+| `filesystem: {}` (empty block) | unrestricted |
+| `read: {}` / `write: {}` | that category unrestricted |
+| `include: []` (with or without excludes) | include-all; excludes still apply |
+| `include: [pats...]`, `exclude: []` | only paths matching >=1 include pass |
+| `include: [pats...]`, `exclude: [excl...]` | include region minus anything matching >=1 exclude (exclude wins) |
+
+Absent, empty and explicit-empty are all exactly allow-all - there are no
+special cases in the code. Every row above is pinned by a unittest.
+
+**What is matched.** The filter sees the absolute post-transform workarea path,
+not the relative path as typed. Patterns are therefore tied to the machine's
+workarea path (e.g. `^/workarea/llmfun/plan/`), which keeps them unambiguous.
+
+**Categories.** Every path-taking file tool declares one category at its call
+site:
+
+- **write**: `writeFile`, `editFile`, `applyDiff`, `removeFile`, and the
+  `loadSkill` destination directory.
+- **read**: `readFile`, `listDirectory`, `grepFiles`,
+  `countLinesInFile`, `md5HashFile`, `loadImageApi`, `loadFileToRAG`.
+
+**Tool-facing error strings.** A denied path returns
+`error: path '<abs>' is rejected by the configured filesystem filter (read|write)`
+with the absolute post-transform path. A refused recursive remove returns
+`error: recursive remove refused: '<abs>' is rejected by the configured filesystem filter (write); nothing was deleted`,
+naming the first offending descendant in depth order.
+
+**Regex footguns.** Patterns are compiled case-insensitively and matched as
+unanchored searches, so:
+
+- Anchor with `^` when you mean a prefix: `plan/` also matches `/x/myplan/y`
+  and `/wa/Plan/` (case-insensitivity holds for all casing variants).
+- Escape dots: `\.md`, not `.md` (an unescaped dot matches any character).
+- Allow-all is `".*"` or an empty include list. A bare `"*"` is an invalid
+  regex and aborts startup.
+- An empty-string pattern (`""`) matches every path - as include it allows
+  everything, as exclude it denies everything. It draws a startup warning.
+- In YAML double-quoted strings backslashes must be doubled (`\\.`). Single
+  quoted YAML scalars keep regex backslashes literal - `config/example.yaml`
+  uses single quotes for this reason.
+
+**Recursive operations.** The argument-path check alone is not enough for
+recursive calls, so the three recursive walkers narrow per entry:
+
+- `listDirectory` skips entries whose path fails the read filter. The
+  `maxDirEntries` cap counts returned entries only, so skipped entries do not
+  consume the budget.
+- `grepFiles` still SCANS excluded files (the external grep process reads
+  them); only result lines from excluded paths are dropped.
+- `removeFile` with `recursive=true` pre-scans the tree and refuses the WHOLE
+  call when any descendant fails the write filter: nothing is deleted.
+  The argument-path check alone cannot protect a recursive delete, since the
+  offending path is a descendant, not the argument.
+
+**Layered merge (system config + overlay).** Nested structs merge
+field-by-field and `string[]` lists are replaced wholesale. An overlay
+`read: {}` does NOT reset a system-configured filter - absent overlay keys keep
+the system values. Only explicit `include: []` / `exclude: []` reset a list,
+and an overlay that sets only `include` silently keeps the system `exclude`
+(and vice versa).
+
+**Startup behavior.** Patterns are compiled once at startup, from the fully
+merged config, never per tool call or per overlay pass. An invalid regex
+aborts startup naming the category and the pattern. An empty-string pattern
+warns. An empty category block is silently allow-all.
+
+**loadSkill fallback.** When the filter denies the `loadSkill` destination,
+the call does not fail: the skill body is loaded directly from the skill source
+directory and the response carries an explicit degradation note stating that
+`references/`, `scripts/` and `assets/` are not available in fallback mode.
+The fallback is always-on (no config knob) and fires only on a filter denial -
+symlinked destinations, absolute paths and containment failures keep their hard
+errors.
+
+---
+
+## 7. Known Gaps & Maintenance
 
 - **Cache-hit reporting is dropped on the floor:** the OpenAI-style and DeepSeek
   usage payloads carry per-request cache-hit fields, and llama.cpp exposes a

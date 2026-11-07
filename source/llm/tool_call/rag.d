@@ -14,7 +14,7 @@ import std.sumtype : match;
 import my.path : Path, AbsolutePath;
 import miniorm : spinSql;
 
-import llm.config : ToolLimits, RagConfig;
+import llm.config : ToolLimits, RagConfig, PathCategory;
 import llm.rag.database : cleanFts5;
 import llm.rag.rag : RAG, Document, Topic, Origin, Offset, Url, add;
 import llm.test_util : retrySql;
@@ -243,7 +243,7 @@ struct LoadFileToRAGParams {
     if (ctx.getRAG() is null) {
         return ExecuteFuncResult("error: RAG not available", success: false);
     }
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.read, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }

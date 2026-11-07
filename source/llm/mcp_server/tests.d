@@ -3,11 +3,16 @@ module llm.mcp_server.tests;
 
 import std.array : array;
 import std.json : JSONType;
+import std.algorithm : canFind, startsWith;
 
 import llm.mcp_server;
 import llm.mcp_server.transport : StdioTransport;
 import llm.mcp_server.types : JsonRpcErrorCode;
 import my.filter : ReFilter;
+import my.path : AbsolutePath;
+
+import llm.config : FilesystemLimits, ToolLimits, buildFilesystemFilterRuntime;
+import llm.tool_call.io : FileContext, FileDirtyTracking;
 
 // --- Integration tests: MCPServer.handleMessage() ---
 @("Regression test for Critical #1: two pre-loaded lines -- the transport must return both without stalling even when the pipe write end stays open.")
@@ -611,4 +616,78 @@ unittest {
 
     auto hits = getFunctions.filter!(f => f.name.startsWith("mcp_stress_t12_")).array;
     assert(hits.length == 400, text(hits.length));
+}
+
+/// Minimal FileContext stub (same shape as io/tests.d TestFileContext) with a
+/// configured filesystem filter excluding `.git` for writes. Used by the
+/// stdio smoke test that pins the tools/call filter behavior.
+private class FilteredFileContextStub : FileContext {
+    AbsolutePath workAreaDir;
+    ToolLimits limits_;
+
+    this(string dir) {
+        import std.file : mkdirRecurse;
+
+        workAreaDir = dir.AbsolutePath;
+        limits_ = ToolLimits();
+        limits_.filesystem.write = FilesystemLimits.CategoryFilter([], [
+            "/\\.git/"
+        ]);
+        limits_.filesystemFilterRuntime = buildFilesystemFilterRuntime(limits_);
+        mkdirRecurse(workAreaDir.toString);
+    }
+
+    void teardown() {
+        import std.file : rmdirRecurse;
+
+        try {
+            rmdirRecurse(workAreaDir.toString);
+        } catch (Exception) {
+            // Silently ignore cleanup failures during test teardown
+        }
+    }
+
+    override bool isPathInsideWorkArea(AbsolutePath path) {
+        auto p = path.toString;
+        auto w = workAreaDir.toString;
+        return p.startsWith(w) && (p.length == w.length || p[w.length] == '/');
+    }
+
+    override AbsolutePath workArea() {
+        return workAreaDir;
+    }
+
+    override ToolLimits getToolLimits() {
+        return limits_;
+    }
+
+    mixin FileDirtyTracking;
+}
+
+@(
+        "MCP stdio smoke: tools/call write_file into an excluded path returns isError with the filter-denial text")
+unittest {
+    import std.algorithm : canFind;
+    import std.datetime : Clock;
+    import std.json : parseJSON;
+    import std.file : exists;
+
+    import llm.tool_call.io.functions : writeFile;
+
+    auto ctx = new FilteredFileContextStub("./llmfun_test/mcp_fs_filter_" ~ Clock.currTime.toString);
+    scope (exit)
+        ctx.teardown;
+
+    auto server = new MCPServer(ReFilter.init, ctx);
+    server.handleMessage(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`);
+
+    auto resp = server.handleMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"write_file","arguments":{"path":".git/config","content":"x"}}}`);
+    auto parsed = parseJSON(resp);
+    assert(parsed["result"]["isError"].type == JSONType.true_, resp);
+
+    auto text = parsed["result"]["content"].array[0]["text"].str;
+    assert(text.canFind("rejected by the configured filesystem filter (write)"), text);
+
+    // The refusal is behavioral, not just textual: nothing was created.
+    assert(!(ctx.workArea ~ ".git").AbsolutePath.exists, "nothing was created");
 }

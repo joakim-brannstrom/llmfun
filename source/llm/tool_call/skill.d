@@ -9,6 +9,7 @@ import std.string : strip;
 import my.path : AbsolutePath;
 
 import llm.skill;
+import llm.config : ToolLimits, PathCategory;
 import llm.tool_call.utility;
 import llm.tool_call;
 
@@ -18,6 +19,7 @@ interface SkillContext : Context {
     SkillManager getSkillManager();
     AbsolutePath workArea();
     bool isPathInsideWorkArea(AbsolutePath path);
+    ToolLimits getToolLimits();
 }
 
 struct LoadSkillParams {
@@ -33,15 +35,19 @@ struct LoadSkillParams {
     bool overwrite;
 }
 
-/// First line and body of the successful loadSkill response. The first
-/// line carries the source skill's frontmatter version so a stale-copy
-/// load is detectable in one line; a skill whose frontmatter has
-/// no version field renders as "(version unknown)" so the format is stable.
 private pure string loadSkillSuccessMessage(string skillName, string version_,
         string destDir, string body) {
     const versionToken = version_.empty ? "unknown" : version_;
     return i"Skill loaded: $(skillName) (version $(versionToken))\nCopied to: $(destDir)\n\n$(body)"
         .text;
+}
+
+private enum fallbackDegradationNote = "references/, scripts/ and assets/ are not available in fallback mode:\n"
+    ~ "the skill was loaded from its source directory without copying.";
+
+private pure string loadSkillFallbackMessage(string skillName, string destDir, string body) {
+    return i"Skill loaded: $(skillName)\nFailed to copy skill to: $(destDir)\n\n$(
+            fallbackDegradationNote)\n\n$(body)".text;
 }
 
 @("loadSkill success message first line carries the skill version")
@@ -76,8 +82,8 @@ ExecuteFuncResult loadSkill(Context baseCtx, LoadSkillParams params) {
                 return ExecuteFuncResult("error: skill manager not available", success: false);
             }
             auto body = mgr.loadSkillBody(params.skillName);
-            return ExecuteFuncResult(i"Skill loaded: $(params.skillName)\nFailed to copy skill to: $(
-                    params.destDir)\n\n$(body)".text, success: true);
+            return ExecuteFuncResult(loadSkillFallbackMessage(params.skillName,
+                    params.destDir, body), success: true);
         } catch (Exception e) {
             return ExecuteFuncResult(i"error: loading skill '$(params.skillName): $(e.msg)".text,
                     success: false);
@@ -92,8 +98,11 @@ ExecuteFuncResult loadSkill(Context baseCtx, LoadSkillParams params) {
         return fallbackLoad();
     }
 
-    auto destDir_ = pathToWorkarea(ctx, params.destDir);
+    auto destDir_ = pathToWorkarea(ctx, params.destDir, PathCategory.write);
     if (!destDir_.valid) {
+        if (destDir_.deniedByFilter) {
+            return fallbackLoad();
+        }
         return ExecuteFuncResult(destDir_.errorMsg, success: false);
     }
 
@@ -121,4 +130,145 @@ ExecuteFuncResult loadSkill(Context baseCtx, LoadSkillParams params) {
     }
     return ExecuteFuncResult(loadSkillSuccessMessage(params.skillName,
             version_, params.destDir, body), success: true);
+}
+
+version (unittest) {
+    import std.algorithm : canFind, startsWith;
+    import std.file : dirEntries, mkdirRecurse, symlink, write, SpanMode;
+    import std.path : buildPath;
+
+    import llm.config : FilesystemLimits, buildFilesystemFilterRuntime;
+    import llm.skill : SkillManager;
+    import llm.test_util : testArea;
+
+    class TestSkillContext : SkillContext {
+        AbsolutePath workAreaDir;
+        ToolLimits limits_;
+        SkillManager mgr_;
+
+        this(string dir) {
+            workAreaDir = dir.AbsolutePath;
+            limits_ = ToolLimits();
+            mkdirRecurse(workAreaDir.toString);
+        }
+
+        void setFilesystemFilter(ToolLimits limits) {
+            limits_ = limits;
+        }
+
+        override bool isPathInsideWorkArea(AbsolutePath path) {
+            auto p = path.toString;
+            auto w = workAreaDir.toString;
+            return p.startsWith(w) && (p.length == w.length || p[w.length] == '/');
+        }
+
+        override AbsolutePath workArea() {
+            return workAreaDir;
+        }
+
+        override ToolLimits getToolLimits() {
+            return limits_;
+        }
+
+        override SkillManager getSkillManager() {
+            return mgr_;
+        }
+    }
+
+    SkillManager makeSkillManager(string sourceRoot) {
+        const skillDir = buildPath(sourceRoot, "test-skill");
+        mkdirRecurse(skillDir);
+        write(buildPath(skillDir, "SKILL.md"), "---\nname: test-skill\ndescription: a test skill for loadSkill fallback tests\nversion: 1.0.0\n---\n\nbody of the test skill\n");
+        auto mgr = new SkillManager();
+        mgr.discover([sourceRoot.AbsolutePath]);
+        return mgr;
+    }
+}
+
+@("loadSkill fallback message carries the degradation note between the failure line and the body")
+unittest {
+    const msg = loadSkillFallbackMessage("test-skill", "skills/dest", "body");
+    const expected = "Skill loaded: test-skill\n" ~ "Failed to copy skill to: skills/dest\n" ~ "\n"
+        ~ "references/, scripts/ and assets/ are not available in fallback mode:\n"
+        ~ "the skill was loaded from its source directory without copying.\n" ~ "\n" ~ "body";
+    assert(msg == expected, msg);
+}
+
+@("loadSkill with a filter-denied destDir falls back to a body-only load and copies nothing")
+unittest {
+    auto area = testArea("skill_filter_denied");
+    scope (exit)
+        area.cleanup();
+
+    auto ctx = new TestSkillContext(buildPath(area.toString, "workarea"));
+    ctx.mgr_ = makeSkillManager(buildPath(area.toString, "skill_src"));
+
+    ToolLimits tl;
+    tl.filesystem.write = FilesystemLimits.CategoryFilter([], [".*"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto r = loadSkill(ctx, LoadSkillParams("test-skill", "skills/dest", false));
+    assert(r.success, r.msg);
+    assert(r.msg == "Skill loaded: test-skill\n" ~ "Failed to copy skill to: skills/dest\n" ~ "\n"
+            ~ "references/, scripts/ and assets/ are not available in fallback mode:\n"
+            ~ "the skill was loaded from its source directory without copying.\n" ~ "\n" ~ "body of the test skill",
+            r.msg);
+    assert(dirEntries(ctx.workAreaDir.toString, SpanMode.shallow).empty,
+            "a filter-denied loadSkill must not create anything in the workarea");
+}
+
+@("loadSkill with a symlinked destDir keeps the hard symlink error, no fallback")
+unittest {
+    auto area = testArea("skill_symlink_dest");
+    scope (exit)
+        area.cleanup();
+
+    auto ctx = new TestSkillContext(buildPath(area.toString, "workarea"));
+    ctx.mgr_ = makeSkillManager(buildPath(area.toString, "skill_src"));
+
+    const target = buildPath(area.toString, "target");
+    mkdirRecurse(target);
+    symlink(target, buildPath(ctx.workAreaDir.toString, "dest"));
+
+    auto r = loadSkill(ctx, LoadSkillParams("test-skill", "dest", false));
+    assert(!r.success, r.msg);
+    assert(r.msg.canFind("is a symlink"), r.msg);
+    assert(!r.msg.canFind("not available in fallback mode"), r.msg);
+}
+
+@("loadSkill with an absolute destDir keeps the absolute-path error, no fallback")
+unittest {
+    auto area = testArea("skill_absolute_dest");
+    scope (exit)
+        area.cleanup();
+
+    auto ctx = new TestSkillContext(buildPath(area.toString, "workarea"));
+    ctx.mgr_ = makeSkillManager(buildPath(area.toString, "skill_src"));
+
+    auto r = loadSkill(ctx, LoadSkillParams("test-skill", "/tmp/llmfun_skill_abs_test", false));
+    assert(!r.success, r.msg);
+    assert(r.msg.canFind("is an absolute path"), r.msg);
+    assert(!r.msg.canFind("not available in fallback mode"), r.msg);
+}
+
+@(
+        "loadSkill with a containment failure keeps the containment error even with a filter configured, no fallback")
+unittest {
+    auto area = testArea("skill_containment_dest");
+    scope (exit)
+        area.cleanup();
+
+    auto ctx = new TestSkillContext(buildPath(area.toString, "workarea"));
+    ctx.mgr_ = makeSkillManager(buildPath(area.toString, "skill_src"));
+
+    ToolLimits tl;
+    tl.filesystem.write = FilesystemLimits.CategoryFilter([], [".*"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto r = loadSkill(ctx, LoadSkillParams("test-skill", "../outside", false));
+    assert(!r.success, r.msg);
+    assert(r.msg == "error: path '../outside' must be inside the allowed workarea", r.msg);
+    assert(!r.msg.canFind("not available in fallback mode"), r.msg);
 }

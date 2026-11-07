@@ -17,6 +17,7 @@ import llm.tool_call.io.diagnostic : buildMarkerDiagnostic, buildBlockDiagnostic
 import llm.tool_call.io.edit_dispatch : editFileUnifiedMemory;
 import llm.tool_call.io.diff : unifiedDiffLines;
 import llm.utility : computeContentHash;
+import llm.config : PathCategory;
 
 mixin RegisterLlmFunctions!();
 
@@ -132,7 +133,7 @@ package string staleBylineTargetError(string path) @safe {
     const targeting = targetingMethodOf(params);
     const dryRun = params.dryRun ? "true" : "false";
 
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.write, checkExist: true);
     if (!path_.valid) {
         logger.warningf("tool=editFile event=failure mode=%s targeting=%s path=%s errorType=invalid_path dryRun=%s",
                 params.mode, targeting, logPath, dryRun);

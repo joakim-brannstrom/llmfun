@@ -13,12 +13,12 @@ import std.process : execute;
 import std.range : enumerate;
 import std.regex : Regex, regex;
 import std.stdio : File;
-import std.string : splitLines, indexOf, strip, split, replace, toLower, chomp;
+import std.string : indexOf, strip, split, replace, toLower, chomp;
 import std.sumtype : match;
 
 import my.path : AbsolutePath;
 
-import llm.config : ToolLimits;
+import llm.config : FilesystemFilterRuntime, ToolLimits, PathCategory;
 import llm.tool_call.io : classifyEditError, FileContext, sanitizeLogPath,
     fileEndsWithNewline, writeLines;
 import llm.tool_call.utility;
@@ -45,7 +45,7 @@ struct RemoveFileParams {
 @Function("Remove file") ExecuteFuncResult removeFile(Context baseCtx, RemoveFileParams params) {
     mixin(baseContextToSpecific!FileContext);
 
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.write, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
@@ -55,6 +55,14 @@ struct RemoveFileParams {
             if (!params.recursive)
                 return ExecuteFuncResult("error: path is a directory; remove_file deletes files only — pass recursive=true to delete the directory tree",
                         success: false);
+            auto flt = ctx.getToolLimits().filesystemFilterRuntime;
+            if (flt.enabled) {
+                foreach (e; dirEntries(path_.toString, SpanMode.depth).filter!(
+                        e => !flt.allows(PathCategory.write, AbsolutePath(e.name)))) {
+                    return ExecuteFuncResult(i"error: recursive remove refused: '$(e.name)' is rejected by the configured filesystem filter (write); nothing was deleted"
+                            .text, success: false);
+                }
+            }
             rmdirRecurse(path_);
         } else {
             remove(path_); // existing behavior, recursive or not
@@ -75,7 +83,7 @@ struct WriteFileParams {
         Context baseCtx, WriteFileParams params) {
     mixin(baseContextToSpecific!FileContext);
 
-    auto path_ = pathToWorkarea(ctx, params.path);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.write);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
@@ -117,7 +125,7 @@ struct ReadFileParams {
 
     auto json = JSONValue.emptyObject;
 
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.read, checkExist: true);
     if (!path_.valid) {
         json["error"] = path_.errorMsg;
         return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: false);
@@ -173,14 +181,17 @@ struct ListDirectoryParams {
 
     auto maxDirEntries = ctx.getToolLimits().maxDirEntries;
 
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.read, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
 
     try {
         JSONValue[] rval;
+        auto flt = ctx.getToolLimits().filesystemFilterRuntime;
         foreach (a; dirEntries(path_.toString, params.recursive ? SpanMode.depth : SpanMode.shallow)) {
+            if (!flt.allows(PathCategory.read, AbsolutePath(a.name)))
+                continue;
             if (params.recursive && rval.length > maxDirEntries) {
                 return ExecuteFuncResult(i"error: failed listing directory recursive: more than $(
                         maxDirEntries) entries in the result".text, success: false);
@@ -227,7 +238,7 @@ struct GrepFilesParams {
         return ExecuteFuncResult("error: maxResults must be >= 1", success: false);
     }
 
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.read, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
@@ -238,7 +249,9 @@ struct GrepFilesParams {
     ];
     auto result = execute(cmd);
     if (result.status == 0) {
-        string rval = result.output.strip.replace(path_.toString, params.path);
+        string rval = filterGrepResultLines(result.output, path_,
+                ctx.getToolLimits().filesystemFilterRuntime).strip.replace(path_.toString,
+                params.path);
         const results = rval.splitter('\n').count;
         if (results > grepMaxResults) {
             return ExecuteFuncResult(i"error: $(results) results exceeds max allowed $(
@@ -254,6 +267,51 @@ struct GrepFilesParams {
             " "))': $(result.output.strip)".text, success: false);
 }
 
+// Assumption: the workarea path and the file names under it contain no ':'. A
+// ':' inside a path would truncate the recovered prefix and could mis-route
+// the filter decision. Lines that do not parse as `<rootPrefix-prefixed
+// path>:<...>` are kept unchanged - defensive: nothing under the root is ever
+// silently discarded without a filter verdict.
+package(llm.tool_call.io) string filterGrepResultLines(string output,
+        AbsolutePath rootPrefix, FilesystemFilterRuntime flt) @safe {
+    const prefix = rootPrefix.toString;
+    string kept;
+    foreach (line; output.splitter('\n').filter!(a => !a.empty)) {
+        if (line.startsWith(prefix)) {
+            const colonIdx = line.indexOf(':', prefix.length);
+            if (colonIdx != -1 && !flt.allows(PathCategory.read, AbsolutePath(line[0 .. colonIdx])))
+                continue;
+        }
+        if (!kept.empty)
+            kept ~= '\n';
+        kept ~= line;
+    }
+    return kept;
+}
+
+@("filterGrepResultLines drops excluded-file lines, keeps allowed and unparseable lines")
+unittest {
+    import llm.config : FilesystemLimits, buildFilesystemFilterRuntime;
+
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], ["/skip/"]);
+    auto flt = buildFilesystemFilterRuntime(tl);
+    assert(flt.enabled);
+
+    const root = AbsolutePath("/wa/root");
+    const output = "/wa/root/a.txt:1:needle here\n"
+        ~ "/wa/root/skip/secret.txt:3:needle hidden\n" ~ "Binary file /wa/root/blob matches\n";
+    const kept = filterGrepResultLines(output, root, flt);
+    assert(kept == "/wa/root/a.txt:1:needle here\nBinary file /wa/root/blob matches", kept);
+}
+
+@("filterGrepResultLines with a disabled filter is an exact passthrough")
+unittest {
+    FilesystemFilterRuntime flt; // enabled == false
+    const output = "/wa/root/a.txt:1:needle\njunk without prefix\n";
+    assert(filterGrepResultLines(output, AbsolutePath("/wa/root"), flt) == output.strip, output);
+}
+
 struct CountLinesInFileParams {
     @ParamDescription("Path to the file")
     string path;
@@ -263,7 +321,7 @@ struct CountLinesInFileParams {
         Context baseCtx, CountLinesInFileParams params) {
     mixin(baseContextToSpecific!FileContext);
 
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.read, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
@@ -289,7 +347,7 @@ struct Md5HashFileParams {
 
     mixin(baseContextToSpecific!FileContext);
 
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.read, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }

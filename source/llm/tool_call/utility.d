@@ -11,6 +11,8 @@ import std.utf : byCodeUnit;
 
 import my.path : Path, AbsolutePath;
 
+import llm.config : PathCategory;
+
 Path tempPath() @safe {
     import std.conv : to;
 
@@ -28,9 +30,12 @@ struct PathCheckResult {
     alias path this;
     bool valid;
     string errorMsg;
+    bool deniedByFilter; // true only when ALL containment checks passed
+    // but the configured filter rejected the path
 }
 
-PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path, bool checkExist = false) {
+PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path,
+        PathCategory category, bool checkExist = false) {
     import std.file : exists, isSymlink;
     import std.path : dirName, isAbsolute;
     import std.string : startsWith;
@@ -70,6 +75,14 @@ PathCheckResult pathToWorkarea(ContextT)(ref ContextT ctx, string path, bool che
                     .text);
         }
         checkPath = checkPath.dirName;
+    }
+    auto flt = ctx.getToolLimits().filesystemFilterRuntime;
+    if (!flt.allows(category, path_)) {
+        logger.trace(path_);
+        auto r = PathCheckResult(path_, false, i"error: path '$(path_)' is rejected by the configured filesystem filter ($(
+                category))".text);
+        r.deniedByFilter = true;
+        return r;
     }
     return PathCheckResult(path_, true, null);
 }
