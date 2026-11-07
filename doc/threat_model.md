@@ -113,6 +113,38 @@ defaultOptions:
 
 **Mitigation**: Subprocess timeout (`timeoutSeconds`) limits execution time.
 
+### 7. Workarea File-Tool Filter Gap (Filesystem Limits)
+
+**Description**: The optional `toolLimits.filesystem` filter restricts which
+workarea paths the file tools may read or write. Assessing this control means
+being explicit about what it does not cover.
+
+**Covers**: the path arguments of the workarea file tools (`pathToWorkarea`,
+read and write categories) plus per-entry narrowing in `listDirectory`,
+`grepFiles`, and recursive `removeFile`. Enforcement lives inside the tool
+layer, so every entry point (direct calls, MCP stdio, AgentPool) is covered.
+
+**Accepted boundaries**:
+
+- **`execute_command` is NOT covered.** Bash in the container can touch any
+  mounted path regardless of this filter. The filter is an accident guard,
+  NOT sandboxing: workarea containment still comes from the container mounts
+  (vectors 1-3 above), not from the filter.
+- **`grepFiles` still scans excluded files.** The external grep process reads
+  them; only result lines from excluded paths are dropped.
+- **Existence probing of filtered paths is possible.** The filter runs after
+  the existence check, so for existence-checking tools a rejected path yields
+  a filter denial only when it exists, while a nonexistent one yields a
+  "does not exist" error. Comparing the two outcomes can reveal whether a
+  filtered-out path exists. Accepted by design.
+- **`loadSkill` degrades by design** when the destination is filter-denied:
+  the skill body is read from the skill source directory, which is outside the
+  filter's reach by definition (the tool reads it itself).
+
+**Mitigation**:
+- The filter can only narrow: it runs last, after absolute-path rejection,
+  workarea containment, and both symlink checks, so it never widens access.
+
 ## Mitigations Summary
 
 | Mitigation | Description | Protects Against |
@@ -122,6 +154,7 @@ defaultOptions:
 | Execution environments | Curated list of allowed container images | Unauthorized image execution |
 | `timeoutSeconds` | Subprocess execution timeout | Denial of service |
 | `maxOutputBytes` | Output stream byte limit | Resource exhaustion |
+| `toolLimits.filesystem` | Regex filter on workarea file-tool paths (see `doc/tool_broker.md`) | Accidental reads/writes outside the intended workarea scope |
 | Magic word scoping | Only two magic words, values only | Option injection |
 
 ## User Responsibilities
@@ -159,3 +192,4 @@ Options map keys are **tag names** (logical groups like `"security"`, `"network"
 - Configuration format: `config/example.yaml`
 - Execution environments format: `execution_environments.yaml`
 - Implementation: `source/llm/config.d`, `source/llm/environment/`
+- Filesystem limits for file tools: `doc/tool_broker.md` (section 6)

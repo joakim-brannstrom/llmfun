@@ -33,6 +33,20 @@ toolLimits:
   maxTopicLength: 100
   maxTopK: 20
   maxArgLength: 200
+  # Filesystem limits for the file tools: an optional per-category regex
+  # filter on workarea paths (an accident guard, not a sandbox - bash is not
+  # covered). Opt-in: leave the block commented out and nothing changes.
+  # Semantics, footguns and boundaries: doc/tool_broker.md section 6.
+  # Patterns match the ABSOLUTE post-transform workarea path, are compiled
+  # case-insensitively and match as unanchored searches - anchor with ^ and
+  # escape dots. Single-quoted YAML keeps regex backslashes literal.
+  # filesystem:
+  #   read:
+  #     include: ['^/workarea/llmfun/.*\.md']
+  #     exclude: ['/\.git/']
+  #   write:
+  #     include: []
+  #     exclude: []
 
 # tui:
 #   # Maximum TUI width in terminal columns. 0 = unlimited (default).

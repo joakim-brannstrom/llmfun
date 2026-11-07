@@ -19,7 +19,7 @@ import my.path : AbsolutePath;
 
 import llm.tool_call;
 import llm.tool_call.utility;
-import llm.config : ToolLimits;
+import llm.config : ToolLimits, PathCategory;
 import llm.types : IAgent;
 import llm.tool_call.io : classifyEditError, FileContext, sanitizeLogPath,
     fileEndsWithNewline, writeLines;
@@ -65,7 +65,7 @@ struct ApplyDiffParams {
     const logPath = sanitizeLogPath(params.path);
     const dryRun = params.dryRun ? "true" : "false";
 
-    auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+    auto path_ = pathToWorkarea(ctx, params.path, PathCategory.write, checkExist: true);
     if (!path_.valid) {
         logger.warningf("tool=applyDiff event=failure path=%s errorType=invalid_path dryRun=%s",
                 logPath, dryRun);

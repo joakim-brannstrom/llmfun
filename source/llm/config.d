@@ -9,11 +9,12 @@ import std.file : readText, exists, mkdirRecurse, rename, rmdirRecurse, thisExeP
 import std.format : format;
 import std.functional : toDelegate;
 import std.json : JSONValue, JSONType, parseJSON, JSONOptions;
-import std.path : dirName;
+import std.path : dirName, isAbsolute;
 import std.string : toLower, startsWith, indexOf;
 import std.sumtype : SumType, match;
 import std.typecons : Nullable;
 
+import my.filter : ReFilter;
 import my.path;
 
 import llm.query : RequestConfig;
@@ -50,6 +51,22 @@ struct RagDatabaseConfig {
     string description;
 }
 
+enum PathCategory {
+    read,
+    write
+}
+
+struct FilesystemLimits {
+    /// Patterns are compiled case-insensitively (ReFilter uses the "i" flag)
+    struct CategoryFilter {
+        string[] include; // empty = match everything (ReFilter semantics)
+        string[] exclude; // exclude wins over include
+    }
+
+    CategoryFilter read;
+    CategoryFilter write;
+}
+
 struct ToolLimits {
     long readFileMaxLines = 20;
     long editFileMaxLines = 80;
@@ -60,6 +77,13 @@ struct ToolLimits {
     long maxTopK = 20;
     long maxArgLength = 200;
     long queryFtl5Mode = 0; // 0: full mode, 1: limited ftl5
+
+    // Raw YAML data ONLY - the generic applyConfig walk touches a member
+    // only when its exact name is a YAML key.
+    FilesystemLimits filesystem;
+
+    // Compiled runtime holder - NOT parsed from YAML
+    FilesystemFilterRuntime filesystemFilterRuntime;
 }
 
 struct RagConfig {
@@ -727,8 +751,6 @@ void makeLocalSetupFileStructure(LlmConfig conf) {
 }
 
 struct ToolFilter {
-    import my.filter : ReFilter;
-
     string[] include;
     string[] exclude;
 
@@ -738,14 +760,42 @@ struct ToolFilter {
 }
 
 struct RagFilter {
-    import my.filter : ReFilter;
-
     string[] include = [".*\\.txt", ".*\\.md"];
     string[] exclude;
 
     ReFilter to() @safe {
         return ReFilter(include, exclude);
     }
+}
+
+struct FilesystemFilterRuntime {
+    ReFilter readFilter;
+    ReFilter writeFilter;
+    bool enabled;
+
+    bool allows(PathCategory cat, AbsolutePath path) @safe {
+        if (!enabled)
+            return true;
+        final switch (cat) {
+        case PathCategory.read:
+            return readFilter.match(path);
+        case PathCategory.write:
+            return writeFilter.match(path);
+        }
+    }
+}
+
+/// The single per-startup compile point for the runtime holder. Called
+/// from readConfigInternal after validateConfig, from the fully merged
+/// config. Never called per tool call or per overlay pass.
+FilesystemFilterRuntime buildFilesystemFilterRuntime(ToolLimits limits) @safe {
+    auto rt = FilesystemFilterRuntime(ReFilter(limits.filesystem.read.include,
+            limits.filesystem.read.exclude), ReFilter(limits.filesystem.write.include,
+            limits.filesystem.write.exclude), true);
+    rt.enabled = !(limits.filesystem.read.include.empty
+            && limits.filesystem.read.exclude.empty
+            && limits.filesystem.write.include.empty && limits.filesystem.write.exclude.empty);
+    return rt;
 }
 
 /// A named group of tools. The group name is the activation key, the
@@ -1213,6 +1263,7 @@ private LlmConfig readConfigInternal(Path path, bool silent = false, bool noCwdC
     if (loadedAnyFile) {
         validateConfig(conf);
     }
+    conf.toolLimits.filesystemFilterRuntime = buildFilesystemFilterRuntime(conf.toolLimits);
 
     conf.resolvePaths(!noCwdConfig);
     conf.loadState();
@@ -1683,6 +1734,13 @@ void validateConfig(LlmConfig conf) {
     if (conf.toolLimits.maxArgLength < 1)
         throw new Exception("toolLimits.maxArgLength must be >= 1");
 
+    // An invalid regex aborts startup: the compile check throws here,
+    // outside applyConfig's per-member warning path.
+    foreach (w; validateFilesystemCategory("read", conf.toolLimits.filesystem.read))
+        logger.warningf("%s", w);
+    foreach (w; validateFilesystemCategory("write", conf.toolLimits.filesystem.write))
+        logger.warningf("%s", w);
+
     if (conf.tui.maxWidth != 0 && (conf.tui.maxWidth < 40 || conf.tui.maxWidth > 10_000))
         throw new Exception(i"tui.maxWidth must be 0 or in [40, 10000], got $(conf.tui.maxWidth)"
                 .text);
@@ -1709,6 +1767,40 @@ void validateConfig(LlmConfig conf) {
                 logger.warningf("%s", w);
     foreach (w; checkApiKeyWarnings(conf))
         logger.warningf("%s", w);
+}
+
+private string[] validateFilesystemCategory(string category, FilesystemLimits.CategoryFilter cat) {
+    string[] warnings;
+
+    foreach (p; cat.include) {
+        if (p.empty)
+            warnings ~= format!"toolLimits.filesystem.%s.include: empty pattern matches everything (include = allow-all)"(
+                    category);
+    }
+    foreach (p; cat.exclude) {
+        if (p.empty)
+            warnings ~= format!"toolLimits.filesystem.%s.exclude: empty pattern matches everything (exclude = deny-all)"(
+                    category);
+    }
+
+    // Compile each pattern individually so the abort names the category,
+    // sub-key, and offending pattern
+    void compileCheck(string where, string pattern) {
+        try {
+            ReFilter([pattern], []);
+        } catch (Exception e) {
+            throw new Exception(format!"toolLimits.filesystem.%s: invalid regex '%s': %s"(where,
+                    pattern, e.msg));
+        }
+    }
+
+    foreach (p; cat.include)
+        compileCheck(category ~ ".include", p);
+    foreach (p; cat.exclude)
+        compileCheck(category ~ ".exclude", p);
+
+    ReFilter(cat.include, cat.exclude); // full construction, discarded
+    return warnings;
 }
 
 /// The discovery meta-tools (listToolTags, then toolSearch). They
@@ -2360,6 +2452,339 @@ tui:
     }
     assert(threw, "validateConfig must throw for idleParkMs > 1000");
     assert(canFind(msg, "tui.idleParkMs"), "unexpected error message: " ~ msg);
+}
+
+@("toolLimits.filesystem absent, empty block, and empty category block are all allow-all") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("config_fs_limits_allowall");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string baseYaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+
+    // Block entirely absent: filter disabled.
+    File(tmpFile, "w").write(baseYaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    auto rt = buildFilesystemFilterRuntime(conf.toolLimits);
+    assert(!rt.enabled, "an absent toolLimits.filesystem block must disable the filter");
+
+    // Explicitly empty block: still disabled.
+    File(tmpFile, "w").write(baseYaml ~ "toolLimits:\n  filesystem: {}\n");
+    conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    rt = buildFilesystemFilterRuntime(conf.toolLimits);
+    assert(!rt.enabled, "an empty toolLimits.filesystem block must disable the filter");
+
+    // Empty category block: allow-all for that category even when the
+    // other category is configured (the empty category must not inherit
+    // deny-all semantics).
+    File(tmpFile, "w").write(baseYaml ~ `toolLimits:
+  filesystem:
+    read: {}
+    write:
+      exclude: [/\.git/]
+`);
+    conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    rt = buildFilesystemFilterRuntime(conf.toolLimits);
+    assert(rt.enabled, "a configured category must enable the filter");
+    assert(rt.allows(PathCategory.read, AbsolutePath("/anything/at/all")),
+            "an empty read category must be allow-all");
+    assert(rt.allows(PathCategory.write, AbsolutePath("/wa/file.md")),
+            "write with excludes only must allow unexcluded paths");
+    assert(!rt.allows(PathCategory.write, AbsolutePath("/wa/.git/x")),
+            "write excludes must still apply");
+}
+
+@("filesystem include region minus excludes; exclude wins over include") unittest {
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter(["^/wa/plan/"], [
+        "/\\.git/"
+    ]);
+    auto rt = buildFilesystemFilterRuntime(tl);
+    assert(rt.enabled);
+    assert(rt.allows(PathCategory.read, AbsolutePath("/wa/plan/a.md")));
+    assert(!rt.allows(PathCategory.read, AbsolutePath("/wa/plan/.git/x")),
+            "exclude must win over include");
+    assert(!rt.allows(PathCategory.read, AbsolutePath("/wa/other")),
+            "paths outside the include region must be rejected");
+    assert(rt.allows(PathCategory.write, AbsolutePath("/wa/other")),
+            "an unconfigured write category must stay allow-all");
+}
+
+@("include: [] with excludes still applies the excludes") unittest {
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], ["/\\.git/"]);
+    auto rt = buildFilesystemFilterRuntime(tl);
+    assert(rt.enabled);
+    assert(rt.allows(PathCategory.read, AbsolutePath("/home/user/file.md")));
+    assert(!rt.allows(PathCategory.read, AbsolutePath("/home/.git/config")),
+            "an empty include list must not disable excludes");
+}
+
+@("an invalid regex aborts startup from validateConfig, not an applyConfig warning") unittest {
+    import std.algorithm : canFind;
+
+    auto conf = nudgesValidateTestConfig();
+    conf.toolLimits.filesystem.read.include = ["*"];
+    bool threw;
+    string msg;
+    try {
+        validateConfig(conf);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must abort startup on an invalid filesystem regex");
+    assert(canFind(msg, "toolLimits.filesystem.read"),
+            "the abort must name the category path: " ~ msg);
+    assert(canFind(msg, "invalid regex"), "the abort must name the failure: " ~ msg);
+    assert(canFind(msg, "*"), "the abort must name the pattern: " ~ msg);
+    assert(!canFind(msg, "unable to read"),
+            "an invalid regex must not surface as an applyConfig-style warning: " ~ msg);
+}
+
+@("an empty-string pattern warns at startup but does not throw") unittest {
+    import std.algorithm : canFind;
+
+    auto conf = nudgesValidateTestConfig();
+    conf.toolLimits.filesystem.write.include = [""];
+    string[] warnings;
+    bool threw;
+    try {
+        warnings = validateFilesystemCategory("write", conf.toolLimits.filesystem.write);
+    } catch (Exception e) {
+        threw = true;
+    }
+    assert(!threw, "an empty pattern must warn, not abort startup");
+    assert(warnings.canFind!(w => w.canFind("empty pattern matches everything")),
+            warnings.to!string);
+
+    // The same config must also pass validateConfig end to end (the
+    // rendering happens in validateConfig; the collector-free no-throw is
+    // the load-bearing assertion here).
+    try {
+        validateConfig(conf);
+    } catch (Exception e) {
+        threw = true;
+    }
+    assert(!threw, "validateConfig must not throw for an empty-string pattern");
+}
+
+@("unknown keys under toolLimits.filesystem produce the unknown-key warning") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("config_fs_limits_unknownkey");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `toolLimits:
+  filesystem:
+    bogus: 1
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(tmpFile, "w").write(yaml);
+
+    // Explicit collector instead of a sharedLog swap (AGENTS.md Testing rule).
+    string[] warnings;
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)),
+            (logger.LogLevel lvl, string msg) { warnings ~= msg; });
+    assert(warnings.canFind!(w => w.canFind("Unknown configuration key FilesystemLimits.bogus")),
+            warnings.to!string);
+    // The struct defaults survive the unknown key.
+    assert(conf.toolLimits.filesystem.read.include.empty);
+    assert(conf.toolLimits.filesystem.read.exclude.empty);
+    assert(conf.toolLimits.filesystem.write.include.empty);
+    assert(conf.toolLimits.filesystem.write.exclude.empty);
+}
+
+@("string[] members are replaced, not merged, across config layers") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("config_fs_limits_layers");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+
+    string baseYaml = `toolLimits:
+  filesystem:
+    read:
+      include: [a]
+`;
+    File(tmpFile, "w").write(baseYaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.toolLimits.filesystem.read.include == ["a"]);
+
+    // An overlay with an explicit empty list resets the base list.
+    File(tmpFile, "w").write(`toolLimits:
+  filesystem:
+    read:
+      include: []
+`);
+    conf = applyLlmConfig(conf, loadYamlValue(Path(tmpFile)));
+    assert(conf.toolLimits.filesystem.read.include.empty,
+            "an explicit empty overlay list must reset the base list");
+
+    // An overlay with no filesystem key keeps the base value.
+    File(tmpFile, "w").write(baseYaml);
+    conf = applyLlmConfig(conf, loadYamlValue(Path(tmpFile)));
+    assert(conf.toolLimits.filesystem.read.include == ["a"],
+            "re-applying the base must restore the include list");
+    File(tmpFile, "w").write("codeModels:\n  - modelName: test\n");
+    conf = applyLlmConfig(conf, loadYamlValue(Path(tmpFile)));
+    assert(conf.toolLimits.filesystem.read.include == ["a"],
+            "an overlay without the key must keep the base value");
+}
+
+@("the runtime holder survives ToolLimits struct copies") unittest {
+    FilesystemLimits limits;
+    limits.read = FilesystemLimits.CategoryFilter(["^/wa/plan/"], []);
+    limits.write = FilesystemLimits.CategoryFilter([], ["/\\.git/"]);
+
+    ToolLimits tl;
+    tl.filesystem = limits;
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+
+    auto copy = tl; // struct assignment (getToolLimits()-style by-value handoff)
+    assert(copy.filesystemFilterRuntime.enabled);
+    assert(copy.filesystemFilterRuntime.allows(PathCategory.read, AbsolutePath("/wa/plan/a.md")));
+    assert(!copy.filesystemFilterRuntime.allows(PathCategory.read, AbsolutePath("/wa/other")));
+    assert(!copy.filesystemFilterRuntime.allows(PathCategory.write,
+            AbsolutePath("/repo/.git/config")));
+    assert(copy.filesystemFilterRuntime.allows(PathCategory.write,
+            AbsolutePath("/repo/src/main.d")));
+}
+
+@("readConfig attaches the compiled filesystem filter holder after validation") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    auto tmpDir = buildPath("llmfun_test", "config_fs_holder_attach_" ~ __LINE__.to!string);
+    mkdirRecurse(tmpDir);
+    scope (exit)
+        rmdirRecurse(tmpDir);
+
+    auto configFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `toolLimits:
+  filesystem:
+    read:
+      include: [^/wa/plan/]
+codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+`;
+    File(configFile, "w").write(yaml);
+
+    auto conf = readConfig(configFile.Path, silent: true, noCwdConfig: true,
+            trustedConfig: false, includeSystemConfig: false);
+    auto rt = conf.toolLimits.filesystemFilterRuntime;
+    assert(rt.enabled, "readConfig must attach the compiled holder");
+    assert(rt.allows(PathCategory.read, AbsolutePath("/wa/plan/a.md")));
+    assert(!rt.allows(PathCategory.read, AbsolutePath("/wa/other")),
+            "the attached holder must carry the configured include region");
+}
+
+@("default filesystem limits allow everything") unittest {
+    ToolLimits tl;
+    assert(!tl.filesystemFilterRuntime.enabled,
+            "an uninitialized holder must be disabled (allow-all)");
+    assert(tl.filesystemFilterRuntime.allows(PathCategory.read, AbsolutePath("/wa/any/file.md")));
+    assert(tl.filesystemFilterRuntime.allows(PathCategory.write, AbsolutePath("/wa/any/file.md")));
+    assert(tl.filesystemFilterRuntime.allows(PathCategory.read, AbsolutePath("/repo/.git/config")));
+    assert(tl.filesystemFilterRuntime.allows(PathCategory.write, AbsolutePath("/repo/.git/config")));
+}
+
+@("include matching and anchoring: unanchored patterns are substring matches") unittest {
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter(["plan/"], []);
+    auto rt = buildFilesystemFilterRuntime(tl);
+    assert(rt.allows(PathCategory.read, AbsolutePath("/x/myplan/y")),
+            "an unanchored pattern matches anywhere the substring occurs");
+    assert(rt.allows(PathCategory.read, AbsolutePath("/wa/plan/x")),
+            "an unanchored pattern matches its literal occurrence");
+
+    tl.filesystem.read = FilesystemLimits.CategoryFilter(["^/wa/plan/"], []);
+    rt = buildFilesystemFilterRuntime(tl);
+    assert(!rt.allows(PathCategory.read, AbsolutePath("/x/myplan/y")),
+            "the ^ anchor must reject the substring occurrence");
+    assert(rt.allows(PathCategory.read, AbsolutePath("/wa/plan/x")),
+            "the ^ anchor must keep the literal prefix match");
+}
+
+@("patterns are case-insensitive") unittest {
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter(["plan/"], []);
+    auto rt = buildFilesystemFilterRuntime(tl);
+    assert(rt.allows(PathCategory.read, AbsolutePath("/wa/Plan/x")),
+            "ReFilter compiles patterns with the \"i\" flag");
+    assert(rt.allows(PathCategory.read, AbsolutePath("/wa/PLAN/x")),
+            "case-insensitivity holds for all casing variants");
+}
+
+@("exclude beats include") unittest {
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter(["^/wa/"], ["/\\.git/"]);
+    auto rt = buildFilesystemFilterRuntime(tl);
+    assert(!rt.allows(PathCategory.read, AbsolutePath("/wa/.git/config")),
+            "an exclude match must deny a path the include region accepts");
+    assert(rt.allows(PathCategory.read, AbsolutePath("/wa/src/a.d")),
+            "paths inside the include region but outside the excludes stay allowed");
+}
+
+@("a bare * pattern is invalid and throws at construction") unittest {
+    bool threw;
+    try {
+        ReFilter(["*"], []);
+    } catch (Exception) {
+        threw = true;
+    }
+    assert(threw, "ReFilter must reject the bare * pattern (startup abort semantics)");
+
+    // The allow-all spellings: ".*" and an empty include list.
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([".*"], []);
+    auto rt = buildFilesystemFilterRuntime(tl);
+    assert(rt.allows(PathCategory.read, AbsolutePath("/any/path/at/all")));
+    assert(rt.allows(PathCategory.read, AbsolutePath("no-anchor-at-all")));
+
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], []);
+    rt = buildFilesystemFilterRuntime(tl);
+    assert(rt.allows(PathCategory.read, AbsolutePath("/any/path/at/all")));
+}
+
+@("an empty-string pattern matches everything") unittest {
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([""], []);
+    auto rt = buildFilesystemFilterRuntime(tl);
+    assert(rt.allows(PathCategory.read, AbsolutePath("/any/file")),
+            "an empty include pattern matches every path");
+    assert(rt.allows(PathCategory.read, AbsolutePath("/x/y")));
+
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], [""]);
+    rt = buildFilesystemFilterRuntime(tl);
+    assert(!rt.allows(PathCategory.read, AbsolutePath("/any/file")),
+            "an empty exclude pattern denies every path");
+    assert(!rt.allows(PathCategory.read, AbsolutePath("/x/y")));
 }
 
 @("the shipped example.yaml parses without the tui key; maxWidth stays 0") unittest {

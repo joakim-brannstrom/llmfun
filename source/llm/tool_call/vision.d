@@ -19,7 +19,7 @@ import my.path : AbsolutePath;
 import llm.types : IAgent, AgentProcessResult = ProcessResult;
 import llm.summary_agent : SummaryAgent;
 import llm.chat : Chat, VisionMessage;
-import llm.config : VisionModelConfig, toRequestConfig;
+import llm.config : VisionModelConfig, toRequestConfig, ToolLimits, PathCategory;
 import llm.query : LlmRequester, toJson, LlamaRequestError;
 import llm.tool_call;
 import llm.tool_call.utility : pathToWorkarea;
@@ -31,6 +31,7 @@ mixin RegisterLlmFunctions!();
 interface VisionContext : Context {
     bool isPathInsideWorkArea(AbsolutePath path);
     AbsolutePath workArea();
+    ToolLimits getToolLimits();
     bool addVisionImage(AbsolutePath path, string query) nothrow;
     bool hasVisionModel();
     IAgent getVisionAgent();
@@ -236,7 +237,7 @@ struct LoadImageApiParams {
     mixin(baseContextToSpecific!VisionContext);
 
     try {
-        auto path_ = pathToWorkarea(ctx, params.path, checkExist: true);
+        auto path_ = pathToWorkarea(ctx, params.path, PathCategory.read, checkExist: true);
         if (!path_.valid) {
             return ExecuteFuncResult(path_.errorMsg, success: false);
         }

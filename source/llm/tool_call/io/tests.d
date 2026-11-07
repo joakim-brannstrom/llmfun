@@ -12,7 +12,8 @@ version (unittest) {
 
     import my.path : AbsolutePath;
 
-    import llm.config : VisionModelConfig, ToolLimits;
+    import llm.config : VisionModelConfig, ToolLimits, PathCategory,
+        FilesystemLimits, buildFilesystemFilterRuntime;
     import llm.tool_call.io.diff;
     import llm.tool_call.io.search;
     import llm.tool_call.io.diagnostic;
@@ -25,10 +26,20 @@ version (unittest) {
     // Mock FileContext for integration tests
     class TestFileContext : FileContext {
         AbsolutePath workAreaDir;
+        ToolLimits limits_;
 
         this(string dir) {
             workAreaDir = dir.AbsolutePath;
+            limits_ = ToolLimits();
             mkdirRecurse(workAreaDir.toString);
+        }
+
+        /// Install a configured ToolLimits. Callers that set
+        /// `limits.filesystem.*` must follow with
+        /// `tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);`
+        /// so the compiled holder matches the raw patterns.
+        void setFilesystemFilter(ToolLimits limits) {
+            limits_ = limits;
         }
 
         void teardown() {
@@ -52,7 +63,7 @@ version (unittest) {
         }
 
         override ToolLimits getToolLimits() {
-            return ToolLimits();
+            return limits_;
         }
 
         mixin FileDirtyTracking;
@@ -4152,7 +4163,7 @@ unittest {
 
     import llm.tool_call.utility : pathToWorkarea;
 
-    auto p = pathToWorkarea(ctx, "a.md").path;
+    auto p = pathToWorkarea(ctx, "a.md", PathCategory.read).path;
     assert(!ctx.isDirty(p), "fresh context: nothing is dirty");
     assert(ctx.observedHash(p) == -1, "fresh context: no snapshot recorded");
 }
@@ -4167,8 +4178,8 @@ unittest {
 
     import llm.tool_call.utility : pathToWorkarea;
 
-    auto viaRelative = pathToWorkarea(ctx, "a.md").path;
-    auto viaExplicit = pathToWorkarea(ctx, "./a.md").path;
+    auto viaRelative = pathToWorkarea(ctx, "a.md", PathCategory.read).path;
+    auto viaExplicit = pathToWorkarea(ctx, "./a.md", PathCategory.read).path;
     assert(viaRelative == viaExplicit, "AbsolutePath normalizes './a.md'");
 
     ctx.observe(viaRelative);
@@ -4190,7 +4201,7 @@ unittest {
 
     import llm.tool_call.utility : pathToWorkarea;
 
-    auto p = pathToWorkarea(ctx, "test.txt").path;
+    auto p = pathToWorkarea(ctx, "test.txt", PathCategory.read).path;
     ctx.markDirty(p);
     assert(ctx.isDirty(p), "markDirty sets the flag");
     import llm.utility : computeContentHash;
@@ -4219,21 +4230,21 @@ unittest {
     foreach (i; 0 .. 250) {
         auto name = "clean" ~ i.to!string ~ ".txt";
         createTestFile(ctx, name, "y\n");
-        auto p = pathToWorkarea(ctx, name).path;
+        auto p = pathToWorkarea(ctx, name, PathCategory.read).path;
         ctx.observe(p);
         cleanPaths ~= p;
     }
     foreach (i; 0 .. 10) {
         auto name = "dirty" ~ i.to!string ~ ".txt";
         createTestFile(ctx, name, "x\n");
-        auto p = pathToWorkarea(ctx, name).path;
+        auto p = pathToWorkarea(ctx, name, PathCategory.read).path;
         ctx.markDirty(p);
         dirtyPaths ~= p;
     }
     foreach (i; 0 .. 10) {
         auto name = "late" ~ i.to!string ~ ".txt";
         createTestFile(ctx, name, "y\n");
-        auto p = pathToWorkarea(ctx, name).path;
+        auto p = pathToWorkarea(ctx, name, PathCategory.read).path;
         ctx.observe(p);
         cleanPaths ~= p;
     }
@@ -4422,13 +4433,13 @@ unittest {
     // A dangling symlinked component (link exists, target does not) must get
     // the clean PathCheckResult error, not an isSymlink FileException.
     symlink(ctx.workArea.toString ~ "_no_such_dir", (ctx.workArea ~ "dlink").toString);
-    auto rejected = pathToWorkarea(ctx, "dlink/real.txt");
+    auto rejected = pathToWorkarea(ctx, "dlink/real.txt", PathCategory.read);
     assert(!rejected.valid);
     assert(rejected.errorMsg.canFind("symlink"), rejected.errorMsg);
 
     // A path whose parent directories do not exist yet is accepted - writeFile
     // relies on this and mkdirRecurse creates them after the guard.
-    auto fresh = pathToWorkarea(ctx, "newdir/sub/file.txt");
+    auto fresh = pathToWorkarea(ctx, "newdir/sub/file.txt", PathCategory.read);
     assert(fresh.valid, fresh.errorMsg);
     assert(!exists((ctx.workArea ~ "newdir").toString), "pre-condition: parents absent");
 }
@@ -4510,7 +4521,7 @@ unittest {
     createTestFile(ctx, "test.txt", "line1\nline2\n");
 
     // Record the snapshot without going through the tools (as readFile does).
-    auto p = pathToWorkarea(ctx, "test.txt").path;
+    auto p = pathToWorkarea(ctx, "test.txt", PathCategory.read).path;
     ctx.observe(p);
 
     // External (non-context) write: the content changes, so the hash
@@ -4542,7 +4553,7 @@ unittest {
         ctx.teardown;
 
     createTestFile(ctx, "test.txt", "line1\n");
-    auto p = pathToWorkarea(ctx, "test.txt").path;
+    auto p = pathToWorkarea(ctx, "test.txt", PathCategory.read).path;
     ctx.observe(p);
 
     remove(p.toString);
@@ -4753,4 +4764,230 @@ unittest {
     const note = json["note"].str;
     assert(note.canFind("auto-derived"), note);
     assert(note.canFind("appears twice"), note);
+}
+
+@("integration: shallow list_directory also skips entries failing the read filter")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+    import std.algorithm : canFind;
+
+    auto ctx = makeTestContext("fs_filter_list_shallow");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "d/a.txt", "a\n");
+    createTestFile(ctx, "d/skip/hidden.txt", "h\n");
+
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], ["/skip(/|$)"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto listing = listDirectory(ctx, ListDirectoryParams(path: "d"));
+    assert(listing.success, listing.msg);
+    assert(listing.msg.canFind("a.txt"), listing.msg);
+    assert(!listing.msg.canFind("skip"), listing.msg);
+}
+
+@(
+        "integration: write_file into an excluded path is rejected by the configured filesystem filter (write)")
+unittest {
+    import llm.tool_call.io.functions : WriteFileParams, writeFile;
+    import std.file : exists;
+
+    auto ctx = makeTestContext("fs_filter_write_excluded");
+    scope (exit)
+        ctx.teardown;
+
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], [".*\\.git.*"]);
+    tl.filesystem.write = FilesystemLimits.CategoryFilter([], [".*\\.git.*"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto result = writeFile(ctx, WriteFileParams(".git/config", "x"));
+    assert(!result.success, result.msg);
+    assert(result.msg.canFind("rejected by the configured filesystem filter (write)"), result.msg);
+    const absTarget = (ctx.workArea ~ ".git/config").AbsolutePath.toString;
+    assert(result.msg.canFind(absTarget), result.msg);
+    assert(!(ctx.workArea ~ ".git").AbsolutePath.exists, "nothing was created");
+}
+
+@("integration: read_file succeeds under a read-allow-all configuration while write is filtered")
+unittest {
+    import llm.tool_call.io.functions : ReadFileParams, WriteFileParams, readFile, writeFile;
+    import std.algorithm : canFind;
+
+    auto ctx = makeTestContext("fs_filter_read_allow_all");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "a.txt", "hello\n");
+
+    ToolLimits tl;
+    tl.filesystem.write = FilesystemLimits.CategoryFilter([], [".*\\.git.*"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto r = readFile(ctx, ReadFileParams("a.txt", 1, 10));
+    assert(r.success, r.msg);
+    assert(r.msg.canFind("hello"), r.msg);
+
+    auto w = writeFile(ctx, WriteFileParams(".git/config", "x"));
+    assert(!w.success, w.msg);
+    assert(w.msg.canFind("rejected by the configured filesystem filter (write)"), w.msg);
+}
+
+@(
+        "integration: a path outside the workarea is still rejected by the containment check, not the filter")
+unittest {
+    import llm.tool_call.io.functions : WriteFileParams, writeFile;
+
+    auto ctx = makeTestContext("fs_filter_containment_layering");
+    scope (exit)
+        ctx.teardown;
+
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], [".*\\.git.*"]);
+    tl.filesystem.write = FilesystemLimits.CategoryFilter([], [".*\\.git.*"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto result = writeFile(ctx, WriteFileParams("../outside.txt", "x"));
+    assert(!result.success, result.msg);
+    // Containment beats the filter: the containment error wins, the filter runs last.
+    assert(result.msg == "error: path '../outside.txt' must be inside the allowed workarea",
+            result.msg);
+}
+
+@("integration: with no filesystem configuration the io tools behave exactly as before")
+unittest {
+    import llm.tool_call.io.functions : ReadFileParams, WriteFileParams, readFile, writeFile;
+    import std.algorithm : canFind;
+
+    auto ctx = makeTestContext("fs_filter_default_noop");
+    scope (exit)
+        ctx.teardown;
+
+    // Default ToolLimits(): the runtime holder is disabled, so every check is
+    // a no-op.
+    auto w = writeFile(ctx, WriteFileParams("a.txt", "hello\n"));
+    assert(w.success, w.msg);
+    assert(w.msg == "OK", w.msg);
+
+    auto r = readFile(ctx, ReadFileParams("a.txt", 1, 10));
+    assert(r.success, r.msg);
+    assert(r.msg.canFind("hello"), r.msg);
+
+    auto miss = readFile(ctx, ReadFileParams("missing.txt", 1, 10));
+    assert(!miss.success, miss.msg);
+    assert(miss.msg.canFind("error: path 'missing.txt' do not exist"), miss.msg);
+}
+
+@("integration: recursive list_directory omits entries failing the read filter and recursive remove_file refuses the whole call")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, RemoveFileParams,
+        listDirectory, removeFile;
+    import std.file : exists;
+
+    auto ctx = makeTestContext("fs_filter_list_remove");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "keep.txt", "k\n");
+    createTestFile(ctx, "skip/inner.txt", "s\n");
+
+    ToolLimits tl;
+    // The pattern must match the excluded directory itself as well as its
+    // contents ("/skip/" alone would match only the children - the dir
+    // entry's name has no trailing slash).
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], ["/skip(/|$)"]);
+    tl.filesystem.write = FilesystemLimits.CategoryFilter([], ["/skip(/|$)"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto listing = listDirectory(ctx, ListDirectoryParams(path: ".", recursive: true));
+    assert(listing.success, listing.msg);
+    assert(listing.msg.canFind("keep.txt"), listing.msg);
+    assert(!listing.msg.canFind("skip"), listing.msg);
+
+    auto result = removeFile(ctx, RemoveFileParams(path: ".", recursive: true));
+    assert(!result.success, result.msg);
+    assert(result.msg.canFind("recursive remove refused"), result.msg);
+    assert(result.msg.canFind("/skip/"), result.msg);
+    assert(result.msg.canFind("nothing was deleted"), result.msg);
+    assert((ctx.workArea ~ "keep.txt").AbsolutePath.exists, "nothing was deleted");
+    assert((ctx.workArea ~ "skip/inner.txt").AbsolutePath.exists,
+            "the excluded subtree still exists");
+}
+
+@("integration: grep_files returns no result lines from files failing the read filter")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+    import std.algorithm : canFind;
+
+    auto ctx = makeTestContext("fs_filter_grep");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "a.txt", "needle here\n");
+    createTestFile(ctx, "skip/secret.txt", "needle hidden\n");
+
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], ["/skip/"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    // Mixed: the kept line survives with its relative path rendering; the
+    // excluded file's line is dropped entirely.
+    auto mixed = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "needle"));
+    assert(mixed.success, mixed.msg);
+    assert(mixed.msg.canFind("a.txt"), mixed.msg);
+    assert(!mixed.msg.canFind("secret"), mixed.msg);
+
+    // Only-in-excluded match: nothing left to return.
+    auto only = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "hidden"));
+    assert(!only.success, only.msg);
+    assert(only.msg.canFind("no matches found"), only.msg);
+}
+
+@("pathToWorkarea filter denial: valid=false, deniedByFilter=true, exact filter message")
+unittest {
+    import llm.tool_call.utility : pathToWorkarea;
+
+    auto ctx = makeTestContext("pwa_filter_denial");
+    scope (exit)
+        ctx.teardown;
+
+    ToolLimits tl;
+    tl.filesystem.write = FilesystemLimits.CategoryFilter([], ["/\\.git/"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto r = pathToWorkarea(ctx, ".git/config", PathCategory.write);
+    assert(!r.valid, r.errorMsg);
+    assert(r.deniedByFilter, r.errorMsg);
+    const absTarget = (ctx.workArea ~ ".git/config").AbsolutePath.toString;
+    assert(r.errorMsg == "error: path '" ~ absTarget
+            ~ "' is rejected by the configured filesystem filter (write)", r.errorMsg);
+}
+
+@("pathToWorkarea containment failure with a filter configured leaves deniedByFilter=false")
+unittest {
+    import llm.tool_call.utility : pathToWorkarea;
+
+    auto ctx = makeTestContext("pwa_filter_containment");
+    scope (exit)
+        ctx.teardown;
+
+    ToolLimits tl;
+    tl.filesystem.write = FilesystemLimits.CategoryFilter([], ["/\\.git/"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto r = pathToWorkarea(ctx, "../outside.txt", PathCategory.write);
+    assert(!r.valid, r.errorMsg);
+    assert(!r.deniedByFilter, r.errorMsg);
+    assert(r.errorMsg == "error: path '../outside.txt' must be inside the allowed workarea",
+            r.errorMsg);
 }
