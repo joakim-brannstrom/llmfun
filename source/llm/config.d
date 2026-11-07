@@ -179,6 +179,35 @@ string[] defaultNudgeFiles(NudgeKind kind, bool hard) @safe pure {
     }
 }
 
+/// Facilities accepted by telemetry.syslog.facility (POSIX-safe set).
+/// Values are the POSIX facility codes so the sink can cast them
+/// straight into openlog.
+enum SyslogFacility {
+    user = 1 << 3,
+    daemon = 3 << 3,
+    local0 = 16 << 3,
+    local1 = 17 << 3,
+    local2 = 18 << 3,
+    local3 = 19 << 3,
+    local4 = 20 << 3,
+    local5 = 21 << 3,
+    local6 = 22 << 3,
+    local7 = 23 << 3,
+}
+
+struct SyslogTelemetryConfig {
+    bool enabled = false;
+    /// Ident handed to openlog; prefixes every record. Must not be
+    /// empty while enabled (an empty ident makes records
+    /// unattributable).
+    string ident = "llmfun";
+    SyslogFacility facility = SyslogFacility.user;
+}
+
+struct TelemetryConfig {
+    SyslogTelemetryConfig syslog;
+}
+
 struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
@@ -312,6 +341,9 @@ struct LlmConfig {
 
     /// AGENTS.md prompt treatment: compression mode, threshold, RAG indexing.
     AgentsMdConfig agentsMd;
+
+    /// Opt-in, off by default.
+    TelemetryConfig telemetry;
 
     /// Agent prompt filename searched for in promptDir.
     string agentPrompt = "AGENT.md";
@@ -1228,6 +1260,39 @@ private CompressionMode compressionModeFromYaml(string spelling) @safe {
     }
 }
 
+/// Case-insensitive; an unknown spelling is a parse error naming the
+/// dotted path and the valid values.
+private SyslogFacility syslogFacilityFromYaml(string spelling) @safe {
+    import std.string : toLower;
+
+    switch (spelling.toLower) {
+    case "user":
+        return SyslogFacility.user;
+    case "daemon":
+        return SyslogFacility.daemon;
+    case "local0":
+        return SyslogFacility.local0;
+    case "local1":
+        return SyslogFacility.local1;
+    case "local2":
+        return SyslogFacility.local2;
+    case "local3":
+        return SyslogFacility.local3;
+    case "local4":
+        return SyslogFacility.local4;
+    case "local5":
+        return SyslogFacility.local5;
+    case "local6":
+        return SyslogFacility.local6;
+    case "local7":
+        return SyslogFacility.local7;
+    default:
+        throw new Exception(
+                "invalid telemetry.syslog.facility '" ~ spelling
+                ~ "' (valid: user | daemon | local0..local7)");
+    }
+}
+
 private void defaultConfigWarnSink(logger.LogLevel lvl, string msg) {
     logger.logf(lvl, "%s", msg);
 }
@@ -1325,6 +1390,9 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json,
                             // explicitly and reject unknown spellings naming
                             // the valid values.
                             __traits(getMember, conf, llmMemberName) = compressionModeFromYaml(
+                                    json[yamlKey].str);
+                        } else static if (is(Type == SyslogFacility)) {
+                            __traits(getMember, conf, llmMemberName) = syslogFacilityFromYaml(
                                     json[yamlKey].str);
                         } else static if (is(Type == enum)) {
                             // Enum fields are configured by member name, e.g. `mode: mixed`.
@@ -1621,6 +1689,10 @@ void validateConfig(LlmConfig conf) {
     if (conf.tui.idleParkMs != 0 && (conf.tui.idleParkMs < 4 || conf.tui.idleParkMs > 1000))
         throw new Exception(i"tui.idleParkMs must be 0 or in [4, 1000], got $(conf.tui.idleParkMs)"
                 .text);
+
+    if (conf.telemetry.syslog.enabled && conf.telemetry.syslog.ident.empty)
+        throw new Exception(
+                "telemetry.syslog.ident must not be empty while telemetry.syslog.enabled is true");
 
     // Nudge policy (NudgeConfig structs), global default and per-model
     // wholesale overrides. Files of disabled kinds are neither loaded
@@ -3279,6 +3351,113 @@ codeModels:
     assert(conf.agentsMd.compression.thresholdKb == 7,
             "sibling keys still parse, got " ~ conf.agentsMd.compression.thresholdKb.to!string);
     assert(warnings.canFind!(w => w.canFind("auto | full | summary")), warnings.to!string);
+}
+
+@("telemetry absent keeps the struct defaults") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("telemetry_absent_defaults");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `tui:
+  idleParkMs: 75
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(!conf.telemetry.syslog.enabled, "telemetry must be opt-in, got enabled");
+    assert(conf.telemetry.syslog.ident == "llmfun",
+            "expected the default ident llmfun, got " ~ conf.telemetry.syslog.ident);
+    assert(conf.telemetry.syslog.facility == SyslogFacility.user,
+            "expected the default facility user");
+}
+
+@("telemetry.syslog parses enabled, ident and facility") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("telemetry_syslog_parse");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `telemetry:
+  syslog:
+    enabled: true
+    ident: mytag
+    facility: LOCAL3
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.telemetry.syslog.enabled, "enabled must parse");
+    assert(conf.telemetry.syslog.ident == "mytag",
+            "expected ident mytag, got " ~ conf.telemetry.syslog.ident);
+    assert(conf.telemetry.syslog.facility == SyslogFacility.local3,
+            "facility spelling is case-insensitive, got "
+            ~ conf.telemetry.syslog.facility.to!string);
+}
+
+@("unknown facility name is rejected naming the path and valid values") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("telemetry_facility_unknown");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `telemetry:
+  syslog:
+    enabled: true
+    ident: mytag
+    facility: local9
+`;
+    File(tmpFile, "w").write(yaml);
+
+    string[] warnings;
+    void delegate(logger.LogLevel, string) capture = (logger.LogLevel lvl, string msg) {
+        warnings ~= msg;
+    };
+    auto syslogConf = applyConfig(SyslogTelemetryConfig.init,
+            loadYamlValue(Path(tmpFile))["telemetry"]["syslog"], capture);
+    assert(warnings.canFind!(w => w.canFind("facility") && w.canFind("local9")),
+            warnings.to!string);
+    assert(syslogConf.facility == SyslogFacility.user,
+            "the rejected facility must not be applied, got " ~ syslogConf.facility.to!string);
+    assert(syslogConf.enabled, "sibling keys still parse");
+    assert(syslogConf.ident == "mytag", "sibling keys still parse");
+}
+
+@("empty ident with enabled throws naming the path") unittest {
+    import std.algorithm : canFind;
+
+    auto conf = nudgesValidateTestConfig();
+    conf.telemetry.syslog.enabled = true;
+    conf.telemetry.syslog.ident = "";
+    bool threw;
+    string msg;
+    try {
+        validateConfig(conf);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for an empty ident on an enabled sink");
+    assert(canFind(msg, "telemetry.syslog.ident"),
+            "error message must name the dotted path, got: " ~ msg);
+}
+
+@("empty ident with disabled passes validateConfig") unittest {
+    auto conf = nudgesValidateTestConfig();
+    conf.telemetry.syslog.enabled = false;
+    conf.telemetry.syslog.ident = "";
+    validateConfig(conf);
 }
 
 /// Regression: a YAML float whose value differs from the struct default must

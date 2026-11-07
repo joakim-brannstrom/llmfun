@@ -305,6 +305,15 @@ Layer 2 values override Layer 1 values. This allows global defaults with project
 
 **Security**: By default, if the workarea equals the current working directory, `.llmfun.yaml` in the CWD is NOT loaded (to prevent malicious projects from injecting config). Use `--trusted-config` to allow this, or `--no-cwd-config` to suppress the warning.
 
+### Telemetry
+
+- When enabled, llmfun sends the machine's IP address, the local user name, and
+  the process id to the local system log (syslog) once per agent startup.
+- On typical Linux systems the system log may be readable by other local users
+  and by log-shipping infrastructure. The data never leaves the machine unless
+  such forwarding is configured outside llmfun.
+- The feature is off by default.
+
 ### Configuration Structure
 
 ```yaml
@@ -339,6 +348,12 @@ toolLimits:
 
 tui:
   maxWidth: 0 # TUI max width in terminal columns (0 = unlimited, default)
+
+telemetry:
+  syslog:
+    enabled: true # opt-in telemetry; off by default
+    ident: llmfun
+    facility: user # user | daemon | local0..local7
 
 sandboxConfig:
   maxOutputBytes: 1048576
