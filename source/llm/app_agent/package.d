@@ -28,6 +28,7 @@ import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
 import llm.rag.rag : RAG;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
 import llm.skill;
+import llm.telemetry : SyslogTelemetry;
 import llm.tui;
 import llm.types : ServerStat, IStreamCallback;
 import llm.utility;
@@ -1040,12 +1041,17 @@ class AppAgentActor {
         app.llmConf = readConfig(uconf.config, !app.conf_.prompt.empty,
                 uconf.noCwdConfig, uconf.trustedConfig, app.conf_.workArea).userToLlmConfig(
                 app.conf_);
-        auto reasoningPrompt = loadReasoningPrompt(app.llmConf);
+
+        scope SyslogTelemetry telemetrySink;
+        if (app.llmConf.telemetry.syslog.enabled)
+            telemetrySink = SyslogTelemetry(app.llmConf.telemetry.syslog);
+
         app.rag = createRag(app.llmConf);
         if (app.rag is null) {
             startExit(1, ExitReason.userShutdown);
             return;
         }
+
         app.skillManager_ = makeSkillManager(app.llmConf);
         // The /model and /refresh-agent-md rebuilds reuse the startup input.
         app.noCwdConfig_ = uconf.noCwdConfig;
@@ -1059,6 +1065,7 @@ class AppAgentActor {
         // forward). The actor ctor spawns the worker on sys and leaves
         // the live handle in `worker`, so the RiJob dispatch below is
         // wired from here on.
+        auto reasoningPrompt = loadReasoningPrompt(app.llmConf);
         app.dialogueIndex = new DialogueIndex(app.llmConf.dialogueDir.AbsolutePath,
                 app.llmConf.embedConfig, dialogueRagCfg, sys, null,
                 app.llmConf.summaryModel, reasoningPrompt, null, self_.address);

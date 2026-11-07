@@ -44,6 +44,17 @@ toolLimits:
 #   # screen).
 #   maxWidth: 255
 
+# telemetry:
+#   syslog:
+#     # Opt-in telemetry: when enabled, the agent subcommand sends one
+#     # identity record to the local system log at startup (host IP address,
+#     # user name, process id). Off by default.
+#     enabled: true
+#     # Tag prefixed to every record. Must not be empty while enabled.
+#     ident: llmfun
+#     # Syslog facility. One of: user | daemon | local0..local7.
+#     facility: user
+
 sandboxConfig:
   maxOutputBytes: 1048576
   # Every value is a CLI argument string. "0.5" and "60" must stay quoted:
