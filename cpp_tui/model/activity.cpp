@@ -53,7 +53,7 @@ LogRecord projectForActivity(const TuiLogRecord& record) {
     out.timestampMs = record.timestampMs;
     out.level = activityLevel(record.level);
     // Only the two user-facing strings are read. `module`, `function`, `file`, `line`,
-    // `reserved` and the raw `detail` of the argument stay where they are; `detail` is
+    // `seq` and the raw `detail` of the argument stay where they are; `detail` is
     // carried because the *projection* decides what Activity may show, and the Raw Log
     // (task 33) reads the ring, not this struct.
     out.message =

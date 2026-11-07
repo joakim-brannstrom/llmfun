@@ -1,9 +1,10 @@
 // test_ui_settings.cpp
 //
-// Standalone unit test for the workbench settings file (model/settings.h, task 22,
-// design §5.3 / D-UI-CONF): `ui.conf` is the sibling of `imgui2.conf` that only the
-// workbench reads and writes, so a legacy save can never clobber a preference it has
-// no field for.
+// Standalone unit test for the workbench settings file (model/settings.h).
+// `ui.conf` is the fixed-name file that only the
+// workbench reads and writes, beside the ini file - the TuiSettings side lives in
+// the derived `<ini-stem>.gui.conf`, so a settings save can never clobber a
+// preference it has no field for.
 //
 // Compiles model/ui_conf.cpp and tui_settings.cpp directly and links only the
 // standard library (no GLFW, no ImGui, no display). No test framework: CHECK(cond)
@@ -13,20 +14,24 @@
 //   - uiConfPath: the sibling of the derived settings file ("imgui2.ini" ->
 //     "ui.conf", "a/b/imgui2.ini" -> "a/b/ui.conf", "" -> "" and no file touched)
 //   - the exact on-disk bytes, defaults and all-non-default
-//   - a full round-trip of every key and every value, pins included
+//   - a full round-trip of every key and every value
 //   - the Version gate: a file from a future build keeps the defaults, whatever the
 //     order of its lines; a missing or malformed Version is applied
 //   - unknown keys skipped, malformed values keep the current value, out-of-range
 //     numbers clamp - the same expectations as ./test_settings
-//   - pins: `Pin.<id>=1` adds, `=0` removes, an empty or unknown id is dropped
+//   - legacy `Pin.*` keys from the agent's old pin storage are ignored, and every
+//     other key in such a profile still loads
 //   - the atomic write: a temporary left behind by a killed writer is never read and
 //     the old file stays intact; a failed swap removes the temporary
 //   - 100 changes in 1 s produce no write at all before the 2 s idle window and
 //     exactly one after it; a failed write does not become a retry loop
 //   - the read-only-location warning is one line per failed attempt, and the values
 //     still apply in memory
-//   - a legacy save (saveTuiSettings) rewrites imgui2.conf only: ui.conf stays
+//   - a legacy save (saveTuiSettings) rewrites imgui2.gui.conf only: ui.conf stays
 //     byte-identical and no MVP key appears in the legacy file
+//   - the two writers keep two files: with the same ini filename, a TuiSettings
+//     save and a ShellPrefs save land in imgui2.gui.conf and ui.conf, each
+//     holding its own format, neither clobbered by the other
 //   - an explicit save of identical bytes leaves the file (and its timestamp) alone
 //   - a quit save carries only a change: a Version=2 file and a hand-edited file
 //     keep their bytes, while a real choice replaces them
@@ -50,6 +55,7 @@
 
 using llmfun::tui::loadTuiSettings;
 using llmfun::tui::saveTuiSettings;
+using llmfun::tui::settingsPath;
 using llmfun::tui::TuiSettings;
 using llmfun::tui::model::flushUiConf;
 using llmfun::tui::model::InspectorTab;
@@ -158,20 +164,16 @@ long long fileMode(const std::string& path) {
 
 bool setFileMode(const std::string& path, mode_t mode) { return ::chmod(path.c_str(), mode) == 0; }
 
-std::set<std::string> setOf(const std::vector<std::string>& ids) {
-    return std::set<std::string>(ids.begin(), ids.end());
-}
-
 bool samePrefs(const ShellPrefs& a, const ShellPrefs& b) {
     return a.sendKey == b.sendKey && a.rawLog == b.rawLog && a.railOpen == b.railOpen &&
-           a.inspectorOpen == b.inspectorOpen && a.tab == b.tab && a.pinned == b.pinned;
+           a.inspectorOpen == b.inspectorOpen && a.tab == b.tab;
 }
 
 } // namespace
 
 int main() {
     // ---------------------------------------------------------------------------
-    section("uiConfPath: the sibling of imgui2.conf");
+    section("uiConfPath: the fixed ui.conf beside the ini file");
     // ---------------------------------------------------------------------------
     CHECK(uiConfPath("imgui2.ini") == "ui.conf");
     CHECK(uiConfPath("imgui2") == "ui.conf");
@@ -204,11 +206,9 @@ int main() {
         prefs.railOpen = 1;
         prefs.inspectorOpen = 0;
         prefs.tab = InspectorTab::Agents;
-        prefs.pinned = setOf({"s-x"});
         loadUiConf(prefs, iniOf(dir));
         CHECK(prefs.sendKey == SendKey::Enter && prefs.rawLog == kRawLogTrace &&
-              prefs.railOpen == 1 && prefs.inspectorOpen == 0 &&
-              prefs.tab == InspectorTab::Agents && prefs.pinned == setOf({"s-x"}));
+              prefs.railOpen == 1 && prefs.inspectorOpen == 0 && prefs.tab == InspectorTab::Agents);
         CHECK(!fileExists(confOf(dir))); // a load never creates the file
     }
 
@@ -235,16 +235,13 @@ int main() {
         prefs.railOpen = 1;
         prefs.inspectorOpen = 0;
         prefs.tab = InspectorTab::Agents;
-        prefs.pinned = setOf({"s-b", "s-a"});
         saveUiConf(prefs, iniOf(dir));
         CHECK(readText(confOf(dir)) == "Version=1\n"
                                        "SendKey=none\n"
                                        "UiLog=debug\n"
                                        "RailOpen=1\n"
                                        "InspectorOpen=0\n"
-                                       "InspectorTab=agents\n"
-                                       "Pin.s-a=1\n"
-                                       "Pin.s-b=1\n");
+                                       "InspectorTab=agents\n");
         // Every key and value survives save -> load.
         ShellPrefs loaded;
         loadUiConf(loaded, iniOf(dir));
@@ -458,47 +455,28 @@ int main() {
     }
 
     // ---------------------------------------------------------------------------
-    section("pins");
+    section("legacy pin keys: ignored, everything else loads");
     // ---------------------------------------------------------------------------
     {
-        const std::string dir = caseDir("pins");
+        // Pins live in the agent's `state.json`, so the workbench parser
+        // ignores `Pin.*` keys: an old profile still loads the keys it can,
+        // and the next write of a real change drops the pin keys for good.
+        const std::string dir = caseDir("legacy-pins");
         const std::string ini = iniOf(dir);
         const std::string conf = confOf(dir);
 
-        writeText(conf, "Pin.s-a=1\nPin.s-b=1\nPin.s-c=0\nPin.s-d=x\nPin.=1\n");
+        writeText(conf, "Version=1\nSendKey=enter\nPin.s-a=1\nPin.s-b=0\nRailOpen=1\n");
         ShellPrefs prefs;
         loadUiConf(prefs, ini);
-        CHECK(prefs.pinned == setOf({"s-a", "s-b"})); // =0, an unknown value and an empty id drop
+        CHECK(prefs.sendKey == SendKey::Enter && prefs.railOpen == 1);
 
-        // A pin the session store does not know is pruned; one it does know stays.
-        const std::set<std::string> known = setOf({"s-a", "s-z"});
-        ShellPrefs pruned;
-        loadUiConf(pruned, ini, &known);
-        CHECK(pruned.pinned == setOf({"s-a"}));
-        // Without a store there is nothing to prune against.
-        ShellPrefs unpruned;
-        loadUiConf(unpruned, ini);
-        CHECK(unpruned.pinned == setOf({"s-a", "s-b"}));
-
-        // `=0` removes a pin that is already in memory, so a hand-edit can unpin.
-        writeText(conf, "Pin.s-a=0\n");
-        ShellPrefs removed;
-        removed.pinned = setOf({"s-a", "s-b"});
-        loadUiConf(removed, ini);
-        CHECK(removed.pinned == setOf({"s-b"}));
-
-        // An empty id is never written (it would come back as no pin at all).
-        ShellPrefs empty;
-        empty.pinned = setOf({"", "s-a"});
-        CHECK(uiConfText(empty).find("Pin.=1") == std::string::npos);
-        CHECK(uiConfText(empty).find("Pin.s-a=1\n") != std::string::npos);
-
-        // Neither is an id that cannot survive the round-trip: "a=b" would be read
-        // back as the key "Pin.a" with a malformed value.
-        ShellPrefs awkward;
-        awkward.pinned = setOf({"a=b", "s-ok"});
-        CHECK(uiConfText(awkward).find("Pin.a=b=1") == std::string::npos);
-        CHECK(uiConfText(awkward).find("Pin.s-ok=1\n") != std::string::npos);
+        // A change rewrites the profile in this build's canonical form.
+        prefs.rawLog = kRawLogDebug;
+        saveUiConf(prefs, ini);
+        CHECK(readText(conf).find("Pin.") == std::string::npos);
+        ShellPrefs reloaded;
+        loadUiConf(reloaded, ini);
+        CHECK(samePrefs(reloaded, prefs));
     }
 
     // ---------------------------------------------------------------------------
@@ -630,22 +608,6 @@ int main() {
         saveUiConf(prefs, ini);
         CHECK(readText(conf) == uiConfText(prefs));
     }
-    {
-        // A prune is a read, not an edit: the pins the store did not list are gone
-        // from memory but still on disk until the user changes something.
-        const std::string dir = caseDir("prunekeep");
-        const std::string ini = iniOf(dir);
-        const std::string conf = confOf(dir);
-        const std::string twoPins = "Version=1\nPin.s-a=1\nPin.s-b=1\n";
-        writeText(conf, twoPins);
-        const std::set<std::string> partial = setOf({"s-a"}); // a filtered/paged store
-        ShellPrefs prefs;
-        loadUiConf(prefs, ini, &partial);
-        CHECK(prefs.pinned == setOf({"s-a"}));
-        flushUiConf(prefs, ini, 10.0);
-        flushUiConf(prefs, ini, 20.0);
-        CHECK(readText(conf) == twoPins); // the user's pin is still on disk
-    }
 
     // ---------------------------------------------------------------------------
     section("debounce: 100 changes in 1 s, one write after the idle window");
@@ -769,13 +731,12 @@ int main() {
     {
         const std::string dir = caseDir("legacy");
         removeFile(confOf(dir));
-        removeFile(dir + "/imgui2.conf");
+        removeFile(settingsPath(iniOf(dir)));
 
         ShellPrefs prefs;
         prefs.sendKey = SendKey::None;
         prefs.rawLog = kRawLogTrace;
         prefs.railOpen = 1;
-        prefs.pinned = setOf({"s-1"});
         saveUiConf(prefs, iniOf(dir));
         const std::string uiBefore = readText(confOf(dir));
         CHECK(!uiBefore.empty() && uiBefore != "<open failed>");
@@ -787,7 +748,7 @@ int main() {
         saveTuiSettings(legacy, iniOf(dir));
         CHECK(readText(confOf(dir)) == uiBefore); // byte-identical
 
-        const std::string legacyText = readText(dir + "/imgui2.conf");
+        const std::string legacyText = readText(settingsPath(iniOf(dir)));
         CHECK(legacyText == "WindowWidth=1024\nWindowHeight=768\nFontScaleMain=1.50\n");
         CHECK(legacyText.find("SendKey") == std::string::npos);
         CHECK(legacyText.find("UiLog") == std::string::npos);
@@ -805,6 +766,65 @@ int main() {
         ShellPrefs reloaded;
         loadUiConf(reloaded, iniOf(dir));
         CHECK(samePrefs(reloaded, prefs));
+    }
+
+    // ---------------------------------------------------------------------------
+    section("the two writers keep two files");
+    // ---------------------------------------------------------------------------
+    {
+        // One ini filename, two saves, two files: the TuiSettings side derives
+        // `<stem>.gui.conf`, the ShellPrefs side keeps the fixed `ui.conf`, so a
+        // whole-file save of either can never overwrite the other's format.
+        const std::string dir = caseDir("collision");
+        const std::string ini = iniOf(dir);
+        const std::string conf = confOf(dir);
+        const std::string gui = settingsPath(ini);
+        removeFile(conf); // a leftover from an earlier run would make the first save inert
+        removeFile(gui);
+        CHECK(gui == dir + "/imgui2.gui.conf"); // the new derivation, pinned here too
+        CHECK(conf != gui);
+
+        TuiSettings view;
+        view.windowWidth = 1024;
+        view.windowHeight = 768;
+        view.fontScaleMain = 1.25f;
+        saveTuiSettings(view, ini);
+        ShellPrefs prefs;
+        prefs.sendKey = SendKey::Enter;
+        prefs.rawLog = kRawLogDebug;
+        saveUiConf(prefs, ini);
+
+        // Both files exist, each holding its own format and nothing of the other's.
+        CHECK(fileExists(conf) && fileExists(gui));
+        const std::string confText = readText(conf);
+        CHECK(confText.find("Version=") == 0 &&
+              confText.find("SendKey=enter") != std::string::npos &&
+              confText.find("WindowWidth") == std::string::npos);
+        const std::string guiText = readText(gui);
+        CHECK(guiText.find("WindowWidth=1024") != std::string::npos &&
+              guiText.find("FontScaleMain=1.25") != std::string::npos &&
+              guiText.find("SendKey") == std::string::npos);
+
+        // The other save order too, with a change on each side: neither writer
+        // clobbers the other's file, and each loader reads its own file back.
+        TuiSettings view2;
+        view2.fontScaleMain = 2.0f;
+        saveTuiSettings(view2, ini);
+        ShellPrefs prefs2;
+        prefs2.sendKey = SendKey::None;
+        prefs2.railOpen = 0;
+        saveUiConf(prefs2, ini);
+        CHECK(readText(conf).find("RailOpen=0") != std::string::npos &&
+              readText(conf).find("WindowWidth") == std::string::npos);
+        CHECK(readText(gui).find("FontScaleMain=2.00") != std::string::npos &&
+              readText(gui).find("Version=") == std::string::npos);
+        TuiSettings loadedView;
+        loadTuiSettings(loadedView, ini);
+        CHECK(loadedView.fontScaleMain == 2.0f && loadedView.windowWidth == 0 &&
+              loadedView.windowHeight == 0);
+        ShellPrefs loadedPrefs;
+        loadUiConf(loadedPrefs, ini);
+        CHECK(samePrefs(loadedPrefs, prefs2));
     }
 
     // ---------------------------------------------------------------------------
@@ -826,8 +846,8 @@ int main() {
         saveUiConf(prefs, iniOf(dir)); // a change is written
         CHECK(writeTime(conf) != 1000);
 
-        // The replaced file keeps its mode: `Pin.*` carries session ids, so a user
-        // who tightened it does not get 0644 back.
+        // The replaced file keeps its mode: the file holds the user's own
+        // choices, so a user who tightened it does not get 0644 back.
         CHECK(setFileMode(conf, 0600));
         CHECK(fileMode(conf) == 0600);
         prefs.rawLog = kRawLogRaw;
@@ -846,8 +866,8 @@ int main() {
     section("a brand-new file goes through the umask; a replaced one keeps its mode");
     // ---------------------------------------------------------------------------
     {
-        // `ui.conf` carries session ids in `Pin.*`: the umask is the user's own
-        // policy on who may read it, and a first save must not bypass that. Each
+        // The umask is the user's own policy on who may read the profile: a
+        // first save must not bypass that. Each
         // mode gets a fresh profile, because a settled profile is not rewritten
         // (that is the quit-save rule above).
         const mode_t previous = ::umask(077);

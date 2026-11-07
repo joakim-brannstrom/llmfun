@@ -85,7 +85,10 @@ struct TuiLogRecordData {
     string moduleName;
     string funcName;
     string file;
+    int seq = 0;
 }
+
+enum string kQueueDropMarker = "queue-drop";
 
 // The severity as the UI's five-step scale (TuiLogLevel).
 //
@@ -133,6 +136,15 @@ string restLinesOf(string msg) @safe {
     return at < 0 ? null : msg[at + 1 .. $];
 }
 
+private __gshared shared(int) s_logSeq;
+
+/// The one stamp dispenser: hand out the next log-order number.
+private int nextLogSeq() @trusted {
+    import core.atomic : atomicOp;
+
+    return atomicOp!"+="(s_logSeq, 1);
+}
+
 // A D `Logger` implementation that captures log entries and drains them for display in the
 // TUI (Activity and the Raw Log), one record per entry.
 class TuiLogger : Logger {
@@ -166,22 +178,17 @@ class TuiLogger : Logger {
         mtx.lock_nothrow();
         scope (exit)
             mtx.unlock_nothrow();
-        // The store's bounds (5000 records / 2 MB) belong to the C++ ring; this queue only
-        // has to survive one frame. What it cannot keep is counted, not dropped silently.
+        const int seq = nextLogSeq();
         if (entries[].length >= MaxQueued) {
             ++droppedInQueue;
             return;
         }
         const SysTime stamp = payload.timestamp;
-        // Unix-epoch milliseconds, because that is what every consumer reads:
-        // `tui.cpp`'s `archiveTimestamp()` and the Activity clock both do `gmtime(ms / 1000)`.
-        // `SysTime.stdTime` counts hnsecs from *1 A.D.*, so `stdTime / 10_000` keeps the time
-        // of day and moves the date ~1969 years out; `toUnixTime` is the epoch seconds and
-        // `fracSecs` the sub-second part (`toUnixTime` alone is whole-second only).
+        // Unix-epoch milliseconds, because that is what every consumer reads
         const long stampMs = stamp.stdTime > 0
             ? cast(long) stamp.toUnixTime * 1_000L + stamp.fracSecs.total!"msecs" : 0;
         entries.put(TuiLogRecordData(payload.logLevel, stampMs, payload.line,
-                payload.msg, payload.moduleName, payload.funcName, payload.file));
+                payload.msg, payload.moduleName, payload.funcName, payload.file, seq));
     }
 
     /// The records captured since the last drain, as a *copy*: `entries[]` is a slice of the
@@ -199,9 +206,10 @@ class TuiLogger : Logger {
         TuiLogRecordData[] drained = entries[].dup;
         entries.clear();
         if (droppedInQueue > 0) {
+            const int seq = nextLogSeq();
             drained ~= TuiLogRecordData(LogLevel.warning, 0, 0,
                     "log queue dropped " ~ droppedInQueue.text ~ " records (the frame loop did not drain in time)",
-                    null, null, null);
+                    null, kQueueDropMarker, null, seq);
             droppedInQueue = 0;
         }
         return drained;
@@ -240,6 +248,7 @@ TuiLogSwap swapToTuiLogger() @trusted {
 // so D source cannot name them. The layout is pinned by the static asserts below, and a
 // reordering of `TuiLogRecord` fails the *build* instead of silently sending a module name
 // where the UI expects a message.
+
 TuiLogRecord makeLogRecord(TuiLogRecordData record, TuiLogAction action, string actionPayload) @trusted {
     static assert(TuiLogRecord.tupleof.length == 11,
             "TuiLogRecord grew: update makeLogRecord's positional list");
@@ -249,17 +258,18 @@ TuiLogRecord makeLogRecord(TuiLogRecordData record, TuiLogAction action, string 
             "TuiLogRecord's field order changed: update makeLogRecord's positional list");
     // The names, not only the types: two same-typed neighbours (`message`/`detail`,
     // `module`/`function`) could otherwise be swapped without a word of warning.
-    static assert(__traits(identifier, TuiLogRecord.tupleof[5]) == "message"
+    static assert(__traits(identifier, TuiLogRecord.tupleof[4]) == "seq"
+            && __traits(identifier, TuiLogRecord.tupleof[5]) == "message"
             && __traits(identifier, TuiLogRecord.tupleof[6]) == "detail"
             && __traits(identifier, TuiLogRecord.tupleof[7]) == "module"
-            && __traits(identifier, TuiLogRecord.tupleof[8]) == "function" && __traits(identifier,
-                TuiLogRecord.tupleof[9]) == "file",
+            && __traits(identifier, TuiLogRecord.tupleof[8]) == "function"
+            && __traits(identifier, TuiLogRecord.tupleof[9]) == "file",
             "TuiLogRecord's field names changed: update makeLogRecord");
 
     auto message = firstLineOf(record.message);
     auto detail = restLinesOf(record.message);
     return TuiLogRecord(toTuiLevel(record.level), action, record.timestampMs,
-            record.line, 0, // reserved
+            record.line, record.seq, // seq: the log-order stamp from the capture site
             String(message.ptr, message.length),
             String(detail.ptr, detail.length), String(record.moduleName.ptr,
                 record.moduleName.length), String(record.funcName.ptr, record.funcName.length),
@@ -588,6 +598,8 @@ interface TUIListener {
     void sessionNew();
     void sessionRename(SessionId id, string title);
     void sessionDelete(SessionId id);
+    void sessionPinToggle(SessionId id);
+    void sessionClone(SessionId id);
     void uiTerminated();
     void uiStartupFailed(string reason);
 }
@@ -880,6 +892,12 @@ class TextUserInterfaceActor : TUICommands {
             case TuiSessionAction_Delete:
                 listener.sessionDelete(SessionId(pendingActionId));
                 break;
+            case TuiSessionAction_PinToggle:
+                listener.sessionPinToggle(SessionId(pendingActionId));
+                break;
+            case TuiSessionAction_Clone:
+                listener.sessionClone(SessionId(pendingActionId));
+                break;
             default:
                 logger.warningf("Unknown session action type %s", pendingAction);
                 break;
@@ -1094,10 +1112,8 @@ struct UiPipelineClear {
 
 // Session sidebar snapshot (D -> UI): full ordered list of sessions.
 //
-// `updatedAtMs` and `flags` are the v5 additions (task 24) the workbench rail
-// groups and marks rows with; the legacy panel ignores them, so both renderers
-// can share one snapshot. `flags` bit 0 = a run is in flight. `unread` and
-// `pinned` are UI-local by design and are therefore not here (FR-03, D-19).
+// `flags` bit 0 = a run is in flight, bit 1 = the user
+// pinned the session.
 struct UiSessionItem {
     SessionId id;
     string title;
@@ -1105,7 +1121,7 @@ struct UiSessionItem {
     size_t messageCount;
     bool isActive;
     long updatedAtMs; // SessionMeta.updatedAt (unix seconds) * 1000; 0 = unknown
-    int flags; // bit 0 = running (TuiSessionFlag_Running); no other bit is used
+    int flags;
 }
 
 struct UiSessionList {

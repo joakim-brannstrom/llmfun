@@ -591,7 +591,7 @@ void addLogRecord(Harness& h, TuiLogLevel level, const std::string& message,
     record.action = TuiLogAction_None;
     record.timestampMs = 0; // the UI stamps the arrival
     record.line = 0;
-    record.reserved = 0;
+    record.seq = 0;
     record.message = makeStr(message);
     record.detail = makeStr(detail);
     record.module = makeStr(module);

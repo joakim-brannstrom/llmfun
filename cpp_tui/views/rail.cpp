@@ -865,7 +865,7 @@ void renderRail(model::RailState& rail, const RailModel& list, const ui::Rect& r
                     // Anchored to its row, and flipped above it when it would not fit
                     // below: ImGui's own clamp bottom-aligns a popup at the display
                     // edge, which paints its spare rows over the row it acts on.
-                    const float menuH = rail.menuHeightPx > 0.0f ? rail.menuHeightPx : 4.0f * m.row;
+                    const float menuH = rail.menuHeightPx > 0.0f ? rail.menuHeightPx : 5.0f * m.row;
                     float menuY = rowRect.y + rowRect.h;
                     if (menuY + menuH > region.bottom())
                         menuY = std::max(region.y, rowRect.y - menuH);
@@ -878,6 +878,8 @@ void renderRail(model::RailState& rail, const RailModel& list, const ui::Rect& r
                             rail.renameFocus = true;
                             ++rail.renameSeq;
                         }
+                        if (ImGui::MenuItem("Clone"))
+                            rail.cloneId = row.id;
                         if (ImGui::MenuItem(row.pinned ? "Unpin" : "Pin"))
                             rail.pinToggleId = row.id;
                         if (ImGui::MenuItem("Delete"))

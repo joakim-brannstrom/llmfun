@@ -430,7 +430,7 @@ std::size_t runWindowCase(const WindowCase& c, const std::string& outDir) {
               ")");
     // (including a floor correction), and FontScaleMain survives the save.
     // The application's teardown order: markdown textures go while the backend
-    // is still alive, then the backend itself (which writes imgui2.conf), then
+    // is still alive, then the backend itself (which writes imgui2.gui.conf), then
     // the context (once, in main).
     llmfun::tui::destroyMarkdown(state);
     state.backend->shutdown();

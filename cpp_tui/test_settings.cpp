@@ -1,7 +1,7 @@
 // test_settings.cpp
 //
 // Standalone unit test for the GUI view settings helpers (tui_settings.h):
-// imgui2.conf path derivation, per-key load with strict parsing, clamping
+// imgui2.gui.conf path derivation, per-key load with strict parsing, clamping
 // and fallbacks, and the save-side guards.
 //
 // Compiles the helper TU directly and links only the standard library (no
@@ -10,8 +10,9 @@
 // exits 0 if every check passes.
 //
 // Covers:
-//   - settingsPath: "imgui2.ini" -> "imgui2.conf"; "imgui2" -> "imgui2.conf";
-//     "" -> ""; ".ini" replaced only as a trailing suffix (exact case)
+//   - settingsPath: "imgui2.ini" -> "imgui2.gui.conf"; "imgui2" ->
+//     "imgui2.gui.conf"; "" -> ""; ".ini" replaced only as a trailing suffix
+//     (exact case) - the ".gui." keeps the file away from ShellPrefs' `ui.conf`
 //   - missing file -> load leaves the struct at its values (defaults)
 //   - empty iniFilename: load/save no-ops, no file touched
 //   - roundtrip and the exact on-disk bytes
@@ -19,8 +20,8 @@
 //   - per-key fallbacks: unknown keys and lines without '=' skipped;
 //     malformed/out-of-range values keep the current value; clamping
 //   - save-side guards: empty path, unwritable path
-//   - drag-end-style save with the raw ini filename lands in "<name>.conf",
-//     never "<name>.conf.conf"
+//   - drag-end-style save with the raw ini filename lands in "<name>.gui.conf",
+//     never "<name>.gui.conf.conf"
 //
 // Run headless from the repo root (scratch files land in the CWD):
 //   ./build/tui/test_settings
@@ -50,7 +51,7 @@ static int g_failures = 0;
 namespace {
 
 const char* kIniName = "test_settings.ini";
-const char* kPath = "test_settings.conf";
+const char* kPath = "test_settings.gui.conf";
 
 void writeText(const std::string& text) {
     std::FILE* f = std::fopen(kPath, "wb");
@@ -86,15 +87,15 @@ bool fileExists(const char* path) {
 } // namespace
 
 int main() {
-    // settingsPath: trailing ".ini" (exact case) -> ".conf", else append
-    CHECK(settingsPath("imgui2.ini") == "imgui2.conf");
-    CHECK(settingsPath("imgui2") == "imgui2.conf");
+    // settingsPath: trailing ".ini" (exact case) -> ".gui.conf", else append
+    CHECK(settingsPath("imgui2.ini") == "imgui2.gui.conf");
+    CHECK(settingsPath("imgui2") == "imgui2.gui.conf");
     CHECK(settingsPath("") == "");
-    CHECK(settingsPath("a/b/imgui2.ini") == "a/b/imgui2.conf");
+    CHECK(settingsPath("a/b/imgui2.ini") == "a/b/imgui2.gui.conf");
     // ".ini" only counts at the end: a name ending elsewhere keeps it and
     // appends; the suffix match is case-sensitive.
-    CHECK(settingsPath("imgui2.ini.old") == "imgui2.ini.old.conf");
-    CHECK(settingsPath("imgui2.INI") == "imgui2.INI.conf");
+    CHECK(settingsPath("imgui2.ini.old") == "imgui2.ini.old.gui.conf");
+    CHECK(settingsPath("imgui2.INI") == "imgui2.INI.gui.conf");
 
     // missing file: the struct keeps its values
     std::remove(kPath);
@@ -268,17 +269,18 @@ int main() {
     saveTuiSettings(TuiSettings{}, std::string(kPath) + "/x");
 
     // drag-end-style save: the raw ini filename is passed.
-    // The save derives the .conf path itself (pre-deriving it wrote a stray
-    // "<name>.conf.conf").
+    // The save derives the .gui.conf path itself (pre-deriving it and saving again
+    // would append a second .gui.conf, producing a stray "<name>.gui.conf.gui.conf").
     std::remove(kPath);
-    std::remove((std::string(kPath) + ".conf").c_str());
+    const std::string stray = std::string(kPath) + ".gui.conf"; // the double-derived name
+    std::remove(stray.c_str());
     {
         TuiSettings s;
         s.fontScaleMain = 2.0f;
         saveTuiSettings(s, kIniName); // raw name, as renderOptionsWindow passes it
         CHECK(fileExists(kPath));
         CHECK(readText() == "FontScaleMain=2.00\n");
-        CHECK(!fileExists((std::string(kPath) + ".conf").c_str()));
+        CHECK(!fileExists(stray.c_str()));
     }
 
     std::remove(kPath);

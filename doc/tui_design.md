@@ -334,14 +334,14 @@ glyph ranges are passed (they only matter to legacy backends); a glyph the
 font lacks renders as its fallback (`?`) glyph. Without configuration the
 rendering is exactly as before on a 1.0-scale monitor.
 
-The GUI persists view settings in `imgui2.conf`, a sibling of the imgui
+The GUI persists view settings in `imgui2.gui.conf`, a sibling of the imgui
 settings file `imgui2.ini`, with one key=value line per setting:
 `WindowWidth`, `WindowHeight` (clamped to [1, 32767]) and `FontScaleMain`
 (accepted range 0.5 - 3.0). Unknown keys are ignored and malformed values
 are rejected (the current value - normally the default - is kept), so a
 hand-edited or truncated file cannot break the GUI.
 
-Precedence is: environment variables, then `imgui2.conf`, then built-in
+Precedence is: environment variables, then `imgui2.gui.conf`, then built-in
 defaults. `LLMFUN_GUI_FONT` / `LLMFUN_GUI_FONT_SIZE` pick the BASE font and
 its pixel size; the saved `FontScaleMain` multiplies on top of whichever
 base the environment chose - the two knobs compose
@@ -350,7 +350,7 @@ a 16 px base with a saved 1.25 scale renders 20 px. `FontScaleMain` is
 changed in the GUI under View -> Options.
 
 The old window-size sibling file `<iniFilename>.win` is gone; window size is
-now stored in `imgui2.conf` (`WindowWidth` / `WindowHeight`). The first run
+now stored in `imgui2.gui.conf` (`WindowWidth` / `WindowHeight`). The first run
 after this change starts once with the default window size.
 
 The text grid instead runs markdown at 1-cell fonts (see Markdown Support),
@@ -365,7 +365,7 @@ the style metrics once (`style.ScaleAllSizes(scale)`) and sets the font scale
 per-monitor query requires GLFW 3.3+; older GLFW compiles the call out inside
 the vendored backend and reports 1.0, so the defaults stay unscaled
 (Wayland/macOS report 1.0 as well). The window size is not changed — the
-layout scales inside the existing 1280x820 window (a persisted `imgui2.conf`
+layout scales inside the existing 1280x820 window (a persisted `imgui2.gui.conf`
 size wins; one below 640x480 opens at the floor).
 
 **The resize floor is observed.** `glfwSetWindowSizeLimits()` only writes
@@ -570,11 +570,13 @@ typedef struct SessionItem {
 } SessionItem;
 
 typedef enum TuiSessionActionType {
-    TuiSessionAction_None = 0,   /* sentinel - no action (empty queue) */
-    TuiSessionAction_Select = 1, /* switch to the session */
-    TuiSessionAction_New = 2,    /* create a new session */
-    TuiSessionAction_Rename = 3, /* rename the session (title payload) */
-    TuiSessionAction_Delete = 4  /* delete the session (already confirmed) */
+    TuiSessionAction_None = 0,       /* sentinel - no action (empty queue) */
+    TuiSessionAction_Select = 1,     /* switch to the session */
+    TuiSessionAction_New = 2,        /* create a new session */
+    TuiSessionAction_Rename = 3,     /* rename the session (title payload) */
+    TuiSessionAction_Delete = 4,     /* delete the session (already confirmed) */
+    TuiSessionAction_PinToggle = 5,  /* toggle the session's pinned bit */
+    TuiSessionAction_Clone = 6       /* duplicate the session */
 } TuiSessionActionType;
 
 typedef struct SessionAction {
@@ -585,8 +587,9 @@ typedef struct SessionAction {
 ```
 
 `TuiSessionActionType` is append-only: existing values are never renumbered
-or reused, so future actions (Fork, Export, Archive, Search) extend it without
-breaking the D mapping. `tui_api.cpp` has compile-time `static_assert`s tying
+or reused, so later actions extend it without breaking the D mapping
+(`PinToggle` and `Clone` landed this way; `Fork`, `Export`, `Archive`,
+`Search` may follow). `tui_api.cpp` has compile-time `static_assert`s tying
 the C enum to the internal C++ mirror (`SessionActionType` in `tui.h`).
 
 `SessionItem` above is the **generation-2** shape, and this section documents
@@ -597,8 +600,10 @@ one. `tui_api.h` carries the authoritative layout and the degradation rules
 ("0 = unknown time, flags 0 = no run, a zeroed item is legal"), and
 `test_tui_api_v4` pins every offset, the round-trip and the fields the ABI must
 *not* carry. `flags` bit 0 is `TuiSessionFlag_Running`, set for the active
-session only while the actor has a run in flight; unread and pinned never cross
-the ABI because they are UI-local facts, not store facts (FR-03, D-19).
+session only while the actor has a run in flight; bit 1 is
+`TuiSessionFlag_Pinned`, the user's pin (persisted D-side in `state.json`).
+`unread` never crosses the ABI because it is a UI-local fact, not a store
+fact (D-UNREAD).
 
 New functions:
 
@@ -726,7 +731,9 @@ struct ChatTabSessionPanel {
 ```
 
 `SessionEntry` is one snapshot row (`id`, `title`, `preview`,
-`messageCount`, `isActive`); the internal `SessionAction` mirrors the C
+`messageCount`, `isActive`); the v5 workbench appended `updatedAtMs` (date
+grouping) and `flags` (bit 0 running, bit 1 pinned — see the Session API
+section). The internal `SessionAction` mirrors the C
 `SessionAction` (type + sessionId + title).
 
 ### Mutual Exclusion with the Pipeline Panel

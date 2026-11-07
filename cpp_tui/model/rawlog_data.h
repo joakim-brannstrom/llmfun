@@ -61,6 +61,12 @@ struct RawLogRecord {
     std::string function;         ///< `LogEntry.funcName`
     std::string file;             ///< `LogEntry.file`
     std::string actionPayload;    ///< what the action would act on (turn/tool id)
+    /// The D-side log stamp every record D sends, so a
+    /// gap between consecutive stamps means records were lost in transport. `0` = unstamped
+    /// (the C++ side synthesized itself).
+    int seq = 0;
+    /// True for the rows that mark a seq gap rather than report a log line
+    bool loss = false;
 };
 
 /// The ring, seen by the Raw Log: a borrowed view, never a copy (R-08: one sink, one store).
@@ -79,12 +85,45 @@ struct RawLogRing {
     const std::deque<RawLogRecord>* records = nullptr;
     std::size_t dropped = 0;
     std::size_t arrivals = 0;
+    /// Every seq before the oldest survivor (0 when the ring never wrapped or the oldest
+    /// survivor is unstamped)
+    std::size_t headN = 0;
+    /// The seqs missing between consecutive stamped survivors
+    std::size_t interiorGapSum = 0;
+    /// The sum of the Ns the queue-drop warnings reported, one per accepted warning.
+    std::size_t queueDropNs = 0;
 
     std::size_t size() const { return records != nullptr ? records->size() : 0; }
     bool empty() const { return size() == 0; }
     /// The `index`-th record, oldest first, or nullptr when the index is outside the ring.
     const RawLogRecord* at(std::size_t index) const;
 };
+
+/// The C++-side marker in `RawLogRecord::function` for a placeholder row the accept path
+/// inserts to mark a seq gap (`-- N records lost here --`).
+inline constexpr char kRawLogSeqGapMarker[] = "seq-gap";
+
+/// The C++-side spelling of the function name D stamps on its queue-drop warnings.
+inline constexpr char kRawLogQueueDropMarker[] = "queue-drop";
+
+/// The interior placeholder's text: `-- N records lost here --`.
+std::string rawLogGapText(std::int64_t n);
+
+/// The folded queue-drop warning's text: `-- N records lost here (D-side queue drop) --`.
+std::string rawLogQueueDropText(std::int64_t n);
+
+/// Every seq before the oldest survivor: the head placeholder's N, derived from the stamps
+/// rather than remembered, so the ring's current contents always agree with it.
+///
+/// `dropped > 0` means the ring wrapped; the count is then the oldest survivor's stamp minus
+/// one.
+std::size_t rawLogHeadGap(const std::deque<RawLogRecord>& records, std::size_t dropped);
+
+/// The seqs missing between consecutive stamped survivors, summed over the ring in order.
+/// A pair is skipped when either side is unstamped or when the stamps go backwards
+/// or repeat. A loss placeholder
+/// carries the seq of the record it precedes.
+std::size_t rawLogInteriorGapSum(const std::deque<RawLogRecord>& records);
 
 /// The level's word, in the archive's spelling: `trace`, `debug`, `info`, `warn`, `error`.
 ///
@@ -102,23 +141,14 @@ std::string rawLogLevelField(int level);
 /// The record's row: `HH:MM:SS.mmm level module.function file:line message[ action N payload]`.
 ///
 /// Every optional part is dropped when the record does not carry it, and the separators go with
-/// it - a record with no metadata prints `12:00:00.000 info  something happened`, not a row of
-/// stray spaces. The clock is *local* time, the same clock Activity's rows use; a saved file
-/// therefore reads in the user's own time, and the goldens pin `TZ=UTC` so a capture in another
-/// zone differs only when the code does.
-///
-/// The action id and its payload are the *last* segment (design §"Projection": "Raw Log = all
-/// fields" - the action is what a retryable error is retryable by, and a row that hides it makes
-/// two errors look identical). They are part of the row text rather than a separate accessor so
-/// the filter and `Save` inherit them without a second implementation.
+/// it - a record with no metadata prints `12:00:00.000 info  something happened`. The clock is
+/// *local* time.
 std::string rawLogRowText(const RawLogRecord& record);
 
 /// The detail's continuation lines, prefixed with two spaces and the design's continuation mark.
 ///
 /// The raw text is split on `\n` (a `\r` before it is dropped, so a CRLF producer does not leave
-/// a stray glyph); an empty detail answers no detail lines. A record with an action gets one
-/// extra line for the id and payload, so a narrow row that dropped the action suffix still keeps
-/// it reachable by expanding the record.
+/// a stray glyph).
 std::vector<std::string> rawLogDetailLines(const RawLogRecord& record);
 
 /// The smallest severity the surface shows, from the `UiLog` preference (D-RAWLOG).

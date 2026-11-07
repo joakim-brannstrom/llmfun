@@ -248,7 +248,7 @@ The decision logic is the pure helper `decideDeleteCommand(pendingId, resolvedId
 
 ## TUI Sidebar
 
-The TUI has a session sidebar: a left panel listing all sessions (id, title, preview, message count, active marker) with switch / new / rename / delete operated from the panel. Every sidebar action funnels into the existing `AgentApp` methods (`switchToSession`, `doCreateSession`, `doDeleteSession`) or the store directly (`sessionStore.rename`), preserving the three-layer architecture (D actor thread -> C API -> C++ imtui renderer) and its message-passing style.
+The TUI has a session sidebar: a left panel listing all sessions (id, title, preview, message count, active marker) with switch / new / rename / delete / pin-toggle / clone operated from the panel. Every sidebar action funnels into the existing `AgentApp` methods (`switchToSession`, `doCreateSession`, `doDeleteSession`) or the store directly (`sessionStore.rename`, `sessionStore.clone`), preserving the three-layer architecture (D actor thread -> C API -> C++ imtui renderer) and its message-passing style.
 
 ### Panel UI
 
@@ -274,14 +274,19 @@ sidebar interaction:
   UI thread (after ui.render()): ui.pollSessionAction() polls at most one
     action (tuiIsSessionActionReady + tuiGetSessionAction), stashes it
   Next loop iteration (after draining ui.userQuery):
-    send(ownerTid, UiUserQuery(query))                 -- non-empty query first
-    send(ownerTid, UiSessionSelect|New|Rename|Delete)  -- click after
-  AgentApp run() receive loop:
-    UiSessionSelect -> doSidebarSelect  -> switchToSession(id)
-    UiSessionNew    -> doSidebarNew     -> doCreateSession()
-    UiSessionRename -> doSidebarRename  -> sessionStore.rename(id, title)
-    UiSessionDelete -> doSidebarDelete  -> doDeleteSession(id)
-    each mutating callee ends with a sendSessionList() refresh
+    listener.userQuery(query)                        -- non-empty query first
+    listener.sessionSelect|New|Rename|Delete|        -- click after
+      PinToggle|Clone
+  TUIListener dispatch (implemented by the AgentApp actor):
+    sessionSelect    -> doSidebarSelect    -> switchToSession(id)
+    sessionNew       -> doSidebarNew       -> doCreateSession()
+    sessionRename    -> doSidebarRename    -> sessionStore.rename(id, title)
+    sessionDelete    -> doSidebarDelete    -> doDeleteSession(id)
+    sessionPinToggle -> doSidebarPinToggle -> flip llmConf.pinnedChatSessions
+                       (the pin set persisted in state.json), saved eagerly
+    sessionClone     -> doSidebarClone     -> sessionStore.clone(id), then
+                       switchToSession(cloneId)
+    each mutating callee ends with exactly one sendSessionList() refresh
 ```
 
 The diagram omits two UI-thread gates: the drained query is sent only when
@@ -289,15 +294,19 @@ its stripped form is non-empty, and the exact raw string `/stop` is
 intercepted by the UI thread itself (`stopAgent()`) and never sent to the
 agent. Both gates predate the sidebar and are unchanged.
 
-The new D messages live in `source/llm/tui/package.d` (module `llm.tui`):
+The inbound snapshot lives in `source/llm/tui/package.d` (module `llm.tui`),
+the outbound actions are dispatched through the `TUIListener` interface in the
+same module:
 
 | Direction | Message | Payload |
 |-----------|---------|---------|
-| D -> UI | `UiSessionList` | `UiSessionItem[]` (id, title, preview, messageCount, isActive, updatedAtMs, flags); immutable for `std.concurrency` send. `updatedAtMs` is `SessionMeta.updatedAt * 1000` (0 = unknown) and `flags` bit 0 is the only bit that crosses (`running`, set for the active session while the actor has a run on the stack - `AgentApp.runInFlight`, not a parameter of the send); unread and pinned stay UI-local |
-| UI -> D | `UiSessionSelect` | `SessionId id` |
-| UI -> D | `UiSessionNew` | none |
-| UI -> D | `UiSessionRename` | `SessionId id`, `string title` |
-| UI -> D | `UiSessionDelete` | `SessionId id` |
+| D -> UI | `UiSessionList` | `UiSessionItem[]` (id, title, preview, messageCount, isActive, updatedAtMs, flags); immutable for `std.concurrency` send. `updatedAtMs` is `SessionMeta.updatedAt * 1000` (0 = unknown) and `flags` carries the bits that cross: bit 0 is `running` (set for the active session while the actor has a run on the stack - `AgentApp.runInFlight`, not a parameter of the send) and bit 1 is `pinned` (from the pin set persisted in `state.json`). Unread stays UI-local |
+| UI -> D | `TUIListener.sessionSelect` | `SessionId id` |
+| UI -> D | `TUIListener.sessionNew` | none |
+| UI -> D | `TUIListener.sessionRename` | `SessionId id`, `string title` |
+| UI -> D | `TUIListener.sessionDelete` | `SessionId id` |
+| UI -> D | `TUIListener.sessionPinToggle` | `SessionId id` |
+| UI -> D | `TUIListener.sessionClone` | `SessionId id` |
 
 The action poll mirrors the existing submit-query poll (`tuiIsSubmitReady` / `tuiGetSubmitQuery` / `tuiResetSubmit`): the C++ side owns UI state, the D side polls and forwards, the agent thread owns semantics. `pollSessionAction` frees every returned string exactly once with `String_Free` (a no-op on the empty-queue `None` sentinel's `{NULL, 0}` fields).
 
@@ -327,6 +336,7 @@ While the agent is busy (`readyStatus == false`), sidebar actions are guard-and-
 - The rename box binds to **its row** (`renameRowId`; any row via the menu — no follow-active rebind) and the action carries that id; D renames that id regardless of the current active session, so a rename can never hit the wrong session if a switch raced in between. Menu `Rename` on row B while the box is open on row A retargets the box to B and reinitializes its buffer, discarding A's draft (logged). That branch is defensive-only with a mouse: opening another row's menu first deactivates the open input, so the focus-loss terminate fires before the popup's Rename item can run — it is kept as a safety net. Empty/whitespace-only titles are rejected in the panel and again in D; there is no length cap anywhere (matching `/rename` and `SessionStore.rename`). The panel buffer holds 256 bytes; a title that does not fit initializes the buffer empty, so a blind Enter is rejected as empty until a new title is typed — no silent truncation. The buffer is (re)initialized only on open/retarget, never per frame.
 - Delete is single-press via the menu: clicking `Delete` queues `{Delete, id}` immediately (guard-and-skipped while busy) — no armed/pending state exists in the C++ panel anymore. The slash-command `/delete` keeps its own two-step confirmation state machine (`decideDeleteCommand` and the agent-side `pendingDeleteId`, untouched), and every sidebar handler still clears the agent-side `pendingDeleteId` on entry, so a stale slash confirmation can never fire against a session that was switched away from, renamed, or deleted via the sidebar.
 - The workbench rail (task 23) says the same thing in its own view: the row menu's `Delete` and the `d` row key queue `{Delete, id}` in one press, with no confirmation anywhere. `d` acts only on the row under the pointer or the row that holds the keyboard-nav focus (`targetRow()`); there is no fallback to the active session, so a stray `d` does nothing. `Esc` has no delete step — the rail's chain is "close the rename box, then clear the search". The `/delete` slash command keeps its own two-step rule (above) because it is a typed command, not an aimed click.
+- Pin toggle and clone follow the same aimed-row shape: the row menu has `Pin`/`Unpin` and `Clone` items, and the rail's `p` row key toggles the pin. A pin is the agent's state, not a workbench preference: the persisted pin set is `llmConf.pinnedChatSessions` in `state.json` (saved eagerly on toggle), and the toggle queues the action through the one registry entry like the other sidebar mutations - D applies it and sends the refreshed snapshot, so the pinned bit comes back as `SessionItem.flags` bit 1. Clone duplicates the session in the store under a fresh id (same title and messages, recomputed counts, untouched original) and makes the clone the active session via `switchToSession`. The single-send refresh rule applies to both paths, so neither sends the list twice.
 - Deleting the active session goes through the same fallback (most recently updated remaining session, else a fresh one); deleting a non-active session removes it and refreshes without switching.
 
 ### Refresh Rule
@@ -335,9 +345,9 @@ The sidebar snapshot is a full replace: D sends the complete ordered list (`Sess
 
 1. At startup, after the message replay in `run()`.
 2. After every completed query, next to `uiMsg.ready()` (covers `/clear`, since `commitActiveSession` bumps `updatedAt` and recomputes counts/preview on every save).
-3. At the end of every mutation chain: `activateSession` (success path) / `switchToSession` / `doRenameSession` / `doDeleteSession` (non-active path); `doCreateSession` sends via the `switchToSession` -> `activateSession` chain. `activateSession` deliberately sends nothing on its load-failure path, and `doDeleteSession` relies on `activateSession` for the active-delete path.
+3. At the end of every mutation chain: `activateSession` (success path) / `switchToSession` / `doRenameSession` / `doDeleteSession` (non-active path); `doCreateSession` sends via the `switchToSession` -> `activateSession` chain. `activateSession` deliberately sends nothing - nothing changed, the same gate as delete).
 
-The mutating callees send the list themselves; a `UiSession*` handler sends only when its path does not end in a sending callee — no double sends per sidebar action. `UiSessionRename` goes straight to the store (there is no active-only rename callee for an arbitrary id), so `doSidebarRename` sends the refreshed list on both the success and the error path. Slash-triggered mutations are exempt from the single-send rule: they arrive as `UiUserQuery`, so the callee send and the receive-loop refresh may both fire in one pass. Idempotent (C++ full replace), accepted.
+The mutating callees send the list themselves; a sidebar handler sends only when its path does not end in a sending callee - no double sends per sidebar action. `doSidebarRename` goes straight to the store (there is no active-only rename callee for an arbitrary id), so it sends the refreshed list on both the success and the error path. `doSidebarClone` keeps the same rule on its unknown-id failure path. Slash-triggered mutations are exempt from the single-send rule: they arrive as user queries, so the callee send and the receive-loop refresh may both fire in one pass. Idempotent (C++ full replace), accepted.
 
 ### C API
 

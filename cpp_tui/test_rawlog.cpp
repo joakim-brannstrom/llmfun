@@ -978,6 +978,151 @@ void checkRememberedNothing() {
           "neither are the two view modes");
 }
 
+// 4b. The seq-gap accounting.
+
+/// A record with a D-side stamp: `index = seq` keeps the clocks ordered with the stamps.
+model::RawLogRecord stampedRecord(int level, const std::string& message, int seq) {
+    model::RawLogRecord out = record(level, message, seq);
+    out.seq = seq;
+    return out;
+}
+
+/// The equation's remainder: `headN + interiorGapSum - dropped - queueDropNs`. Zero when every
+/// missing seq was explained by a queue-drop warning; anything else is the diagnostic the
+/// surfaces can print (a positive remainder is a loss the stamps prove but nothing explained).
+long long remainderOf(const tui::TuiState& state) {
+    const long long head =
+        static_cast<long long>(model::rawLogHeadGap(state.logRecords, state.droppedRecords));
+    const long long interior =
+        static_cast<long long>(model::rawLogInteriorGapSum(state.logRecords));
+    return head + interior - static_cast<long long>(state.droppedRecords) -
+           static_cast<long long>(state.queueDropRecords);
+}
+
+void checkGapAccounting() {
+    // A forced gap with no warning: the hole becomes a placeholder row, and the remainder is
+    // the loss the stamps prove but nothing explained.
+    tui::TuiState state = workbenchState();
+    tui::tuiAddLogRecord(state, stampedRecord(model::kRawLogLevelInfo, "one", 1));
+    tui::tuiAddLogRecord(state, stampedRecord(model::kRawLogLevelInfo, "two", 2));
+    tui::tuiAddLogRecord(state, stampedRecord(model::kRawLogLevelInfo, "five", 5));
+    check(state.logRecords.size() == 4, "a forced gap becomes a placeholder row");
+    const model::RawLogRecord& placeholder = state.logRecords[2];
+    check(placeholder.loss && placeholder.function == model::kRawLogSeqGapMarker,
+          "the placeholder is a loss row with the gap marker");
+    check(placeholder.message == model::rawLogGapText(2), "the placeholder names the hole");
+    check(model::rawLogRowText(placeholder) == placeholder.message,
+          "a loss row's text is its message alone");
+    check(state.logRecords[0].message == "one" && state.logRecords[1].message == "two" &&
+              state.logRecords[3].message == "five",
+          "the real rows are untouched");
+    check(state.lastStampedSeq == 5, "the watermark moved to the new stamp");
+    check(remainderOf(state) == 2, "the unexplained gap is the remainder");
+
+    // A queue-drop warning that explains exactly the gap: folded into one loss row, and the
+    // equation balances.
+    tui::TuiState folded = workbenchState();
+    tui::tuiAddLogRecord(folded, stampedRecord(model::kRawLogLevelInfo, "one", 1));
+    tui::tuiAddLogRecord(folded, stampedRecord(model::kRawLogLevelInfo, "two", 2));
+    model::RawLogRecord warning =
+        stampedRecord(model::kRawLogLevelWarn,
+                      "log queue dropped 2 records (the frame loop did not drain in time)", 5);
+    warning.function = model::kRawLogQueueDropMarker;
+    tui::tuiAddLogRecord(folded, warning);
+    check(folded.logRecords.size() == 3, "an explained warning folds into one loss row");
+    const model::RawLogRecord& row = folded.logRecords.back();
+    check(row.loss && row.message == model::rawLogQueueDropText(2),
+          "the fold names the hole and its source");
+    check(row.function == model::kRawLogQueueDropMarker && row.level == model::kRawLogLevelWarn,
+          "the fold keeps the warning's level");
+    check(folded.queueDropRecords == 2, "the warning's N is what the D-side sum counts");
+    check(remainderOf(folded) == 0, "an explained gap balances");
+
+    // A warning that claims a different N than the stamps prove: nothing folds, both rows
+    // show, and the remainder is the discrepancy itself (positive: loss without an excuse).
+    tui::TuiState mismatch = workbenchState();
+    tui::tuiAddLogRecord(mismatch, stampedRecord(model::kRawLogLevelInfo, "one", 1));
+    tui::tuiAddLogRecord(mismatch, stampedRecord(model::kRawLogLevelInfo, "two", 2));
+    model::RawLogRecord liar =
+        stampedRecord(model::kRawLogLevelWarn,
+                      "log queue dropped 5 records (the frame loop did not drain in time)", 6);
+    liar.function = model::kRawLogQueueDropMarker;
+    tui::tuiAddLogRecord(mismatch, liar);
+    check(mismatch.logRecords.size() == 4, "a miscounted warning folds nothing");
+    check(mismatch.logRecords[2].message == model::rawLogGapText(3),
+          "the hole shows at its own size");
+    check(mismatch.logRecords[3].message == liar.message, "and the warning keeps its own wording");
+    check(mismatch.queueDropRecords == 5, "the claimed N is summed as claimed");
+    check(remainderOf(mismatch) == -2, "the discrepancy is the diagnostic");
+
+    // A duplicate stamp: accepted as a normal record, no gap logic, and the watermark stays
+    // put so the next in-order stamp does not look like a gap.
+    tui::TuiState dup = workbenchState();
+    tui::tuiAddLogRecord(dup, stampedRecord(model::kRawLogLevelInfo, "one", 1));
+    tui::tuiAddLogRecord(dup, stampedRecord(model::kRawLogLevelInfo, "two", 2));
+    tui::tuiAddLogRecord(dup, stampedRecord(model::kRawLogLevelInfo, "three", 3));
+    tui::tuiAddLogRecord(dup, stampedRecord(model::kRawLogLevelInfo, "three again", 3));
+    tui::tuiAddLogRecord(dup, stampedRecord(model::kRawLogLevelInfo, "four", 4));
+    check(dup.logRecords.size() == 5, "a duplicate is accepted as a normal record");
+    bool anyLoss = false;
+    for (const model::RawLogRecord& r : dup.logRecords)
+        anyLoss = anyLoss || r.loss;
+    check(!anyLoss, "no placeholder follows a duplicate");
+    check(dup.lastStampedSeq == 4, "the watermark did not move backwards");
+    check(remainderOf(dup) == 0, "and the ring accounts clean");
+
+    // Priming: a state created mid-process cannot know what D logged before it existed - the
+    // first stamp is a starting point, not a hole.
+    tui::TuiState primed = workbenchState();
+    tui::tuiAddLogRecord(primed, stampedRecord(model::kRawLogLevelInfo, "late join", 500));
+    check(primed.logRecords.size() == 1, "the first stamp is a starting point, not a hole");
+    check(primed.lastStampedSeq == 500, "the watermark primed at the first stamp");
+    check(remainderOf(primed) == 0, "and priming explains itself");
+
+    // Unstamped records (seq 0) flow through unchanged and never start the watermark's gap
+    // logic behind a number that is not a position.
+    tui::TuiState legacy = workbenchState();
+    tui::tuiAddLogRecord(legacy, record(model::kRawLogLevelInfo, "pre-stamp", 0));
+    tui::tuiAddLogRecord(legacy, stampedRecord(model::kRawLogLevelInfo, "stamped", 1));
+    check(legacy.logRecords.size() == 2 && !legacy.logRecords[0].loss,
+          "an unstamped record flows through unchanged");
+    check(legacy.lastStampedSeq == 1, "the watermark starts at the first stamp");
+    check(remainderOf(legacy) == 0, "and no gap was invented");
+
+    // The wrap: a placeholder the FIFO evicts is not counted as dropped - nothing arrived, so
+    // losing the marker loses nothing. The fill runs far enough that the placeholder itself is
+    // the third eviction (one, two, then the placeholder): the `!placeholder` branch is
+    // exercised, and the two real records carry all of `droppedRecords`.
+    tui::TuiState wrap = workbenchState();
+    tui::tuiAddLogRecord(wrap, stampedRecord(model::kRawLogLevelInfo, "one", 1));
+    tui::tuiAddLogRecord(wrap, stampedRecord(model::kRawLogLevelInfo, "two", 2));
+    tui::tuiAddLogRecord(wrap, stampedRecord(model::kRawLogLevelInfo, "after gap", 5));
+    for (int seq = 6; seq <= 5004; ++seq)
+        tui::tuiAddLogRecord(wrap, stampedRecord(model::kRawLogLevelInfo, "fill", seq));
+    check(wrap.logRecords.front().function != model::kRawLogSeqGapMarker,
+          "premise: the placeholder itself was the eviction that just happened");
+    check(wrap.droppedRecords == 2,
+          "the placeholder's eviction is not a drop (the two real records are)");
+    check(model::rawLogHeadGap(wrap.logRecords, wrap.droppedRecords) == 4,
+          "the head gap counts the evicted and the never-arrived alike, placeholder evicted");
+    check(model::rawLogInteriorGapSum(wrap.logRecords) == 0,
+          "the interior gap moved into the head, not into both");
+    check(remainderOf(wrap) == 2, "and the remainder is stable across the wrap");
+
+    // An unstamped oldest survivor proves nothing came before it: even a wrapped ring
+    // (dropped > 0) claims no head gap, because the stamps cannot answer for seqs the
+    // store never saw stamped.
+    tui::TuiState allUnstamped = workbenchState();
+    for (int i = 0; i <= 5002; ++i)
+        tui::tuiAddLogRecord(allUnstamped, record(model::kRawLogLevelInfo, "plain", i));
+    check(allUnstamped.droppedRecords > 0, "premise: the all-unstamped ring wrapped");
+    check(allUnstamped.logRecords.front().seq == 0, "premise: the oldest survivor is unstamped");
+    check(model::rawLogHeadGap(allUnstamped.logRecords, allUnstamped.droppedRecords) == 0,
+          "an unstamped oldest survivor claims no head gap");
+    check(allUnstamped.queueDropRecords == 0,
+          "and nothing is claimed for seqs no stamp ever backed");
+}
+
 // ---------------------------------------------------------------------------
 // 5. The goldens
 // ---------------------------------------------------------------------------
@@ -987,24 +1132,52 @@ struct Scene {
     const char* filter;
     bool paused;
     bool records;
+    bool gap; // the loss scene: a wrapped ring with a placeholder
     int w, h;
 };
 
 std::vector<Scene> scenes() {
     return {
-        {"rawlog-follow", "", false, true, 100, 30},
-        {"rawlog-filtered", "read_file", false, true, 100, 30},
-        {"rawlog-paused", "", true, true, 100, 30},
-        {"rawlog-empty", "", false, false, 40, 15},
+        {"rawlog-follow", "", false, true, false, 100, 30},
+        {"rawlog-filtered", "read_file", false, true, false, 100, 30},
+        {"rawlog-paused", "", true, true, false, 100, 30},
+        {"rawlog-empty", "", false, false, false, 40, 15},
+        {"rawlog-gap", "", false, true, true, 100, 30},
     };
+}
+
+/// The loss scene's ring content: stamps with the ring already wrapped (`dropped = 2`),
+/// an interior placeholder marking the two seqs that never arrived, and no queue-drop warning -
+/// the golden pins the head row, the placeholder row and their dim ink against the real rows.
+std::deque<model::RawLogRecord> gapRecords() {
+    std::deque<model::RawLogRecord> records;
+    model::RawLogRecord first = record(model::kRawLogLevelInfo, "session opened", 0);
+    first.seq = 3;
+    records.push_back(first);
+    model::RawLogRecord placeholder;
+    placeholder.timestampMs = kFixtureEpochMs;
+    placeholder.message = model::rawLogGapText(2);
+    placeholder.function = model::kRawLogSeqGapMarker;
+    placeholder.seq = 6; // the virtual slot: the seq of the record it precedes
+    placeholder.loss = true;
+    records.push_back(placeholder);
+    model::RawLogRecord warned = record(model::kRawLogLevelWarn, "ui.conf is read-only", 2);
+    warned.seq = 6;
+    records.push_back(warned);
+    model::RawLogRecord failed = record(model::kRawLogLevelError, "read_file failed", 3);
+    failed.action = TuiLogAction_Retry;
+    failed.seq = 7;
+    records.push_back(failed);
+    return records;
 }
 
 std::string goldenText(const Scene& scene) {
     g_w = scene.w;
     g_h = scene.h;
     const std::deque<model::RawLogRecord> records =
-        scene.records ? mixedRecords() : std::deque<model::RawLogRecord>();
-    const model::RawLogRing ring = ringOf(records);
+        scene.gap ? gapRecords()
+                  : (scene.records ? mixedRecords() : std::deque<model::RawLogRecord>());
+    const model::RawLogRing ring = ringOf(records, scene.gap ? 2u : 0u);
     const ui::Rect rect = surfaceRect(scene.w, scene.h);
     views::RawLogState state;
     state.open = true;
@@ -1114,6 +1287,7 @@ int main(int argc, char** argv) {
     checkOverlayStack();
     checkAbi();
     checkRememberedNothing();
+    checkGapAccounting();
     checkGoldens(update);
 
     ImGui::DestroyContext();

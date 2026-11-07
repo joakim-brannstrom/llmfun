@@ -298,7 +298,7 @@ struct Inbound {
         record.action = action;
         record.timestampMs = kFixtureEpochMs;
         record.line = 412;
-        record.reserved = 0;
+        record.seq = 0;
         record.message = String{message.data(), message.size()};
         record.detail = String{detail.data(), detail.size()};
         record.module = String{module.data(), module.size()};

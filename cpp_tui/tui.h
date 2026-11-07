@@ -210,6 +210,8 @@ enum class SessionActionType : int {
     New = 2,
     Rename = 3,
     Delete = 4,
+    PinToggle = 5,
+    Clone = 6,
 };
 
 // One queued sidebar action (UI -> D). Mirrors the C SessionAction
@@ -236,14 +238,20 @@ struct SessionEntry {
     size_t messageCount{0};
     bool isActive{false};
     int64_t updatedAtMs{0};
-    /// Bit 0 = a run is in flight for this session. `unread` and `pinned` are
-    /// UI-local and never cross the ABI (FR-03, D-19).
+    /// Bit 0 = a run is in flight, bit 1 = the user pinned the session
+    /// (`TuiSessionFlag_Running` / `TuiSessionFlag_Pinned`; the pin is the
+    /// agent's persisted pin set in `state.json`, applied D-side).
     int flags{0};
 };
 
 /// The `SessionEntry::flags` bit that says a run is in flight (tui_api.h's
 /// `TuiSessionFlag_Running`; the C API layer static_asserts the two agree).
 inline constexpr int kSessionFlagRunning = 1;
+
+/// The `SessionEntry::flags` bit that says the user pinned the session
+/// (`tui_api.h`'s `TuiSessionFlag_Pinned`; the C API layer static_asserts the
+/// two agree).
+inline constexpr int kSessionFlagPinned = 2;
 
 /// The session list the rail draws, and the queue the UI->D hand-off goes through.
 ///
@@ -324,30 +332,15 @@ struct TuiState {
     /// knows its profile name - and the debounced write runs on every frame after it.
     bool uiConfLoaded{false};
 
-    /// The pins were pruned against a complete session snapshot (D-UI-CONF): the first non-empty
-    /// snapshot is the moment the id set is known, and pruning earlier would drop the pins of
-    /// sessions that are merely still loading. One-shot, like the load above.
-    bool uiConfPinsPruned{false};
-
-    /// How many log records this state has ever accepted (`tuiAddLogRecord` is the only
-    /// writer; the two-string `tuiAddLogMessage` goes through it). A monotonic *counter*, not
-    /// a store: the record ring is bounded, so "the ring got shorter" cannot tell a new record
-    /// from an eviction, and the inspector's unread badge has to count arrivals - it reads
-    /// `UiState::unreadActivity` since task 31, which the Activity projection increments from
-    /// this same arrival.
+    /// How many log records this state has ever accepted.
+    ///
+    /// Not the same number as `lastStampedSeq` below, this is the *arrival* counter, while
+    /// that one is the D-side stamp watermark the gap logic reads.
     std::size_t logRecordSeq{0};
 
-    /// v4 backend ownership: attached by the C API's tuiInit(), torn down by
-    /// tuiDestroyState() before this state is freed; null = backend-less
-    /// (legal and inert — headless harnesses never attach one).
     std::unique_ptr<Backend> backend;
-    /// ImGui context created by tuiInit() for this state; null = none.
-    /// tuiDestroyState() destroys exactly this context and never a context it
-    /// did not create (headless harnesses keep their own).
     ImGuiContext* ownedContext = nullptr;
 
-    /// GUI view settings (font scale, persisted window size); owned here so
-    /// the Options window and the GUI backend share one authoritative copy.
     TuiSettings settings;
     /// Options window open (View -> Options); guards stacking duplicates.
     bool optionsOpen = false;
@@ -366,11 +359,6 @@ struct TuiState {
     /// (`model::ThreadView::Offline`) and the composer is disabled with a
     /// tooltip. A flag, not a string: the UI never parses an error sentence to
     /// find this out.
-    ///
-    /// Trigger (task 39, D-STATUS): `tuiSetRuntimeStatus` sets it when the run's phase is
-    /// `offline`, and clears it when the status is cleared - the numbers are the only source
-    /// that can say it, and no message text is ever matched. A harness sets it directly for the
-    /// offline scenes (the headless smoke test does).
     bool offline{false};
 
     /// The unknown phase ordinal `tuiSetRuntimeStatus` last complained about, whether it has
@@ -399,6 +387,12 @@ struct TuiState {
     /// Records the ring had to drop because a bound was reached (never silently: the Raw
     /// Log draws `N records dropped` and an error drop raises one Activity error).
     size_t droppedRecords = 0;
+
+    /// The highest D-side log stamp
+    std::int32_t lastStampedSeq = 0;
+
+    /// The sum of the Ns D's queue-drop warnings have reported
+    std::size_t queueDropRecords = 0;
     /// The archive file (`tuiSetLogging`), opened lazily by the first record a session
     /// archives and closed by `tuiSetLogging(false)` or by the state's destruction. One handle
     /// for the whole run: an archive write must not cost one `fopen` per record, and a failed
@@ -498,11 +492,11 @@ struct TuiState {
     views::RawLogState rawLog;
 
     /// The settings sheet's state (views/settings.h, task 34). Named `settingsSheet` and not
-    /// `settings`: `TuiState::settings` is the `TuiSettings` of `imgui2.conf` (the font scale and
-    /// the window size), and the sheet *edits* that struct through
-    /// `renderSettings()` - one name for the surface and one for the value keeps the two apart.
-    /// The open flag lives here rather than on `UiState`: it is a mode of this process, never a
-    /// preference, and `ui.conf` has no key for it.
+    /// `settings`: `TuiState::settings` is the `TuiSettings` of `imgui2.gui.conf` (the font scale
+    /// and the window size), and the sheet *edits* that struct through `renderSettings()` - one
+    /// name for the surface and one for the value keeps the two apart. The open flag lives here
+    /// rather than on `UiState`: it is a mode of this process, never a preference, and `ui.conf`
+    /// has no key for it.
     views::SettingsState settingsSheet;
 
     /// The help page's state (views/help.h, task 42): its query, its derived rows and the scroll
@@ -710,7 +704,7 @@ void debugMarkFrameThread(TuiState& state);
 void tuiResetFrameThread(TuiState& state);
 
 /// Set the file imgui persists its settings to (io.IniFilename); the GUI
-/// backend stores the window size in settingsPath(filename) (imgui2.ini -> imgui2.conf).
+/// backend stores the window size in settingsPath(filename).
 /// Call this before the backend attach creates the ImGui context (`tuiInit`
 /// in the v4 C API flow), which captures the name; a later call has no
 /// effect. Empty disables persistence.

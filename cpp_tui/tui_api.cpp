@@ -449,6 +449,7 @@ static ::llmfun::tui::LogRecord copyRecord(const TuiLogRecord& record) {
     out.function = stringOf(record.function);
     out.file = stringOf(record.file);
     out.actionPayload = stringOf(record.actionPayload);
+    out.seq = record.seq;
     return out;
 }
 
@@ -754,6 +755,11 @@ static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Rename) == TuiS
               "C/C++ session action enum mismatch (Rename)");
 static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Delete) == TuiSessionAction_Delete,
               "C/C++ session action enum mismatch (Delete)");
+static_assert(static_cast<int>(::llmfun::tui::SessionActionType::PinToggle) ==
+                  TuiSessionAction_PinToggle,
+              "C/C++ session action enum mismatch (PinToggle)");
+static_assert(static_cast<int>(::llmfun::tui::SessionActionType::Clone) == TuiSessionAction_Clone,
+              "C/C++ session action enum mismatch (Clone)");
 
 /* The lane list's capacity is the pipeline panel's (task 30): `model/` may not include
  * `tui.h`, so the model carries the number and this is where the two are pinned together. A
@@ -764,11 +770,13 @@ static_assert(::llmfun::tui::model::kAgentLaneMax == ::llmfun::tui::ChatTabLeftP
               "the Agents tab's lane capacity must match the pipeline's MaxAgents");
 
 /* Same linkage for the v5 session-row flags (task 24): `SessionItem::flags` is a
- * bit field, not an enum, so the two spellings are pinned with a static_assert
- * on the one bit that exists rather than by an enum mirror.
+ * bit field, not an enum, so the two spellings are pinned with static_asserts
+ * on the bits that exist rather than by an enum mirror.
  */
 static_assert(::llmfun::tui::kSessionFlagRunning == TuiSessionFlag_Running,
               "C/C++ session row flag mismatch (Running)");
+static_assert(::llmfun::tui::kSessionFlagPinned == TuiSessionFlag_Pinned,
+              "C/C++ session row flag mismatch (Pinned)");
 
 /* Session sidebar */
 

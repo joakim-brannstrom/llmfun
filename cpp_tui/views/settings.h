@@ -31,7 +31,7 @@
 /// nothing here is a second way to write a file. The two persisted groups keep their owners -
 /// the send key and the Raw Log level live in `model::ShellPrefs` (`ui.conf`, through the
 /// debounced write the frame already runs), the font scale in `TuiSettings`
-/// (`imgui2.conf`, the backend's file) - so the sheet edits the values
+/// - so the sheet edits the values
 /// and the debounce/file path stays exactly where tasks 20/22 put it. A change applies on the
 /// *next* frame: the layout, the metrics and every region were computed before this view ran.
 ///
@@ -65,19 +65,13 @@
 // targets include `tui.h` with no `cpp_tui/` on the include path (the inspector header's rule).
 #include "../model/settings.h"
 
-// Forward declarations, not includes (the palette header's rule): a translation unit that
-// reaches `tui.h` must not need the `cpp_tui` include root just because a view was mentioned.
 namespace llmfun::tui::ui {
 struct Metrics;
 struct Rect;
 } // namespace llmfun::tui::ui
 
 namespace llmfun::tui {
-/// The GUI's `imgui2.conf` settings (`tui_settings.h`), by reference only - see
-/// `renderSettings()`. Forward-declared for the same reason the `ui/` types are.
 struct TuiSettings;
-/// The frame's aggregate, for `returnKeyboardBelow()` - which writes the frame's own state, so it
-/// lives in the composition root and is only *declared* here.
 struct TuiState;
 } // namespace llmfun::tui
 
@@ -201,7 +195,6 @@ struct SettingsState {
     /// pointed at a file). The sheet prints `kSettingsNoProfile` for an empty one rather than an
     /// empty cell.
     std::string uiConfPath;
-    /// `imgui2.conf` - the font scale's and the window's file, which the backends own.
     std::string iniConfPath;
     /// The UI log archive is on (`TuiState::isLogActive`, `--debug-ui`).
     bool logArchive = false;
@@ -245,8 +238,6 @@ struct SettingsState {
     // --- what the sheet answers, applied by the frame ----------------------
     /// The `Close` control (the `Esc` step is the frame's, `closeTopOverlay()`).
     bool closeRequested = false;
-    /// The font scale was committed: the frame writes `imgui2.conf` once (`saveTuiSettings`),
-    /// not per frame - the value itself is already in the `TuiSettings` the view edited.
     bool fontScaleChanged = false;
 
     // --- observations, for the harness, the golden and the log -------------
@@ -289,8 +280,8 @@ void activate(SettingsState& state, model::ShellPrefs& prefs, TuiSettings& setti
 /// Draw the sheet inside `region` - the box `ui::computeShell()` answered
 /// (`ShellLayout::settingsOverlay`) - and apply the keys it owns.
 ///
-/// `prefs` and `settings` are edited *in place*: they are the one owner of each value
-/// (`model::ShellPrefs` in `ui.conf`, `TuiSettings` in `imgui2.conf`), so a change is a change
+/// `prefs` and `settings` are edited *in place*: they are the one owner of each value,
+/// so a change is a change
 /// to the thing the rest of the frame reads, and the frame's own write paths carry it to disk.
 /// Nothing is written by this file.
 ///

@@ -634,14 +634,20 @@ struct AgentApp {
      * That is the documented hole in the snapshot: the store has no per-session
      * run state, and the run the actor knows about is always the active
      * session's, so any other row is left at 0 instead of guessing.
+     *
+     * `pinnedIds` sets the `pinned` flag (bit 1) on every row whose id is in
+     * the persisted pin set (`LlmConfig.pinnedChatSessions`): pinned is agent
+     * state, not `ui.conf` preference, so it crosses the ABI with the snapshot.
      */
     package static UiSessionItem[] mapSessionItems(const SessionMeta[] sessions,
-            SessionId activeId, bool activeRunning = false) @safe pure nothrow {
+            SessionId activeId, bool activeRunning = false, string[] pinnedIds = null) @safe pure nothrow {
         auto items = new UiSessionItem[sessions.length];
         foreach (i, ref const s; sessions) {
             const isActive = s.id.get == activeId.get;
+            const pinned = pinnedIds.canFind(s.id.get);
             items[i] = UiSessionItem(s.id, s.title, s.preview, s.messageCount,
-                    isActive, s.updatedAt * 1000, isActive && activeRunning ? 1 : 0);
+                    isActive, s.updatedAt * 1000, (isActive && activeRunning
+                        ? 1 : 0) | (pinned ? 2 : 0));
         }
         return items;
     }
@@ -666,7 +672,8 @@ struct AgentApp {
     package void sendSessionList() {
         if (!uiMsg.isActive())
             return;
-        auto items = mapSessionItems(sessionStore.list(), activeSession.id, runInFlight);
+        auto items = mapSessionItems(sessionStore.list(), activeSession.id,
+                runInFlight, llmConf.pinnedChatSessions);
         uiMsg.sessionList(items);
     }
 
@@ -761,10 +768,65 @@ struct AgentApp {
                 return;
             }
             doDeleteSession(id); // sends the refreshed list
+            if (llmConf.pinnedChatSessions.canFind(id.get)) {
+                llmConf.pinnedChatSessions = llmConf.pinnedChatSessions.filter!(
+                        pinned => pinned != id.get).array;
+                savePinsEagerly();
+            }
         } catch (Exception e) {
             this.sendChatMessage("error: Failed to delete session: %s.",
                     TuiChatMessageType_Assistant, e.msg);
         }
+    }
+
+    package void doSidebarPinToggle(SessionId id) {
+        pendingDeleteId = SessionId.init;
+        try {
+            if (!isValidId(id) || !sessionStore.has(id))
+                return;
+            if (llmConf.pinnedChatSessions.canFind(id.get)) {
+                llmConf.pinnedChatSessions = llmConf.pinnedChatSessions.filter!(
+                        pinned => pinned != id.get).array;
+            } else {
+                llmConf.pinnedChatSessions ~= id.get;
+            }
+            savePinsEagerly();
+            sendSessionList();
+        } catch (Exception e) {
+            logger.warningf("pin toggle refresh failed: %s", e.msg);
+        }
+    }
+
+    package void doSidebarClone(SessionId id) {
+        pendingDeleteId = SessionId.init;
+        try {
+            if (!isValidId(id)) {
+                this.sendChatMessage("error: Invalid session id '%s'. Clone rejected.",
+                        TuiChatMessageType_Assistant, id);
+                return;
+            }
+            auto result = sessionStore.clone(id);
+            if (hasValue(result)) {
+                auto cloneMeta = orElse(result, SessionMeta());
+                switchToSession(cloneMeta.id); // sends the refreshed list
+                this.sendChatMessage("Session cloned to '%s'.",
+                        TuiChatMessageType_Assistant, shortSessionId(cloneMeta.id));
+            } else {
+                // Unknown/corrupt id - error message, active session
+                // unchanged, list still refreshed below.
+                this.sendChatMessage("error: Failed to clone session '%s'.",
+                        TuiChatMessageType_Assistant, shortSessionId(id));
+                sendSessionList();
+            }
+        } catch (Exception e) {
+            this.sendChatMessage("error: Failed to clone session: %s.",
+                    TuiChatMessageType_Assistant, e.msg);
+        }
+    }
+
+    package void savePinsEagerly() @safe {
+        if (auto err = llmConf.trySaveState())
+            logger.warningf("pin persistence: state.json save failed: %s", err);
     }
 
     // TODO: make the method nothrow to ensure it never accidentally exited
@@ -1041,6 +1103,8 @@ class AppAgentActor {
         app.llmConf = readConfig(uconf.config, !app.conf_.prompt.empty,
                 uconf.noCwdConfig, uconf.trustedConfig, app.conf_.workArea).userToLlmConfig(
                 app.conf_);
+        if (app.conf_.setupDirs)
+            inheritCentralUiProfile(app.llmConf);
 
         scope SyslogTelemetry telemetrySink;
         if (app.llmConf.telemetry.syslog.enabled)
@@ -1168,6 +1232,14 @@ class AppAgentActor {
 
     void sessionDelete(SessionId id) {
         app.doSidebarDelete(id);
+    }
+
+    void sessionPinToggle(SessionId id) {
+        app.doSidebarPinToggle(id);
+    }
+
+    void sessionClone(SessionId id) {
+        app.doSidebarClone(id);
     }
 
     void uiTerminated() {

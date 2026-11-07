@@ -446,8 +446,13 @@ int main(int argc, char** argv) {
                                                 String{text.c_str(), text.size()},
                                                 makeStr("thinking..."), TuiChatMessageType_User});
                     std::string log = std::to_string(text.size());
-                    tuiAddLogMessage(state, String{summary.c_str(), summary.size()},
-                                     String{log.c_str(), log.size()});
+                    // The stamped path: every production record crosses the ABI with a
+                    // sequence number, so the Raw Log can account for what a drop removed.
+                    TuiLogRecord logRecord{};
+                    logRecord.level = TuiLogLevel_Info;
+                    logRecord.message = String{summary.c_str(), summary.size()};
+                    logRecord.detail = String{log.c_str(), log.size()};
+                    tuiAddLogRecord(state, &logRecord);
                 }
             }
             tuiResetSubmit(state);
@@ -464,7 +469,13 @@ int main(int argc, char** argv) {
             stopping.phase = 4; /* waiting */
             stopping.detail = makeStr("Stopping agent");
             tuiSetRuntimeStatus(state, &stopping);
-            tuiAddLogMessage(state, makeStr("cancel requested"), makeStr("Send/Stop button"));
+            // The stamped path: every production record crosses the ABI with a sequence
+            // number, so the Raw Log can account for what a drop removed.
+            TuiLogRecord cancelRecord{};
+            cancelRecord.level = TuiLogLevel_Info;
+            cancelRecord.message = makeStr("cancel requested");
+            cancelRecord.detail = makeStr("Send/Stop button");
+            tuiAddLogRecord(state, &cancelRecord);
         }
 
         tuiBackendRender(state);

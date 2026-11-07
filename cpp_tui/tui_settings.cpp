@@ -1,4 +1,4 @@
-/// GUI view settings persistence (imgui2.conf); see tui_settings.h.
+/// GUI view settings persistence; see tui_settings.h.
 #include "tui_settings.h"
 
 // renderOptionsWindow (below) is ImGui-dependent and compiled out of the
@@ -128,8 +128,8 @@ std::string settingsPath(const std::string& iniFilename) {
     const std::string suffix = ".ini";
     if (iniFilename.size() >= suffix.size() &&
         iniFilename.compare(iniFilename.size() - suffix.size(), suffix.size(), suffix) == 0)
-        return iniFilename.substr(0, iniFilename.size() - suffix.size()) + ".conf";
-    return iniFilename + ".conf";
+        return iniFilename.substr(0, iniFilename.size() - suffix.size()) + ".gui.conf";
+    return iniFilename + ".gui.conf";
 }
 
 void loadTuiSettings(TuiSettings& settings, const std::string& iniFilename) {
@@ -236,8 +236,6 @@ void renderOptionsWindow(TuiState& state) {
             state.settings.fontScaleMain = percent / PercentPerUnit;
         }
         if (ImGui::IsItemDeactivatedAfterEdit())
-            // saveTuiSettings derives the .conf path itself - pass the raw
-            // iniFilename; pre-deriving it here wrote imgui2.conf.conf.
             saveTuiSettings(state.settings, state.iniFilename);
         ImGui::Text("%d px", static_cast<int>(ImGui::GetFontSize()));
         trackExtent();

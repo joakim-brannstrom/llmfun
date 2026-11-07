@@ -50,9 +50,8 @@ inline constexpr int kThreadWindowGroupsGui = 30;
 /// view reads and updates this struct while it draws, and the frame layer
 /// applies the *answers* at the bottom in the same frame. Nothing here is
 /// persisted: the search text and the row latches belong to the session, and
-/// the pinned set lives in `ShellPrefs` (`ui.conf`) where task 22 put it - and the file itself
-/// is the frame layer's business (`views::uiConfFrame()` / `uiConfQuit()`, task 29), so a
-/// `Ctrl+B` choice and a pin survive a restart from the frame that made them.
+/// the pin lives in the agent's `state.json`, which the snapshot's flags carry
+/// into every row.
 ///
 /// Why the model and not `views/rail.h`: a header that travels inside `tui.h`
 /// may not include `ui/` or another directory's header (see `views/topbar.h`),
@@ -124,9 +123,10 @@ struct RailState {
     bool newRequested = false; ///< queue a New
     std::string renameId;      ///< a committed rename: queue `{Rename, id, renamedTitle}`
     std::string renamedTitle;
-    std::string deleteId;        ///< delete this session (the row the user aimed at)
-    std::string pinToggleId;     ///< flip this session's pin in `ShellPrefs::pinned`
-    bool focusSearch = false;    ///< "focus search": also opens the rail when it is collapsed
+    std::string deleteId;     ///< delete this session (the row the user aimed at)
+    std::string pinToggleId;  ///< queue a `PinToggle`: the pin lives in the agent's `state.json`
+    std::string cloneId;      ///< queue a `Clone`: duplicate this session; the D side dispatches it
+    bool focusSearch = false; ///< "focus search": also opens the rail when it is collapsed
     bool escapeConsumed = false; ///< the rail took this frame's `Esc` (D-ESC: one step per press)
     /// The rail is widened *for the search*: `openRailForSearch()` set `UiState::railW`
     /// because the collapsed shape has no field, and `searchPrevRailW` is the request it
