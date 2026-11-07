@@ -875,9 +875,10 @@ void caseNonBlockingRender() {
 
 // Member detectors for "the ABI must not carry this field". `createdAt` is
 // deliberately not sent (D-SESSION-TS: grouping and relative time use the update
-// stamp only) and `unread`/`pinned` are UI-local (FR-03, D-19), so a future edit
+// stamp only) and `unread` is UI-local, so a future edit
 // that adds one of them to SessionItem fails here instead of surfacing as a rail
-// that draws a fact the store never had.
+// that draws a fact the store never had. `pinned` is checked alongside it: the
+// pin is agent state that crosses as `flags` bit 1, never as a field.
 template <typename T, typename = void> struct HasCreatedAt : std::false_type {};
 template <typename T>
 struct HasCreatedAt<T, std::void_t<decltype(&T::createdAt)>> : std::true_type {};
@@ -895,14 +896,15 @@ template <typename T> struct HasPinned<T, std::void_t<decltype(&T::pinned)>> : s
 // size is 80, and a snapshot round-trips through `tuiSetSessionList()` into
 // `SessionEntry` unchanged. It also pins the two degradation rules the rail
 // depends on: an all-zero (pre-v5-style) item is a legal snapshot, and the fields
-// that must not cross the ABI (`createdAt`, `unread`, `pinned`) do not exist on it.
+// that must not cross the ABI do not exist on it (`createdAt`, `unread` stays
+// UI-local, `pinned` rides `flags` bit 1).
 void caseSessionRowFields() {
     g_where = "case 1d: SessionItem v5 appended fields";
 
     static_assert(!HasCreatedAt<SessionItem>::value,
                   "createdAt is deliberately not sent (D-SESSION-TS)");
     static_assert(!HasUnread<SessionItem>::value && !HasPinned<SessionItem>::value,
-                  "unread/pinned are UI-local and never cross the ABI (FR-03, D-19)");
+                  "no unread field, and pinned crosses as a flags bit, not a field");
 
     static_assert(sizeof(SessionItem) == 80, "SessionItem is 80 bytes on the 64-bit ABI");
     static_assert(offsetof(SessionItem, id) == 0, "SessionItem::id keeps offset 0");
@@ -922,6 +924,9 @@ void caseSessionRowFields() {
     static_assert(TuiSessionFlag_Running == 1, "bit 0 is the running flag");
     static_assert(llmfun::tui::kSessionFlagRunning == TuiSessionFlag_Running,
                   "the C++ mirror of the running flag matches the C header");
+    static_assert(TuiSessionFlag_Pinned == 2, "bit 1 is the pinned flag");
+    static_assert(llmfun::tui::kSessionFlagPinned == TuiSessionFlag_Pinned,
+                  "the C++ mirror of the pinned flag matches the C header");
 
     TuiState* state = tuiCreateState();
     expect(state != nullptr, "tuiCreateState succeeds");
@@ -1158,7 +1163,7 @@ void caseLogRecords() {
     record.action = TuiLogAction_Retry;
     record.timestampMs = 1'782'000'000'123;
     record.line = 412;
-    record.reserved = 0;
+    record.seq = 0;
     record.message = String{message, std::strlen(message)};
     record.detail = String{detail, std::strlen(detail)};
     record.module = String{module, std::strlen(module)};

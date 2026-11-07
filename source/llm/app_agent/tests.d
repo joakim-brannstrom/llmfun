@@ -949,6 +949,102 @@ unittest {
             "the end-of-run snapshot clears the running flag");
 }
 
+@("the pinned set from state.json drives flags bit 1 (and combines with running)")
+unittest {
+    import std.file : mkdirRecurse, write;
+    import std.path : buildPath;
+
+    auto tmpDir = testArea("app_agent_pinned_flags");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto a = SessionId("20260618-153045-a1b2");
+    auto b = SessionId("20260618-153045-b3c4");
+    write(buildPath(tmpDir, a.get ~ ".json"),
+            `{"title": "A", "createdAt": 100, "updatedAt": 100, "messages": []}`);
+    write(buildPath(tmpDir, b.get ~ ".json"),
+            `{"title": "B", "createdAt": 100, "updatedAt": 300, "messages": []}`);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.sessionStore = new SessionStore(tmpDir.Path);
+    app.activeSession.id = b;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+
+    // No pins yet: every row at 0.
+    app.sendSessionList();
+    assert(sink.lastSessionList().all!(item => item.flags == 0),
+            "an empty pin set marks no session pinned");
+
+    // Pin a (not the active one): only a's row carries bit 1.
+    app.llmConf.dataDir = buildPath(tmpDir, "data").Path;
+    mkdirRecurse(app.llmConf.dataDir.toString);
+    app.llmConf.pinnedChatSessions = [a.get];
+    app.sendSessionList();
+    auto snap = sink.lastSessionList();
+    size_t aIdx = size_t.max, bIdx = size_t.max;
+    foreach (i, ref const item; snap) {
+        if (item.id == a)
+            aIdx = i;
+        if (item.id == b)
+            bIdx = i;
+    }
+    assert(aIdx != size_t.max && snap[aIdx].flags == 2, "a pinned id must carry flags bit 1");
+    assert(bIdx != size_t.max && snap[bIdx].flags == 0, "an unpinned row keeps flags 0");
+
+    // Active AND pinned: bit 0 and bit 1 both set on the same row.
+    app.activeSession.id = a;
+    app.runInFlight = true;
+    app.sendSessionList();
+    snap = sink.lastSessionList();
+    assert(snap[aIdx].flags == 3, "running (bit 0) and pinned (bit 1) combine");
+}
+
+@("deleting a pinned session drops the id from the pin set and persists it")
+unittest {
+    import std.file : exists, mkdirRecurse, readText, write;
+    import std.json : parseJSON;
+    import std.path : buildPath;
+    import my.filter : ReFilter;
+
+    auto tmpDir = testArea("app_agent_delete_unpins");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    cfg.dataDir = buildPath(tmpDir, "data").Path;
+    mkdirRecurse(cfg.dataDir.toString);
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    auto a = SessionId("20260618-153045-a1b2");
+    auto b = SessionId("20260618-153045-b3c4");
+    write(buildPath(tmpDir, "chat", a.get ~ ".json"),
+            `{"title": "A", "createdAt": 100, "updatedAt": 400, "messages": []}`);
+    write(buildPath(tmpDir, "chat", b.get ~ ".json"),
+            `{"title": "B", "createdAt": 100, "updatedAt": 300, "messages": []}`);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.llmConf.pinnedChatSessions = [a.get, b.get];
+    app.sessionStore = store;
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+    auto aFile = store.load(a);
+    assert(hasValue(aFile), "setup: active session file must load");
+    app.activeSession = orElse(aFile, SessionFile()).meta;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+
+    app.doSidebarDelete(a);
+
+    assert(!app.llmConf.pinnedChatSessions.canFind(a.get),
+            "a deleted session must not keep a dangling pin");
+    assert(app.llmConf.pinnedChatSessions == [b.get], "the other pinned id must survive the delete");
+    // The eager save persisted the set: state.json carries it.
+    auto saved = parseJSON(readText(buildPath(cfg.dataDir.toString, "state.json")));
+    assert(saved["pinnedChatSessions"].array.map!(v => v.str).array == [b.get],
+            "the unpin must be persisted eagerly on delete");
+}
+
 @(
         "navigation never rewrites a session (updatedAt unchanged) and a dirty chat commits with an updatedAt bump")
 unittest {
@@ -2774,4 +2870,267 @@ unittest {
             "the marker blocks are still written into the content (the legacy panel reads them)");
     assert(last.content.canFind("grep_files")
             && last.content.canFind("write_file"), "both tool blocks are in the text");
+}
+
+@("sidebar pin toggle flips the persisted pin set and refreshes the list")
+unittest {
+    import std.file : mkdirRecurse, readText;
+    import std.json : parseJSON;
+    import std.path : buildPath;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("app_agent_pin_toggle");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.sessionStore = store;
+    app.activeSession = meta;
+    app.llmConf.dataDir = Path(buildPath(tmpDir, "data"));
+    mkdirRecurse(app.llmConf.dataDir.toString);
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+
+    // A valid id toggles in: the in-memory set flips, the state.json on disk
+    // carries it (the eager save), and the snapshot marks that row pinned
+    // (flags bit 1) with every other bit untouched.
+    app.doSidebarPinToggle(meta.id);
+    assert(app.pendingDeleteId == SessionId.init, "pin toggle clears pending delete");
+    assert(app.llmConf.pinnedChatSessions.canFind(meta.id.get), "the toggle pins the session");
+    auto saved = parseJSON((app.llmConf.dataDir ~ "state.json").readText);
+    assert("pinnedChatSessions" in saved, "state.json must carry pinnedChatSessions");
+    assert(saved["pinnedChatSessions"].array.length == 1
+            && saved["pinnedChatSessions"].array[0].str == meta.id.get,
+            "the eager save must persist the pinned id");
+    auto snap = sink.lastSessionList();
+    assert(snap.length == 1 && snap[0].id == meta.id);
+    assert(snap[0].flags == 2,
+            "the refreshed list carries the pinned bit: " ~ snap[0].flags.to!string);
+    assert(sink.countOf("sessionList") == 1, "one refreshed list per toggle");
+
+    // Toggling twice returns to the original set, on disk too.
+    app.doSidebarPinToggle(meta.id);
+    assert(app.llmConf.pinnedChatSessions.length == 0, "the second toggle unpins");
+    saved = parseJSON((app.llmConf.dataDir ~ "state.json").readText);
+    assert(saved["pinnedChatSessions"].array.length == 0,
+            "the unpinned id leaves state.json as well");
+    snap = sink.lastSessionList();
+    assert(snap.length == 1 && snap[0].flags == 0, "the refreshed list drops the pinned bit");
+    assert(sink.countOf("sessionList") == 2, "one refreshed list per toggle");
+}
+
+@("sidebar pin toggle tolerates malformed and unknown ids")
+unittest {
+    import std.file : mkdirRecurse;
+    import std.path : buildPath;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("app_agent_pin_toggle_noise");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.sessionStore = new SessionStore(buildPath(tmpDir, "store").Path);
+    app.llmConf.dataDir = Path(buildPath(tmpDir, "data"));
+    mkdirRecurse(app.llmConf.dataDir.toString);
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+
+    // A malformed queued id (the regex gate rejects it) is noise: no throw, no
+    // state change, no chat row, no refresh.
+    app.doSidebarPinToggle(SessionId("not-an-id"));
+    assert(app.pendingDeleteId == SessionId.init, "the gate clears pending delete");
+    assert(app.llmConf.pinnedChatSessions.length == 0, "a malformed id changes nothing");
+    assert(sink.countOf("sessionList") == 0, "a malformed id sends nothing");
+    assert(sink.lastChatMessage().length == 0, "a malformed id is not a user error");
+
+    // An id that is well-formed but unknown to the store is tolerated the same
+    // way (no throw, no crash): the set stays unchanged, nothing is saved or
+    // sent - the store gate keeps a stale queued id from pinning a session
+    // that no longer exists.
+    auto unknown = SessionId("20260618-153045-ffff");
+    app.doSidebarPinToggle(unknown);
+    assert(app.pendingDeleteId == SessionId.init, "the store gate clears pending delete");
+    assert(app.llmConf.pinnedChatSessions.length == 0, "an unknown id changes nothing");
+    assert(sink.countOf("sessionList") == 0, "an unknown id sends nothing");
+    assert(sink.lastChatMessage().length == 0, "an unknown id is not a user error");
+}
+
+@("pin toggle survives a restart: state.json round-trip into a fresh app")
+unittest {
+    import std.algorithm : canFind;
+    import std.file : mkdirRecurse;
+    import std.path : buildPath;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("app_agent_pin_restart");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    // First run: the toggle pins the session, and the eager save has already
+    // written state.json when the "process" ends.
+    auto first = AgentApp(UserConfig.AgentChatConfig.init);
+    first.sessionStore = store;
+    first.activeSession = meta;
+    first.llmConf.dataDir = Path(buildPath(tmpDir, "data"));
+    mkdirRecurse(first.llmConf.dataDir.toString);
+    first.doSidebarPinToggle(meta.id);
+    assert(first.llmConf.pinnedChatSessions.canFind(meta.id.get), "the first run pins the session");
+
+    // Restart: a fresh app over the same data dir loads state.json the way
+    // startup does, and the pinned id comes back.
+    auto second = AgentApp(UserConfig.AgentChatConfig.init);
+    second.llmConf.dataDir = first.llmConf.dataDir;
+    second.llmConf.loadState();
+    assert(second.llmConf.pinnedChatSessions.canFind(meta.id.get),
+            "loadState restores the pinned id from state.json");
+
+    // The restarted app projects the restored pin into the snapshot the rail
+    // draws: the row carries the pinned bit (flags bit 1), grouped pinned-first
+    // by the C++ half of this pair.
+    second.sessionStore = new SessionStore(tmpDir.Path);
+    auto sink = new TuiRecordingSink();
+    second.uiMsg = new UiMessenger(sink);
+    second.sendSessionList();
+    auto snap = sink.lastSessionList();
+    assert(snap.length == 1 && snap[0].id == meta.id, "the restarted list names the session");
+    assert(snap[0].flags == 2,
+            "the restarted app's list still carries the pinned bit: " ~ snap[0].flags.to!string);
+
+    // Unpinning persists the same way: the next start loads an empty set.
+    second.doSidebarPinToggle(meta.id);
+    assert(second.llmConf.pinnedChatSessions.length == 0, "the second run unpins");
+    auto third = AgentApp(UserConfig.AgentChatConfig.init);
+    third.llmConf.dataDir = first.llmConf.dataDir;
+    third.llmConf.loadState();
+    assert(third.llmConf.pinnedChatSessions.length == 0, "the unpin survives the restart too");
+}
+
+// sidebar clone: the store copy lands, the clone becomes the active session
+// (the New path), the original file is untouched, one list refresh.
+@("sidebar clone makes the clone the active session and leaves the original untouched")
+unittest {
+    import std.file : mkdirRecurse, readText;
+    import std.path : buildPath;
+
+    import llm.test_util : testArea;
+    import llm.agent : Agent;
+    import my.filter : ReFilter;
+
+    auto tmpDir = testArea("app_agent_sidebar_clone");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(tmpDir.Path);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    app.agent_ = new Agent("main", cfg, null, null, null, ReFilter.init);
+
+    // Session A with one persisted user message, activated the production way
+    // (switchToSession): the active chat mirrors the file, the dirty flag is
+    // false, so the clone's commit is a no-op.
+    auto meta = store.create();
+    JSONValue doc;
+    JSONValue userMsg;
+    userMsg["role"] = "user";
+    userMsg["content"] = "what is 2+2?";
+    doc["messages"] = JSONValue([userMsg]);
+    auto savedMeta = store.save(meta.id, meta, doc);
+    app.activeSession = savedMeta;
+    app.switchToSession(meta.id);
+
+    auto originalPath = buildPath(tmpDir, meta.id.get ~ ".json");
+    auto originalBytes = readText(originalPath);
+
+    // The sink goes in after the setup switch so the clone action's send
+    // count is observable in isolation.
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+
+    app.doSidebarClone(meta.id);
+    assert(app.pendingDeleteId == SessionId.init, "clone clears pending delete");
+
+    auto snap = sink.lastSessionList();
+    assert(snap.length == 2, "the refreshed list carries both rows: " ~ snap.length.to!string);
+    SessionId cloneId;
+    foreach (row; snap) {
+        if (row.id != meta.id)
+            cloneId = row.id;
+    }
+    assert(cloneId.get.length > 0, "the list names a second session (the clone)");
+    assert(app.activeSession.id == cloneId, "the clone is the active session");
+    assert(sink.countOf("sessionList") == 1, "one refreshed list per clone action");
+
+    // The active chat projection is the clone's history (the New path): the
+    // persisted user message replays into the chat (Chat.load seeds a system
+    // entry when the history is empty, so the count is not asserted).
+    bool sawClonedQuery;
+    foreach (msg; app.agent_.chat.getMessages())
+        msg.match!((llm.chat.Message m) {
+            if (m.role == llm.chat.Role.user && m.content == "what is 2+2?")
+                sawClonedQuery = true;
+        }, (llm.chat.ToolMessage _) {}, (llm.chat.ToolResponse _) {}, (llm.chat.VisionMessage _) {
+        });
+    assert(sawClonedQuery, "the clone's history is loaded into the active chat");
+
+    // The clone's file mirrors the original's history and title verbatim;
+    // the original file is byte-identical.
+    auto cloneSf = orElse(store.load(cloneId), SessionFile());
+    assert(cloneSf.meta.title == savedMeta.title, "clone title equals the original title verbatim");
+    assert(cloneSf.doc["messages"].array.length == 1, "the clone carries the full history");
+    assert(cloneSf.doc["messages"].array[0]["content"].str == "what is 2+2?",
+            "the cloned message content is identical");
+    assert(readText(originalPath) == originalBytes, "the original file is byte-identical");
+    assert(sink.lastChatMessage().canFind("Session cloned"),
+            "the clone posts a confirmation: got '" ~ sink.lastChatMessage() ~ "'");
+}
+
+@("sidebar clone rejects invalid ids and degrades on unknown ids")
+unittest {
+    import std.file : mkdirRecurse;
+    import std.path : buildPath;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("app_agent_sidebar_clone_none");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto store = new SessionStore(buildPath(tmpDir, "store").Path);
+    auto meta = store.create();
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.sessionStore = store;
+    app.activeSession = meta;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+
+    // A malformed queued id: error chat message, no store access, no refresh
+    // (the same gate doSidebarDelete uses).
+    app.doSidebarClone(SessionId("not-an-id"));
+    assert(app.pendingDeleteId == SessionId.init, "the gate clears pending delete");
+    assert(sink.lastChatMessage().canFind("Invalid session id"),
+            "a malformed id is a user error: got '" ~ sink.lastChatMessage() ~ "'");
+    assert(sink.countOf("sessionList") == 0, "a malformed id sends no refresh");
+
+    // An unknown (well-formed) id: clone -> none -> error message, active
+    // session unchanged, one list refresh.
+    auto unknown = SessionId("20260618-153045-ffff");
+    app.doSidebarClone(unknown);
+    assert(app.activeSession.id == meta.id, "clone-none must keep the active session");
+    assert(sink.lastChatMessage() == "error: Failed to clone session 'ffff'.",
+            "clone-none must emit the error chat message");
+    assert(store.list().length == 1, "clone-none must not create files");
+    assert(sink.countOf("sessionList") == 1, "clone-none must still refresh the sidebar list");
 }

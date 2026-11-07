@@ -1195,6 +1195,35 @@ void checkInteraction() {
     // keyboard checks below.
     check(pointAt(ui.rail, "s-week", static_cast<float>(titleX), static_cast<float>(titleY), body),
           "premise: the pointer is back on the third row");
+    // The row menu's Clone: a two-click path to a queued action.
+    ui.rail.cloneId.clear();
+    typeText("m", body);
+    frame(body); // the request opens the popup
+    check(ui.rail.menuRowId == "s-week", "premise: the row menu is open for Clone");
+    const Grid cloneMenuGrid = frame(body); // the popup is drawn the frame after it opens
+    int cloneMenuX = -1;
+    int cloneMenuY = -1;
+    cloneMenuGrid.find("Clone", cloneMenuX, cloneMenuY);
+    check(cloneMenuX >= 0, "the menu offers Clone");
+    clickAt(static_cast<float>(cloneMenuX), static_cast<float>(cloneMenuY), body);
+    check(ui.rail.cloneId == "s-week", "the menu's Clone queues the row it was opened on");
+    check(ui.rail.deleteId.empty() && ui.rail.selectId.empty(), "clone queues nothing else");
+    ui.rail.cloneId.clear();
+
+    // The click left the pointer where the popup was, so aim again before the
+    // keyboard checks below.
+    check(pointAt(ui.rail, "s-week", static_cast<float>(titleX), static_cast<float>(titleY), body),
+          "premise: the pointer is back on the third row after the clone click");
+
+    // Esc closes the menu without queueing anything.
+    typeText("m", body);
+    frame(body);
+    check(ui.rail.menuRowId == "s-week", "premise: the menu is open for the Esc check");
+    pressEscape(ui.rail, body);
+    check(ui.rail.menuRowId.empty(), "Esc closes the menu");
+    check(ui.rail.cloneId.empty(), "an Esc that closed the menu queued nothing");
+    check(pointAt(ui.rail, "s-week", static_cast<float>(titleX), static_cast<float>(titleY), body),
+          "premise: the pointer is back on the third row for the keyboard checks");
 
     // `Esc` is not a delete step any more: the queued answer stands, because there is
     // nothing to cancel - the delete was the press itself.

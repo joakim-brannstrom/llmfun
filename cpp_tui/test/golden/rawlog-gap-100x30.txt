@@ -1,0 +1,36 @@
+name: rawlog-gap
+screen: 100x30
+surface: x=0 y=0 w=100 h=30 overlay=1
+state: follow=1 paused=0 filter=''
+parts: matched=4 drawn=5 dropped=2
+text:
+  Raw Log  follow                                                                                4
+   Filter
+  2 older records were evicted before this point
+  00:00:00.000 info  llm.agent.pool.processTurn source/llm/agent/pool.d:412 session opened
+  -- 2 records lost here --
+  00:00:02.000 warn  llm.agent.pool.processTurn source/llm/agent/pool.d:412 ui.conf is read-only
+  00:00:03.000 error llm.agent.pool.processTurn source/llm/agent/pool.d:412 read_file failed
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  2 records dropped
+    Copy     Save     Close    f follow  p pause  / filter  y copy  Esc close

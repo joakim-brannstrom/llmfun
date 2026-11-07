@@ -66,6 +66,8 @@ private class RecordingTUIListener : TUIListener {
     SessionId[] renameIds;
     string[] renameTitles;
     SessionId[] deletes;
+    SessionId[] pinToggles;
+    SessionId[] clones;
     int terminated;
     string startupFailure;
 
@@ -92,6 +94,14 @@ private class RecordingTUIListener : TUIListener {
 
     void sessionDelete(SessionId id) {
         deletes ~= id;
+    }
+
+    void sessionPinToggle(SessionId id) {
+        pinToggles ~= id;
+    }
+
+    void sessionClone(SessionId id) {
+        clones ~= id;
     }
 
     void uiTerminated() {
@@ -271,6 +281,40 @@ unittest {
     assert(f.listener.renameTitles == ["new title"], "rename title mismatch");
     assert(f.listener.queries.length == 0, "no query expected");
     // the stash is cleared after the forward
+    assert(f.actor.pendingAction == TuiSessionAction_None, "stash should be cleared");
+    assert(f.actor.pendingActionId is null && f.actor.pendingActionTitle is null);
+    f.teardown();
+}
+
+@("TUI actor: pin toggle action forwarding")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // Package seam: the same queued-action stash the other actions use.
+    f.actor.pendingAction = TuiSessionAction_PinToggle;
+    f.actor.pendingActionId = "id2";
+    f.drive();
+
+    assert(f.listener.pinToggles.length == 1 && f.listener.pinToggles[0] == SessionId("id2"),
+            "listener should have sessionPinToggle(\"id2\")");
+    assert(f.listener.queries.length == 0, "no query expected");
+    assert(f.actor.pendingAction == TuiSessionAction_None, "stash should be cleared");
+    assert(f.actor.pendingActionId is null && f.actor.pendingActionTitle is null);
+    f.teardown();
+}
+
+@("TUI actor: clone action forwarding")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // Package seam: the same queued-action stash the other actions use.
+    f.actor.pendingAction = TuiSessionAction_Clone;
+    f.actor.pendingActionId = "id3";
+    f.drive();
+
+    assert(f.listener.clones.length == 1 && f.listener.clones[0] == SessionId("id3"),
+            "listener should have sessionClone(\"id3\")");
+    assert(f.listener.queries.length == 0, "no query expected");
     assert(f.actor.pendingAction == TuiSessionAction_None, "stash should be cleared");
     assert(f.actor.pendingActionId is null && f.actor.pendingActionTitle is null);
     f.teardown();
@@ -631,13 +675,14 @@ unittest {
 
     auto record = makeLogRecord(TuiLogRecordData(LogLevel.error, 1_782_000_000_123L,
             412, "read_file failed\n  at pool.d:412\n  at agent.d:88",
-            "llm.agent.pool", "processTurn", "/src/llm/agent/pool.d"), TuiLogAction_Retry, "turn-7");
+            "llm.agent.pool", "processTurn", "/src/llm/agent/pool.d", 7),
+            TuiLogAction_Retry, "turn-7");
 
     assert(record.level == TuiLogLevel_Error, "error keeps its severity");
     assert(record.action == TuiLogAction_Retry, "the action crosses as an id, never a label");
     assert(record.timestampMs == 1_782_000_000_123L, "the sender's clock is kept");
     assert(record.line == 412, "the source line is kept");
-    assert(record.reserved == 0, "the reserved word stays zero");
+    assert(record.seq == 7, "the record carries its own log-order stamp");
     assert(view(record.tupleof[5]) == "read_file failed", "the first line is the message");
     assert(view(record.tupleof[6]) == "  at pool.d:412\n  at agent.d:88",
             "the rest of a multi-line entry is the detail");
@@ -648,8 +693,56 @@ unittest {
 
     // A single-line entry has no detail: the Activity row must not hold the message twice.
     auto single = makeLogRecord(TuiLogRecordData(LogLevel.info, 0, 0,
-            "one line", null, null, null), TuiLogAction_None, null);
+            "one line", null, null, null, 8), TuiLogAction_None, null);
     assert(view(single.tupleof[5]) == "one line");
     assert(view(single.tupleof[6]).length == 0, "a single-line message has no detail");
     assert(single.timestampMs == 0, "a record with no clock stays 0: the UI stamps the arrival");
+    assert(single.seq == 8, "the stamp travels with the record, not reassigned at the boundary");
+}
+
+@("TUI log record: the stamp is consecutive in capture order across a drain")
+unittest {
+    // The point of the stamp: two records the runtime produced in order arrive with
+    // consecutive numbers, so a gap on the UI side is exactly the count of what a drop
+    // removed. The counter is process-global, so the assertion is relative, not absolute.
+    auto log = new TuiLogger(LogLevel.all);
+    log.info("first");
+    log.info("second");
+    auto drained = log.drainEntries();
+    assert(drained.length == 2, "both records are drained in order");
+    auto first = makeLogRecord(drained[0], TuiLogAction_None, null);
+    auto second = makeLogRecord(drained[1], TuiLogAction_None, null);
+    assert(first.seq >= 1, "the first stamped record is at least 1");
+    assert(second.seq == first.seq + 1, "consecutive captures stamp consecutive numbers");
+}
+
+@("TUI log record: the queue-drop warning is stamped and carries the drop marker")
+unittest {
+    import std.algorithm.searching : endsWith;
+    import std.conv : text;
+
+    // Flood the bounded queue so the drain has to report its own loss: the synthetic
+    // warning is a record like any other (it is stamped by the same counter, after the
+    // dropped entries consumed theirs) plus the marker that lets the UI recognize it
+    // without matching on its message text.
+    auto log = new TuiLogger(LogLevel.all);
+    foreach (i; 0 .. 20_050)
+        log.info("spam " ~ i.text);
+    auto drained = log.drainEntries();
+    assert(drained.length == 20_001,
+            "the flood reports exactly one overflow (got " ~ drained.length.text ~ ")");
+    auto warning = drained[$ - 1];
+    assert(warning.message.endsWith("records (the frame loop did not drain in time)"),
+            "the last drained record is the overflow report");
+    assert(warning.funcName == kQueueDropMarker, "the warning carries the drop marker");
+    auto stamped = makeLogRecord(warning, TuiLogAction_None, null);
+    assert(stamped.seq >= 1, "the warning is stamped like any record");
+    // The stamp is consumed at capture, before the queue's drop check: the 50 dropped
+    // entries kept stamps they never delivered, so the warning's number sits exactly
+    // N past the last kept record's - the gap the UI's accept path sizes.
+    const long kept = drained.length - 1;
+    const long dropped = 20_050 - kept;
+    assert(drained[$ - 2].seq >= 1, "kept records carry their capture-order stamps");
+    assert(warning.seq == drained[$ - 2].seq + dropped + 1,
+            "a D-side drop leaves exactly an N-sized seq gap before the warning");
 }

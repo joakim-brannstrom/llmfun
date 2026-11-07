@@ -37,9 +37,6 @@ constexpr int kAutoOpen = -1;
 constexpr int kClosed = 0;
 constexpr int kOpen = 1;
 
-/// `Pin.<sessionId>` is the one key with a variable name.
-constexpr std::string_view kPinPrefix = "Pin.";
-
 bool isBlank(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
 
 std::string_view trimBlanks(std::string_view text) {
@@ -64,14 +61,6 @@ bool equalsWord(std::string_view text, std::string_view word) {
             return false;
     }
     return true;
-}
-
-/// The one rule for a pin id, used by the parser and the writer: an empty id
-/// writes `Pin.=1` (which reads back as no pin), and one carrying '=' or a line
-/// break writes a line that reads back as a different key. Such an id is neither
-/// stored nor written, so the set can never hold one the file cannot carry.
-bool storablePinId(std::string_view id) {
-    return !id.empty() && id.find_first_of("=\r\n") == std::string_view::npos;
 }
 
 /// A whole numeric value: no trailing garbage, no hex, no locale (a de_DE user's
@@ -155,17 +144,6 @@ void applyLine(ShellPrefs& prefs, std::string_view line) {
     }
     if (key == "Version")
         return; // checked before anything is applied, so the order in the file is free
-    if (key.compare(0, kPinPrefix.size(), kPinPrefix) == 0) {
-        const std::string_view id = key.substr(kPinPrefix.size());
-        long flag = 0;
-        if (!storablePinId(id) || !parseWholeNumber(value, flag))
-            return; // malformed keeps the pinned set as it is
-        if (flag != 0)
-            prefs.pinned.insert(std::string(id));
-        else
-            prefs.pinned.erase(std::string(id));
-        return;
-    }
     // Unknown key: skipped, so a newer build's file still loads what it can.
 }
 
@@ -493,8 +471,6 @@ float fontScaleFromPercent(int percent) { return static_cast<float>(percent) / 1
 std::string uiConfPath(const std::string& iniFilename) {
     if (iniFilename.empty())
         return std::string();
-    // The same directory as the ini file, and therefore as the `imgui2.conf`
-    // `tui_settings::settingsPath()` derives from it.
     const std::size_t slash = iniFilename.find_last_of('/');
     if (slash == std::string::npos)
         return std::string(kUiConfName);
@@ -509,16 +485,10 @@ std::string uiConfText(const ShellPrefs& prefs) {
     text += "RailOpen=" + std::string(triStateWord(prefs.railOpen)) + "\n";
     text += "InspectorOpen=" + std::string(triStateWord(prefs.inspectorOpen)) + "\n";
     text += "InspectorTab=" + std::string(inspectorTabWord(prefs.tab)) + "\n";
-    for (const std::string& id : prefs.pinned) {
-        if (!storablePinId(id))
-            continue; // the parser drops it too, so writing it would store nothing
-        text += "Pin." + id + "=1\n";
-    }
     return text;
 }
 
-void loadUiConf(ShellPrefs& prefs, const std::string& iniFilename,
-                const std::set<std::string>* knownSessionIds) {
+void loadUiConf(ShellPrefs& prefs, const std::string& iniFilename) {
     const std::string path = uiConfPath(iniFilename);
     if (path.empty())
         return;
@@ -552,15 +522,6 @@ void loadUiConf(ShellPrefs& prefs, const std::string& iniFilename,
     }
 
     forEachLine(contents, [&prefs](std::string_view line) { applyLine(prefs, line); });
-
-    if (knownSessionIds != nullptr) {
-        for (auto it = prefs.pinned.begin(); it != prefs.pinned.end();) {
-            if (knownSessionIds->count(*it) == 0)
-                it = prefs.pinned.erase(it);
-            else
-                ++it;
-        }
-    }
 
     state.loaded = true;
     state.baseline = uiConfText(prefs);

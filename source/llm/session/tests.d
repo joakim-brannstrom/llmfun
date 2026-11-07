@@ -114,6 +114,22 @@ unittest {
     assert(!hasValue(loadOpt), "load should return none for missing file");
 }
 
+@("has() tracks the session files the store holds")
+unittest {
+    auto tmpDir = makeTempDir("has_probe");
+    scope (exit)
+        cleanupDir(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    assert(store.has(meta.id), "has() is true for a created session");
+    assert(!store.has(SessionId("20260618-153045-ffff")),
+            "has() is false for a well-formed id with no file");
+    assert(!store.has(SessionId("not-an-id")),
+            "has() is false for a malformed id (no format check here)");
+}
+
 @("save() with user and assistant messages updates the counts, preview, and updatedAt")
 unittest {
     auto tmpDir = makeTempDir("save_messages");
@@ -636,4 +652,122 @@ unittest {
 
     auto result = resolveSessionRef(sessions, "5");
     assert(!hasValue(result), "out of range index should return none");
+}
+
+@(
+        "clone() writes a fresh valid id with identical messages, recomputed counts, and an untouched original")
+unittest {
+    auto tmpDir = makeTempDir("clone_fresh");
+    scope (exit)
+        cleanupDir(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+
+    JSONValue userMsg;
+    userMsg["role"] = "user";
+    userMsg["content"] = "hello world";
+    doc["messages"].array ~= userMsg;
+
+    JSONValue assistantMsg;
+    assistantMsg["role"] = "assistant";
+    assistantMsg["content"] = "hi there";
+    doc["messages"].array ~= assistantMsg;
+
+    store.save(meta.id, meta, doc);
+    auto originalPath = buildPath(tmpDir, meta.id.get ~ ".json");
+    auto originalBytes = readText(originalPath);
+    auto before = store.list()[0];
+
+    auto result = store.clone(meta.id);
+    assert(hasValue(result), "clone should succeed");
+    auto cloneMeta = orElse(result, SessionMeta());
+
+    // Fresh valid id, distinct from the original.
+    import std.regex : regex, match;
+    import std.range : empty;
+
+    auto pat = regex(r"^\d{8}-\d{6}-[0-9a-f]{4}$");
+    assert(!cloneMeta.id.get.match(pat).empty, "clone id format invalid: " ~ cloneMeta.id.get);
+    assert(cloneMeta.id != meta.id, "clone id must differ from the original");
+
+    // Title stays the original's verbatim.
+    assert(cloneMeta.title == before.title, "clone title should equal the original title");
+
+    // Counts recomputed by the save path.
+    assert(cloneMeta.messageCount == 2, "clone messageCount should be 2");
+    assert(cloneMeta.userMessageCount == 1, "clone userMessageCount should be 1");
+    assert(cloneMeta.preview == "hello world", "clone preview should match the user message");
+
+    // Identical history: same message array, byte-identical modulo id/updatedAt.
+    auto cloneOpt = store.load(cloneMeta.id);
+    assert(hasValue(cloneOpt), "the clone file must load back");
+    auto cloneSf = orElse(cloneOpt, SessionFile());
+    assert(cloneSf.doc["messages"].array.length == 2, "clone carries the full history");
+    assert(cloneSf.doc["messages"].array[0]["content"].str == "hello world",
+            "message content copied");
+
+    // The original file is untouched.
+    assert(readText(originalPath) == originalBytes, "the original file must be byte-identical");
+    assert(store.has(meta.id), "the original session still exists");
+}
+
+@("clone() preserves unknown header keys through the round-trip")
+unittest {
+    auto tmpDir = makeTempDir("clone_extra");
+    scope (exit)
+        cleanupDir(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+
+    JSONValue userMsg;
+    userMsg["role"] = "user";
+    userMsg["content"] = "preserve me";
+    doc["messages"].array ~= userMsg;
+
+    // A header key this build does not know: parseHeader parks it in
+    // meta.extra, and the clone must carry it over like rename()/save() do.
+    JSONValue extraObj;
+    extraObj["futureKey"] = "future-value";
+    meta.extra = extraObj;
+    store.save(meta.id, meta, doc);
+
+    auto result = store.clone(meta.id);
+    assert(hasValue(result), "clone should succeed");
+    auto cloneMeta = orElse(result, SessionMeta());
+
+    auto cloneOpt = store.load(cloneMeta.id);
+    assert(hasValue(cloneOpt), "the clone file must load back");
+    auto cloneSf = orElse(cloneOpt, SessionFile());
+    assert("futureKey" in cloneSf.meta.extra, "the clone must preserve unknown header keys");
+    assert(cloneSf.meta.extra["futureKey"].str == "future-value",
+            "the unknown key's value must survive the clone");
+}
+
+@("clone() returns none for invalid and unknown ids and leaves the store unchanged")
+unittest {
+    auto tmpDir = makeTempDir("clone_none");
+    scope (exit)
+        cleanupDir(tmpDir);
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    auto invalid = store.clone(SessionId("../etc/passwd"));
+    assert(!hasValue(invalid), "clone should reject an invalid id");
+
+    auto unknown = store.clone(SessionId("20260618-153045-ffff"));
+    assert(!hasValue(unknown), "clone should reject an unknown id");
+
+    auto sessions = store.list();
+    assert(sessions.length == 1 && sessions[0].id == meta.id, "the store is unchanged");
 }

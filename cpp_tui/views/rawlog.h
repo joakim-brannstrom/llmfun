@@ -90,8 +90,10 @@ inline constexpr char kRawLogChipPaused[] = "paused";
 /// a blank body reads as a broken surface.
 inline constexpr char kRawLogEmpty[] = "No records yet";
 inline constexpr char kRawLogNoMatches[] = "No records match";
-/// `N records dropped` (NFR-17: a bound that loses data has to say so).
+/// `N records dropped`.
 inline constexpr char kRawLogDroppedSuffix[] = " records dropped";
+/// The head-of-ring placeholder row.
+inline constexpr char kRawLogHeadGapSuffix[] = " older records were evicted before this point";
 /// The controls. `Save` exports the filtered records, `Copy` the rows on screen - two different
 /// questions, so two different controls.
 inline constexpr char kRawLogCopyLabel[] = "Copy";

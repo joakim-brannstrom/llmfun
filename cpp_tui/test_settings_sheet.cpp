@@ -21,10 +21,10 @@
 //   5. the frame wiring. The top bar's `Settings` entry opens it, `Esc` closes it as one step of
 //      one press, the z-order is palette > settings > Raw Log, and the rectangle comes from
 //      `ui::computeShell()` (inside the display, never part of the tiling);
-//   6. persistence. A behaviour value round-trips through `ui.conf` (and the legacy `imgui2.conf`
-//      round trip is `./test_settings`'s job, unchanged), a value the sheet can no longer offer is
-//      still *shown*, and an unwritable profile produces exactly one Activity warning while the
-//      session keeps running - never one per frame;
+//   6. persistence. A behaviour value round-trips through `ui.conf` (and the window settings'
+//      `imgui2.gui.conf` round trip is `./test_settings`'s job), a value the sheet can no longer
+//      offer is still *shown*, and an unwritable profile produces exactly one Activity warning
+//      while the session keeps running - never one per frame;
 //   7. the copy action: the six documented fields, and no message text;
 //   8. the goldens: open, with an active search, with no match, on a section, and at the 40x15
 //      floor.
@@ -427,9 +427,10 @@ void checkSource() {
     check(!contains(cpp, "\"Settings\""), "the title is the header's string, not a literal");
     check(!contains(cpp, "\"No setting matches\""), "and so is the empty state");
     check(!contains(cpp, "\"Copy system info\""), "and the copy row's label");
-    // The sheet edits values; the *frame* owns both write paths (ui.conf's debounce, imgui2.conf's
-    // save), so a view that opened a file would be a second writer nobody asked for.
-    check(!contains(cpp, "saveTuiSettings("), "the view never writes imgui2.conf");
+    // The sheet edits values; the *frame* owns both write paths (ui.conf's debounce,
+    // imgui2.gui.conf's save), so a view that opened a file would be a second writer nobody asked
+    // for.
+    check(!contains(cpp, "saveTuiSettings("), "the view never writes imgui2.gui.conf");
     check(!contains(cpp, "saveUiConf") && !contains(cpp, "flushUiConf"),
           "and never writes ui.conf");
     check(!contains(cpp, "fopen"), "and opens no file at all");
@@ -655,14 +656,14 @@ void checkRows() {
 
     // The diagnostics rows report the frame's derived facts, not a guess.
     sheet.uiConfPath = "/tmp/ui.conf";
-    sheet.iniConfPath = "/tmp/imgui2.conf";
+    sheet.iniConfPath = "/tmp/imgui2.gui.conf";
     sheet.logArchive = true;
     rows = views::settingsRows(sheet, prefs, settings, m);
     const views::SettingsRow* uiConf = findRow(rows, views::kSettingsRowUiConf);
     check(uiConf != nullptr && uiConf->value == "/tmp/ui.conf", "the ui.conf path is drawn");
     const views::SettingsRow* iniConf = findRow(rows, views::kSettingsRowIniConf);
-    check(iniConf != nullptr && iniConf->value == "/tmp/imgui2.conf",
-          "and so is the imgui2.conf path");
+    check(iniConf != nullptr && iniConf->value == "/tmp/imgui2.gui.conf",
+          "and so is the imgui2.gui.conf path");
     const views::SettingsRow* logLevel = findRow(rows, views::kSettingsRowLogLevel);
     check(logLevel != nullptr && logLevel->value == views::kSettingsLogLevelOn,
           "an archive that is on reads `all`");
@@ -1218,7 +1219,7 @@ void checkPersistence() {
         tui::TuiSettings loaded;
         tui::loadTuiSettings(loaded, scaleIni);
         check(std::fabs(loaded.fontScaleMain - 1.10f) < 0.005f,
-              "the font scale round-trips through imgui2.conf (the legacy file)");
+              "the font scale round-trips through imgui2.gui.conf");
     }
 
     // An unwritable profile: one Activity warning, the session keeps running, no per-frame retry.
@@ -1269,7 +1270,7 @@ void checkCopy() {
     g_phase = "Y: copy";
     views::SettingsState sheet;
     sheet.uiConfPath = "/home/u/.config/llmfun/ui.conf";
-    sheet.iniConfPath = "/home/u/.config/llmfun/imgui2.conf";
+    sheet.iniConfPath = "/home/u/.config/llmfun/imgui2.gui.conf";
     sheet.versions = "tui api 5, ui.conf v1";
     sheet.flags = "offline=0 run=1 stop=0 rawlog=0";
     sheet.displayW = 100;

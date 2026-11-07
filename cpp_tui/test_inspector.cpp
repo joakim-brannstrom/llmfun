@@ -1099,35 +1099,6 @@ void checkBounded() {
 }
 
 // ---------------------------------------------------------------------------
-// 10b. The pin prune (D-UI-CONF): `Pin.<id>` lines for sessions the store lost
-// ---------------------------------------------------------------------------
-
-void checkPins() {
-    tui::TuiState state;
-    state.ui.prefs.pinned = {"gone", "kept"};
-    // A snapshot with one of the two sessions. Nothing is pruned before a snapshot arrives
-    // (a loading store would lose the pins it has not listed yet), so the first frame is the
-    // moment the id set becomes known.
-    tui::SessionEntry entry;
-    entry.id = "kept";
-    entry.title = "Kept session";
-    entry.updatedAtMs = 1;
-    state.sessionPanel.sessions.push_back(entry);
-
-    shellFrame(state, 100, 30);
-    check(state.uiConfPinsPruned, "the first complete snapshot prunes the pins");
-    check(state.ui.prefs.pinned.size() == 1 && state.ui.prefs.pinned.count("kept") == 1,
-          "the pin of a session the store no longer has is dropped");
-    check(state.ui.prefs.pinned.count("gone") == 0, "...and only that one");
-
-    // One-shot: a pin added afterwards is not pruned by the next snapshot, even though the
-    // snapshot does not name it (it may be a session the list is still paging in).
-    state.ui.prefs.pinned.insert("later");
-    shellFrame(state, 100, 30);
-    check(state.ui.prefs.pinned.count("later") == 1, "the prune happens once, not every frame");
-}
-
-// ---------------------------------------------------------------------------
 // 11. The profile: `ui.conf` survives a restart
 // ---------------------------------------------------------------------------
 
@@ -1384,7 +1355,6 @@ int main(int argc, char** argv) {
     checkReservedPress();
     checkTabKeys();
     checkBounded();
-    checkPins();
     checkPersistence();
     checkGoldens(update);
 

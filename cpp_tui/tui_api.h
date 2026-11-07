@@ -223,13 +223,14 @@ typedef struct SessionItem {
 
 /* SessionItem.flags - what the session snapshot may say about a row.
  *
- * Only `Running` crosses the ABI. `unread` and `pinned` are UI-local by design
- * (FR-03, D-19): unread is "updatedAt advanced while this session was not
- * active during this process lifetime" and pinned is a `ui.conf` preference, so
- * neither is a fact the store has. Bits above 0 are reserved for later
- * additive flags and must be zero, exactly like `reserved`.
+ * Running (bit 0) and Pinned (bit 1) cross the ABI. `unread` stays UI-local by
+ * design: unread is "updatedAt advanced while this session was
+ * not active during this process lifetime", so it is not a fact the store has.
+ * Bits above 1 are reserved for later additive flags and must be zero, exactly
+ * like `reserved`.
  */
 #define TuiSessionFlag_Running 1 /* bit 0: a run is in flight for this session */
+#define TuiSessionFlag_Pinned 2  /* bit 1: the user pinned this session */
 
 /* TuiSessionActionType - Kind of a session sidebar action.
  * Append-only ordering: existing values must never be renumbered or
@@ -237,11 +238,13 @@ typedef struct SessionItem {
  * added without breaking the D-side mapping.
  */
 typedef enum TuiSessionActionType {
-    TuiSessionAction_None = 0,   /* sentinel - no action (empty queue) */
-    TuiSessionAction_Select = 1, /* switch to the session */
-    TuiSessionAction_New = 2,    /* create a new session */
-    TuiSessionAction_Rename = 3, /* rename the session (title payload) */
-    TuiSessionAction_Delete = 4  /* delete the session (the UI never re-asks) */
+    TuiSessionAction_None = 0,      /* sentinel - no action (empty queue) */
+    TuiSessionAction_Select = 1,    /* switch to the session */
+    TuiSessionAction_New = 2,       /* create a new session */
+    TuiSessionAction_Rename = 3,    /* rename the session (title payload) */
+    TuiSessionAction_Delete = 4,    /* delete the session (the UI never re-asks) */
+    TuiSessionAction_PinToggle = 5, /* toggle the session's pinned bit */
+    TuiSessionAction_Clone = 6      /* duplicate the session (dispatch lives D-side) */
 } TuiSessionActionType;
 
 /* SessionAction - One queued sidebar action, consumed by tuiGetSessionAction.
@@ -479,7 +482,7 @@ void tuiSetMaxWidth(TuiState* state, int maxWidth);
 void tuiSetIdlePark(TuiState* state, int parkMs);
 
 /* Set the file imgui persists its settings to (io.IniFilename); the GUI
-    backend stores the window size in settingsPath(filename) (imgui2.ini -> imgui2.conf).
+    backend stores the window size in settingsPath(filename).
     Call this BEFORE `tuiInit`: the name is captured when tuiInit creates the
     ImGui context, and a later call has no effect. NULL or an empty filename
     disables persistence (imgui's "$cwd/imgui.ini" default is not used).
@@ -561,7 +564,11 @@ typedef struct TuiLogRecord {
     int32_t action;       /* TuiLogAction; the UI renders the label */
     int64_t timestampMs;  /* Unix-epoch ms (UTC); 0 = UI stamps the arrival */
     int32_t line;         /* LogEntry.line, 0 = unknown */
-    int32_t reserved;     /* zero; keeps the struct layout stable */
+    int32_t seq;          /* 0 = unstamped; else a per-process monotonic log-order
+                             (capture-order) stamp from 1. A record the D log queue drops
+                             consumes a stamp it never delivers, which turns a drop into a
+                             gap the accept path can size. No wrap handling: past INT32_MAX
+                             a wrap degrades into spurious gap markers, never corruption. */
     String message;       /* unformatted, user-facing, one line */
     String detail;        /* optional multi-line context for the Raw Log */
     String module;        /* LogEntry.moduleName */

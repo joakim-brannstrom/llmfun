@@ -212,9 +212,24 @@ const model::RawLogRecord* recordAtLine(const RawLogState& state, const model::R
     return ring.at(recordIndex);
 }
 
-// ---------------------------------------------------------------------------
+/// The head-of-ring placeholder row: when the ring has wrapped, the stamps prove
+/// `oldest seq - 1` records were evicted from the front, and the surface says so in one
+/// row of its own, like the interior placeholders the accept path inserts. Drawn only
+/// over at least one real row: over an all-miss filter the row would read as a result,
+/// not a warning. An unstamped oldest survivor (seq 0 or 1) draws no row.
+bool hasHeadRow(const RawLogState& state, const model::RawLogRing& ring) {
+    if (ring.dropped == 0 || state.matching.empty())
+        return false;
+    const model::RawLogRecord* front = ring.at(0);
+    return front != nullptr && front->seq > 1;
+}
+
+/// The head row's text: `N older records were evicted before this point`.
+std::string headRowText(const model::RawLogRing& ring) {
+    return std::to_string(model::rawLogHeadGap(*ring.records, ring.dropped)) + kRawLogHeadGapSuffix;
+}
+
 // The anatomy
-// ---------------------------------------------------------------------------
 
 /// Every rectangle and every fixed string the surface draws, answered once.
 ///
@@ -380,16 +395,24 @@ void rawLogFollowNewest(RawLogState& state) {
 
 std::string rawLogVisibleText(const RawLogState& state, const model::RawLogRing& ring,
                               std::size_t first, std::size_t windowRows) {
+    const bool head = hasHeadRow(state, ring);
     std::string out;
-    const std::size_t total = state.matching.size() + state.expandedLines.size();
+    const std::size_t total = (head ? 1u : 0u) + state.matching.size() + state.expandedLines.size();
     const std::size_t end = std::min(total, first + windowRows);
     for (std::size_t line = first; line < end; ++line) {
+        if (head && line == 0) {
+            out += headRowText(ring);
+            out += '\n';
+            continue;
+        }
+        const std::size_t bodyLine = head ? line - 1 : line;
         std::size_t recordIndex = 0;
-        const model::RawLogRecord* record = recordAtLine(state, ring, line, recordIndex);
+        const model::RawLogRecord* record = recordAtLine(state, ring, bodyLine, recordIndex);
         if (record != nullptr)
             out += model::rawLogRowText(*record);
-        else if (line > state.expandedAt && line - state.expandedAt <= state.expandedLines.size())
-            out += state.expandedLines[line - state.expandedAt - 1];
+        else if (bodyLine > state.expandedAt &&
+                 bodyLine - state.expandedAt <= state.expandedLines.size())
+            out += state.expandedLines[bodyLine - state.expandedAt - 1];
         else
             continue;
         out += '\n';
@@ -512,7 +535,9 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
     // The body. Its own child, so the stream scrolls under a title and a control row that stay
     // put - and so `Save`/`Close` never scroll out of reach of the rows they act on.
     const float rowH = m.row;
-    const std::size_t totalLines = state.matching.size() + state.expandedLines.size();
+    const bool headRow = hasHeadRow(state, ring);
+    const std::size_t totalLines =
+        (headRow ? 1u : 0u) + state.matching.size() + state.expandedLines.size();
     if (parts.body.h >= rowH) {
         ImGui::SetCursorScreenPos(ImVec2(parts.body.x, parts.body.y));
         ImGui::BeginChild("##rawlog_body", ImVec2(parts.body.w, parts.body.h),
@@ -575,11 +600,20 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
                            ColorToken::textMid);
                     continue;
                 }
+                // The head-of-ring placeholder: the seqs evicted before the oldest
+                // survivor. A row of its own in the dim ink, not a record - clicking it does
+                // not expand anything and it copies like any other visible row.
+                if (headRow && line == 0) {
+                    lineAt(m, row, row.x, row.y, headRowText(ring), ColorToken::textDim);
+                    continue;
+                }
+                const std::size_t bodyLine = headRow ? line - 1 : line;
                 std::size_t recordIndex = 0;
-                const model::RawLogRecord* record = recordAtLine(state, ring, line, recordIndex);
+                const model::RawLogRecord* record =
+                    recordAtLine(state, ring, bodyLine, recordIndex);
                 if (record == nullptr) {
                     // A continuation line of the expanded record.
-                    const std::size_t detailLine = line - state.expandedAt - 1;
+                    const std::size_t detailLine = bodyLine - state.expandedAt - 1;
                     const char* text = detailLine < state.expandedLines.size()
                                            ? state.expandedLines[detailLine].c_str()
                                            : "";
@@ -587,7 +621,10 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
                     continue;
                 }
                 const std::string text = rowTextForWidth(*record, rowW, m);
-                lineAt(m, row, row.x, row.y, text, levelInk(record->level));
+                // A loss row is not a log line: its message alone, in the dim ink -
+                // the same treatment the detail continuations get.
+                lineAt(m, row, row.x, row.y, text,
+                       record->loss ? ColorToken::textDim : levelInk(record->level));
                 const std::string id = "##rawlog_row" + std::to_string(line);
                 const RowHit hit = submitRow(row, id.c_str());
                 if (hit.clicked) {

@@ -12,7 +12,8 @@
 //     boxes the view computed - a clip that ate the values would pass a box-only check;
 //   - the text scale is the one setting whose effect the grid cannot show: changing it reaches the
 //     next frame's `ImGuiStyle::FontScaleMain` and the next frame's metrics (`row` grows), and the
-//     commit is written to `imgui2.conf` once - the legacy file, unchanged.
+//     commit is written to `imgui2.gui.conf` once - the file the window's whole
+//     settings state lives in, unchanged.
 //
 // The GUI half of "a golden screen in both backends" is this binary: the pixel sheet's type sizes,
 // its search field's frame height and its placement only exist under the real GLFW/OpenGL3 backend
@@ -276,7 +277,7 @@ int main(int argc, char** argv) {
           "Enter steps the text scale by one 5 % step (got " +
               std::to_string(state.settings.fontScaleMain) + ")");
     const std::string conf = readWhole(confPath);
-    check(!conf.empty(), "the commit wrote imgui2.conf");
+    check(!conf.empty(), "the commit wrote imgui2.gui.conf");
     check(conf.find("FontScaleMain=1.05") != std::string::npos,
           "with the scale the sheet committed (got '" + conf + "')");
     check(!state.settingsSheet.fontScaleChanged, "and the answer was consumed once");

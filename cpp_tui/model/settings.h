@@ -1,11 +1,11 @@
 /// The workbench's own settings file (`ui.conf`): the persisted shell
-/// preferences, kept apart from `imgui2.conf` so a `TuiSettings` save cannot
+/// preferences, kept apart from `imgui2.gui.conf` so a `TuiSettings` save cannot
 /// clobber them (design §5.3, D-UI-CONF / D-03).
 ///
 /// `ShellPrefs` is the one owner of the user's choices - the model keeps no
 /// second copy, and the views read its fields instead of their own flags. What
 /// is *not* here is as deliberate: window size and `FontScaleMain` stay in
-/// `imgui2.conf` through `TuiSettings` (a rollback has to find them where the
+/// `imgui2.gui.conf` through `TuiSettings` (a rollback has to find them where the
 /// older build left them), the Raw Log's open state is
 /// never persisted (D-RAWLOG), and the unread set is not persisted either (D-19) -
 /// it belongs on `UiState` next to `rawLogOpen`, never in this struct.
@@ -18,8 +18,8 @@
 /// case-insensitively, surrounding blanks are ignored, and a number outside its
 /// range clamps instead of being dropped - including one too large for a `long`.
 ///
-/// Reading is never a change: `loadUiConf()` settles the debounce state, so a
-/// pruned pin or an untouched profile is not written back behind the user's back.
+/// Reading is never a change: `loadUiConf()` settles the debounce state, so an
+/// untouched profile is not written back behind the user's back.
 ///
 /// Wiring (task 29): the frame layer owns the three calls, in one place (D-UI-CONF: the
 /// frame is the only writer of this file) -
@@ -29,7 +29,6 @@
 /// disk through the debounce the next time the user stops changing things.
 #pragma once
 
-#include <set>
 #include <string>
 
 namespace llmfun::tui::model {
@@ -140,12 +139,6 @@ struct ShellPrefs {
     /// (`toggleInspector()`).
     int inspectorOpen = -1;
     InspectorTab tab = InspectorTab::Activity;
-    /// Pinned session ids (design §5.1's `Pin.<sessionId>=1`), pruned on load for a
-    /// session the store no longer has. An id that cannot round-trip (empty, or
-    /// carrying `=`, CR or LF) is dropped by the parser and never written, so the
-    /// set can never hold one the file cannot carry. `std::set` order is the write
-    /// order, so the file's bytes are a function of the set and nothing else.
-    std::set<std::string> pinned;
 };
 
 /// Show or hide the rail, as the user's own press means it (`Ctrl+B` and the palette's
@@ -182,8 +175,7 @@ inline void toggleInspector(ShellPrefs& prefs, bool visible) {
 std::string uiConfPath(const std::string& iniFilename);
 
 /// The file's bytes, one `Key=Value` line per setting and a trailing newline:
-/// `Version`, `SendKey`, `UiLog`, `RailOpen`, `InspectorOpen`, `InspectorTab`,
-/// then one `Pin.<id>=1` per pinned session in set order.
+/// `Version`, `SendKey`, `UiLog`, `RailOpen`, `InspectorOpen`, `InspectorTab`.
 ///
 /// This is the format's single owner - the debounce below compares exactly these
 /// bytes, so "the file is up to date" has one definition - and the writer never
@@ -203,16 +195,7 @@ std::string uiConfText(const ShellPrefs& prefs);
 /// A file whose `Version` is newer than this build keeps the defaults and is
 /// marked as the newer build's: only an explicit save of a real change writes it,
 /// so starting and quitting this build leaves its bytes alone.
-///
-/// `knownSessionIds` is the session store's id set when the caller has one; pins
-/// for an id it does not contain are pruned *in memory* (the load settles the
-/// debounce state, so the prune alone never reaches the disk). Pass the complete
-/// set: a partial one - a filtered, paged or still-opening store - would drop the
-/// pins it does not list, and a later change would then write the pruned set.
-/// `nullptr` (the default) skips the pruning, which is what a caller without a
-/// store wants.
-void loadUiConf(ShellPrefs& prefs, const std::string& iniFilename,
-                const std::set<std::string>* knownSessionIds = nullptr);
+void loadUiConf(ShellPrefs& prefs, const std::string& iniFilename);
 
 /// Write the file now: `ui.conf.tmp`, fsync, `rename()` - a crash or a full disk
 /// leaves the previous file intact instead of a truncated one. A replaced file

@@ -296,9 +296,10 @@ RailFrame deriveRail(TuiState& state, std::int64_t nowMs) {
         rail.loadingFrames = 0;
     }
 
-    // 3. The rows: the snapshot plus the three facts that are not in it - which row
-    //    is active (the id is authoritative, `isActive` repeats it), the pin
-    //    (a `ui.conf` preference) and unread (this process's own set).
+    // 3. The rows: the snapshot plus the two facts that are not in it - which row
+    //    is active (the id is authoritative, `isActive` repeats it) and unread
+    //    (this process's own set). The pin rides the snapshot's flags bit 1: the
+    //    agent owns it, so the shell only reads it.
     RailFrame frame;
     frame.rows.reserve(panel.sessions.size());
     for (const SessionEntry& entry : panel.sessions) {
@@ -310,7 +311,7 @@ RailFrame deriveRail(TuiState& state, std::int64_t nowMs) {
         row.updatedAtMs = entry.updatedAtMs;
         row.active = panel.activeId.empty() ? entry.isActive : entry.id == panel.activeId;
         row.running = (entry.flags & kSessionFlagRunning) != 0;
-        row.pinned = state.ui.prefs.pinned.count(entry.id) != 0;
+        row.pinned = (entry.flags & kSessionFlagPinned) != 0;
         frame.rows.push_back(std::move(row));
     }
 
@@ -321,22 +322,7 @@ RailFrame deriveRail(TuiState& state, std::int64_t nowMs) {
     for (model::SessionRow& row : frame.rows)
         row.unread = state.ui.unread.isUnread(row.id);
 
-    // 5. The pin prune, once and only once (`ShellPrefs::pinned`): a `Pin.<id>` line
-    //    for a session the store no longer has would keep a dead id in the preference for ever.
-    //    The moment to drop them is the first *complete* snapshot - pruning against a list that
-    //    is still loading would delete the pins it has not seen yet - and this is the one place
-    //    the frame holds that snapshot.
-    if (!state.uiConfPinsPruned && !panel.sessions.empty()) {
-        state.uiConfPinsPruned = true;
-        for (auto it = state.ui.prefs.pinned.begin(); it != state.ui.prefs.pinned.end();) {
-            const bool known =
-                std::any_of(panel.sessions.begin(), panel.sessions.end(),
-                            [&it](const SessionEntry& entry) { return entry.id == *it; });
-            it = known ? std::next(it) : state.ui.prefs.pinned.erase(it);
-        }
-    }
-
-    // 6. Group, order and filter (model/session_rows.h). Once per frame, not once
+    // 5. Group, order and filter (model/session_rows.h). Once per frame, not once
     //    per drawn row: the view walks the groups it is given.
     const std::string filter(rail.filterBuf.data());
     frame.list = model::buildRailRows(frame.rows, nowMs, filter);
@@ -403,17 +389,22 @@ void applyRailAnswers(TuiState& state, float fullRailW) {
             queueSessionAction(state.sessionPanel, SessionActionType::Delete, id, "");
     }
 
+    if (!rail.cloneId.empty()) {
+        const std::string id = rail.cloneId;
+        rail.cloneId.clear();
+        if (canQueue && !id.empty())
+            queueSessionAction(state.sessionPanel, SessionActionType::Clone, id, "");
+    }
+
     if (!rail.pinToggleId.empty()) {
         const std::string id = rail.pinToggleId;
         rail.pinToggleId.clear();
-        // Pins are a preference (`ui.conf`), not session data: the toggle edits
-        // the one owner, `ShellPrefs::pinned`. The file itself is the frame layer's business
-        // (`views::uiConfFrame()` / `uiConfQuit()`): a pin reaches the disk with the
-        // next debounced write or on quit, and a pin the store no longer has is pruned once, by
-        // `deriveRail()`'s first complete snapshot.
-        const auto erased = state.ui.prefs.pinned.erase(id);
-        if (erased == 0 && !id.empty())
-            state.ui.prefs.pinned.insert(id);
+        // A pin is the agent's state (`LlmConfig.pinnedChatSessions` in
+        // `state.json`), not a workbench preference: the toggle queues the
+        // action through the one registry entry like the other sidebar
+        // mutations, and D applies it and sends the refreshed snapshot.
+        if (canQueue && !id.empty())
+            queueSessionAction(state.sessionPanel, SessionActionType::PinToggle, id, "");
     }
 
     if (rail.searchEnded || (rail.searchWide && state.ui.prefs.railOpen == 0)) {
@@ -693,7 +684,7 @@ void applyInspectorAnswers(TuiState& state) {
 /// The settings sheet's inputs for this frame.
 ///
 /// The facts only the frame knows, because a view may read none of them: the profile's
-/// two file paths (`ui.conf` beside the ini file, `imgui2.conf` derived from its name), the UI log
+/// two file paths, the UI log
 /// archive's switch, the ABI and format versions, the run's flags - and the display size, which the
 /// sheet reports as the "size" of the window it is drawn in. They are derived *only while the sheet
 /// is up* - a closed sheet costs nothing - and while it is up they are rebuilt each frame: a
@@ -720,10 +711,6 @@ void deriveSettings(TuiState& state, ImVec2 display) {
 }
 
 /// Apply what the sheet answered this frame, and clear the answers.
-///
-/// Two answers travel through the frame because the view cannot perform them: a *close* hands the
-/// keyboard back (`returnKeyboardBelow()`), and a committed font scale is written to `imgui2.conf`
-/// here and only here: the view knows that the value changed, but the profile name is the frame's.
 /// One write per commit, never one per frame (`saveTuiSettings`).
 void applySettingsAnswers(TuiState& state) {
     views::SettingsState& sheet = state.settingsSheet;
@@ -772,7 +759,11 @@ model::RawLogRing rawLogRing(const TuiState& state) {
     // Three facts: the ring itself (borrowed), the dropped counter and the accept counter. The
     // last one is what tells the surface's cached index that a record arrived - at capacity the
     // size does not move, and a burst can stamp several records with the same millisecond.
-    return model::RawLogRing{&state.logRecords, state.droppedRecords, state.logRecordSeq};
+    model::RawLogRing ring{&state.logRecords, state.droppedRecords, state.logRecordSeq};
+    ring.headN = model::rawLogHeadGap(state.logRecords, state.droppedRecords);
+    ring.interiorGapSum = model::rawLogInteriorGapSum(state.logRecords);
+    ring.queueDropNs = state.queueDropRecords;
+    return ring;
 }
 
 /// Apply what the Raw Log answered this frame, and clear the answers.

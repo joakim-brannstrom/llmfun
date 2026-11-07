@@ -248,6 +248,10 @@ struct LlmConfig {
     Path dialogueDir;
     /// Active chat session id (stored in state.json; empty = none).
     string activeChatSessionId;
+    /// Chat session ids the user pinned (stored in state.json; a file without
+    /// the key loads an empty set). Invalid ids are filtered out on load -
+    /// a malformed entry never aborts startup.
+    string[] pinnedChatSessions;
 
     Path[] skillPathsUser;
     Path[] skillPathsSystem;
@@ -515,6 +519,17 @@ struct LlmConfig {
             import llm.utility : getValue;
 
             activeChatSessionId = getValue!(string)(json, v => v["activeChatSessionId"].str, "");
+
+            import std.algorithm : filter, map, sort, uniq;
+            import llm.session.types : isValidId, SessionId;
+
+            // Pinned ids: a missing key loads an empty set; ids that fail the
+            // session-id validation (the same one the store applies) are
+            // dropped, never abort startup. Duplicates from a hand-edited file
+            // are collapsed so the persisted set stays canonical.
+            pinnedChatSessions = getValue!(string[])(json,
+                    v => v["pinnedChatSessions"].array.map!(a => a.str).array, [
+            ]).filter!(id => isValidId(SessionId(id))).array.sort.uniq.array;
         } catch (Exception e) {
             logger.tracef("Failed to load state: %s", e.msg);
         }
@@ -522,10 +537,19 @@ struct LlmConfig {
 
     /// Save state to llmfun/data/state.json. Only saves if directory exists.
     void saveState() const @safe nothrow {
+        trySaveState();
+    }
+
+    /// Save state, reporting the outcome. Same write path as `saveState`
+    /// (tmp + rename, only when the data dir exists), but a failed write is
+    /// reported instead of swallowed, so callers that lose a user action on
+    /// failure (the pin toggle) can log it louder than the trace here.
+    /// Returns: null on success, else the failure message (a missing data dir stays a no-op).
+    package string trySaveState() const @safe nothrow {
         import std.stdio : File;
 
         if (!dataDir.exists) {
-            return;
+            return null;
         }
 
         try {
@@ -534,6 +558,7 @@ struct LlmConfig {
             JSONValue stateObj;
             stateObj["activeCodeModelIndex"] = activeCodeModelIndex;
             stateObj["activeChatSessionId"] = activeChatSessionId;
+            stateObj["pinnedChatSessions"] = pinnedChatSessions;
             File(tempFile, "w").writeln(stateObj.toString(JSONOptions.doNotEscapeSlashes));
             rename(tempFile, stateFile);
         } catch (Exception e) {
@@ -541,7 +566,9 @@ struct LlmConfig {
                 logger.tracef("Failed to save state: %s", e.msg);
             } catch (Exception e) {
             }
+            return e.msg;
         }
+        return null;
     }
 
     RagDatabaseConfig[] getRagSecondary() @safe {
@@ -748,6 +775,55 @@ void makeLocalSetupFileStructure(LlmConfig conf) {
     }
     if (!conf.dataDir.empty)
         ensureMemoryTierDirs([conf.dataDir ~ "memory"]);
+}
+
+/// Path of the TuiSettings file derived from an imgui ini filename,
+/// mirroring `tui_settings::settingsPath` in cpp_tui: a trailing ".ini"
+/// (exact case) is replaced with ".gui.conf"; any other name gets
+/// ".gui.conf" appended.
+private Path tuiSettingsPath(Path iniFile) @safe {
+    import std.algorithm : endsWith;
+
+    auto name = iniFile.toString;
+    if (endsWith(name, ".ini"))
+        name = name[0 .. $ - 4];
+    return Path(name ~ ".gui.conf");
+}
+
+/// Copy the central UI profile into the locations a local-setup instance
+/// reads. First run only.
+void inheritCentralUiProfile(LlmConfig conf) @safe {
+    import std.path : dirName;
+    import my.xdg : xdgDataHome;
+
+    auto centralIni = xdgDataHome ~ Path(ProgramName) ~ "ui.ini";
+    auto localIni = conf.uiInitFile;
+
+    if (localIni.empty || localIni == centralIni)
+        return;
+
+    static void copyIfAbsent(Path source, Path target) @safe {
+        import std.file : copy, exists, mkdirRecurse, rename;
+        import std.path : dirName;
+
+        if (source == target || !source.exists || target.exists)
+            return;
+        try {
+            mkdirRecurse(dirName(target));
+            auto tmp = Path(target.toString ~ ".tmp");
+            copy(source.toString, tmp);
+            rename(tmp.toString, target);
+            logger.trace("Copied UI profile file ", target);
+        } catch (Exception e) {
+            logger.warningf("failed to copy UI profile file '%s' to '%s': %s",
+                    source, target, e.msg);
+        }
+    }
+
+    copyIfAbsent(centralIni, localIni);
+    copyIfAbsent(Path(dirName(centralIni.toString)) ~ "ui.conf",
+            Path(dirName(localIni.toString)) ~ "ui.conf");
+    copyIfAbsent(tuiSettingsPath(centralIni), tuiSettingsPath(localIni));
 }
 
 struct ToolFilter {
@@ -4103,6 +4179,100 @@ codeModels:
     foreach (area; areas)
         foreach (tier; ["short", "long", "archive"])
             assert((area ~ tier).exists, area.toString ~ "/" ~ tier);
+}
+
+@("pinnedChatSessions round-trips through state.json, and invalid ids are filtered on load") unittest {
+    import std.algorithm : canFind;
+    import std.file : write;
+    import std.json : parseJSON;
+    import std.path : buildPath;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("config_pinned_roundtrip");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto conf = LlmConfig.init;
+    conf.dataDir = Path(buildPath(tmpDir, "data"));
+    mkdirRecurse(conf.dataDir.toString);
+
+    conf.pinnedChatSessions = [
+        "20260101-120000-abcd", "20260101-130000-ffff", "bogus"
+    ];
+    conf.saveState();
+
+    // The saved JSON carries the key with all three ids.
+    auto saved = parseJSON((conf.dataDir ~ "state.json").readText);
+    assert("pinnedChatSessions" in saved, "state.json must carry pinnedChatSessions");
+    assert(saved["pinnedChatSessions"].array.length == 3);
+
+    // Restart simulation: a fresh load keeps only the valid ids.
+    auto reloaded = LlmConfig.init;
+    reloaded.dataDir = conf.dataDir;
+    reloaded.loadState();
+    assert(reloaded.pinnedChatSessions.length == 2, "exactly the two valid ids survive the reload");
+    assert(reloaded.pinnedChatSessions.canFind("20260101-120000-abcd")
+            && reloaded.pinnedChatSessions.canFind("20260101-130000-ffff"),
+            "both valid ids survive the reload");
+    assert(!reloaded.pinnedChatSessions.canFind("bogus"),
+            "an invalid id is dropped on load, never aborting startup");
+
+    // A hand-edited file with a duplicated id loads a canonical (deduped) set.
+    write(buildPath(conf.dataDir.toString, "state.json"),
+            `{"pinnedChatSessions": ["20260101-120000-abcd", "20260101-120000-abcd"]}`);
+    reloaded.loadState();
+    assert(reloaded.pinnedChatSessions == ["20260101-120000-abcd"],
+            "a duplicated pinned id collapses on load");
+}
+
+@("state.json without pinnedChatSessions (or with a non-array value) loads an empty pin set") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("config_pinned_missing_key");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto conf = LlmConfig.init;
+    conf.dataDir = Path(buildPath(tmpDir, "data"));
+    mkdirRecurse(conf.dataDir.toString);
+
+    // An old state.json without the key (hand-written: saveState now always
+    // writes it).
+    File(buildPath(conf.dataDir.toString, "state.json"), "w").writeln(
+            `{"activeChatSessionId": "20260101-120000-abcd"}`);
+    conf.loadState();
+    assert(conf.pinnedChatSessions.empty, "a file without the key loads an empty set");
+
+    // A non-array value is tolerated too (getValue falls back to the default).
+    File(buildPath(conf.dataDir.toString, "state.json"), "w").writeln(
+            `{"pinnedChatSessions": "nope"}`);
+    conf.loadState();
+    assert(conf.pinnedChatSessions.empty, "a non-array pin value loads an empty set");
+}
+
+@("trySaveState reports a failed write, saveState keeps its nothrow swallow") unittest {
+    import std.path : buildPath;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("config_pinned_save_failure");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto conf = LlmConfig.init;
+    conf.dataDir = Path(buildPath(tmpDir, "data"));
+    mkdirRecurse(conf.dataDir.toString);
+    conf.pinnedChatSessions = ["20260101-120000-abcd"];
+
+    // The tmp write target is a directory, so File(tempFile, "w") throws.
+    mkdirRecurse((conf.dataDir ~ "state.json.tmp").toString);
+    assert(conf.trySaveState() !is null, "a failed write must be reported as the message");
+
+    conf.saveState(); // must not throw (the no-throw contract stays)
 }
 
 @("per-model compression.mode: bogus is a parse error naming the valid values") unittest {

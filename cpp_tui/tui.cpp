@@ -364,7 +364,30 @@ TuiLogRecord toInbound(const LogRecord& record) {
     out.function = view(record.function);
     out.file = view(record.file);
     out.actionPayload = view(record.actionPayload);
+    out.seq = record.seq;
     return out;
+}
+
+/// The N a queue-drop warning reports, or -1 when the message is not the pinned format.
+long long queueDropReportedN(const std::string& message) {
+    static constexpr char prefix[] = "log queue dropped ";
+    static constexpr char suffix[] = " records (the frame loop did not drain in time)";
+    if (message.size() < sizeof(prefix) - 1 || message.compare(0, sizeof(prefix) - 1, prefix) != 0)
+        return -1;
+    constexpr std::size_t digitsStart = sizeof(prefix) - 1;
+    std::size_t end = digitsStart;
+    while (end < message.size() && message[end] >= '0' && message[end] <= '9')
+        ++end;
+    if (end == digitsStart || message.compare(end, sizeof(suffix) - 1, suffix) != 0)
+        return -1;
+    // Defense-in-depth against a re-worded D message with a huge digit run: a run
+    // past 18 digits cannot be a real drop count and would overflow the parse.
+    if (end - digitsStart > 18)
+        return -1;
+    long long n = 0;
+    for (std::size_t i = digitsStart; i < end; ++i)
+        n = n * 10 + (message[i] - '0');
+    return n;
 }
 
 } // namespace
@@ -385,32 +408,66 @@ void tuiAddOutputLine(TuiState& state, const ChatMessage& msg) {
 }
 
 void tuiAddLogRecord(TuiState& state, const LogRecord& record) {
-    state.logRecords.push_back(record);
-    // The monotonic arrival counter (see `TuiState::logRecordSeq`): the ring is bounded, so
-    // this is the only fact that tells a consumer a record arrived.
-    ++state.logRecordSeq;
-    // Both bounds are enforced FIFO, oldest first: the byte bound is what keeps a session of
-    // huge stack traces from turning the ring into an unbounded allocation. A record larger
-    // than the whole budget cannot be kept - it evicts everything (itself included) and is
-    // counted as dropped like any other eviction, which is what NFR-17 asks for: never a
-    // silent loss, always a number the Raw Log can print.
     const auto bytesOf = [](const LogRecord& r) {
         return r.message.size() + r.detail.size() + r.module.size() + r.function.size() +
                r.file.size() + r.actionPayload.size();
     };
-    state.logRecordBytes += bytesOf(record);
-    // One dropped *error* is a fact the user has to be able to see: the Raw Log's dropped row is
-    // developer detail, and Activity is where a user looks for "something failed". The eviction is
-    // the only place that knows, so it raises one Activity error for the whole eviction (a burst
-    // evicts thousands; one row is the news, a thousand are noise) - task 33's promotion rule.
+
+    // The seq-gap accounting: the stamp tells the accept path when records were lost in transport.
+    // Unstamped (`seq == 0`) flows through, and no gap is invented behind a number that is not
+    // a position. The first stamp a fresh state sees is a starting point, not a hole: the state
+    // cannot know what D logged before it existed. A duplicate (`seq <= watermark`) is a normal
+    // record and the watermark stays put, or the next in-order stamp would look like a gap.
+    LogRecord stored = record;
+    if (record.seq > 0) {
+        const bool queueDrop = record.function == model::kRawLogQueueDropMarker;
+        const long long reportedN = queueDrop ? queueDropReportedN(record.message) : -1;
+        if (state.lastStampedSeq == 0) {
+            state.lastStampedSeq = record.seq;
+        } else if (record.seq > state.lastStampedSeq) {
+            const std::int64_t gap =
+                static_cast<std::int64_t>(record.seq) - state.lastStampedSeq - 1;
+            if (gap > 0) {
+                if (queueDrop && reportedN == gap) {
+                    stored.message = model::rawLogQueueDropText(gap);
+                    stored.loss = true;
+                } else {
+                    // An unexplained (or miscounted) gap: both the hole and the warning, if
+                    // any, show as their own rows - the discrepancy is the diagnostic.
+                    LogRecord placeholder;
+                    placeholder.timestampMs = record.timestampMs;
+                    placeholder.message = model::rawLogGapText(gap);
+                    placeholder.function = model::kRawLogSeqGapMarker;
+                    // The virtual slot is the arriving record's seq: `rawLogHeadGap` and the
+                    // interior sum stay exact even if the placeholder outlives the record
+                    // (it is older, so it is the one the FIFO evicts first).
+                    placeholder.seq = record.seq;
+                    placeholder.loss = true;
+                    state.logRecords.push_back(placeholder);
+                    state.logRecordBytes += bytesOf(placeholder);
+                }
+            }
+            state.lastStampedSeq = record.seq;
+            // Every accepted warning reports its own N, folded or not: the equation's
+            // D-side term is what D *claimed*, and a claimed N the stamps do not back is
+            // exactly the mismatch this sum exists to expose.
+            if (queueDrop && reportedN >= 0)
+                state.queueDropRecords += static_cast<std::size_t>(reportedN);
+        }
+    }
+    state.logRecords.push_back(stored);
+    ++state.logRecordSeq;
+    state.logRecordBytes += bytesOf(stored);
     bool droppedError = false;
     while (!state.logRecords.empty() && (state.logRecords.size() > state.MaxLogRecords ||
                                          state.logRecordBytes > state.MaxLogRecordBytes)) {
         if (state.logRecords.front().level >= TuiLogLevel_Error)
             droppedError = true;
+        const bool placeholder = state.logRecords.front().function == model::kRawLogSeqGapMarker;
         state.logRecordBytes -= bytesOf(state.logRecords.front());
         state.logRecords.pop_front();
-        ++state.droppedRecords;
+        if (!placeholder)
+            ++state.droppedRecords;
     }
     if (droppedError) {
         model::LogRecord notice;
@@ -422,26 +479,13 @@ void tuiAddLogRecord(TuiState& state, const LogRecord& record) {
                               isActivityVisible(state));
     }
 
-    // The archive line, formatted from the record (design §6.4: the archive keeps its
-    // historical format; the format itself lives in `logArchiveLine()`).
-    //
-    // The archive is the only formatted copy: the Raw Log and the Activity tab read the
-    // record's own strings, so a run without `tuiSetLogging` formats nothing per arrival
-    // (task-31 review I3: a second formatted copy of every record used to be built for a
-    // tab nobody draws).
     if (state.isLogActive) {
         const std::string line = logArchiveLine(record);
         if (FILE* archive = archiveHandle(state); archive != nullptr) {
-            // A failed write or flush latches the archive off exactly like a failed open: the
-            // audit trail must not lose its tail silently (a full disk is the case this exists
-            // for), and one attempt per request is enough. `&&` short-circuits, so a failed
-            // write is not followed by a newline for a line that never landed. `ferror` also
-            // catches an error the previous writer left on the shared stream, which a fresh
-            // `fflush` on an empty buffer can no longer report.
-            const bool stored = std::fputs(line.c_str(), archive) >= 0 &&
-                                std::fputc('\n', archive) != EOF && std::fflush(archive) == 0 &&
-                                std::ferror(archive) == 0;
-            if (!stored)
+            const bool written = std::fputs(line.c_str(), archive) >= 0 &&
+                                 std::fputc('\n', archive) != EOF && std::fflush(archive) == 0 &&
+                                 std::ferror(archive) == 0;
+            if (!written)
                 failLogArchive(state);
         }
     }
@@ -454,18 +498,12 @@ std::int64_t nowMs() {
 }
 
 void tuiAddLogMessage(TuiState& state, const LogMessage& msg) {
-    // The shipped two-string call, kept for the compatibility path (design §6.4: "the
-    // two-string wrapper only for legacy sites with no metadata"). It maps to a record with
-    // no metadata and the informational severity, so one store sees every arrival.
     LogRecord record;
     record.timestampMs = nowMs();
     record.level = TuiLogLevel_Info;
     record.message = msg.summary;
     record.detail = msg.text;
     tuiAddLogRecord(state, record);
-    // Activity is a projection of the same arrival. There is no metadata to drop here, so the
-    // projection is the record itself (the rules `projectForActivity()` and
-    // `activityShowsLevel()` apply are reused, not re-implemented).
     model::appendActivity(state.ui, model::projectForActivity(toInbound(record)), record.level,
                           isActivityVisible(state));
 }

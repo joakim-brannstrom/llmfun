@@ -11,7 +11,9 @@
 //      surface is painted over the thread, not blended into it), and every row is
 //      inside it;
 //   3. a frame of the shipped workbench renders with no queued session action - the
-//      rail's own hit targets and its character-level keys do not fire on their own.
+//      rail's own hit targets and its character-level keys do not fire on their own;
+//   4. the snapshot's pin bit (flags bit 1) reaches the rail: a pinned row joins the
+//      PINNED group at the top, and unpinning the last pinned row drops the group.
 //
 // The screenshot (`rail-gui-1280x820.ppm`) is the visual evidence: the same frame the
 // assertions measured.
@@ -93,11 +95,11 @@ void seedSessions(llmfun::tui::TuiState& state, long long nowMs) {
         entry.messageCount = 3;
         entry.isActive = f.active;
         entry.updatedAtMs = nowMs - static_cast<long long>(f.hoursAgo) * 3'600'000LL;
+        if (f.pinned)
+            entry.flags |= llmfun::tui::kSessionFlagPinned;
         state.sessionPanel.sessions.push_back(entry);
         if (f.active)
             state.sessionPanel.activeId = f.id;
-        if (f.pinned)
-            state.ui.prefs.pinned.insert(f.id);
     }
     // One non-active row carries the run flag (`SessionItem::flags` bit 0, task 24):
     // the frame then has the static run mark to draw, and the checks below can pin the
@@ -336,14 +338,27 @@ int main(int argc, char** argv) {
     // The rail's answers only become D actions here, so this is where the session
     // protocol is pinned: one Select queues one action, a switch made while a run is
     // active is deferred and flushed on the first ready frame, new/rename/delete are
-    // refused while a run is active, a pin edits `ShellPrefs`, and a select clears the
-    // unread dot. Every step below is one real frame of the shipped workbench.
+    // refused while a run is active, a pin is forwarded to D as a PinToggle action (the
+    // pin lives in `state.json`), and a select clears the unread dot. Every step below
+    // is one real frame of the shipped workbench.
     const auto frameOnce = [&]() {
         state.backend->newFrame();
         tuiRender(state);
         state.backend->renderFrame();
     };
-    const auto clearActions = [&state]() { state.sessionPanel.actions.clear(); };
+    const auto clearActions = [&state]() {
+        const std::size_t queued = state.sessionPanel.actions.size();
+        state.sessionPanel.actions.clear();
+        return queued;
+    };
+    // One scan over the queue for "is this action in it": the shape the rename/delete
+    // checks below iterate by hand.
+    const auto actionQueued = [&](llmfun::tui::SessionActionType type, const std::string& id) {
+        for (const auto& action : state.sessionPanel.actions)
+            if (action.type == type && action.sessionId == id)
+                return true;
+        return false;
+    };
 
     // (a) a select while ready: one action, and the loading state that draws the
     //     pending mark (the skeleton only when the list is empty).
@@ -412,13 +427,25 @@ int main(int argc, char** argv) {
     check(sawDelete, "a delete answer is queued as Delete(id)");
     clearActions();
 
-    // (f) a pin edits the preference (the one owner), both ways.
+    // (f) a pin toggle is queued for D, both ways (the pin lives in `state.json`,
+    // so the workbench only forwards the toggle - it never edits a preference).
     state.ui.rail.pinToggleId = "s07";
     frameOnce();
-    check(state.ui.prefs.pinned.count("s07") != 0, "`p` pins the session in ShellPrefs");
+    check(actionQueued(llmfun::tui::SessionActionType::PinToggle, "s07"),
+          "`p` queues a PinToggle for D");
+    check(clearActions() == 1, "exactly one action per toggle");
     state.ui.rail.pinToggleId = "s07";
     frameOnce();
-    check(state.ui.prefs.pinned.count("s07") == 0, "`p` again unpins it");
+    check(actionQueued(llmfun::tui::SessionActionType::PinToggle, "s07"), "and unpin queues again");
+    check(clearActions() == 1, "the unpin is one action too");
+
+    // (f2) a clone answer is queued for D too - the C++ side only forwards the
+    // request, and the copy itself is D's work.
+    state.ui.rail.cloneId = "s08";
+    frameOnce();
+    check(actionQueued(llmfun::tui::SessionActionType::Clone, "s08"),
+          "the `Clone` menu answer queues a Clone for D");
+    check(clearActions() == 1, "exactly one action per clone");
 
     // (g) selecting a session clears its unread dot.
     std::vector<llmfun::tui::model::SessionRow> trackerRows;
@@ -581,6 +608,64 @@ int main(int argc, char** argv) {
           "...entirely in the right-hand slot the time label uses (x=" +
               std::to_string(noTimeDiff.x0) + ".." + std::to_string(noTimeDiff.x1) +
               ", y=" + std::to_string(noTimeDiff.y0) + ".." + std::to_string(noTimeDiff.y1) + ")");
+
+    // (l) the pin flag reaches the rail. The pin rides the same `SessionItem::flags`
+    //     word as the run mark (bit 1), and the only thing it may change is the
+    //     grouping: a pinned row joins the PINNED group at the top (the pixel
+    //     profile draws no second mark for it, the group is the mark). The grid
+    //     half is `./test_rail`'s. Here the same toggle goes through the shipped frame.
+    setRunningFlag(state, "s02", false);
+    setTimestamp(state, "s02", nowMs - 2 * 3'600'000LL); // restore the fixture's row
+    setTitle(state, "s02", "Composer paste handling");
+    frameOnce(); // the snapshot changed shape (grouped again): let the frame settle
+    const Ppm pinnedBase = captureFrame("rail-pin-base.ppm");
+    const Ppm pinnedBaseAgain = captureFrame("rail-pin-base-again.ppm");
+    check(diffBox(pinnedBase, pinnedBaseAgain).count == 0,
+          "premise: an unchanged snapshot renders the same pixels (pin base)");
+
+    const auto setPinnedFlag = [&](const std::string& id, bool pinned) {
+        for (auto& entry : state.sessionPanel.sessions) {
+            if (entry.id != id)
+                continue;
+            if (pinned)
+                entry.flags |= llmfun::tui::kSessionFlagPinned;
+            else
+                entry.flags &= ~llmfun::tui::kSessionFlagPinned;
+        }
+    };
+    setPinnedFlag("s07", true);
+    const Ppm pinnedFrame = captureFrame("rail-pin-s07.ppm");
+    setPinnedFlag("s07", false);
+    const Ppm unpinnedFrame = captureFrame("rail-pin-s07-cleared.ppm");
+    const DiffBox pinDiff = diffBox(pinnedFrame, unpinnedFrame);
+    check(pinDiff.count > 0, "the pin flag alone changes what the rail draws (differing=" +
+                                 std::to_string(pinDiff.count) + ")");
+    check(pinDiff.x0 >= static_cast<int>(railLayout.rail.x) &&
+              pinDiff.x1 <= static_cast<int>(railLayout.rail.x + railLayout.rail.w),
+          "...inside the rail column only (x=" + std::to_string(pinDiff.x0) + ".." +
+              std::to_string(pinDiff.x1) + ")");
+    check(pinDiff.y0 <= static_cast<int>(railLayout.rail.y + 3.0f * m.row + m.border),
+          "...joining the PINNED group's rows at the top of the rail body (y0=" +
+              std::to_string(pinDiff.y0) + ", bound=" +
+              std::to_string(static_cast<int>(railLayout.rail.y + 3.0f * m.row + m.border)) + ")");
+
+    // The fixture's pinned row *is* the rail's PINNED group: unpinning it drops the
+    // header (a group with no rows is omitted) and re-sorts the list, and the change
+    // starts at the top of the rail body, where that header sits.
+    setPinnedFlag("s00", false);
+    const Ppm noPinnedFrame = captureFrame("rail-pin-fixture-cleared.ppm");
+    setPinnedFlag("s00", true);
+    const DiffBox groupDiff = diffBox(pinnedBaseAgain, noPinnedFrame);
+    check(groupDiff.count > 0,
+          "unpinning the fixture's row redraws the PINNED group it headed (differing=" +
+              std::to_string(groupDiff.count) + ")");
+    check(groupDiff.x0 >= static_cast<int>(railLayout.rail.x) &&
+              groupDiff.x1 <= static_cast<int>(railLayout.rail.x + railLayout.rail.w),
+          "...inside the rail column only (x=" + std::to_string(groupDiff.x0) + ".." +
+              std::to_string(groupDiff.x1) + ")");
+    check(groupDiff.y0 <= static_cast<int>(railLayout.rail.y + 2.0f * m.row + m.border),
+          "...starting in the band where the PINNED header sits (y0=" +
+              std::to_string(groupDiff.y0) + ")");
 
     state.backend->shutdown();
     ImGui::DestroyContext();

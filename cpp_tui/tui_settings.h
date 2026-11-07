@@ -4,7 +4,7 @@
 
 namespace llmfun::tui {
 
-/// GUI view settings persisted in imgui2.conf (a sibling of imgui2.ini);
+/// GUI view settings persisted in their own file;
 /// windowWidth/windowHeight 0 = "no persisted size", fontScaleMain defaults to 1.0.
 struct TuiSettings {
     float fontScaleMain = 1.0f;
@@ -13,8 +13,9 @@ struct TuiSettings {
 };
 
 /// Derive the settings path from the imgui ini filename by replacing a
-/// trailing ".ini" (exact case) with ".conf" ("imgui2.ini" -> "imgui2.conf";
-/// any other name gets ".conf" appended). Empty input returns "".
+/// trailing ".ini" (exact case) with ".gui.conf". The extra ".gui." keeps
+/// TuiSettings in its own file, never the ShellPrefs file `ui.conf`. Empty
+/// input returns "".
 std::string settingsPath(const std::string& iniFilename);
 
 /// Load settings from iniFilename's derived path. Line format "Key=Value",

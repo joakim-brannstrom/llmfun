@@ -6,7 +6,7 @@
 /// failed to parse.
 ///
 /// This file draws, edits the two preference structs and answers; it writes no file and reads no
-/// display (D-METRICS). The frame owns both write paths: it saves `imgui2.conf` once when
+/// display. The frame owns both write paths: it saves once when
 /// `fontScaleChanged` says a commit happened, and `ui.conf` reaches the disk through the debounce
 /// the frame already runs - so a sheet that is closed a second after a change still leaves both
 /// files consistent with what the user chose.
@@ -171,9 +171,10 @@ std::vector<SettingsRow> allRows(const SettingsState& state, const model::ShellP
             row.kind = SettingsRowKind::ReadOnly;
             row.enabled = false;
         } else {
-            // The *drawable* percentage: a hand-edited `FontScaleMain=1.02` in `imgui2.conf` loads
-            // (the loader accepts 0.5..3.0), but no step can produce 102 % - so the sheet prints
-            // what `clampFontScale()` answers, which is also where the first `Enter` starts from.
+            // The *drawable* percentage: a hand-edited `FontScaleMain=1.02` in `imgui2.gui.conf`
+            // loads (the loader accepts 0.5..3.0), but no step can produce 102 % - so the sheet
+            // prints what `clampFontScale()` answers, which is also where the first `Enter` starts
+            // from.
             row.value =
                 percentText(model::fontScalePercent(model::clampFontScale(settings.fontScaleMain)));
             row.note = "GUI text scale, " +
@@ -242,7 +243,7 @@ std::vector<SettingsRow> allRows(const SettingsState& state, const model::ShellP
         row.section = kSettingsSectionAdvanced;
         row.label = "Workbench settings";
         row.value = state.uiConfPath.empty() ? std::string(kSettingsNoProfile) : state.uiConfPath;
-        row.note = "ui.conf: send key, raw log level, rail/inspector state, pins";
+        row.note = "ui.conf: send key, raw log level, rail/inspector state";
         rows.push_back(std::move(row));
     }
     {
@@ -251,7 +252,7 @@ std::vector<SettingsRow> allRows(const SettingsState& state, const model::ShellP
         row.section = kSettingsSectionAdvanced;
         row.label = "Window settings";
         row.value = state.iniConfPath.empty() ? std::string(kSettingsNoProfile) : state.iniConfPath;
-        row.note = "imgui2.conf: window size and text scale";
+        row.note = "imgui2.gui.conf: window size and text scale";
         rows.push_back(std::move(row));
     }
     {
@@ -515,7 +516,7 @@ void activate(SettingsState& state, model::ShellPrefs& prefs, TuiSettings& setti
         const float next = model::stepFontScale(settings.fontScaleMain, 1);
         if (next != settings.fontScaleMain) {
             settings.fontScaleMain = next;
-            // The frame writes `imgui2.conf` once, in the frame that committed the change: the
+            // The frame writes `imgui2.gui.conf` once, in the frame that committed the change: the
             // view knows *that* it changed, only the frame knows the file. `metricsFor()` reads
             // the new scale on the next frame (`tui.cpp`), which is what "applies next frame"
             // means for the one value that changes the metrics themselves.

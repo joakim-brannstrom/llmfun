@@ -131,6 +131,10 @@ std::string envValue(const char* name) {
 } // namespace
 
 std::string rawLogRowText(const RawLogRecord& record) {
+    // A loss-marker row is its message alone: it carries no clock, no level and no
+    // coordinates, and the filter and `Save` must see exactly the text the screen showed.
+    if (record.loss)
+        return record.message;
     std::string row = clockText(record.timestampMs);
     row += ' ';
     row += rawLogLevelField(record.level);
@@ -172,6 +176,40 @@ std::string rawLogRowText(const RawLogRecord& record) {
         }
     }
     return row;
+}
+
+std::string rawLogGapText(std::int64_t n) {
+    return "-- " + std::to_string(n) + " records lost here --";
+}
+
+std::string rawLogQueueDropText(std::int64_t n) {
+    return "-- " + std::to_string(n) + " records lost here (D-side queue drop) --";
+}
+
+std::size_t rawLogHeadGap(const std::deque<RawLogRecord>& records, std::size_t dropped) {
+    if (dropped == 0 || records.empty())
+        return 0;
+    // The count is the stamps' arithmetic, not a remembered number: seq 1 delivered the first
+    // record, so the oldest survivor at seq S means exactly S-1 seqs came before it. An
+    // unstamped survivor cannot answer and does not guess.
+    const int seq = records.front().seq;
+    return seq > 1 ? static_cast<std::size_t>(seq) - 1u : 0u;
+}
+
+std::size_t rawLogInteriorGapSum(const std::deque<RawLogRecord>& records) {
+    std::size_t sum = 0;
+    const RawLogRecord* prev = nullptr;
+    for (const RawLogRecord& record : records) {
+        if (prev != nullptr && prev->seq > 0 && record.seq > prev->seq) {
+            // Consecutive survivors with a stamp jump: the missing seqs are the gap. Equal or
+            // backwards stamps are duplicates/replays and contribute nothing; a loss
+            // placeholder carries the seq of the record it precedes, so the pair around it
+            // splits the gap without doubling it.
+            sum += static_cast<std::size_t>(record.seq - prev->seq) - 1u;
+        }
+        prev = &record;
+    }
+    return sum;
 }
 
 std::vector<std::string> rawLogDetailLines(const RawLogRecord& record) {

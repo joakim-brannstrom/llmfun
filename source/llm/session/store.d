@@ -276,6 +276,12 @@ class SessionStore {
         return some(sf);
     }
 
+    /** Whether the store holds a session file for the id (no format check -
+     * callers validate). */
+    bool has(SessionId id) @trusted {
+        return filePathFor(id).exists;
+    }
+
     /** Save a session, bumping updatedAt and recomputing counts/preview.
      *
      * `doc` contributes only `messages[]`; the header is rebuilt from
@@ -389,6 +395,52 @@ class SessionStore {
         }
 
         return some(sf.meta);
+    }
+
+    /** Clone a session: one JSON read, one JSON write under a freshly generated id.
+     *
+     * Returns: none on invalid/unknown id or a failed write; the original file
+     * is untouched in every case.
+     */
+    Optional!SessionMeta clone(SessionId id) @trusted {
+        if (!isValidId(id)) {
+            safeWarn("Invalid session id format for clone: '%s'", id.get);
+            return none!SessionMeta();
+        }
+
+        auto loadOpt = load(id);
+        if (!hasValue(loadOpt)) {
+            safeWarn("Clone failed: session '%s' not found", id.get);
+            return none!SessionMeta();
+        }
+
+        auto sf = orElse(loadOpt, SessionFile());
+
+        auto now = Clock.currTime().toUnixTime();
+        auto cloneId = generateId((SessionId candidate) {
+            return exists(filePathFor(candidate));
+        });
+
+        auto meta = SessionMeta();
+        meta.id = cloneId;
+        meta.title = sf.meta.title;
+        meta.createdAt = sf.meta.createdAt;
+        meta.updatedAt = now;
+        // Unknown header keys must survive the clone like they survive
+        // rename()/save() round-trips (parseHeader parked them in extra).
+        meta.extra = sf.meta.extra;
+
+        auto outDoc = buildSessionDoc(meta, now, getMessagesArray(sf.doc));
+        try {
+            atomicWrite(cloneId, serializeDoc(outDoc));
+        } catch (Exception e) {
+            safeWarn("Clone save failed for '%s': %s", cloneId.get, e.msg);
+            return none!SessionMeta();
+        }
+
+        // Recompute counts/preview from the written document (the save path).
+        auto cloneMeta = parseHeader(cloneId, outDoc);
+        return some(cloneMeta);
     }
 
     /** List all sessions, sorted by updatedAt descending (ties: id descending).

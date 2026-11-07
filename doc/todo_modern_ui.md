@@ -688,8 +688,9 @@ while the developer raw log is open) · settings gear.
   auto policy applies only when no preference exists.
 - Groups are computed from `SessionMeta.updatedAt`, which already exists in the store
   (`session/types.d:40-44`) but is not yet sent to the UI. Empty groups are omitted.
-- Pinned state is UI-local in `imgui2.conf` for the MVP (the simpler option); it can move
-  to `SessionMeta.extra` later if cross-machine sync is wanted.
+- Pinned state is persisted D-side in `state.json` (`llmConf.pinnedChatSessions`,
+  saved eagerly on toggle); it crosses the ABI as `SessionItem.flags` bit 1.
+  `SessionMeta.extra` stays untouched.
 - Search is fzf over title + preview + last answer; results are highlighted with the
   existing `session_fuzzy` matcher (already excellent).
 - Footer: `+ New session` is a quiet row, not a shouting button; `?` opens help.
@@ -913,8 +914,8 @@ container, a placeholder, a caret and a button.
 Behaviour:
 
 - `Enter` sends and `Shift+Enter` inserts a newline **only after the P0 key gate proves it
-  in both backends with `InputTextMultiline` active** — the old TUI problem was precisely
-  the active multiline field, not the idle screen. If the TUI cannot distinguish
+  in both backends with `InputTextMultiline` active** - the multiline field is exactly
+  where the two keys become ambiguous, not the idle screen. If the TUI cannot distinguish
   Shift+Enter, do **not** change Enter: use a same-chord alternative that works in both,
   or keep `Enter`=newline and the real Send button. No per-profile default.
 - The gate is a real test: focus `InputTextMultiline`, press Enter and Shift+Enter, assert
@@ -992,7 +993,7 @@ run: open at ≥ 1200 px, collapsed otherwise (a saved preference wins).
 - Each tab has an empty state ("No sources used in this turn", "No memory read").
 - TUI: tab strip as `[1] Context  [2] Tools …` with the active tab reverse-video; number
   keys select. Content scrolls independently.
-- **Activity** is the **user-facing** half of the old Log tab: plain-language rows with a
+- **Activity** is the **user-facing** log surface: plain-language rows with a
   severity glyph (`i`, `!`, `✕`) and colour, a time, and an action where relevant
   (`Retry`, `Details`). Filter: info / warning / error; search. No module names, no line
   numbers, no stack traces — those live in the raw log (§5.29). It is quiet by default:
@@ -1173,11 +1174,13 @@ A searchable sheet (GUI modal, TUI overlay), sections:
 - **Advanced**: backend mode (auto/gui/tui), ini/settings path, log level, diagnostics
   (copy system info).
 
-Persist in `ui.conf` (a sibling of `imgui2.conf`) during the transition; legacy window size
-and `FontScaleMain` stay in `imgui2.conf` so a legacy save cannot clobber the new keys.
-After legacy is removed, the two files merge into one. Same tolerant key=value parser:
+Preferences persist in `ui.conf` (a sibling of the imgui ini `imgui2.ini`);
+window size and `FontScaleMain` live in `imgui2.gui.conf` (the TuiSettings file
+the settings rule derives from the ini). Each file has one writer and one
+format, so neither save can clobber the other. Same tolerant key=value parser:
 unknown keys ignored, malformed values rejected. Settings changes apply on the next frame
-(except backend mode, which needs a restart and says so).
+(except backend mode, which needs a restart and says so). Merging the two files into one
+is optional future cleanup.
 
 ### 5.28 Help overlay (`?`)
 
@@ -1294,9 +1297,9 @@ when the table is too wide.
 - `s` toggles the markdown source; `y` copies the markdown; `o` opens the table/source in
   the canvas.
 - MVP: plain cell text (strip `**`, links to labels, inline code as text); inline styling
-  is P3. The legacy thread bridge preprocesses each table into a fenced `llmfun-table`
-  block rendered by `RegisterFencedBlockRenderer` (no child window); v5 uses
-  `TuiBlockKind_Table`.
+  is P3. The table bridge (`ui/table.cpp`, `bridgeTables()`) preprocesses each table into
+  a fenced `llmfun-table` block rendered by `RegisterFencedBlockRenderer` (no child
+  window); v5 uses `TuiBlockKind_Table`.
 - Tests: 103×82, 110×30, 120×40; long/wide tables; header artifacts; wrapping; source
   toggle; code-fence skipping.
 
@@ -1470,8 +1473,8 @@ Rail (when focused):
 | `n` | New session |
 
 **Changes from today** (documented in the release notes and shown once as a one-time
-hint): `Enter` sends; `Ctrl+Q` quits; `Ctrl+C` no longer quits (it copies in the GUI and
-cancels a run in the TUI — the TUI form needs raw mode/ISIG off, §8.12); history moves
+hint): `Enter` sends; `Ctrl+Q` quits; `Ctrl+C` copies in the GUI and cancels a run in the
+TUI (the TUI form needs raw mode/ISIG off, §8.12); history moves
 from the non-working `Ctrl+Up/Down` to `↑`/`↓` at the first/last line; `Esc` gains
 cancel-run semantics. `Ctrl+L` remains "clear the view" (not the session); `/clear` still
 clears the session.
@@ -1963,7 +1966,7 @@ cpp_tui/
                 actions, revisions, bounds                         (new)
   views/        shell, rail, thread, blocks, composer, inspector,
                 palette, canvas, settings, toasts, help, rawlog    (new)
-  session_panel.cpp  -> views/rail.cpp (retired after cutover)
+  session_panel.cpp  -> views/rail.cpp (deleted once views/rail.cpp is the only rail)
   tui_chat.cpp       -> split into views/thread.cpp + views/blocks.cpp
   tui_widgets.*      -> ui/primitives.* (retired)
   tui_settings.*     -> extended with theme/density/send-key, same parser
@@ -1972,7 +1975,7 @@ cpp_tui/
   test/              golden-grid fixtures, perf harness, contrast test
 source/llm/
   app_agent/ui.d     typed emitters, no formatting
-  app_agent/package.d  emit turns/blocks; keep v4 strings behind a flag
+  app_agent/package.d  emit turns/blocks (P3); the MVP keeps the v4 message emission
   app_agent/slash*.d expose command metadata
   tui/package.d      v5 bindings, action polling, store updates
 doc/
@@ -1999,9 +2002,9 @@ doc/
 The existing headless harness pattern (`test_session_filter_smoke`, `test_tui_maxwidth`)
 is exactly what golden-grid testing needs; no new machinery.
 
-### 8.11 Migration (strangler, MVP first)
+### 8.11 Phasing (MVP first)
 
-The migration deliberately has **two tracks**: an MVP that removes the pain and can replace
+The work deliberately has **two tracks**: an MVP that removes the pain and can replace
 today's UI, and the post-MVP work that raises the ceiling. The typed model is the long
 pole; it must not block the rescue.
 
@@ -2010,28 +2013,28 @@ pole; it must not block the rescue.
 1. **Tokens + metrics + primitives.** Replace `applyTheme`, `renderButton`,
    `renderSeparator`, the hard-coded `ImVec4`s. Visual change only; no data change.
 2. **Shell.** Compute the layout; move the top bar, rail, composer and now bar to
-   `views/*`; keep the legacy thread renderer behind the same shell.
-3. **Legacy thread restyle.** Fix the invisible headers, replace role-coloured bars with
+   `views/*`; the thread renderer stays behind the same shell.
+3. **Thread restyle.** Fix the invisible headers, replace role-coloured bars with
    role rules, keep markdown/thinking/copy/groups. No v5 model yet.
 4. **MVP surfaces.** Activity + Raw Log, Agents tab, minimal Settings, minimal palette.
-5. **Composer behaviour.** Enter send, Stop, placeholder, history; a setting restores
-   the old Enter=newline behaviour.
-6. **Parity tests, dogfood, `--legacy-ui` fallback.** Ship only when every current
-   feature has a checked equivalent.
+5. **Composer behaviour.** Enter send, Stop, placeholder, history; a setting selects
+   Enter=newline instead.
+6. **Parity tests, dogfood.** Ship only when every current feature has a checked
+   equivalent.
 
-The shell consumes a thin adapter over the existing v4 messages; the v5 thread can
-replace the legacy thread later without touching the shell. This is the deliberate
-trade-off for speed: less elegance now, no rewrite later.
+The shell consumes a thin adapter over the v4 messages; the v5 thread replaces it later
+without touching the shell. This is the deliberate trade-off for speed: less elegance
+now, no rewrite later.
 
 **Post-MVP track:**
 
 7. **Store + adapter.** Add `model/ui_store` and v5 structs. `tuiAddChatMessage` creates
    a turn with one prose block; both renderers work; tests assert parity.
 8. **Thread v5.** Turns, run ribbon, tool cards, reasoning, answer card, streaming
-   identity; delete the legacy thread path.
+   identity; the restyled v4 thread path is deleted once v5 is the only renderer.
 9. **Full inspector, palette, search, canvas.** New surfaces on the typed model.
 10. **Delete dead code** (`session_panel.cpp`, `tui_widgets.*`, the `showHeader` alpha
-    hack, per-widget profile gates, the `--legacy-ui` path after one release).
+    hack, per-widget profile gates).
 
 Every step is shippable and reversible; no step requires the next one to compile.
 
@@ -2121,8 +2124,9 @@ llmfun sets it true in both profiles.
     a long 3-column table blanking at 110×30 (and a 4-column table blanking at 120×40),
     while short tables render. The fix is **not** a rich_md fit/wrap patch: the TUI uses a
     first-party **text-grid table renderer** (parse GFM, content-width columns, wrap, no
-    background, source toggle), and the GUI keeps rich_md native tables. The legacy bridge
-    preprocesses tables into a fenced `llmfun-table` block. This is MVP work; the upstream
+    background, source toggle), and the GUI keeps rich_md native tables. The table bridge
+    (`ui/table.cpp`) preprocesses tables into a fenced `llmfun-table` block. This is MVP
+    work; the upstream
     `TextGrid` table mode is optional post-MVP.
 12. **TUI Ctrl+C is SIGINT, not an ImGui key.** The ncurses backend runs in cbreak with
     ISIG on, so `\x03` terminates the process before ImGui or rich_md sees it (the
@@ -2220,7 +2224,7 @@ losing a feature. It is not a demo and not the full Workbench.
 
 **Scope:**
 
-- New shell: top bar, rail, thread (restyled legacy renderer), composer, now bar,
+- New shell: top bar, rail, thread (restyled renderer), composer, now bar,
   inspector frame with **Agents** and **Activity**.
 - New surfaces: **Raw Log** overlay (developer-only, off by default), minimal
   **Settings**, minimal **Ctrl+K** palette.
@@ -2238,7 +2242,7 @@ losing a feature. It is not a demo and not the full Workbench.
 - Minimal Settings: font scale (GUI), send key, Raw Log toggle.
 - **Everything in §9.2 is checked.**
 
-**Important:** the MVP ships the **new shell around the restyled legacy thread**, not the
+**Important:** the MVP ships the **new shell around the restyled thread**, not the
 full turn/ribbon layout shown in §3.2/§5.4. The MVP thread has readable headers, neutral
 surfaces and role rules, but keeps today's message groups; the Workbench turn model,
 ribbon and tool cards arrive in P3.
@@ -2249,10 +2253,10 @@ ribbon and tool cards arrive in P3.
 - Not GUI-only syntax highlighting, the Mermaid TUI/GUI split, or GUI LaTeX (P5/P6).
 - Not universal search, canvas, minimap, semantic zoom, ask/approval.
 - Not the keymap overhaul: `Ctrl+C` keeps quitting, `Ctrl+Q` is added as an alias; the
-  copy/cancel semantics change later with a migration note.
+  copy/cancel semantics change later with a release note.
 
 **Timeline:** P0 (3–5 days) + P1 (1–1.5 weeks) + P2 (2.5–3 weeks) ≈ 4.5 weeks of build,
-plus one week of dogfood ≈ **5.5 weeks to the default flip** (range 5–6.5).
+plus one week of dogfood ≈ **5.5 weeks to release** (range 5–6.5).
 
 **Exit criteria:**
 
@@ -2262,7 +2266,7 @@ plus one week of dogfood ≈ **5.5 weeks to the default flip** (range 5–6.5).
 - Golden screens at 120×36, 100×30, 80×24 and GUI 1280×820.
 - Frame time and session-open time within 10% of today.
 - One week of dogfood with no P0/P1 regression.
-- `--legacy-ui` works; the default is flipped; docs and release notes are updated.
+- Docs and release notes are updated.
 
 ### 9.2 Parity checklist
 
@@ -2280,7 +2284,7 @@ plus one week of dogfood ≈ **5.5 weeks to the default flip** (range 5–6.5).
 | Log | Log tab, collapsing rows | **Activity** + **Raw Log** | log tests |
 | Status | one sentence | chips (structured status if available, string split as fallback) | mapping test |
 | Composer | multiline + fake Send + Prev/Next | visible composer, real Send/Stop, history | interaction tests |
-| Enter behaviour | newline; send via fake field | Enter sends; setting restores old behaviour | interaction test |
+| Enter behaviour | newline; send via fake field | Enter sends; a setting selects newline | interaction test |
 | Font scale | GUI View→Options | Settings sheet | settings test |
 | Window size/DPI/font env | persisted/backend | same | settings test |
 | Backend auto/fallback/startup errors | C++ init | same | existing tests |
@@ -2301,24 +2305,18 @@ answer card, Context Lens, full inspector tabs, universal search, canvas, minima
 semantic zoom, ask/approval, Parchment/Native themes, density, full settings,
 virtualization (pixel-perfect), keymap overhaul.
 
-### 9.3 Cutover and rollback
+### 9.3 Rollout
 
-- **Flag:** `LLMFUN_UI=workbench|legacy` and `--ui=...`; `--ui` selects the UI
-  generation while `--tui`/`--gui` still select the backend. Default `legacy` during
-  development, `workbench` at the MVP release.
-- **Merge gate:** the branch may merge only when §9.2 is green and `--legacy-ui` works;
-  the default flip is a separate release commit.
-- **Dogfood:** one week on `workbench` before the default flip, using the same
+- **Merge gate:** the branch may merge only when §9.2 is green; the release commit is
+  separate from the feature commits.
+- **Dogfood:** one week of daily use before release, on the same
   sessions/settings files.
-- **Compatibility:** no data migration. Both paths read the same session files. Window
-  size and `FontScaleMain` stay in `imgui2.conf`; MVP-only settings live in a sibling
-  `ui.conf` that legacy never writes, so a legacy save cannot clobber them. New keys are
-  ignored by legacy; the two files merge after legacy is removed.
-- **Release:** flip the default; keep `--legacy-ui` for one release. Document the one
-  intentional behaviour change (Enter sends) and the setting to restore it.
-- **Rollback:** `--legacy-ui` / `LLMFUN_UI=legacy`; if a blocker appears, flip the
-  default back without touching data.
-- **Removal:** delete the legacy path and the restyle shims after one release.
+- **Compatibility:** no data migration. All renderers read the same session files. Window
+  size and `FontScaleMain` live in `imgui2.gui.conf`, MVP-only settings in the sibling
+  `ui.conf`; each file has one writer and one format, so neither save can clobber the
+  other. Unknown keys are ignored on load.
+- **Release:** document the one intentional behaviour change (Enter
+  sends) and the setting that selects newline instead.
 
 ### 9.4 Full program (MVP and post-MVP)
 
@@ -2330,7 +2328,7 @@ compress P3–P4.
 |---|---|---|---|
 | **P0 — Quick wins** | first MVP slice: composer send/stop, visible input, minimal palette, neutral palette, status chips, session row + scrollbar, empty state, GUI 1280×820 | 3–5 days | First dogfood build; no behaviour regressions |
 | **P1 — Foundation** | `ui/` tokens, metrics, primitives, icons; layout engine; theme switch; GUI style; golden-grid harness | 1–1.5 weeks | No hard-coded colours; 4 breakpoints render; contrast test green |
-| **P2 — Shell + MVP surfaces** | top bar, rail (filter/select/new/rename/delete, scrollbar), legacy thread restyle, composer v2 (chips, meter, Send/Stop), now bar, Agents + Activity inspector, Raw Log, minimal Settings, minimal palette, rich_md Style bridge, custom TUI table renderer | 2.5–3 weeks | §9.2 parity green; MVP exit criteria met |
+| **P2 — Shell + MVP surfaces** | top bar, rail (filter/select/new/rename/delete, scrollbar), thread restyle, composer v2 (chips, meter, Send/Stop), now bar, Agents + Activity inspector, Raw Log, minimal Settings, minimal palette, rich_md Style bridge, custom TUI table renderer | 2.5–3 weeks | §9.2 parity green; MVP exit criteria met |
 | **P3 — Thread v5** | v5 store, turns, run ribbon, work section, tool cards, reasoning, answer card, streaming identity, minimap, semantic zoom, table inline styling | 2–2.5 weeks | 50-turn session readable; tool failures retry; no flicker; 1000 messages responsive via paging/collapsed turns |
 | **P4 — Intelligence** | full inspector (Context, Tools, Sources, Memory), Context Lens, Why?, canvas, universal search, ask/approval cards, UI capability handshake (§8.14) | 1.5–2 weeks | "Why?" answers with sources; search jumps to a turn; the model prompt reflects the active UI capabilities |
 | **P5 — Polish** | Parchment + Native themes, density, full settings sheet, help overlay, focus mode, notifications, GUI-only rich_md syntax highlighting (code editor build), Mermaid TUI/GUI split + wrapper, accessibility audit, docs, onboarding | 1–1.5 weeks | Light theme ships; no contrast failures; keymap complete; docs rewritten |
@@ -2339,7 +2337,7 @@ compress P3–P4.
 Dependencies: P0 → P1 → P2 (MVP); P3 needs the v5 store (can start in parallel with the
 end of P2); P4 needs P3; P5 next; P6 is optional and last.
 
-Totals: **MVP build ≈ 4.5 weeks** (P0–P2, range 4–5.5); **default flip ≈ 5.5 weeks**
+Totals: **MVP build ≈ 4.5 weeks** (P0–P2, range 4–5.5); **release ≈ 5.5 weeks**
 including one week of dogfood (range 5–6.5); **post-MVP ≈ 5 weeks** (P3–P5), plus the
 optional P6 (3–5 days + review); **full program ≈ 10–11.5 weeks** excluding the optional P6.
 
@@ -2348,8 +2346,7 @@ P5 scope, not the MVP: TUI tables must not blank or show the native rich_md arti
 
 What to cut if time is short: universal search (keep the palette), the memory tab, the
 canvas (keep tool detail inline), Parchment. What never to cut from the MVP: any row in
-§9.2, the composer, readable headers, the session rail, the Agents/Activity split, the
-legacy fallback.
+§9.2, the composer, readable headers, the session rail, the Agents/Activity split.
 
 ---
 
@@ -2365,7 +2362,7 @@ legacy fallback.
 | rich_md re-parses/draws every visible fragment | High | Medium | Bound visible turns, collapse old ones, 30 fps streaming, frame budget |
 | C ABI churn breaks D | Low | High | Additive v5; v4 adapters; round-trip tests; version check |
 | Font assets inflate the binary / licensing | Low | Low | Subset OFL fonts; embedded Roboto fallback; ≤ 1.5 MB budget |
-| Users dislike changed keys (Enter/Ctrl+Q) | Medium | Medium | One-time hint, settings to restore old behaviour for one release |
+| Users dislike changed keys (Enter/Ctrl+Q) | Medium | Medium | One-time hint, a settings override for the changed keys for one release |
 | 16-colour / NO_COLOR looks flat | Medium | Medium | Native theme + glyph/label redundancy; tested in CI via token simulation |
 | ImGui has no accessibility tree | High | Medium | Keyboard-complete, high contrast, text dumps; document the limitation |
 | Pipeline/agent instrumentation too invasive | Medium | Medium | Inspector degrades honestly ("not reported"); ship what exists |
@@ -2385,11 +2382,9 @@ legacy fallback.
 
 ### 10.3 Decisions
 
-All previously open questions are resolved; these are the decisions the implementation
-plan should follow.
+These are the decisions the implementation plan follows.
 
-1. **Pinning sessions:** UI-local in `imgui2.conf` (the simpler option). Can move to
-   `SessionMeta.extra` later if cross-machine sync is wanted.
+1. **Pinning sessions:** persisted in `state.json` (`pinnedChatSessions`) and the row menu / `p` rail key toggle it.
 2. **Message ordinals:** show `#12` dim in the turn meta only; never in the header.
 3. **Ctrl+C:** change to copy/cancel and move quit to `Ctrl+Q`, with a one-time hint.
    This is post-MVP; the TUI form needs raw mode (§8.12). The MVP keeps Ctrl+C quit.
@@ -2515,7 +2510,7 @@ void tuiFreeAction(TuiUiAction*);   // frees the owned Strings
 ```
 
 Compatibility rule: if `tuiSetTurns`/`tuiTurnUpsert` has ever been called, the UI renders
-the typed store and ignores v4 chat messages; otherwise it renders the legacy store. A
+the typed store and ignores v4 chat messages; otherwise it renders the v4 message store. A
 single boolean, tested both ways.
 
 ## Appendix C — File fate
@@ -2543,30 +2538,18 @@ Resolved decisions are in §10.3. These are the remaining design details:
 4. Should the palette's free-text fallback send to the agent, or require a modifier?
 5. Is 30 fps streaming visibly worse than 60 in the GUI? (Measure on llvmpipe in P3.)
 
----
-
-*End of proposal. The next artifact should be `plan/modern_ui_tasks.md`: the same phases
-broken into single-session code tasks with acceptance criteria, MVP first — P0 → P1 → P2
-(with the §9.2 parity checklist as the merge gate) — then P3 → P4 → P5, plus the optional
-P6. The typed model (P3) starts after the MVP merges; it is the ceiling, not the rescue.*
-
 ## Appendix E - User Notes
 
 ### Agents Tab
-- In Agents when I click on it I seem to only see the currently streamed message. I do not see see any more messages. In the old design I could at least see the last 10 messages.
-    - I am also not seeing how many messages they have produced. In the old UI there was a [NR] beside the agent.
-      Will this be added back later on (task 33+)?
+- In Agents when I click on an agent I only see the currently streamed message; earlier
+  messages are not visible. The agent should keep a visible message history (at least the
+  last 10 messages).
+    - There is no message count beside the agent. Add a `[NR]`-style count beside the
+      agent row.
 - I also want to see tok/s for the active agent
 - There is no highlight that there is activity under the Agents tab, like there is for the Activity tab
 - In the last agent that is executed the used context is not shown.
 - I only see the tool call part when I have an agent focus. No thinking, no content
-
-### Session
-- The animation when the active session is working is very annoying. Remove it (the one that goes /-\)
-    - Done: the rail's running row now draws the static run mark `◐` (the spinner's frame 0),
-      unconditionally - every `running` row, not only the active one. `ui::spinner()` remains
-      available as the animated indicator for future animated surfaces; no production draw
-      site calls it right now.
 
 ### Main window
 - The D side should stop adding x and v to tool responses. The UI should instead show the success status and the D side just send over the data such as the status. I am trying to say that the D side should not "decorate" the answer with a success/fail status but rather that the UI do that in a "prettier" way.
@@ -2593,9 +2576,6 @@ P6. The typed model (P3) starts after the MVP merges; it is the ceiling, not the
 # Misc
 - It is very annoying that while a "execute_command" is running a newline keep on being printed and removed.
     This seems to not be limited to only execute_command but rather when the agent is working
-- add a clone option to the "..." button in the session bar
 - make the colors configurable for user/agent/answer
 - make the whole color schema swappable/configurable
-- make it so that a new instance with --local-setup inherit the central configuration of the UI such as scale etc
-- make Pin persistent
 - make it possible to control how much is printed when it is working such as "minimal" where you only see it is working compared to "maximum" where you see everything.
