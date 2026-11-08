@@ -132,6 +132,11 @@ const char* rawLogLevelWord(int level);
 /// writes the unpadded text, because a saved line should not carry alignment whitespace.
 std::string rawLogLevelField(int level);
 
+/// The record's clock, as the row text spells it: `HH:MM:SS.mmm` in local time, or
+/// `--:--:--.---` for a record that never got a stamp. Activity's clock is the same reading
+/// in the same zone, so the two surfaces cannot disagree about *when* a line happened.
+std::string rawLogClockText(std::int64_t timestampMs);
+
 /// The record's row: `HH:MM:SS.mmm level module.function file:line message[ action N payload]`.
 ///
 /// Every optional part is dropped when the record does not carry it, and the separators go with
@@ -155,6 +160,18 @@ bool rawLogShowsLevel(int level, int minLevel);
 /// the record, and hiding a hit whose detail carries the term would be a search that lies. An
 /// empty or blanks-only filter matches everything.
 bool rawLogMatches(const RawLogRecord& record, std::string_view filter);
+
+/// The lower-case form of `text`, ASCII only.
+/// ASCII on purpose: the filter is a substring test over a developer string, and a full Unicode
+/// case fold would need a locale table this build does not carry. A non-ASCII codepoint is
+/// compared byte-exactly, which is what a developer searching a module name expects. The view's
+/// highlight folds with the same function, so its byte offsets land on the matcher's bytes.
+std::string rawLogAsciiLower(std::string_view text);
+
+/// Whether `text` carries no character beyond space, tab, carriage return and line feed: the
+/// matcher's meaning of "no filter", shared with the view's highlight guard so the two cannot
+/// disagree about when a filter is a filter.
+bool rawLogFilterBlank(std::string_view text);
 
 /// The directory `Save` writes to: `$XDG_DATA_HOME/llmfun/logs`, else
 /// `$HOME/.local/share/llmfun/logs`.
