@@ -2841,7 +2841,7 @@ unittest {
 
     // No tool call yet: no tool name, and the numbers are the stat's (startContext + tokenCount).
     updater.messageUpdate(StreamMessage(content: "hello"), null,
-            ServerStat(startContext: 1200, tokenCount: 34));
+            ServerStat(startContext: 1200, tokenCount: 34, predictedPerSecond: 38.1));
     assert(sink.laneUpdates.length == 1, "one tick, one recorded lane update");
     auto first = sink.laneUpdates[0];
     assert(first.agentId == "coder", "the agent id travels");
@@ -2850,8 +2850,9 @@ unittest {
     assert(first.contextUsed == 1234, "contextUsed is stat.context: " ~ first
             .contextUsed.to!string);
     assert(first.contextMax == 8192, "contextMax is the model's context size");
-    assert(first.status.canFind("1234/8192 tokens"),
-            "the legacy sentence still goes out (the legacy panel paints it): " ~ first.status);
+    assert(first.tokensPerSecond == 38.1,
+            "tokensPerSecond is stat.predictedPerSecond, sent raw: "
+            ~ first.tokensPerSecond.to!string);
 
     // Two calls in one response: the array arrives in protocol order, so the last element is the
     // newest call - the tool name the row shows.
@@ -2865,6 +2866,7 @@ unittest {
     auto last = sink.laneUpdates[$ - 1];
     assert(last.currentTool == "write_file", "the newest call (highest index) is the field");
     assert(last.contextUsed == 15, "the numbers move with the stat");
+    assert(last.tokensPerSecond == 0.0, "the rate is the stat's field too (0 = no reading)");
     assert(last.role == "assistant", "the role crosses");
     assert(last.content.canFind("--- Tool ---"),
             "the marker blocks are still written into the content (the legacy panel reads them)");

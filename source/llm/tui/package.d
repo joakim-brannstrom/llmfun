@@ -287,34 +287,13 @@ void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
     }
 }
 
-/// The Raw Log's logger rule, as data (D-RAWLOG, task 33).
-///
-/// Opening the developer surface raises the process' in-process logger to the developer level and
-/// closing it - or quitting - restores what was configured. The rule is one struct so it can be
-/// tested without a window, and so there is exactly one place that decides "raise" and "restore".
-///
-/// `std.logger` has no `debug` step at all (`all < trace < info < warning < error`), so the
-/// design's "raise to debug" is `trace`: the one level below `info` that carries developer detail.
-/// `UiLog=trace` asks for the same floor, so the design's parenthetical is satisfied by
-/// construction; a level the user already made more verbose than `trace` (`all`) is never
-/// lowered, because the surface may add detail but never remove it.
-///
-/// The raise normally rides the per-frame poll of the surface's open state, but it can also be
-/// seeded directly on the spawn edge: `--debug-ui` opens the Raw Log before the first frame and
-/// raises the level with it, so records emitted between process start and the first frame are
-/// captured too (the seed is the same `sync(true)` edge, so the later per-frame polls no-op).
-///
-/// The archive (`tuiSetLogging`) is deliberately not part of this: the archive file
-/// (`llmfun_ui_log.txt`) keeps the level the user configured - `--debug-ui` widens the *view*,
-/// never the file, and neither an open surface nor the seed turns it into a trace file.
 struct RawLogLevelBorrow {
     private {
         LogLevel saved;
         bool raised;
     }
 
-    /// One call per frame with the surface's state; one write per edge. Returns true when this
-    /// call changed the level (a test reads it; production only needs the effect).
+    /// One call per frame with the borrow's state
     bool sync(bool open) {
         if (open == raised)
             return false;
@@ -349,8 +328,6 @@ struct TextUserInterface {
     private {
         TuiState* tuiState;
         TuiLogSwap logSwap;
-        /// The Raw Log's borrowed logger level (D-RAWLOG): one raise per open, one restore per
-        /// close, and the same restore on quit.
         RawLogLevelBorrow rawLogLevel;
     }
 
@@ -457,17 +434,15 @@ struct TextUserInterface {
         auto content = msg.content.toTuiString;
         auto reasoning = msg.thinking.toTuiString;
         auto role = msg.role.toTuiString;
-        auto status = msg.status.toTuiString;
         auto currentTool = msg.currentTool.toTuiString;
         String finish;
-        // The layout is a wire contract with `cpp_tui/tui_api.h` (120 bytes: task 39a appended
-        // the lane's fields); a reordering fails the build instead of sending a tool name where
-        // the UI expects a count.
-        static assert(PipelineChatMessage.sizeof == 120,
+        // The layout is a wire contract with `cpp_tui/tui_api.h` (104 bytes); a reordering
+        // fails the build instead of sending a tool name where the UI expects a count.
+        static assert(PipelineChatMessage.sizeof == 104,
                 "PipelineChatMessage layout changed: update tui_api.h and this mirror together");
         tuiPipelineAgentUpdate(tuiState, id, PipelineChatMessage(content: content, reasoning: reasoning, role: role,
-                finishReason: finish, status: status, currentTool: currentTool,
-                contextUsed: msg.contextUsed, contextMax: msg.contextMax));
+                finishReason: finish, currentTool: currentTool, contextUsed: msg.contextUsed,
+                contextMax: msg.contextMax, tokensPerSecond: msg.tokensPerSecond));
     }
 
     void pipelineMessage(UiPipelineStreamDone msg) {
@@ -494,20 +469,9 @@ struct TextUserInterface {
         tuiSetRawLogOpen(tuiState, open ? 1 : 0);
     }
 
-    // The Raw Log's logger rule (D-RAWLOG): while the surface is up the process logs at the
-    // developer level, and closing it - or quitting - restores what was configured.
-    //
-    // One poll per frame and one edge per change, never a write per frame: the level is a
-    // process-wide setting and every write of it is visible to every producer thread.
-    //
-    // `std.logger` has no `debug` step at all (`all < trace < info < warning < error`), so the
-    // design's "raise to debug" is `trace` - the one level below `info` that carries developer
-    // detail. `UiLog=trace` asks for the same floor, so the design's parenthetical is satisfied
-    // by construction; a level the user already made more verbose than `trace` (`all`) is never
-    // lowered. The archive (`tuiSetLogging`) is deliberately untouched: it keeps the level the
-    // user configured, and neither `--debug-ui` nor an open surface turns it into a trace file.
     void syncRawLogLevel() {
-        rawLogLevel.sync(tuiIsRawLogOpen(tuiState) != 0);
+        rawLogLevel.sync(tuiIsRawLogOpen(tuiState) != 0
+                && tuiRawLogFloor(tuiState) == TuiLogLevel_Trace);
     }
 
     void restoreRawLogLevel() {
@@ -758,16 +722,16 @@ class TextUserInterfaceActor : TUICommands {
         ui.setIniFile(iniFile);
     }
 
-    // with the flag set, open the Raw Log before the first frame AND seed the
-    // borrowed logger level to trace, so records emitted between process start
-    // and the first frame (backend attach, first agent traffic) are captured
-    // too - the per-frame syncRawLogLevel() only ran after it. Without the
-    // flag, nothing changes.
+    // with the flag set, open the Raw Log before the first frame and run the logger sync off the
+    // same edge the per-frame poll uses, so records emitted between process start and the first
+    // frame (backend attach, first agent traffic) are captured too - but only when the floor asks
+    // for trace: the poll's predicate decides, so a floor of info leaves the logger configured.
+    // Without the flag, nothing changes.
     package void debugUiSpawnEdge() {
         if (!debugUi)
             return;
         ui.setRawLogOpen(true);
-        ui.syncRawLogLevel(); // reads the just-set open state back from C: the same sync(true) edge
+        ui.syncRawLogLevel();
     }
 
     void onSpawn(ActorRef selfRef) {
@@ -1097,7 +1061,7 @@ struct UiPipelineStreamChatMessage {
     string content;
     string thinking;
     string role;
-    string status;
+    double tokensPerSecond;
     string currentTool;
     long contextUsed;
     long contextMax;

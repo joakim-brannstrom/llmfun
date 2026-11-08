@@ -103,10 +103,14 @@ class SessionStore {
 
     /** Compute messageCount, userMessageCount, and preview from messages array.
      *
-     * Preview short-circuits at the first string-content user message.
-     * Counts require the full scan.
+     * The preview is the LATEST real user query with non-empty string content
+     * (a later real query with empty content keeps the earlier preview - an
+     * empty query contributes nothing to display). `userMessageCount` counts
+     * every `role == "user"` entry, harness nudges included.
      */
     private void computeCountsAndPreview(JSONValue doc, ref SessionMeta meta) @trusted {
+        import llm.chat : isUserQuerySaveData;
+
         size_t msgCount = 0;
         size_t userMsgCount = 0;
         string previewStr;
@@ -115,29 +119,35 @@ class SessionStore {
         foreach (entry; msgs.array) {
             msgCount++;
 
-            if (entry.type == JSONType.object) {
-                auto role = getValue!(string)(entry, v => v["role"].str, "");
-                if (role == "user") {
-                    userMsgCount++;
-                    // Extract preview from first user message with string content
-                    if (previewStr.length == 0) {
-                        auto content = getValue!(string)(entry, v => v["content"].str, "");
-                        if (content.length > 0) {
-                            // First PreviewMaxChars graphemes; newlines, tabs,
-                            // and control bytes normalized to spaces so the
-                            // preview is always a single line. Grapheme
-                            // iteration never splits multi-byte UTF-8.
-                            previewStr = content.byGrapheme.take(PreviewMaxChars)
-                                .byCodePoint.map!(c => isControl(c) ? ' ' : c).text;
-                        }
-                    }
-                }
-            }
+            if (entry.type != JSONType.object)
+                continue;
+
+            auto role = getValue!(string)(entry, v => v["role"].str, "");
+            if (role != "user")
+                continue;
+
+            userMsgCount++;
+
+            auto content = getValue!(string)(entry, v => v["content"].str, "");
+            if (content.length == 0)
+                continue;
+            auto saveData = getValue!JSONValue(entry, v => v["save_data"], JSONValue.init);
+            if (!isUserQuerySaveData(saveData))
+                continue;
+
+            previewStr = truncatePreview(content);
         }
 
         meta.messageCount = msgCount;
         meta.userMessageCount = userMsgCount;
         meta.preview = previewStr;
+    }
+
+    // First PreviewMaxChars graphemes; newlines, tabs, and control bytes
+    // normalized to spaces so the preview is always a single line.
+    private string truncatePreview(string content) @safe {
+        return content.byGrapheme.take(PreviewMaxChars)
+            .byCodePoint.map!(c => isControl(c) ? ' ' : c).text;
     }
 
     /** Parse the header fields and compute counts/preview from a JSON document.

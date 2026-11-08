@@ -17,14 +17,14 @@ text:
                       log
                       ALL    APPEARANCE    BEHAVIOUR    ADVANCED
                        BEHAVIOUR
-                     ▌ Raw log level                                       off
+                     ▌ Raw log level                                      info
                        ADVANCED
                        Log level                                           off
 
 
 
 
-                     what the Raw Log shows when it is opened (off = only what…
+                     what the Raw Log shows when it is opened (info = what a n…
                      Esc close  Tab section  ^N/^P move  Enter change  / search
 
 

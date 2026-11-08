@@ -1,7 +1,7 @@
 // test_rawlog.cpp
 //
-// The Raw Log surface (views/rawlog.h + model/rawlog_data.h, design §4.9 / FR-16 / D-RAWLOG /
-// task 33): the opt-in developer stream, its row format, its filter and follower, its save and
+// The Raw Log surface (views/rawlog.h + model/rawlog_data.h): the opt-in developer stream,
+// its row format, its filter and follower, its save and
 // copy, and the wiring that makes it reachable from every documented access path.
 //
 // What this binary proves, in order:
@@ -11,7 +11,7 @@
 //   2. the model. The row text (`time level module.function file:line message`), the detail
 //      lines, the case-insensitive filter, the `UiLog` floor, the save name/path and the one
 //      write - including "never overwrite", "never inside the workarea" and "the archive keeps
-//      its own level" (this task never calls `tuiSetLogging`);
+//      its own level" (the archive's level is never touched here);
 //   3. the surface. Title, counts, chips (`follow`/`paused`), the dropped row, the empty and
 //      no-match states, the bounded window (5000 records draw a viewport, not the list), the
 //      expanded detail and the copy payload;
@@ -40,6 +40,8 @@
 #include "tui.h"
 
 #include "tui_api.h"
+
+#include "test/tui_state_handle.h"
 
 #include "model/activity.h"
 #include "model/settings.h"
@@ -374,14 +376,23 @@ void checkDetailAndFilter() {
           "and the detail, which is what a search for an argument is looking for");
     check(!model::rawLogMatches(withDetail, "nonexistent"), "a miss is a miss");
 
-    check(model::rawLogFloor(model::kRawLogOff) == model::kRawLogLevelInfo,
-          "UiLog=off shows what a normal run logs");
-    check(model::rawLogFloor(model::kRawLogRaw) == model::kRawLogLevelInfo,
-          "UiLog=raw is the same floor, named explicitly");
-    check(model::rawLogFloor(model::kRawLogDebug) == model::kRawLogLevelDebug,
-          "UiLog=debug widens it to the developer step");
-    check(model::rawLogFloor(model::kRawLogTrace) == model::kRawLogLevelTrace,
-          "UiLog=trace keeps trace lines");
+    // The pref IS a severity - the ladder's words name the ABI's severities directly, so the
+    // floor compare (`level >= minLevel`) needs no mapping and the table below is the one
+    // spellbook.
+    check(model::kRawLogError == model::kRawLogLevelError &&
+              model::kRawLogWarn == model::kRawLogLevelWarn &&
+              model::kRawLogInfo == model::kRawLogLevelInfo &&
+              model::kRawLogTrace == model::kRawLogLevelTrace,
+          "the UiLog constants are the ABI's severities (settings.h static_asserts them too)");
+    check(model::kUiLogLadder[0].severity == model::kRawLogError &&
+              std::string(model::kUiLogLadder[0].word) == "error" &&
+              model::kUiLogLadder[1].severity == model::kRawLogWarn &&
+              std::string(model::kUiLogLadder[1].word) == "warn" &&
+              model::kUiLogLadder[2].severity == model::kRawLogInfo &&
+              std::string(model::kUiLogLadder[2].word) == "info" &&
+              model::kUiLogLadder[3].severity == model::kRawLogTrace &&
+              std::string(model::kUiLogLadder[3].word) == "trace",
+          "the ladder table spells the four words in the sheet's cycle order");
     check(model::rawLogShowsLevel(model::kRawLogLevelTrace, model::kRawLogLevelInfo) == false,
           "a trace line is below the ordinary floor");
     check(model::rawLogShowsLevel(model::kRawLogLevelError, model::kRawLogLevelInfo),
@@ -396,6 +407,84 @@ std::string scratchRoot() {
     if (std::system(cmd.c_str()) != 0)
         return std::string();
     return path;
+}
+
+/// The openability marker: a summary row whose record carries multi-line detail ends in a dim
+/// `+` and gives up one cell for it; a detail-free row keeps the full width. Draw-only: the copy
+/// payload, the save file and the filter haystack are spelled without it.
+void checkOpenableGlyph() {
+    // The marker leads the row, so a row's first non-blank cell says whether it reserved
+    // the cell for it.
+    g_w = 100;
+    g_h = 30;
+    const ui::Rect rect = surfaceRect(g_w, g_h);
+    const auto firstMark = [](const Grid& grid, const char* needle) {
+        const std::string row = grid.rowText(grid.rowOf(needle));
+        std::size_t begin = 0;
+        while (begin < row.size() && row[begin] == ' ')
+            ++begin;
+        return begin == row.size() ? ' ' : row[begin];
+    };
+
+    const std::deque<model::RawLogRecord> records = mixedRecords();
+    views::RawLogState state = openSurface(rect, ringOf(records));
+    const Grid grid = capture();
+    check(firstMark(grid, "tool args resolved") == '+',
+          "the record with detail starts with the openability marker");
+    check(firstMark(grid, "session opened") != '+',
+          "a detail-free row keeps the full width and prints no marker");
+    check(firstMark(grid, "ui.conf is read-only") != '+',
+          "and so does every other detail-free row");
+
+    // A row that fills the whole width is cut before the marker's cell, and only by that cell:
+    // the same message without detail shows one more letter, so the reservation is per row.
+    model::RawLogRecord withDetail =
+        record(model::kRawLogLevelInfo, std::string(80, 'x'), 0, "args: path=README.md");
+    model::RawLogRecord withoutDetail = withDetail;
+    withoutDetail.detail.clear();
+    const auto xs = [](const Grid& grid, const char* needle) {
+        const std::string row = grid.rowText(grid.rowOf(needle));
+        int count = 0;
+        for (const char c : row)
+            count += c == 'x' ? 1 : 0;
+        return count;
+    };
+    const std::deque<model::RawLogRecord> detailOnly{withDetail};
+    views::RawLogState detailed = openSurface(rect, ringOf(detailOnly));
+    const Grid detailedGrid = capture();
+    check(xs(detailedGrid, "00:00:00.000") < 80,
+          "the long message is cut before the marker's cell");
+    check(firstMark(detailedGrid, "00:00:00.000") == '+', "with the marker still leading the row");
+    const std::deque<model::RawLogRecord> bareOnly{withoutDetail};
+    views::RawLogState bare = openSurface(rect, ringOf(bareOnly));
+    const Grid bareGrid = capture();
+    check(xs(bareGrid, "00:00:00.000") == xs(detailedGrid, "00:00:00.000") + 1,
+          "a detail-free row draws exactly one cell more of the same message");
+
+    // The marker is an affordance, never content: the copy payload spells the model row whole,
+    // and the filter does not see the glyph either.
+    views::RawLogState copied = openSurface(rect, ringOf(detailOnly));
+    copied.firstVisible = 0;
+    copied.windowRows = 1;
+    const std::string payload = views::rawLogVisibleText(copied, ringOf(detailOnly), 0, 1);
+    check(contains(payload, model::rawLogRowText(withDetail)),
+          "the copy carries the whole model row, truncated nowhere");
+    views::RawLogState filtered = openSurface(rect, ringOf(detailOnly));
+    std::snprintf(filtered.filter.data(), filtered.filter.size(), "%s",
+                  views::kRawLogOpenableGlyph);
+    frame(
+        [&](const ui::Metrics& m) { views::renderRawLog(filtered, rect, m, ringOf(detailOnly)); });
+    check(filtered.matchingRecords == 0, "the filter haystack has no glyph in it");
+
+    // An expanded record keeps its marker on the summary row: openability is a fact of the
+    // record, not of the view state.
+    views::RawLogState expanded = openSurface(rect, ringOf(records));
+    expanded.expandedKey = views::rawLogKey(records[1]);
+    const Grid expandedGrid = frame(
+        [&](const ui::Metrics& m) { views::renderRawLog(expanded, rect, m, ringOf(records)); });
+    check(expandedGrid.hasText("path=README.md"), "premise: the record is expanded");
+    check(firstMark(expandedGrid, "tool args resolved") == '+',
+          "and its summary row still starts with the marker");
 }
 
 void checkSave() {
@@ -899,7 +988,7 @@ void checkPlainKeys() {
 /// under the palette must not hand the keyboard to the composer and dismiss the palette.
 void checkOverlayStack() {
     tui::TuiState state = workbenchState();
-    state.ui.prefs.rawLog = model::kRawLogDebug;
+    state.ui.prefs.rawLog = model::kRawLogTrace;
     for (int i = 0; i < 12; ++i) {
         state.logRecords.push_back(
             record(model::kRawLogLevelInfo, "stack " + std::to_string(i), i));
@@ -944,6 +1033,7 @@ void checkOverlayStack() {
 
 void checkAbi() {
     check(tuiIsRawLogOpen(nullptr) == 0, "tuiIsRawLogOpen is null-safe");
+    check(tuiRawLogFloor(nullptr) == 0, "tuiRawLogFloor is null-safe (trace)");
     tuiSetRawLogOpen(nullptr, 1); // must not crash
     check(true, "tuiSetRawLogOpen is null-safe");
 
@@ -953,6 +1043,17 @@ void checkAbi() {
     TuiState* state = tuiCreateState();
     check(state != nullptr, "a state handle is created");
     check(tuiIsRawLogOpen(state) == 0, "a fresh state reports the surface closed");
+    check(tuiRawLogFloor(state) == model::kRawLogInfo,
+          "a fresh state reports the configured floor (info)");
+
+    // The floor getter reads the preference itself, so each ladder word's severity round-trips
+    // through the handle D polls: the raise condition is pref-valued, not a re-derived guess.
+    for (const model::UiLogWord& word : model::kUiLogLadder) {
+        state->inner->ui.prefs.rawLog = word.severity;
+        check(tuiRawLogFloor(state) == word.severity,
+              "the floor getter reports " + std::string(model::uiLogWord(word.severity)));
+    }
+    state->inner->ui.prefs.rawLog = model::kRawLogInfo;
 
     tuiSetRawLogOpen(state, 1);
     check(tuiIsRawLogOpen(state) == 1, "tuiSetRawLogOpen(1) opens it - the `--debug-ui` path");
@@ -971,9 +1072,9 @@ void checkRememberedNothing() {
     // The open state is not a preference: `ui.conf` has no key for it, and the model's writer
     // never emits one (D-RAWLOG: "open state does not persist").
     model::ShellPrefs prefs;
-    prefs.rawLog = model::kRawLogDebug;
+    prefs.rawLog = model::kRawLogError;
     const std::string text = model::uiConfText(prefs);
-    check(contains(text, "UiLog=debug"), "the level is persisted");
+    check(contains(text, "UiLog=error"), "the level is persisted");
     check(!contains(text, "RawLogOpen") && !contains(text, "rawLogOpen"), "the open state is not");
     check(!contains(text, "RawLogPaused") && !contains(text, "RawLogFollow"),
           "neither are the two view modes");
@@ -1274,6 +1375,7 @@ int main(int argc, char** argv) {
     checkSource();
     checkRowText();
     checkDetailAndFilter();
+    checkOpenableGlyph();
     checkSave();
     checkSurface();
     checkFilterAndStates();

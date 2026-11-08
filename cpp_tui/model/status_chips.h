@@ -3,7 +3,7 @@
 /// The status area answers four questions — how much context, how fast, which
 /// model, what state — and shows one chip per answer. The answers travel as the
 /// structured status D sends every tick (`tuiSetRuntimeStatus`), and this module
-/// owns the one formatting of those numbers into the four chips.
+/// provides the single formatting of those numbers into the four chips.
 ///
 /// Layering: `model` depends on nothing app-specific — no ImGui, no `tui.h`, no
 /// `ChatMessage` — so the formatter is testable without a renderer
@@ -18,9 +18,7 @@ namespace llmfun::tui::model {
 
 /// The UI's one phase vocabulary: seven states, one
 /// word each, shared by the now bar, the status chips, the composer's phase line and
-/// the rail's running mark. It lives here, beside `RuntimeStatus`, because
-/// `RuntimeStatus::phase` *is* this vocabulary's ordinal - and because a view that
-/// reads the bars must not have to include the whole state aggregate for it.
+/// the rail's running mark.
 ///
 /// The numbers match D's `TuiRuntimeStatus.phase`, so a run status crosses the
 /// surface without a translation table. A number this build has no member for
@@ -136,5 +134,10 @@ bool operator!=(const StatusChips& a, const StatusChips& b);
 /// "no name reported". Numbers are decimal and locale-independent (no
 /// `strtod`/`snprintf`, so `LC_NUMERIC` cannot turn `38.1` into `38,1`).
 StatusChips chipsFromStatus(const RuntimeStatus& status);
+
+/// "38.1 tok/s": one decimal and the suffix. Locale-independent by construction (`std::to_chars`
+/// never reads `LC_NUMERIC`; the UI adopts the user's locale on init). Returns `kMissingChipValue`
+/// on a formatting error.
+std::string formatRate(double value);
 
 } // namespace llmfun::tui::model

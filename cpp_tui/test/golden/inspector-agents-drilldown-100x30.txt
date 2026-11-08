@@ -2,11 +2,13 @@ name: inspector-agents-drilldown
 screen: 100x30
 rail: x=0 w=26 thread: x=26 w=46 inspector: x=72 w=28
 open: 1 tab: agents focused: 'coder'
-lanes: 3 rows=3 drawn=3
+lanes: 5 rows=5 drawn=5
 mission: 'planner ✓ -> coder ◐ -> r…'
 action: 'Stop all'
 lane: '  planner | ✓ done | 00:12'
 lane: '▸ coder | ◐ running' (focused)
+lane: '  00:31 | 4.2k tok'
+lane: '  tool: read_file'
 lane: '  reviewer | ○ queued'
 text:
    llmfun                                                      Ctrl+K commands Shift+?   Settings
@@ -14,9 +16,9 @@ text:
                           coder: reading the parser                      planner ✓ -> coder ◐ -> r…
  No sessions yet                                                           planner | ✓ done | 00:12
                                                                          ▸ coder | ◐ running
+                                                                           00:31 | 4.2k tok
+                                                                           tool: read_file
                                                                            reviewer | ○ queued
-
-
 
 
 

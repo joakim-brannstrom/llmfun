@@ -1,6 +1,6 @@
 // test_clear_output_state.cpp
 //
-// Headless regression test for the widened clear contract: tuiClearOutput / the C-API
+// Headless regression test for the full clear contract: tuiClearOutput / the C-API
 // tuiClearChatMessages must reset ALL derived chat-display state, not just outputLines:
 //
 //   - outputLineOpen (the set of collapsed header-group positions): stale positions survived a
@@ -21,7 +21,7 @@
 //
 // Also checks that the C-API clear functions are no-ops on a NULL state,
 // that outputLineNextId is NOT reset (monotonic per-message id, uniqueness
-// only), TUI_API_VERSION is pinned at the current generation (6), and the
+// only), TUI_API_VERSION is pinned at the current generation (9), and the
 // auto-scroll flag is unaffected by the clear.
 //
 // Exit codes: 0 = all scenarios pass; 1 = first assertion failure.
@@ -158,9 +158,9 @@ void scenario4_scrollAndApiVersion() {
     llmfun::tui::tuiClearOutput(state);
     expect(state.autoScroll == true, "auto-scroll on stays on across a clear");
 
-    // Documentation-only marker: the widened clear contract must not bump it.
-    // 6 is the current generation (the legacy renderer's removal, task 41).
-    static_assert(TUI_API_VERSION == 7, "TUI_API_VERSION must stay at the current v7 generation");
+    // Documentation-only marker: the clear contract must not bump it.
+    // 9 is the current generation (the Raw Log floor getter).
+    static_assert(TUI_API_VERSION == 9, "TUI_API_VERSION must stay at the current v9 generation");
 }
 
 // Scenario 5: C-API null-safety preserved.

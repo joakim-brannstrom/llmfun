@@ -52,10 +52,10 @@
 
 using llmfun::tui::model::flushUiConf;
 using llmfun::tui::model::InspectorTab;
-using llmfun::tui::model::kRawLogDebug;
-using llmfun::tui::model::kRawLogOff;
-using llmfun::tui::model::kRawLogRaw;
+using llmfun::tui::model::kRawLogError;
+using llmfun::tui::model::kRawLogInfo;
 using llmfun::tui::model::kRawLogTrace;
+using llmfun::tui::model::kRawLogWarn;
 using llmfun::tui::model::kUiConfIdleSeconds;
 using llmfun::tui::model::loadUiConf;
 using llmfun::tui::model::saveUiConf;
@@ -186,10 +186,10 @@ int main() {
         // An empty name has no path, so a save cannot create one and a load cannot
         // fail on it. (The file the legacy side would write stays untouched.)
         ShellPrefs prefs;
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogError;
         saveUiConf(prefs, "");
         loadUiConf(prefs, "");
-        CHECK(prefs.rawLog == kRawLogDebug);
+        CHECK(prefs.rawLog == kRawLogError);
     }
     {
         const std::string dir = caseDir("missing");
@@ -215,7 +215,7 @@ int main() {
         saveUiConf(ShellPrefs{}, iniOf(dir));
         CHECK(readText(confOf(dir)) == "Version=2\n"
                                        "SendKey=tab\n"
-                                       "UiLog=off\n"
+                                       "UiLog=info\n"
                                        "RailOpen=auto\n"
                                        "InspectorOpen=auto\n"
                                        "InspectorTab=activity\n"
@@ -226,14 +226,14 @@ int main() {
         removeFile(confOf(dir));
         ShellPrefs prefs;
         prefs.sendKey = SendKey::None;
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogError;
         prefs.railOpen = 1;
         prefs.inspectorOpen = 0;
         prefs.tab = InspectorTab::Agents;
         saveUiConf(prefs, iniOf(dir));
         CHECK(readText(confOf(dir)) == "Version=2\n"
                                        "SendKey=none\n"
-                                       "UiLog=debug\n"
+                                       "UiLog=error\n"
                                        "RailOpen=1\n"
                                        "InspectorOpen=0\n"
                                        "InspectorTab=agents\n"
@@ -255,7 +255,7 @@ int main() {
         removeFile(confOf(dir)); // the first save creates the profile
         const SendKey keys[] = {SendKey::None, SendKey::Enter, SendKey::Tab};
         const InspectorTab tabs[] = {InspectorTab::Agents, InspectorTab::Activity};
-        const int levels[] = {kRawLogOff, kRawLogRaw, kRawLogDebug, kRawLogTrace};
+        const int levels[] = {kRawLogTrace, kRawLogInfo, kRawLogWarn, kRawLogError};
         const int triStates[] = {-1, 0, 1};
         bool roundTripped = true;
         for (const SendKey key : keys) {
@@ -279,20 +279,20 @@ int main() {
             }
         }
         CHECK(roundTripped);
-        // The writer never emits a word the parser rejects: an out-of-range value in
-        // memory is clamped to its nearest legal word and reads back as that.
+        // The writer never emits a word the parser rejects: a value off the ladder is
+        // spelled as the default it reads as, and reads back as that.
         ShellPrefs wild;
         wild.rawLog = 99;
         wild.railOpen = 7;
         wild.inspectorOpen = -42;
         const std::string text = uiConfText(wild);
-        CHECK(text.find("UiLog=trace\n") != std::string::npos);
+        CHECK(text.find("UiLog=info\n") != std::string::npos);
         CHECK(text.find("RailOpen=1\n") != std::string::npos);
         CHECK(text.find("InspectorOpen=auto\n") != std::string::npos);
         saveUiConf(wild, ini);
         ShellPrefs clamped;
         loadUiConf(clamped, ini);
-        CHECK(clamped.rawLog == kRawLogTrace && clamped.railOpen == 1 &&
+        CHECK(clamped.rawLog == kRawLogInfo && clamped.railOpen == 1 &&
               clamped.inspectorOpen == -1);
     }
 
@@ -346,13 +346,13 @@ int main() {
                         "InspectorOpen=7\n");
         ShellPrefs prefs;
         prefs.sendKey = SendKey::None;
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogError;
         prefs.railOpen = 0;
         prefs.inspectorOpen = 0;
         prefs.tab = InspectorTab::Agents;
         loadUiConf(prefs, ini);
         CHECK(prefs.sendKey == SendKey::None);
-        CHECK(prefs.rawLog == kRawLogDebug);
+        CHECK(prefs.rawLog == kRawLogError);
         CHECK(prefs.railOpen == 0);
         CHECK(prefs.tab == InspectorTab::Agents);
         CHECK(prefs.inspectorOpen == 1); // 7 clamps to the open end
@@ -374,6 +374,18 @@ int main() {
         CHECK(words.rawLog == kRawLogTrace);
         CHECK(words.railOpen == -1);
         CHECK(words.tab == InspectorTab::Agents);
+
+        // The ladder's words are the only ones that map: a stale word from an older format
+        // (`off`, `raw`, `debug`) and any garbage read as the shipped default (`info`), exactly
+        // like a missing line.
+        bool staleReadsDefault = true;
+        for (const char* stale : {"off", "raw", "debug", "verbose"}) {
+            writeText(conf, std::string("UiLog=") + stale + "\n");
+            ShellPrefs defaulted;
+            loadUiConf(defaulted, ini);
+            staleReadsDefault = staleReadsDefault && defaulted.rawLog == kRawLogInfo;
+        }
+        CHECK(staleReadsDefault);
 
         // No legacy vocabulary: a word outside the none/enter/tab set is simply
         // unknown. It leaves the stored value in place (I-09), so on the shipped
@@ -398,7 +410,7 @@ int main() {
         // touched).
         CHECK(uiConfText(fallback) == "Version=2\n"
                                       "SendKey=tab\n"
-                                      "UiLog=off\n"
+                                      "UiLog=info\n"
                                       "RailOpen=auto\n"
                                       "InspectorOpen=auto\n"
                                       "InspectorTab=activity\n"
@@ -445,10 +457,10 @@ int main() {
 
         // CRLF is a Windows hand-edit, not a different format; a file without a
         // trailing newline still parses its last line.
-        writeText(conf, "Version=1\r\nSendKey=enter\r\nUiLog=debug");
+        writeText(conf, "Version=1\r\nSendKey=enter\r\nUiLog=error");
         ShellPrefs crlf;
         loadUiConf(crlf, ini);
-        CHECK(crlf.sendKey == SendKey::Enter && crlf.rawLog == kRawLogDebug);
+        CHECK(crlf.sendKey == SendKey::Enter && crlf.rawLog == kRawLogError);
     }
 
     // ---------------------------------------------------------------------------
@@ -468,7 +480,7 @@ int main() {
         CHECK(prefs.sendKey == SendKey::Enter && prefs.railOpen == 1);
 
         // A change rewrites the profile in this build's canonical form.
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogError;
         saveUiConf(prefs, ini);
         CHECK(readText(conf).find("Pin.") == std::string::npos);
         ShellPrefs reloaded;
@@ -493,7 +505,7 @@ int main() {
         ShellPrefs prefs;
         loadUiConf(prefs, ini);
         CHECK(prefs.sendKey == SendKey::Enter); // the intact file, not the temporary
-        CHECK(prefs.railOpen == -1 && prefs.rawLog == kRawLogOff);
+        CHECK(prefs.railOpen == -1 && prefs.rawLog == kRawLogInfo);
         CHECK(readText(conf) == before); // and loading does not "repair" the file
         CHECK(fileExists(conf + ".tmp"));
 
@@ -514,7 +526,7 @@ int main() {
         removeFile(dir + "/ui.conf");
         CHECK(::mkdir((dir + "/ui.conf").c_str(), 0755) == 0);
         ShellPrefs prefs;
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogError;
         saveUiConf(prefs, iniOf(dir));
         std::string warning;
         CHECK(takeUiConfWarning(warning));
@@ -569,7 +581,7 @@ int main() {
         loadUiConf(prefs, ini);
         CHECK(samePrefs(prefs, ShellPrefs{})); // defaults, not half-applied
         flushUiConf(prefs, ini, 10.0);
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogError;
         flushUiConf(prefs, ini, 20.0);
         flushUiConf(prefs, ini, 30.0);
         CHECK(readText(conf) == newer);
@@ -619,7 +631,7 @@ int main() {
         saveUiConf(prefs, ini);
         CHECK(readText(conf) == handEdited);
         // A change is written in this build's canonical form.
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogError;
         saveUiConf(prefs, ini);
         CHECK(readText(conf) == uiConfText(prefs));
     }
@@ -639,7 +651,7 @@ int main() {
         prefs.fontScaleMain = 1.25f;
         const std::string v2Bytes = "Version=2\n"
                                     "SendKey=tab\n"
-                                    "UiLog=off\n"
+                                    "UiLog=info\n"
                                     "RailOpen=auto\n"
                                     "InspectorOpen=auto\n"
                                     "InspectorTab=activity\n"
@@ -809,7 +821,9 @@ int main() {
         writeText(conf, v1);
         ShellPrefs prefs;
         loadUiConf(prefs, ini);
-        CHECK(prefs.sendKey == SendKey::Enter && prefs.rawLog == kRawLogDebug &&
+        // `debug` is not a word of this format's ladder, so the level reads as the shipped
+        // default (`info`) - the other five keys still apply.
+        CHECK(prefs.sendKey == SendKey::Enter && prefs.rawLog == kRawLogInfo &&
               prefs.railOpen == 1 && prefs.inspectorOpen == 0 && prefs.tab == InspectorTab::Agents);
         CHECK(prefs.windowWidth == 0 && prefs.windowHeight == 0 && prefs.fontScaleMain == 1.0f);
         saveUiConf(prefs, ini);
@@ -834,7 +848,7 @@ int main() {
 
         bool wroteDuringBurst = false;
         for (int i = 0; i < 100; ++i) {
-            prefs.rawLog = (i % 2 == 0) ? kRawLogRaw : kRawLogDebug;
+            prefs.rawLog = (i % 2 == 0) ? kRawLogInfo : kRawLogError;
             now += 0.01; // 100 changes in 1 s
             flushUiConf(prefs, ini, now);
             if (fileExists(conf))
@@ -847,10 +861,10 @@ int main() {
         flushUiConf(prefs, ini, now + kUiConfIdleSeconds + 0.5); // the user stopped
         CHECK(fileExists(conf));
         // A literal expectation, not uiConfText()'s own answer.
-        CHECK(prefs.rawLog == kRawLogDebug);
+        CHECK(prefs.rawLog == kRawLogError);
         CHECK(readText(conf) == "Version=2\n"
                                 "SendKey=tab\n"
-                                "UiLog=debug\n"
+                                "UiLog=error\n"
                                 "RailOpen=auto\n"
                                 "InspectorOpen=auto\n"
                                 "InspectorTab=activity\n"
@@ -904,26 +918,26 @@ int main() {
         CHECK(uiConfPath(ini) == dir + "/blocked/ui.conf");
 
         ShellPrefs prefs;
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogError;
         saveUiConf(prefs, ini);
         std::string warning;
         CHECK(takeUiConfWarning(warning));
         CHECK(!warning.empty());
         CHECK(!takeUiConfWarning(warning));  // one line, not one per call
-        CHECK(prefs.rawLog == kRawLogDebug); // the value still applies in memory
+        CHECK(prefs.rawLog == kRawLogError); // the value still applies in memory
 
         // The per-frame path cannot become a retry loop: a failed write ends the
         // window, so the same bytes are never attempted again.
         double now = 10.0;
         flushUiConf(prefs, ini, now);
-        prefs.rawLog = kRawLogRaw;
+        prefs.rawLog = kRawLogInfo;
         flushUiConf(prefs, ini, now + 0.1);
         flushUiConf(prefs, ini, now + kUiConfIdleSeconds + 1.0); // one attempt
         CHECK(takeUiConfWarning(warning));
         flushUiConf(prefs, ini, now + 4.0);
         flushUiConf(prefs, ini, now + 30.0);
         CHECK(!takeUiConfWarning(warning));
-        CHECK(prefs.rawLog == kRawLogRaw);
+        CHECK(prefs.rawLog == kRawLogInfo);
 
         // A new change is a new attempt, and is reported once.
         prefs.rawLog = kRawLogTrace;
@@ -980,7 +994,7 @@ int main() {
         const std::string conf = confOf(dir);
         removeFile(conf);
         ShellPrefs prefs;
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogError;
         saveUiConf(prefs, iniOf(dir));
         CHECK(fileExists(conf));
         CHECK(setWriteTime(conf, 1000));
@@ -995,7 +1009,7 @@ int main() {
         // choices, so a user who tightened it does not get 0644 back.
         CHECK(setFileMode(conf, 0600));
         CHECK(fileMode(conf) == 0600);
-        prefs.rawLog = kRawLogRaw;
+        prefs.rawLog = kRawLogInfo;
         saveUiConf(prefs, iniOf(dir));
         CHECK(fileMode(conf) == 0600);
 
@@ -1020,7 +1034,7 @@ int main() {
             const std::string dir = caseDir("umask-077");
             removeFile(confOf(dir));
             ShellPrefs prefs;
-            prefs.rawLog = kRawLogDebug;
+            prefs.rawLog = kRawLogError;
             saveUiConf(prefs, iniOf(dir));
             CHECK(fileMode(confOf(dir)) == 0600);
             // A mode the user set on an existing file still wins over the umask.
@@ -1033,7 +1047,7 @@ int main() {
             const std::string dir = caseDir("umask-027");
             removeFile(confOf(dir));
             ShellPrefs prefs;
-            prefs.rawLog = kRawLogDebug;
+            prefs.rawLog = kRawLogError;
             ::umask(027);
             saveUiConf(prefs, iniOf(dir));
             CHECK(fileMode(confOf(dir)) == 0640);
@@ -1042,7 +1056,7 @@ int main() {
             const std::string dir = caseDir("umask-022");
             removeFile(confOf(dir));
             ShellPrefs prefs;
-            prefs.rawLog = kRawLogDebug;
+            prefs.rawLog = kRawLogError;
             ::umask(022);
             saveUiConf(prefs, iniOf(dir));
             CHECK(fileMode(confOf(dir)) == 0644);

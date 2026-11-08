@@ -1,6 +1,6 @@
 // test_tui_api_v4.cpp
 //
-// Headless contract test for the v4 single-handle C API.
+// Headless contract test for the single-handle C API.
 //
 // In-process cases (no ImGui context is created in the process, so any
 // accidental ImGui access on a None-safe path would fault):
@@ -9,16 +9,16 @@
 //     reports TuiBackendKind_None;
 //   - the deliberate tuiRender asymmetry: tuiRender(NULL) == 0 (exit),
 //     tuiRender(none-state) == 1 (continue);
-//   - the cancel flag (tuiRequestCancel / tuiTakeCancel, task 3): NULL-safe,
+//   - the cancel flag (tuiRequestCancel / tuiTakeCancel): NULL-safe,
 //     consume-on-read, idempotent while a request is pending, and off the
 //     frame thread only after a frame has claimed one (debugIsFrameThread);
-//   - the v5 session-row fields (task 24): SessionItem's size and offsets are
+//   - the session-row fields: SessionItem's size and offsets are
 //     pinned, a snapshot round-trips into SessionEntry unchanged, and the fields
 //     the ABI must not carry (createdAt, unread, pinned) are absent;
-//   - the v5 pipeline lane fields (task 39a): PipelineChatMessage's size and
-//     offsets are pinned, the numbers and the tool name round-trip into the
-//     lane the Agents tab draws, the v4 sentence is untouched, and
-//     `0/0` (no reading) is told apart from `0/8192` (a real zero);
+//   - the pipeline lane fields: PipelineChatMessage's size and offsets are
+//     pinned, the numbers, the tool name, and the rate round-trip into the
+//     lane the Agents tab draws, and `0/0` (no reading) is told apart from
+//     `0/8192` (a real zero);
 //   - tuiDestroyState(NULL) and destroy-without-init are safe no-ops, and an
 //     ImGui context created by a test harness itself survives a state
 //     destroy;
@@ -994,38 +994,35 @@ void caseSessionRowFields() {
     tuiDestroyState(state);
 }
 
-// Case 1f: the pipeline lane fields (task 39a)
+// Case 1f: the pipeline lane fields
 //
-// `PipelineChatMessage` grew four appended fields so the Agents tab stops parsing D's text for
-// the context count and the tool name. The case pins the wire contract (the size, every offset,
-// the pre-v5 ones unchanged), round-trips the fields through `tuiPipelineAgentUpdate` into the
-// lane the workbench draws while the v4 sentence is untouched, and pins the two degradation
-// rules the row depends on: `0/0` is no reading, `0/8192` is a real zero, and `reserved` carries
-// nothing.
+// `PipelineChatMessage` carries the lane's numbers, the tool name, and the rate as fields, so
+// the Agents tab never parses D's text. The case pins the wire contract (size, offsets, the
+// API generation), round-trips the fields through `tuiPipelineAgentUpdate` into the lane the
+// workbench draws, and pins the degradation rules: `0/0` is no reading, `0/8192` is a real
+// zero, and a `tokensPerSecond` of 0.0 is "no reading this tick".
 void casePipelineLaneFields() {
-    g_where = "case 1f: PipelineChatMessage v5 appended fields";
+    g_where = "case 1f: PipelineChatMessage lane fields";
 
-    static_assert(sizeof(PipelineChatMessage) == 120,
-                  "PipelineChatMessage is 120 bytes on the 64-bit ABI");
+    static_assert(sizeof(PipelineChatMessage) == 104,
+                  "PipelineChatMessage is 104 bytes on the 64-bit ABI");
     static_assert(offsetof(PipelineChatMessage, content) == 0, "content keeps offset 0");
     static_assert(offsetof(PipelineChatMessage, reasoning) == 16, "reasoning keeps offset 16");
     static_assert(offsetof(PipelineChatMessage, role) == 32, "role keeps offset 32");
     static_assert(offsetof(PipelineChatMessage, finishReason) == 48,
                   "finishReason keeps offset 48");
-    static_assert(offsetof(PipelineChatMessage, status) == 64, "status keeps offset 64");
-    // The four v5 appends.
-    static_assert(offsetof(PipelineChatMessage, currentTool) == 80,
-                  "currentTool is appended at 80");
-    static_assert(offsetof(PipelineChatMessage, contextUsed) == 96,
-                  "contextUsed is appended at 96");
-    static_assert(offsetof(PipelineChatMessage, contextMax) == 104,
-                  "contextMax is appended at 104");
-    static_assert(offsetof(PipelineChatMessage, reserved) == 112, "reserved is appended at 112");
+    static_assert(offsetof(PipelineChatMessage, currentTool) == 64,
+                  "currentTool sits at offset 64");
+    static_assert(offsetof(PipelineChatMessage, contextUsed) == 80,
+                  "contextUsed sits at offset 80");
+    static_assert(offsetof(PipelineChatMessage, contextMax) == 88, "contextMax sits at offset 88");
+    static_assert(offsetof(PipelineChatMessage, tokensPerSecond) == 96,
+                  "tokensPerSecond sits at offset 96");
     static_assert(sizeof(PipelineChatMessage::contextUsed) == 8 &&
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
-    static_assert(TUI_API_VERSION == 6 || TUI_API_VERSION == 7,
-                  "the lane fields are additive, no re-bump");
+    static_assert(TUI_API_VERSION == 9,
+                  "the lane contract changed; bump one version per ABI event");
     static_assert(sizeof(SessionItem) == 80, "SessionItem is unaffected by the lane fields");
 
     // NULL-safe, and an empty agent id still registers nothing.
@@ -1038,26 +1035,23 @@ void casePipelineLaneFields() {
     const std::string content =
         "Let me read that file.\n--- Tool ---\nread_file\n```json\n{}\n```\n";
     const std::string role = "assistant";
-    const std::string status = "Context 1234/8192 tokens | 12.3 tok/s";
     std::string tool = "read_file";
     PipelineChatMessage msg{};
     msg.content = String{content.data(), content.size()};
     msg.role = String{role.data(), role.size()};
-    msg.status = String{status.data(), status.size()};
     msg.currentTool = String{tool.data(), tool.size()};
     msg.contextUsed = 1234;
     msg.contextMax = 8192;
+    msg.tokensPerSecond = 38.1;
 
     tuiPipelineAgentUpdate(state, makeStr("coder"), msg);
-    // A second tick: the release path (auto-registration builds the v4 store's `AgentStream` from
-    // the first four strings only, unchanged since task 30), so the sentence is checked here.
+    // A second tick exercises the update path (the first one registered the lane).
     tuiPipelineAgentUpdate(state, makeStr("coder"), msg);
 
-    // The v4 store is untouched by the new fields: it keeps its own copy of the sentence,
-    // which nothing draws since task 41 removed the renderer that did.
+    // The v4 store keeps its own copy of the stream, and the rate with it.
     expect(state->inner->left.agents.size() == 1, "the v4 store registers the agent once");
-    expect(state->inner->left.agents[0].stream.status == status,
-           "the v4 store still receives the status sentence");
+    expect(state->inner->left.agents[0].stream.tokensPerSecond == 38.1,
+           "the v4 store carries the rate D sent");
     expect(state->inner->left.agents[0].stream.content == content,
            "...and the agent's stream text, unchanged");
 
@@ -1076,14 +1070,12 @@ void casePipelineLaneFields() {
     expect(lane().currentTool == "read_file",
            "currentTool crosses (got " + lane().currentTool + ")");
 
-    // Text independence: a sentence full of numbers that disagrees with the fields, and a text
-    // with no `--- Tool ---` marker, change no lane value - the mirror reads fields only.
-    const std::string decoyStatus = "Context 999999/8192 tokens | 999.0 tok/s";
+    // Text independence: a text with no `--- Tool ---` marker changes no lane value - the
+    // mirror reads fields only.
     const std::string plainContent = "no marker in here at all";
-    msg.status = String{decoyStatus.data(), decoyStatus.size()};
     msg.content = String{plainContent.data(), plainContent.size()};
     tuiPipelineAgentUpdate(state, makeStr("coder"), msg);
-    expect(lane().tokens == 1234, "the count is the field, not the biggest number in the sentence");
+    expect(lane().tokens == 1234, "the count is the field, not the biggest number in the text");
     expect(lane().currentTool == "read_file", "the tool name is the field, not the stream's text");
     expect(state->inner->ui.agents.size() == 1, "a second update updates the same lane");
 
@@ -1097,6 +1089,12 @@ void casePipelineLaneFields() {
     tuiPipelineAgentUpdate(state, makeStr("coder"), msg);
     expect(lane().tokens == 0, "`0/0` stores 0 as well");
 
+    // A rate of 0.0 stores 0.0: "no reading this tick" is a value the row can gate on, not a
+    // missing field.
+    msg.tokensPerSecond = 0.0;
+    tuiPipelineAgentUpdate(state, makeStr("coder"), msg);
+    expect(state->inner->left.agents[0].stream.tokensPerSecond == 0.0, "a 0.0 rate stores 0.0");
+
     // Every String is copied during the call (C-02): scribbling over the caller's buffer must
     // not touch the lane's copy.
     std::string scribbled = "write_file";
@@ -1108,22 +1106,6 @@ void casePipelineLaneFields() {
     expect(lane().currentTool == "write_file",
            "currentTool was copied during the call, not borrowed");
     expect(lane().tokens == 42, "the numbers crossed with it");
-
-    // `reserved` is documented as zero and carries nothing: a value in it must not reach the
-    // lane. The rest of the update is unchanged (the buffer above is garbage now, so the String
-    // is rebuilt from a fresh copy), so any difference would be `reserved`'s doing.
-    std::string toolAgain = "write_file";
-    msg.currentTool = String{toolAgain.data(), toolAgain.size()};
-    msg.reserved = 1234;
-    tuiPipelineAgentUpdate(state, makeStr("coder"), msg);
-    expect(lane().content == plainContent,
-           "reserved carries nothing: the stream text is unchanged");
-    expect(lane().role == role, "reserved carries nothing: the role is unchanged");
-    expect(lane().tokens == 42, "reserved carries nothing: the count is unchanged");
-    expect(lane().currentTool == "write_file",
-           "reserved carries nothing: the tool name is unchanged");
-    expect(lane().state == llmfun::tui::model::kAgentStateRunning,
-           "reserved carries nothing: the lane is still running");
 
     // Finishing the lane keeps the numbers it last reported.
     tuiPipelineAgentDone(state, makeStr("coder"));
@@ -1437,7 +1419,7 @@ int main(int argc, char** argv) {
             (void)std::remove("llmfun_ui_log.txt");
     });
 
-    static_assert(TUI_API_VERSION == 7, "this contract test pins the current API generation (v7)");
+    static_assert(TUI_API_VERSION == 9, "this contract test pins the current API generation (v9)");
 
     caseNoneStateInert();
     caseLogRecords();

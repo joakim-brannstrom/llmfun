@@ -1,6 +1,6 @@
 /// TUI core: the TuiState aggregate and the public tui* API.
 /// Holds the shared UI state structs and the entry points the C API drives;
-/// each state owns its attached backend (v4; see tui_backend.h).
+/// each state owns its attached backend (see tui_backend.h).
 #pragma once
 
 #include <algorithm>
@@ -124,11 +124,6 @@ struct LogArchive {
 /// One log record with owned strings: the C ABI's `TuiLogRecord` copied at the call
 /// boundary (D may free its buffers the moment `tuiAddLogRecord` returns - C-02).
 ///
-/// The *value type* moved to `model/rawlog_data.h` (task 33) so `views/rawlog.h` can name it
-/// without reaching `tui.h`: the Raw Log draws these records and a view may not include the
-/// aggregate (D-ADAPTER). The alias keeps the one store's element type spelled as it was, so
-/// `deque` in this header, `tuiAddLogRecord()` below and the archive all still say `LogRecord`.
-///
 /// This is the *raw* record and the ring's element type; it keeps the developer fields (module,
 /// function, file, line) because the Raw Log shows them. Activity's element type is
 /// `model::LogRecord`, which has none of those fields by construction -
@@ -175,7 +170,7 @@ struct AgentStreamMessage {
     std::string thinking;
     std::string role;
     std::string finishReason;
-    std::string status;
+    double tokensPerSecond{0.0};
 };
 
 struct AgentStream {

@@ -7,7 +7,7 @@ text:
   Raw Log  follow  paused                                                                        4
    Filter
   00:00:00.000 info  llm.agent.pool.processTurn source/llm/agent/pool.d:412 session opened
-  00:00:01.000 trace llm.agent.pool.processTurn source/llm/agent/pool.d:412 tool args resolved
+  +00:00:01.000 trace llm.agent.pool.processTurn source/llm/agent/pool.d:412 tool args resolved
   00:00:02.000 warn  llm.agent.pool.processTurn source/llm/agent/pool.d:412 ui.conf is read-only
   00:00:03.000 error llm.agent.pool.processTurn source/llm/agent/pool.d:412 read_file failed
 

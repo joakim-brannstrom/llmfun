@@ -213,8 +213,11 @@ std::vector<SettingsRow> allRows(const SettingsState& state, const model::ShellP
         row.id = kIdRawLog;
         row.section = kSettingsSectionBehaviour;
         row.label = "Raw log level";
-        row.value = model::uiLogWord(prefs.rawLog);
-        row.note = "what the Raw Log shows when it is opened (off = only what a normal run logs)";
+        // A value the table does not carry is shown at the ladder's nearer
+        // end, the value a press would act on.
+        row.value =
+            model::uiLogWord(std::clamp(prefs.rawLog, model::kRawLogTrace, model::kRawLogError));
+        row.note = "what the Raw Log shows when it is opened (info = what a normal run logs)";
         row.kind = SettingsRowKind::Choice;
         row.enabled = true;
         rows.push_back(std::move(row));
@@ -505,18 +508,12 @@ void activate(SettingsState& state, model::ShellPrefs& prefs, const ui::Metrics&
         return;
     }
     if (std::strcmp(row.id, kIdRawLog) == 0) {
-        // The four levels, in the order `uiLogWord()` names them, wrapping at the end: a
-        // one-press cycle, and the value written is one the writer can spell (`uiConfText`).
-        const int current = std::clamp(prefs.rawLog, model::kRawLogOff, model::kRawLogTrace);
-        prefs.rawLog = (current + 1) % model::kUiLogChoiceCount;
+        const int current = std::clamp(prefs.rawLog, model::kRawLogTrace, model::kRawLogError);
+        const int next = (model::uiLogIndexOf(current) + 1) % model::kUiLogChoiceCount;
+        prefs.rawLog = model::kUiLogLadder[next].severity;
         return;
     }
     if (std::strcmp(row.id, kIdSendKey) == 0) {
-        // The offered set, in the catalogue's order and wrapping: the next value the
-        // active profile can honour (`sendKeyOffered()`). A value the gate does not
-        // prove is never landed in the file, and a proven-but-unwired one (the
-        // pixel profile's `enter` while no composition signal exists) is not offered
-        // either - the scan steps over it.
         const int count = model::kSendKeyChoiceCount;
         const int index = model::sendKeyIndex(prefs.sendKey);
         for (int step = 1; step <= count; ++step) {

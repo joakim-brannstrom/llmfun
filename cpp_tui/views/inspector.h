@@ -1,5 +1,5 @@
-/// The inspector panel (`views/inspector.cpp`): the right-hand frame and its two tabs
-/// (design §4.8, D-INSPECTOR, tasks 29/30).
+/// The inspector panel (`views/inspector.cpp`): the right-hand frame and its two tabs,
+/// Agents and Activity.
 ///
 ///     ┌────────────────────────────┐
 ///     │ [5] Agents   [6] Activity  │  tab strip: one row, the active tab inverted
@@ -11,46 +11,23 @@
 ///     │ Stop all                   │  the action row: the run's stop, two presses
 ///     └────────────────────────────┘
 ///
-/// Two tabs, and two only: **Agents** (`Ctrl+5`) and **Activity** (`Ctrl+6`). `Ctrl+1..4`
-/// are reserved by the design and stay reserved - a press of one of the digits that arrives
-/// selects nothing and the strip says `not available yet` (D-16: no tabs 1-4 in the MVP).
+/// The Agents tab draws the run's pipeline agents: a mission strip that summarizes the run in
+/// one row, one row per lane (state glyph and word, label, clock, context count, rate, current
+/// tool; the focused lane marked, its extra detail on indented continuation rows) and a fixed
+/// action row with `Stop all`. Clicking a lane focuses the thread's transcript on that agent
+/// (`UiState::focusedAgent`); the lane menu - right click, or `m` while no field owns the
+/// keyboard - stops one lane or arms the run's stop.
 ///
-/// The Agents tab replaces the mutually exclusive pipeline panel (design §9.2, FR-14): one
-/// lane per pipeline agent - a glyph and a word for its state, its label, its clock, its
-/// context count and its current tool, each dropped from the right when the 28-cell column
-/// cannot hold it and the *state never dropped* (D-BLOCK: the row's meaning). Above the list
-/// is the mission strip (the run in one row) and below it the action row, both fixed, because
-/// a summary that scrolls away is not a summary and a `Stop all` that scrolls away is a
-/// control the user cannot reach. Clicking a lane points the *thread* at that agent's
-/// transcript (`UiState::focusedAgent`); the lane menu - right click, or `m` while no field
-/// owns the keyboard - stops one lane (`Stop lane`) or arms the run's stop (`Stop every
-/// agent...`, which is the same confirmation the action row draws).
+/// The Activity tab lists the run's records under a severity filter and a search field; when
+/// the filter or the search hides every record, the body says so.
 ///
-/// Where the panel is. The layout engine owns that: `ShellLayout::inspector` is the docked
-/// column at and above the wide breakpoint and the `90 %`-wide right-hand panel below it
-/// (`ShellLayout::inspectorOverlay`), and a closed panel has no rectangle at all. The view
-/// never asks which of the two it got beyond the `overlay` flag the frame hands it, which
-/// changes two things only: the panel draws a hairline (a floating surface needs an edge; a
-/// column beside the thread does not) and `Esc` closes it (D-ESC, `views/shell.h`).
-///
-/// The tabs are a *control*, not a decoration: each one is a real hit box, and either one
-/// also opens a closed panel - a press that selects a tab and shows nothing would be a key
-/// that does nothing. The TUI's key fallback for the pair is the character-level `[`/`]`
-/// (plan/key_gate.md §10/§11 option (a)): `Ctrl+5`/`Ctrl+6` are swallowed by the terminal, so
-/// the strip reads the queued characters itself - never a chord - while no text field owns
-/// the keyboard (`ui::takeCharacter`), which is what keeps `[` typed into the composer as
-/// typing.
-///
-/// Contract: a view is a geometry taker. It receives `ShellLayout::inspector`, a `Metrics` and
-/// the frame's lane list (`UiState::agents`, passed like the rail's rows), reads no display
-/// size, no profile flag and no aggregate, so it draws the same in both profiles and a harness
-/// can render it into a cell grid. `inspectorMeasure()` answers every part once and
-/// `renderInspector()` draws from those numbers, so the panel that is drawn and the panel that
-/// was measured cannot differ.
-///
-/// Layering: `model/settings.h`, `model/ui_state.h` (the lane value type), `ui/` and imgui - no
-/// `tui.h`, no v4 type. That is what lets `./test_inspector` and `./test_agents_tab` draw the
-/// panel into a cell grid with no application state.
+/// The functions split in two: `inspectorMeasure()` computes every part's geometry and text
+/// inside the region the frame hands it - pure within the call, the one place the panel's
+/// layout is decided - and `renderInspector()` draws the panel from exactly those measured
+/// parts, so the drawn and the measured panel cannot differ. Smaller helpers cover the tab
+/// strip (`inspectorTabName`, `inspectorNextTab`, `inspectorPreviousTab`, `inspectorEmptyText`),
+/// the activity list's scroll (`scrollActivityToNewest`) and the window computation
+/// (`inspectorWindow`).
 #pragma once
 
 #include <array>
@@ -323,12 +300,17 @@ struct InspectorParts {
         std::string text;
         bool focused = false;
         bool live = false;
+        /// A continuation line of the focused lane's headline above it: display ink only,
+        /// the headline keeps the click and the menu.
+        bool tail = false;
     };
     /// The mission strip's one row (`planner ✓ -> coder ◐`), empty when no lane exists.
     std::string missionText;
-    /// The lane rows in lane order. The renderer draws the visible window of them; the whole
-    /// list is built here because a row's text is a *measurement* (which fields fit in the
-    /// column), not a drawing decision.
+    /// The lane rows in lane order: one headline row per lane, plus continuation rows
+    /// (`tail`) under the focused lane's headline for the detail a single row would drop.
+    /// The renderer draws the visible window of them; the whole list is built here because a
+    /// row's text is a *measurement* (which fields fit in the column), not a drawing
+    /// decision.
     std::vector<LaneRow> laneRows;
     /// `Stop all` or `Stop all?` (armed), and `Yes`/`No` while armed.
     std::string stopAllText;
