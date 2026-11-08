@@ -687,6 +687,7 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
     const bool anyLive = model::anyLiveAgentLane(lanes);
     {
         const ui::TypeScope bodyType(ui::TypeStep::body, m.textGrid);
+        std::size_t tailOrdinal = 0; // per-lane: the head row resets it, tail lines bump it
         for (std::size_t i = 0; i < window.count; ++i) {
             const std::size_t index = window.first + i;
             const ui::Rect row{origin.x, origin.y + m.row * static_cast<float>(index), rowW, m.row,
@@ -740,9 +741,14 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
             lineAt(m, row, row.x, laneRow.text, ink);
             const model::AgentLane* lane = laneOf(laneRow.id);
             // Continuations share the lane's logical id (focus, menu) but must not share the
-            // row's ImGui id with the headline - two widgets with one id collide.
-            const std::string rowId =
-                "##inspector_lane_" + laneRow.id + (laneRow.tail ? "#tail" : "");
+            // row's ImGui id with each other or with the headline - widgets with one id
+            // collide, so each tail line under a lane gets its own ordinal.
+            if (laneRow.tail)
+                ++tailOrdinal;
+            else
+                tailOrdinal = 0;
+            const std::string rowId = "##inspector_lane_" + laneRow.id +
+                                      (laneRow.tail ? "#tail" + std::to_string(tailOrdinal) : "");
             const RowHit hit = submitRow(row, rowId.c_str());
             if (hit.left)
                 state.focusRequest = laneRow.id;
