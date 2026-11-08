@@ -103,6 +103,9 @@ inline constexpr char kRawLogSaveFailedPrefix[] = "Save failed: ";
 inline constexpr char kRawLogCopiedPrefix[] = "Copied ";
 /// The openability marker: one ASCII glyph in dim ink.
 inline constexpr char kRawLogOpenableGlyph[] = "+";
+/// The open record's marker: the same cell flips to it while the record is
+/// expanded (`+` openable, `-` open, blank nothing to open).
+inline constexpr char kRawLogOpenGlyph[] = "-";
 /// The drawer's grip label: one word, right-aligned on the grip row (a control the user cannot
 /// see is a control they will not find).
 inline constexpr char kRawLogResizeLabel[] = "resize";
@@ -111,6 +114,36 @@ inline constexpr char kRawLogResizeLabel[] = "resize";
 inline constexpr int kRawLogMinResizeUnits = 4;
 /// The command the composer intercepts, exactly like D's typed `/stop`.
 inline constexpr char kRawLogCommand[] = "/rawlog";
+
+// The per-frame column plan
+
+/// One frame's record-row layout: the ladder rung and every segment's offset and
+/// width in the profile's unit. All widths are whole cells, so the text grid hits
+/// columns exactly and the pixel profile uses identical proportions. The rung reads
+/// the frame width alone, and when the marker, gap, level and gap segments alone
+/// exceed the body (under 10 cells), the body draws no record rows.
+struct RowPlan {
+    int rung;               // 0..4, the degradation ladder rung
+    float markerX, markerW; // 1 cell, RESERVED ON EVERY ROW (blank when no detail)
+    float clockX, clockW;   // 12 cells at rungs 0-1; 8 cells (no ms) at rungs 2-3; 0 at rung 4
+    float levelX, levelW;   // 5 cells (rawLogLevelField()'s padded width, always drawn)
+    float locX, locW;       // kRawLogLocationCells = 36 cells; 0 from rung 3
+    float msgX, msgW;       // msgW = bodyW - msgX (rest of the row); msgX constant per frame
+    float tagW; // tag slack (kRawLogTagGapCells + kRawLogTagMinCells) at rung 0; 0 from rung 1, and
+                // a tag draws only where this is positive
+};
+RowPlan rawRowPlan(float bodyW, const ui::Metrics& m);
+
+/// The location segment's text inside a `cells`-wide column. Widest form first,
+/// whole pieces, never a fragment:
+///   1. `module.function file:line` exactly as model::rawLogRowText() builds `where`
+///      (module empty -> function alone; file empty -> no file part);
+///   2. else trim passes: each pass drops the leftmost dot-component of `module`;
+///      the FIRST pass also shortens `file` to `basename:line`;
+///   3. else an ASCII `...` mid-ellipsis replaces the elided middle of
+///      `module.function`, preserving its tail and the whole ` file:line`;
+///   4. empty when even step 3's minimum (`...` + ` file:line`) exceeds `cells`.
+std::string rawLogLocationText(const model::RawLogRecord& record, int cells);
 
 /// Is `query` the Raw Log's command? The comparison is exact after the shipped submit
 /// handshake trimmed the draft's trailing newline and NULs, so `/rawlog ` (with a trailing

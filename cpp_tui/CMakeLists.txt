@@ -1015,6 +1015,23 @@ target_link_libraries(test_rail_gui PRIVATE
     glfw
     ${CMAKE_DL_LIBS}
 )
+# The Raw Log surface in the pixel profile: the same view the text grid draws, driven
+# through the real GLFW/OpenGL3 backend at 100, 72 and 60 cells of body width - the
+# column plan is profile-blind, the message and the location are cut with the ASCII
+# ellipsis when their content overflows, and the geometry is stable across frames.
+# Needs a display: xvfb-run -s "-screen 0 1280x820x24" ./test_rawlog_gui [--out DIR]
+add_executable(test_rawlog_gui
+    test_rawlog_gui.cpp
+)
+add_dependencies(test_rawlog_gui llmfun_tui_all_lib)
+target_include_directories(test_rawlog_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_rawlog_gui PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
+)
 
 # The composer (task 27, design §4.6 / FR-09 / D-PASTE): the paste policy (CRLF fold, the
 # 5000-character question), the send rule (the action button sends; no key does while the

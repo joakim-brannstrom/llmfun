@@ -1,4 +1,4 @@
-/// The Raw Log surface (views/rawlog.h owns the contract and the anatomy).
+/// The Raw Log surface.
 ///
 /// Structure of this file, in the order the frame meets it:
 ///
@@ -44,13 +44,8 @@ constexpr double kFollowIntervalSeconds = 0.1;
 /// Rows drawn beyond the viewport, so a partially visible row at the bottom edge still paints.
 constexpr float kOverscanRows = 1.0f;
 
-// ---------------------------------------------------------------------------
-// Text helpers (the two every view carries)
-// ---------------------------------------------------------------------------
-
 /// `text`'s width in the profile's own unit: cells on the grid (a wide glyph counts two) and
-/// pixels in the pixel profile (the atlas). The pixel half needs `ImGui::CalcTextSize`, which
-/// `ui/text.h` deliberately does not reach for.
+/// pixels in the pixel profile (the atlas).
 float textUnits(const ui::Metrics& m, std::string_view text) {
     if (text.empty())
         return 0.0f;
@@ -61,18 +56,69 @@ float textUnits(const ui::Metrics& m, std::string_view text) {
     return ImGui::CalcTextSize(text.data(), text.data() + text.size()).x;
 }
 
-/// The record row as the surface can show it: the full model row when it fits, and the same row
-/// without its trailing action segment when only that segment would be cut. The action remains in
-/// the filter, the copy payload and the saved file; a drawn fragment ("actio") advertises nothing.
-std::string rowTextForWidth(const model::RawLogRecord& record, float width, const ui::Metrics& m) {
-    std::string text = model::rawLogRowText(record);
-    if (width <= 0.0f || record.action == 0 || textUnits(m, text) <= width)
-        return text;
-    const std::size_t at = text.rfind(" action ");
-    if (at != std::string::npos)
-        text.erase(at);
-    return text;
+/// The message, mid-ellipsized: whole while it fits, then the head that fits beside the
+/// ellipsis marker and then the marker. Cut between codepoints, never inside one. `headLen`, when
+/// asked for, is the byte length of the drawn head: the whole message when it fits, otherwise cut.
+std::string ellipsizedMessage(const ui::Metrics& m, std::string_view message, float boxW,
+                              std::size_t* headLen = nullptr) {
+    if (boxW <= 0.0f) {
+        if (headLen != nullptr)
+            *headLen = 0;
+        return std::string();
+    }
+    if (textUnits(m, message) <= boxW) {
+        if (headLen != nullptr)
+            *headLen = message.size();
+        return std::string(message);
+    }
+    const std::string_view ellipsis = ui::asciiFallback(ui::Icon::Ellipsis);
+    const float ellipsisW = textUnits(m, ellipsis);
+    if (ellipsisW > boxW) {
+        if (headLen != nullptr)
+            *headLen = 0;
+        return std::string();
+    }
+    float used = 0.0f;
+    std::size_t keep = 0;
+    while (keep < message.size()) {
+        // One codepoint: its lead byte plus any continuation bytes behind it.
+        std::size_t len = 1;
+        while (keep + len < message.size() &&
+               (static_cast<unsigned char>(message[keep + len]) & 0xC0) == 0x80)
+            ++len;
+        const float w = textUnits(m, message.substr(keep, len));
+        if (used + w > boxW - ellipsisW)
+            break;
+        used += w;
+        keep += len;
+    }
+    if (headLen != nullptr)
+        *headLen = keep;
+    return std::string(message.substr(0, keep)) + std::string(ellipsis);
 }
+
+/// The first case-insensitive occurrence of `filter` inside `text`, as a byte
+/// offset into the original, or `npos`. ASCII-lower on both sides - the same
+/// comparison the filter matcher applies - so the offsets land on the same
+/// bytes of the original string.
+std::size_t caseInsensitiveFind(std::string_view text, std::string_view filter) {
+    if (filter.empty() || filter.size() > text.size())
+        return std::string_view::npos;
+    return model::rawLogAsciiLower(text).find(model::rawLogAsciiLower(filter));
+}
+
+// The record row's segment widths, in cells. `rawRowPlan()` keys its rung table
+// on these, so a row's geometry stays a whole number of cells on the text grid
+// and the same proportion in pixels.
+constexpr int kRawLogGapCells = 2; // between adjacent segments
+constexpr int kRawLogMarkerCells = 1;
+constexpr int kRawLogClockCells = 12;     // "HH:MM:SS.mmm"
+constexpr int kRawLogShortClockCells = 8; // "HH:MM:SS"
+constexpr int kRawLogLevelCells = 5;      // rawLogLevelField()'s width
+constexpr int kRawLogLocationCells = 36;  // the fixed location column
+constexpr int kRawLogMinMessageCells = 12;
+constexpr int kRawLogTagGapCells = 2;
+constexpr int kRawLogTagMinCells = 8; // "action N", the shortest possible tag
 
 /// One line of text left-aligned at `x`, vertically centred in `box` and clipped to it.
 void lineAt(const ui::Metrics& m, const ui::Rect& box, float x, float y, std::string_view text,
@@ -192,22 +238,57 @@ bool rebuildIndex(RawLogState& state, const model::RawLogRing& ring) {
     return true;
 }
 
-/// The record row at body line `line`, or nullptr for a line that belongs to the expanded
-/// record's detail block (or to nothing at all).
-const model::RawLogRecord* recordAtLine(const RawLogState& state, const model::RawLogRing& ring,
-                                        std::size_t line, std::size_t& recordIndex) {
-    const std::size_t detailCount = state.expandedLines.size();
-    const bool hasDetail = detailCount > 0 && state.expandedAt != std::string::npos;
-    std::size_t index = line;
-    if (hasDetail && line > state.expandedAt) {
-        if (line <= state.expandedAt + detailCount)
-            return nullptr;
-        index = line - detailCount;
+/// The body's line map, rebuilt each frame: one line per record, plus its
+/// preview line (the record has detail and is not the expanded record), OR its
+/// expanded continuation lines.
+struct RawLogLineMap {
+    std::vector<std::size_t> bases; // per matching record: the record's first body line
+    std::size_t total = 0;          // the body's line count, head row excluded
+};
+
+RawLogLineMap rawLogLineMap(const RawLogState& state, const model::RawLogRing& ring) {
+    RawLogLineMap map;
+    map.bases.reserve(state.matching.size());
+    std::size_t line = 0;
+    const bool expandedInList = state.expandedAt < state.matching.size();
+    for (std::size_t i = 0; i < state.matching.size(); ++i) {
+        map.bases.push_back(line);
+        if (expandedInList && i == state.expandedAt) {
+            // The expanded record: its row plus its continuation lines - the
+            // same lines `refreshExpansion` cached this frame.
+            line += 1 + state.expandedLines.size();
+        } else {
+            // Everyone else: one row, plus the preview line the detail earns.
+            const model::RawLogRecord* record = ring.at(state.matching[i]);
+            line += record != nullptr && !record->detail.empty() ? 2 : 1;
+        }
     }
-    if (index >= state.matching.size())
+    map.total = line;
+    return map;
+}
+
+/// The body line at `line` in the map's space.
+const model::RawLogRecord* recordAtLine(const RawLogState& state, const model::RawLogRing& ring,
+                                        const RawLogLineMap& map, std::size_t line,
+                                        std::size_t& recordIndex, bool* isPreview = nullptr) {
+    if (isPreview != nullptr)
+        *isPreview = false;
+    const auto slot = std::upper_bound(map.bases.begin(), map.bases.end(), line);
+    if (slot == map.bases.begin())
         return nullptr;
+    const std::size_t index = static_cast<std::size_t>(slot - map.bases.begin()) - 1;
+    const std::size_t offset = line - map.bases[index];
+    const model::RawLogRecord* record = ring.at(state.matching[index]);
+    if (offset == 0) {
+        recordIndex = state.matching[index];
+        return record;
+    }
+    if (state.expandedAt < state.matching.size() && index == state.expandedAt)
+        return nullptr; // a continuation line of the expanded record
+    if (isPreview != nullptr && record != nullptr && !record->detail.empty() && offset == 1)
+        *isPreview = true;
     recordIndex = state.matching[index];
-    return ring.at(recordIndex);
+    return record;
 }
 
 /// The head-of-ring placeholder row: when the ring has wrapped, the stamps prove
@@ -364,6 +445,136 @@ void takeSurfaceKeys(RawLogState& state) {
 
 } // namespace
 
+// The per-frame column plan
+
+RowPlan rawRowPlan(float bodyW, const ui::Metrics& m) {
+    RowPlan plan{};
+    const int cells = bodyW > 0.0f ? static_cast<int>(std::floor(bodyW / m.gu)) : 0;
+
+    // The ladder: the widest rung whose segments leave the message its minimum
+    // (12 cells at rungs 0-3). The rung reads the frame width alone, so a row's
+    // geometry never depends on its content.
+    int clockCells = 0;
+    int locCells = 0;
+    int tagCells = 0;
+    if (cells >= 84) {
+        plan.rung = 0;
+        clockCells = kRawLogClockCells;
+        locCells = kRawLogLocationCells;
+        tagCells = kRawLogTagGapCells + kRawLogTagMinCells;
+    } else if (cells >= 74) {
+        plan.rung = 1;
+        clockCells = kRawLogClockCells;
+        locCells = kRawLogLocationCells;
+    } else if (cells >= 70) {
+        plan.rung = 2;
+        clockCells = kRawLogShortClockCells;
+        locCells = kRawLogLocationCells;
+    } else if (cells >= 32) {
+        plan.rung = 3;
+        clockCells = kRawLogShortClockCells;
+    } else {
+        plan.rung = 4;
+    }
+
+    // Present segments each take one gap before them; an absent segment's gaps
+    // collapse, so the message always follows the last drawn segment by one gap.
+    const float gap = static_cast<float>(kRawLogGapCells) * m.gu;
+    float x = 0.0f;
+    plan.markerX = x;
+    plan.markerW = static_cast<float>(kRawLogMarkerCells) * m.gu;
+    x += plan.markerW + gap;
+    plan.clockX = x;
+    plan.clockW = static_cast<float>(clockCells) * m.gu;
+    if (clockCells > 0)
+        x += plan.clockW + gap;
+    plan.levelX = x;
+    plan.levelW = static_cast<float>(kRawLogLevelCells) * m.gu;
+    x += plan.levelW + gap;
+    plan.locX = x;
+    plan.locW = static_cast<float>(locCells) * m.gu;
+    if (locCells > 0)
+        x += plan.locW + gap;
+    plan.msgX = x;
+    plan.msgW = std::max(0.0f, bodyW - plan.msgX);
+    plan.tagW = static_cast<float>(tagCells) * m.gu;
+    return plan;
+}
+
+std::string rawLogLocationText(const model::RawLogRecord& record, int cells) {
+    if (cells <= 0)
+        return std::string();
+    std::string modulePart = record.module;
+    std::string filePart;
+    if (!record.file.empty()) {
+        filePart = record.file;
+        if (record.line > 0)
+            filePart += ':' + std::to_string(record.line);
+    }
+    // The join `rawLogRowText()` builds, re-derived from the record's own fields
+    // after every trim pass.
+    const auto nameOf = [&record, &modulePart] {
+        std::string name = modulePart;
+        if (!record.function.empty()) {
+            if (!name.empty())
+                name += '.';
+            name += record.function;
+        }
+        return name;
+    };
+    const auto joined = [&] {
+        std::string where = nameOf();
+        if (!filePart.empty()) {
+            if (!where.empty())
+                where += ' ';
+            where += filePart;
+        }
+        return where;
+    };
+
+    std::string text = joined();
+    bool firstPass = true;
+    while (ui::displayWidth(text) > cells && !modulePart.empty()) {
+        // One pass: the module's leftmost dot-component goes, and the first pass
+        // also shortens the file to its basename with the line kept.
+        const std::size_t dot = modulePart.find('.');
+        modulePart = dot == std::string::npos ? std::string() : modulePart.substr(dot + 1);
+        if (firstPass) {
+            firstPass = false;
+            const std::size_t slash = filePart.find_last_of('/');
+            if (slash != std::string::npos)
+                filePart.erase(0, slash + 1);
+        }
+        text = joined();
+    }
+    if (ui::displayWidth(text) <= cells)
+        return text;
+
+    // Mid-ellipsis: the elided middle of the name goes, its tail and the whole
+    // file part stay. Without a name there is no middle to elide.
+    const std::string name = nameOf();
+    if (name.empty())
+        return std::string();
+    const int fileOverhead =
+        filePart.empty() ? 0 : 1 + static_cast<int>(ui::displayWidth(filePart));
+    const int available = cells - fileOverhead;
+    if (available < 3)
+        return std::string();
+    std::string tail;
+    std::size_t at = name.size();
+    while (at > 0) {
+        std::size_t start = at - 1;
+        while (start > 0 && (static_cast<unsigned char>(name[start]) & 0xC0) == 0x80)
+            --start;
+        const std::string candidate = name.substr(start);
+        if (3 + ui::displayWidth(candidate) > available)
+            break;
+        tail = candidate;
+        at = start;
+    }
+    return "..." + tail + (filePart.empty() ? std::string() : " " + filePart);
+}
+
 // ---------------------------------------------------------------------------
 // The contract's small answers
 // ---------------------------------------------------------------------------
@@ -393,9 +604,12 @@ void rawLogFollowNewest(RawLogState& state) {
 
 std::string rawLogVisibleText(const RawLogState& state, const model::RawLogRing& ring,
                               std::size_t first, std::size_t windowRows) {
+    // The same map the body draws from, built here so the payload and the
+    // screen can never disagree about which line is which.
+    const RawLogLineMap map = rawLogLineMap(state, ring);
     const bool head = hasHeadRow(state, ring);
     std::string out;
-    const std::size_t total = (head ? 1u : 0u) + state.matching.size() + state.expandedLines.size();
+    const std::size_t total = (head ? 1u : 0u) + map.total;
     const std::size_t end = std::min(total, first + windowRows);
     for (std::size_t line = first; line < end; ++line) {
         if (head && line == 0) {
@@ -405,14 +619,26 @@ std::string rawLogVisibleText(const RawLogState& state, const model::RawLogRing&
         }
         const std::size_t bodyLine = head ? line - 1 : line;
         std::size_t recordIndex = 0;
-        const model::RawLogRecord* record = recordAtLine(state, ring, bodyLine, recordIndex);
-        if (record != nullptr)
+        bool isPreview = false;
+        const model::RawLogRecord* record =
+            recordAtLine(state, ring, map, bodyLine, recordIndex, &isPreview);
+        if (record != nullptr && !isPreview) {
             out += model::rawLogRowText(*record);
-        else if (bodyLine > state.expandedAt &&
-                 bodyLine - state.expandedAt <= state.expandedLines.size())
-            out += state.expandedLines[bodyLine - state.expandedAt - 1];
-        else
+        } else if (record != nullptr) {
+            // The preview line: it takes a screen row but copies nothing -
+            // Copy takes the canonical one-line form, never a detail preview.
             continue;
+        } else {
+            // A continuation line of the expanded record, if this line is one.
+            if (state.expandedAt < state.matching.size()) {
+                const std::size_t base = map.bases[state.expandedAt];
+                if (bodyLine > base && bodyLine - base <= state.expandedLines.size()) {
+                    out += state.expandedLines[bodyLine - base - 1];
+                    out += '\n';
+                }
+            }
+            continue;
+        }
         out += '\n';
     }
     return out;
@@ -534,14 +760,18 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
     // put - and so `Save`/`Close` never scroll out of reach of the rows they act on.
     const float rowH = m.row;
     const bool headRow = hasHeadRow(state, ring);
-    const std::size_t totalLines =
-        (headRow ? 1u : 0u) + state.matching.size() + state.expandedLines.size();
+    const RawLogLineMap lineMap = rawLogLineMap(state, ring);
+    const std::size_t totalLines = (headRow ? 1u : 0u) + lineMap.total;
     if (parts.body.h >= rowH) {
         ImGui::SetCursorScreenPos(ImVec2(parts.body.x, parts.body.y));
         ImGui::BeginChild("##rawlog_body", ImVec2(parts.body.w, parts.body.h),
                           ImGuiChildFlags_None);
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const float rowW = std::max(0.0f, ImGui::GetContentRegionAvail().x);
+        // The frame's column plan: every record row draws from these offsets, so the
+        // message column cannot move between rows. Loss rows and the placeholder row
+        // are full-width lines outside the plan.
+        const RowPlan plan = rawRowPlan(rowW, m);
         ImGui::Dummy(ImVec2(1.0f, std::max(rowH * static_cast<float>(totalLines), parts.body.h)));
 
         // D-FOLLOW, the Raw Log's half: follow is pointer-owned and content-driven. A wheel
@@ -591,6 +821,14 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
                                    m.textGrid};
                 if (row.y >= parts.body.bottom() || row.bottom() <= parts.body.y)
                     continue;
+                // The ultra-narrow rung: below kRawLogMarkerCells + kRawLogGapCells +
+                // kRawLogLevelCells
+                // + kRawLogGapCells = 10 cells the plan's own segments exceed the body, so no
+                // record row can be drawn at all - not even partially, because a markerless
+                // fragment would pretend to be a row. The empty state and the filter field stay
+                // usable, and an undrawn line must not count as a drawn one for Copy.
+                if (totalLines > 0 && plan.msgX > rowW)
+                    continue;
                 ++state.drawnRows;
 
                 if (totalLines == 0) {
@@ -607,34 +845,136 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
                 }
                 const std::size_t bodyLine = headRow ? line - 1 : line;
                 std::size_t recordIndex = 0;
+                bool isPreview = false;
                 const model::RawLogRecord* record =
-                    recordAtLine(state, ring, bodyLine, recordIndex);
+                    recordAtLine(state, ring, lineMap, bodyLine, recordIndex, &isPreview);
+                if (record != nullptr && isPreview) {
+                    // The detail preview: the first detail line of a closed record with
+                    // detail, in the dim ink at the message column. It takes a screen row
+                    // - the scroll model accounts for it - but it is not the record's row:
+                    // no marker, no clock, no level. It copies nothing, like every other
+                    // preview line, but it does toggle its record on a click.
+                    const std::vector<std::string> preview = model::rawLogDetailLines(*record);
+                    lineAt(m, row, row.x + plan.msgX, row.y,
+                           preview.empty() ? "" : preview.front().c_str(), ColorToken::textLow);
+                    // The preview is its own hit target, and its click toggles the
+                    // same record the row toggles: the id carries the
+                    // record's key so the two rows can never collide.
+                    const std::string key = rawLogKey(*record);
+                    const std::string previewId = "##rawlog_preview" + key;
+                    const RowHit hit = submitRow(row, previewId.c_str());
+                    if (hit.clicked)
+                        state.expandedKey = state.expandedKey == key ? std::string() : key;
+                    continue;
+                }
                 if (record == nullptr) {
-                    // A continuation line of the expanded record.
-                    const std::size_t detailLine = bodyLine - state.expandedAt - 1;
+                    // A continuation line of the expanded record: aligned under the
+                    // message segment like the preview lines, in the metadata ink.
+                    // The copy path is unaffected - it copies the text
+                    // verbatim, whatever the screen indent.
+                    const std::size_t detailLine = bodyLine - lineMap.bases[state.expandedAt] - 1;
                     const char* text = detailLine < state.expandedLines.size()
                                            ? state.expandedLines[detailLine].c_str()
                                            : "";
-                    lineAt(m, row, row.x, row.y, text, ColorToken::textMid);
+                    lineAt(m, row, row.x + plan.msgX, row.y, text, ColorToken::textLow);
                     continue;
                 }
-                // The openability marker: a record with multi-line detail can be opened, and
-                // the dim `+` says which rows. It leads the row, so a clipped long line
-                // still shows its mark - clipping eats the tail, not the head.
-                const bool openable = !record->detail.empty();
-                const float glyphW = textUnits(m, kRawLogOpenableGlyph);
-                ui::Rect textBox = row;
-                if (openable) {
-                    textBox.x = row.x + glyphW;
-                    textBox.w = std::max(0.0f, row.w - glyphW);
+                // The record row: each segment drawn straight from the record's own fields,
+                // at the plan's offsets. Nothing between the segments is assembled or
+                // sliced; a segment that does not fit is dropped whole, and a loss row is
+                // not a log line - its message alone, in the dim ink, the same treatment
+                // the detail continuations get.
+                if (record->loss) {
+                    lineAt(m, row, row.x, row.y, record->message, ColorToken::textDim);
+                } else {
+                    const bool isOpen = state.expandedAt < state.matching.size() &&
+                                        recordIndex == state.matching[state.expandedAt];
+                    if (!record->detail.empty())
+                        lineAt(m, row, row.x + plan.markerX, row.y,
+                               isOpen ? kRawLogOpenGlyph : kRawLogOpenableGlyph,
+                               ColorToken::textLow);
+                    if (plan.clockW > 0.0f) {
+                        std::string clock = model::rawLogClockText(record->timestampMs);
+                        const std::size_t cells = static_cast<std::size_t>(
+                            std::max(0, static_cast<int>(plan.clockW / m.gu)));
+                        if (clock.size() > cells)
+                            clock.resize(cells);
+                        lineAt(m, row, row.x + plan.clockX, row.y, clock, ColorToken::textLow);
+                    }
+                    lineAt(m, row, row.x + plan.levelX, row.y,
+                           model::rawLogLevelField(record->level), levelInk(record->level));
+                    if (plan.locW > 0.0f) {
+                        const std::string where =
+                            rawLogLocationText(*record, static_cast<int>(plan.locW / m.gu));
+                        lineAt(m, row, row.x + plan.locX, row.y, where, ColorToken::textLow);
+                    }
+                    float messageW = plan.msgW;
+                    if (plan.tagW > 0.0f && record->action != 0) {
+                        // Only the plan's widest rung reserves tag room. There the tag rides
+                        // the body's right edge and takes its room from the message: a row
+                        // that cannot fit both keeps the message whole and drops the tag
+                        // whole, because a cut tag lies about the action.
+                        std::string tag = "action " + std::to_string(record->action);
+                        if (!record->actionPayload.empty()) {
+                            tag.push_back(' ');
+                            tag += record->actionPayload;
+                        }
+                        const float tagW = textUnits(m, tag);
+                        if (tagW + kRawLogTagGapCells * m.gu <=
+                            plan.msgW - kRawLogMinMessageCells * m.gu) {
+                            lineAt(m, row, row.x + row.w - tagW, row.y, tag, ColorToken::accent);
+                            messageW = plan.msgW - tagW - kRawLogTagGapCells * m.gu;
+                        }
+                    }
+                    const ui::Rect messageBox{row.x + plan.msgX, row.y, messageW, row.h,
+                                              m.textGrid};
+                    std::size_t headLen = 0;
+                    const std::string shown =
+                        ellipsizedMessage(m, record->message, messageW, &headLen);
+                    // The highlight: the first case-insensitive filter occurrence inside the drawn
+                    // slice. The search runs over the drawn head's bytes - the head is the
+                    // message's own prefix, so a match there is the matcher's first match in the
+                    // visible part, and a match surviving only in the clipped tail stays plain. A
+                    // blanks-only filter is match-all, and the highlight agrees by painting
+                    // nothing.
+                    std::size_t spanStart = 0;
+                    std::size_t spanEnd = 0;
+                    const std::string_view filter = state.filter.data();
+                    if (!model::rawLogFilterBlank(filter) && headLen > 0) {
+                        const std::size_t at =
+                            caseInsensitiveFind(record->message.substr(0, headLen), filter);
+                        if (at != std::string_view::npos) {
+                            spanStart = at;
+                            spanEnd = std::min(at + filter.size(), headLen);
+                        }
+                    }
+                    if (spanEnd == spanStart) {
+                        lineAt(m, messageBox, messageBox.x, messageBox.y, shown,
+                               levelInk(record->level));
+                    } else {
+                        // Three draws of three slices: the span carries the accent, its neighbors
+                        // keep the level ink. Each slice is drawn from the pen position the single
+                        // draw would have used, so the glyphs land where they always did, and a
+                        // slice that touches an edge is empty and lineAt drops it. The slices never
+                        // draw past their own box - text left of a clip rect would smear onto the
+                        // clip's first cell in the grid renderer.
+                        const float preW = textUnits(m, shown.substr(0, spanStart));
+                        const float spanW =
+                            textUnits(m, shown.substr(spanStart, spanEnd - spanStart));
+                        const ui::Rect preBox{messageBox.x, messageBox.y, preW, messageBox.h,
+                                              m.textGrid};
+                        const ui::Rect spanBox{messageBox.x + preW, messageBox.y, spanW,
+                                               messageBox.h, m.textGrid};
+                        const ui::Rect postBox{messageBox.x + preW + spanW, messageBox.y,
+                                               messageW - preW - spanW, messageBox.h, m.textGrid};
+                        lineAt(m, preBox, messageBox.x, messageBox.y, shown.substr(0, spanStart),
+                               levelInk(record->level));
+                        lineAt(m, spanBox, messageBox.x + preW, messageBox.y,
+                               shown.substr(spanStart, spanEnd - spanStart), ColorToken::accent);
+                        lineAt(m, postBox, messageBox.x + preW + spanW, messageBox.y,
+                               shown.substr(spanEnd), levelInk(record->level));
+                    }
                 }
-                const std::string text = rowTextForWidth(*record, textBox.w, m);
-                // A loss row is not a log line: its message alone, in the dim ink -
-                // the same treatment the detail continuations get.
-                lineAt(m, textBox, textBox.x, textBox.y, text,
-                       record->loss ? ColorToken::textDim : levelInk(record->level));
-                if (openable)
-                    lineAt(m, row, row.x, row.y, kRawLogOpenableGlyph, ColorToken::textDim);
                 const std::string id = "##rawlog_row" + std::to_string(line);
                 const RowHit hit = submitRow(row, id.c_str());
                 if (hit.clicked) {
@@ -686,7 +1026,7 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
             ui::button(spec, m, box);
             return ui::buttonPressed(spec, m, box);
         };
-        const bool canCopy = totalLines > 0 && state.windowRows > 0;
+        const bool canCopy = state.drawnRows > 0 && state.windowRows > 0;
         if (drawButton(parts.copyButton, kRawLogCopyLabel, canCopy))
             state.copiedNow = true;
         if (drawButton(parts.saveButton, kRawLogSaveLabel))
@@ -709,7 +1049,9 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
         // The payload replaces the previous one even when it is empty: a stale `copiedRows` would
         // claim a copy the user did not get (review M10), and a `y` on an empty window must clear
         // the clipboard instead of leaving a line the user did not just copy.
-        state.copiedRows = rawLogVisibleText(state, ring, state.firstVisible, state.windowRows);
+        state.copiedRows = state.drawnRows > 0 ? rawLogVisibleText(state, ring, state.firstVisible,
+                                                                   state.windowRows)
+                                               : std::string();
         ImGui::SetClipboardText(state.copiedRows.c_str());
         // A copy that took nothing says nothing: "Copied 0 rows" would be a claim about a press
         // that put an empty string on the clipboard, which is the state it just replaced.

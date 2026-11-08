@@ -2,15 +2,15 @@ name: rawlog-follow
 screen: 100x30
 surface: x=0 y=0 w=100 h=30 overlay=1
 state: follow=1 paused=0 filter=''
-parts: matched=4 drawn=4 dropped=0
+parts: matched=4 drawn=5 dropped=0
 text:
   Raw Log  follow                                                                                4
    Filter
-  00:00:00.000 info  llm.agent.pool.processTurn source/llm/agent/pool.d:412 session opened
-  +00:00:01.000 trace llm.agent.pool.processTurn source/llm/agent/pool.d:412 tool args resolved
-  00:00:02.000 warn  llm.agent.pool.processTurn source/llm/agent/pool.d:412 ui.conf is read-only
-  00:00:03.000 error llm.agent.pool.processTurn source/llm/agent/pool.d:412 read_file failed
-
+     00:00:00.000  info   agent.pool.processTurn pool.d:412     session opened
+  +  00:00:01.000  trace  agent.pool.processTurn pool.d:412     tool args resolved
+                                                                  | args: path=README.md
+     00:00:02.000  warn   agent.pool.processTurn pool.d:412     ui.conf is read-only
+     00:00:03.000  error  agent.pool.processTurn pool.d:412     read_file failed   action 1 turn-7
 
 
 

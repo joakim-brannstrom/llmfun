@@ -53,12 +53,10 @@ std::string rawLogLevelField(int level) {
     return word;
 }
 
-namespace {
-
 /// `HH:MM:SS.mmm` in local time for a millisecond clock reading, or `--:--:--.---` for a record
 /// that never got a stamp. Activity's clock is the same reading in the same zone, so the two
 /// surfaces cannot disagree about *when* a line happened.
-std::string clockText(std::int64_t timestampMs) {
+std::string rawLogClockText(std::int64_t timestampMs) {
     if (timestampMs <= 0)
         return "--:--:--.---";
     const std::time_t seconds = static_cast<std::time_t>(timestampMs / 1000);
@@ -78,8 +76,9 @@ std::string clockText(std::int64_t timestampMs) {
 ///
 /// ASCII on purpose: the filter is a substring test over a developer string, and a full Unicode
 /// case fold would need a locale table this build does not carry. A non-ASCII codepoint is
-/// compared byte-exactly, which is what a developer searching a module name expects.
-std::string asciiLower(std::string_view text) {
+/// compared byte-exactly, which is what a developer searching a module name expects. The view's
+/// highlight folds with the same function, so its byte offsets land on the matcher's bytes.
+std::string rawLogAsciiLower(std::string_view text) {
     std::string out;
     out.reserve(text.size());
     for (const char c : text) {
@@ -91,13 +90,17 @@ std::string asciiLower(std::string_view text) {
     return out;
 }
 
-bool isBlank(std::string_view text) {
+/// Whether `text` carries no character beyond space, tab, carriage return and
+/// line feed: the matcher's meaning of "no filter".
+bool rawLogFilterBlank(std::string_view text) {
     for (const char c : text) {
         if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
             return false;
     }
     return true;
 }
+
+namespace {
 
 /// `mkdir -p` for the save directory, one component at a time. A component that already exists
 /// is fine (that is what `-p` means); anything else answers false and `rawLogSave()` reports the
@@ -134,7 +137,7 @@ std::string rawLogRowText(const RawLogRecord& record) {
     // coordinates, and the filter and `Save` must see exactly the text the screen showed.
     if (record.loss)
         return record.message;
-    std::string row = clockText(record.timestampMs);
+    std::string row = rawLogClockText(record.timestampMs);
     row += ' ';
     row += rawLogLevelField(record.level);
 
@@ -251,13 +254,13 @@ bool rawLogShowsLevel(int level, int minLevel) {
 }
 
 bool rawLogMatches(const RawLogRecord& record, std::string_view filter) {
-    if (isBlank(filter))
+    if (rawLogFilterBlank(filter))
         return true;
-    const std::string needle = asciiLower(filter);
-    const std::string haystack = asciiLower(rawLogRowText(record));
+    const std::string needle = rawLogAsciiLower(filter);
+    const std::string haystack = rawLogAsciiLower(rawLogRowText(record));
     if (haystack.find(needle) != std::string::npos)
         return true;
-    return asciiLower(record.detail).find(needle) != std::string::npos;
+    return rawLogAsciiLower(record.detail).find(needle) != std::string::npos;
 }
 
 std::string rawLogSaveDir() {

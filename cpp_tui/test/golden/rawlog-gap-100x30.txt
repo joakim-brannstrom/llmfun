@@ -7,10 +7,10 @@ text:
   Raw Log  follow                                                                                4
    Filter
   2 older records were evicted before this point
-  00:00:00.000 info  llm.agent.pool.processTurn source/llm/agent/pool.d:412 session opened
+     00:00:00.000  info   agent.pool.processTurn pool.d:412     session opened
   -- 2 records lost here --
-  00:00:02.000 warn  llm.agent.pool.processTurn source/llm/agent/pool.d:412 ui.conf is read-only
-  00:00:03.000 error llm.agent.pool.processTurn source/llm/agent/pool.d:412 read_file failed
+     00:00:02.000  warn   agent.pool.processTurn pool.d:412     ui.conf is read-only
+     00:00:03.000  error  agent.pool.processTurn pool.d:412     read_file failed          action 1
 
 
 

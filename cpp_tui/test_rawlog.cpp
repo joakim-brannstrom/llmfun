@@ -150,11 +150,20 @@ struct Grid {
     int nx = 0;
     int ny = 0;
     std::vector<uint32_t> ch;
+    std::vector<uint8_t> fg;
 
     uint32_t at(int x, int y) const {
         if (x < 0 || y < 0 || x >= nx || y >= ny)
             return 0;
         return ch[static_cast<std::size_t>(y) * nx + x];
+    }
+
+    /// The cell's foreground ink, as the backend encoded it: whatever palette
+    /// entry the resolved color became this frame, never a hard-coded index.
+    uint8_t fgAt(int x, int y) const {
+        if (x < 0 || y < 0 || x >= nx || y >= ny)
+            return 0;
+        return fg[static_cast<std::size_t>(y) * nx + x];
     }
 
     std::string rowText(int y) const {
@@ -192,8 +201,11 @@ Grid capture() {
     grid.ny = g_screen.ny;
     const std::size_t cells = static_cast<std::size_t>(grid.nx) * grid.ny;
     grid.ch.resize(cells);
-    for (std::size_t i = 0; i < cells; ++i)
+    grid.fg.resize(cells);
+    for (std::size_t i = 0; i < cells; ++i) {
         grid.ch[i] = g_screen.data[i].ch;
+        grid.fg[i] = g_screen.data[i].fg;
+    }
     return grid;
 }
 
@@ -233,6 +245,35 @@ Grid frame(const std::function<void(const ui::Metrics&)>& body, const char* char
 const ui::Metrics& gridMetrics() {
     static const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
     return m;
+}
+
+/// Draws a probe glyph with the given ink on a screen cell so an ink
+/// assertion can compare a drawn cell's fg against the same token rendered
+/// by the normal text path. Must be called inside the same frame() body,
+/// after the view, on a cell that carries no view glyph.
+void probeToken(const ui::Metrics& m, int x, int y, ui::ColorToken token) {
+    ImGui::GetWindowDrawList()->AddText(ImVec2(x * m.gu, y * m.row),
+                                        ImGui::GetColorU32(ui::color(token)), "x");
+}
+
+void checkInkCapture() {
+    const ui::Metrics& m = gridMetrics();
+    g_w = 100;
+    g_h = 30;
+    // The cells the probe will paint into, empty before anything draws: a probe
+    // that overwrote a view glyph would lie about whose ink it carries.
+    const Grid blank = frame([](const ui::Metrics&) {});
+    check(blank.at(4, 8) == 0 || blank.at(4, 8) == ' ', "premise: the probe cells are blank");
+    check(blank.at(7, 8) == 0 || blank.at(7, 8) == ' ', "premise: the second probe cell is blank");
+
+    const Grid probed = frame([&](const ui::Metrics& mm) {
+        probeToken(mm, 4, 8, ui::ColorToken::textLow);
+        probeToken(mm, 7, 8, ui::ColorToken::accent);
+        probeToken(mm, 10, 8, ui::ColorToken::textLow);
+    });
+    check(probed.at(4, 8) == 'x', "premise: the probe drew its glyph");
+    check(probed.fgAt(4, 8) != probed.fgAt(7, 8), "different tokens leave different ink");
+    check(probed.fgAt(4, 8) == probed.fgAt(10, 8), "the same token leaves the same ink");
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +391,100 @@ void checkRowText() {
     check(std::string(model::rawLogLevelWord(99)) == "info", "an unknown level reads as info");
 }
 
+// ---------------------------------------------------------------------------
+// 1b. The column plan
+// ---------------------------------------------------------------------------
+
+void checkColumnPlan() {
+    const ui::Metrics& m = gridMetrics();
+    const float gu = m.gu;
+    const auto wholeCells = [&](float v) { return std::fmod(v, gu) == 0.0f; };
+
+    // The rung table's boundaries, pinned one cell past each edge.
+    const struct {
+        int cells;
+        int rung;
+        float msgXCells;
+    } boundaries[] = {
+        {9, 4, 10},  {10, 4, 10}, {31, 4, 10}, {32, 3, 20}, {69, 3, 20},  {70, 2, 58},
+        {73, 2, 58}, {74, 1, 62}, {83, 1, 62}, {84, 0, 62}, {100, 0, 62},
+    };
+    for (const auto& b : boundaries) {
+        const float bodyW = static_cast<float>(b.cells) * gu;
+        const views::RowPlan plan = views::rawRowPlan(bodyW, m);
+        const std::string at = std::to_string(b.cells) + " cells";
+        check(plan.rung == b.rung,
+              "the ladder answers rung " + std::to_string(b.rung) + " at " + at);
+        check(plan.msgX == b.msgXCells * gu, "the message column starts at cell " +
+                                                 std::to_string(static_cast<int>(b.msgXCells)) +
+                                                 " at " + at);
+        check(plan.markerX == 0.0f && plan.markerW == gu,
+              "the marker is the row's one reserved first cell at " + at);
+        check(plan.levelW == 5.0f * gu, "the level field keeps its five cells at " + at);
+        check(plan.msgW == std::max(0.0f, bodyW - plan.msgX),
+              "the message takes the rest of the row at " + at);
+        check(wholeCells(plan.markerW) && wholeCells(plan.clockW) && wholeCells(plan.levelW) &&
+                  wholeCells(plan.locW) && wholeCells(plan.msgX) && wholeCells(plan.tagW),
+              "every planned width is whole cells at " + at);
+        if (plan.rung == 0) {
+            check(plan.clockX == 3.0f * gu && plan.clockW == 12.0f * gu &&
+                      plan.levelX == 17.0f * gu && plan.locX == 24.0f * gu &&
+                      plan.locW == 36.0f * gu && plan.tagW == 10.0f * gu,
+                  "the widest rung's segment offsets hold at " + at);
+        } else if (plan.rung == 1) {
+            check(plan.clockX == 3.0f * gu && plan.clockW == 12.0f * gu &&
+                      plan.levelX == 17.0f * gu && plan.locX == 24.0f * gu &&
+                      plan.locW == 36.0f * gu && plan.tagW == 0.0f,
+                  "the tagless wide rung's segment offsets hold at " + at);
+        } else if (plan.rung == 2) {
+            check(plan.clockX == 3.0f * gu && plan.clockW == 8.0f * gu &&
+                      plan.levelX == 13.0f * gu && plan.locX == 20.0f * gu &&
+                      plan.locW == 36.0f * gu && plan.tagW == 0.0f,
+                  "the short-clock rung's offsets hold at " + at);
+        } else if (plan.rung == 3) {
+            check(plan.clockX == 3.0f * gu && plan.clockW == 8.0f * gu &&
+                      plan.levelX == 13.0f * gu && plan.locW == 0.0f && plan.tagW == 0.0f,
+                  "the no-location rung's offsets hold at " + at);
+        } else {
+            check(plan.clockW == 0.0f && plan.locW == 0.0f && plan.tagW == 0.0f &&
+                      plan.levelX == 3.0f * gu,
+                  "the narrowest rung keeps the marker and the level alone at " + at);
+        }
+    }
+
+    // Degenerate frames plan, never divide by zero or underflow.
+    for (const float bodyW : {0.0f, -1.0f}) {
+        const views::RowPlan plan = views::rawRowPlan(bodyW, m);
+        check(plan.rung == 4 && plan.msgW == 0.0f,
+              "a degenerate body width plans rung 4 with no message");
+    }
+
+    // The location rule: widest form first, whole pieces, never a fragment.
+    const model::RawLogRecord located = record(model::kRawLogLevelInfo, "warming up");
+    check(views::rawLogLocationText(located, 54) ==
+              "llm.agent.pool.processTurn source/llm/agent/pool.d:412",
+          "the location's full form when the column fits it");
+    check(views::rawLogLocationText(located, 36) == "agent.pool.processTurn pool.d:412",
+          "one trim pass shortens the module and basenames the file");
+    const std::string narrow = views::rawLogLocationText(located, 20);
+    check(contains(narrow, "...") && contains(narrow, "pool.d:412") &&
+              ui::displayWidth(narrow) == 20,
+          "the mid-ellipsis keeps the name's tail and the whole file part");
+    check(views::rawLogLocationText(located, 8).empty(),
+          "a column too narrow even for the ellipsis's minimum shows no location");
+    model::RawLogRecord plain;
+    plain.message = "bare";
+    check(views::rawLogLocationText(plain, 36).empty(),
+          "a record with no coordinates shows no location");
+    for (int cells = 0; cells <= 60; ++cells) {
+        const std::string text = views::rawLogLocationText(located, cells);
+        check(text.empty() || ui::displayWidth(text) <= cells,
+              "the location rule never returns a fragment (" + std::to_string(cells) + " cells)");
+        check(text.empty() || contains(text, "pool.d:412"),
+              "and it never cuts the file part away (" + std::to_string(cells) + " cells)");
+    }
+}
+
 void checkDetailAndFilter() {
     model::RawLogRecord withDetail =
         record(model::kRawLogLevelTrace, "tool call", 0, "args: path=README.md\nargs: limit=200\n");
@@ -399,6 +534,71 @@ void checkDetailAndFilter() {
           "an error always passes it");
 }
 
+std::string scratchRoot();
+
+void checkN2Identity() {
+    // A wrapped ring with a stamped front, so the head placeholder row is up
+    // beside real rows; one record expanded, so detail lines sit inside the
+    // window; a filter active, so the mapped list is narrower than the ring.
+    std::deque<model::RawLogRecord> records;
+    for (int i = 0; i < 4; ++i)
+        records.push_back(record(model::kRawLogLevelInfo, "kept " + std::to_string(i), i));
+    records[0].seq = 5;
+    records[1].detail = "args: path=README.md\nargs: limit=200";
+    records[1].seq = 8;
+    records[2].action = TuiLogAction_Retry;
+    records[2].actionPayload = "turn-7";
+    records[3].seq = 10;
+    const model::RawLogRing ring{&records, 4};
+    check(model::rawLogHeadGap(records, 4) == 4, "premise: the ring's head gap is 4");
+
+    g_w = 100;
+    g_h = 30;
+    const ui::Rect rect = surfaceRect(g_w, g_h);
+    views::RawLogState state;
+    state.open = true;
+    state.overlayShape = true;
+    state.minLevel = model::kRawLogLevelTrace;
+    std::snprintf(state.filter.data(), state.filter.size(), "%s", "kept");
+    ++state.filterSeq;
+    for (int i = 0; i < 2; ++i)
+        frame([&](const ui::Metrics& mm) { views::renderRawLog(state, rect, mm, ring); });
+    state.expandedKey = views::rawLogKey(records[1]);
+    frame([&](const ui::Metrics& mm) { views::renderRawLog(state, rect, mm, ring); });
+    check(state.matchingRecords == records.size(), "premise: the filter keeps all four records");
+    check(state.expandedLines == model::rawLogDetailLines(records[1]),
+          "premise: the expanded record carries its detail lines");
+
+    // The canonical texts, in the order the window shows them: the head row, each
+    // mapped record's model row, the expanded record's detail lines after it. The
+    // save file spells the same rows without the head row and without expansion.
+    std::string copyExpected =
+        std::to_string(model::rawLogHeadGap(records, 4)) + views::kRawLogHeadGapSuffix + "\n";
+    std::string saveExpected;
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        copyExpected += model::rawLogRowText(records[i]) + "\n";
+        saveExpected += model::rawLogRowText(records[i]) + "\n";
+        const std::vector<std::string> lines = model::rawLogDetailLines(records[i]);
+        for (const std::string& line : lines) {
+            saveExpected += line + "\n";
+            if (i == 1)
+                copyExpected += line + "\n";
+        }
+    }
+    const std::size_t totalLines = 1 + state.matching.size() + state.expandedLines.size();
+    check(views::rawLogVisibleText(state, ring, 0, totalLines) == copyExpected,
+          "the copy path emits the model's canonical texts, byte for byte");
+
+    const std::string root = scratchRoot();
+    check(!root.empty(), "premise: the scratch data directory exists");
+    setenv("XDG_DATA_HOME", root.c_str(), 1);
+    std::string path;
+    std::string error;
+    check(model::rawLogSave(ring, "kept", kFixtureEpochMs, path, error), "the save writes a file");
+    check(readWhole(path) == saveExpected, "and the save path emits the same canonical texts");
+    unsetenv("XDG_DATA_HOME");
+}
+
 /// A directory that the save test owns: `$XDG_DATA_HOME` points at it, so nothing is written to
 /// the real home and the "outside the workarea" rule is provable by construction.
 std::string scratchRoot() {
@@ -409,9 +609,10 @@ std::string scratchRoot() {
     return path;
 }
 
-/// The openability marker: a summary row whose record carries multi-line detail ends in a dim
-/// `+` and gives up one cell for it; a detail-free row keeps the full width. Draw-only: the copy
-/// payload, the save file and the filter haystack are spelled without it.
+/// The openability marker: a summary row whose record carries multi-line detail leads with a
+/// low-ink `+` in the row's reserved first cell, and every record row reserves that cell
+/// whether or not it carries the glyph - the message column stays put from row to row.
+/// Draw-only: the copy payload, the save file and the filter haystack are spelled without it.
 void checkOpenableGlyph() {
     // The marker leads the row, so a row's first non-blank cell says whether it reserved
     // the cell for it.
@@ -429,15 +630,16 @@ void checkOpenableGlyph() {
     const std::deque<model::RawLogRecord> records = mixedRecords();
     views::RawLogState state = openSurface(rect, ringOf(records));
     const Grid grid = capture();
-    check(firstMark(grid, "tool args resolved") == '+',
+    check(firstMark(grid, "tool args resolved") == views::kRawLogOpenableGlyph[0],
           "the record with detail starts with the openability marker");
-    check(firstMark(grid, "session opened") != '+',
-          "a detail-free row keeps the full width and prints no marker");
-    check(firstMark(grid, "ui.conf is read-only") != '+',
+    check(firstMark(grid, "session opened") != views::kRawLogOpenableGlyph[0],
+          "a detail-free row prints no marker in its reserved first cell");
+    check(firstMark(grid, "ui.conf is read-only") != views::kRawLogOpenableGlyph[0],
           "and so does every other detail-free row");
 
-    // A row that fills the whole width is cut before the marker's cell, and only by that cell:
-    // the same message without detail shows one more letter, so the reservation is per row.
+    // The long message fills the message column, and the column is the same in every row:
+    // the reservation comes out of the row's head, not out of the message, so the counts
+    // and the start cell are identical with and without the marker.
     model::RawLogRecord withDetail =
         record(model::kRawLogLevelInfo, std::string(80, 'x'), 0, "args: path=README.md");
     model::RawLogRecord withoutDetail = withDetail;
@@ -454,12 +656,13 @@ void checkOpenableGlyph() {
     const Grid detailedGrid = capture();
     check(xs(detailedGrid, "00:00:00.000") < 80,
           "the long message is cut before the marker's cell");
-    check(firstMark(detailedGrid, "00:00:00.000") == '+', "with the marker still leading the row");
+    check(firstMark(detailedGrid, "00:00:00.000") == views::kRawLogOpenableGlyph[0],
+          "with the marker still leading the row");
     const std::deque<model::RawLogRecord> bareOnly{withoutDetail};
     views::RawLogState bare = openSurface(rect, ringOf(bareOnly));
     const Grid bareGrid = capture();
-    check(xs(bareGrid, "00:00:00.000") == xs(detailedGrid, "00:00:00.000") + 1,
-          "a detail-free row draws exactly one cell more of the same message");
+    check(xs(bareGrid, "00:00:00.000") == xs(detailedGrid, "00:00:00.000"),
+          "the message column draws the same cells with and without the marker");
 
     // The marker is an affordance, never content: the copy payload spells the model row whole,
     // and the filter does not see the glyph either.
@@ -476,15 +679,449 @@ void checkOpenableGlyph() {
         [&](const ui::Metrics& m) { views::renderRawLog(filtered, rect, m, ringOf(detailOnly)); });
     check(filtered.matchingRecords == 0, "the filter haystack has no glyph in it");
 
-    // An expanded record keeps its marker on the summary row: openability is a fact of the
-    // record, not of the view state.
+    // An expanded record flips its marker to the open glyph: openability is a fact of
+    // the record, not of the view state, but *open* is view state -
+    // `+` openable, `-` open, blank nothing to open.
     views::RawLogState expanded = openSurface(rect, ringOf(records));
     expanded.expandedKey = views::rawLogKey(records[1]);
     const Grid expandedGrid = frame(
         [&](const ui::Metrics& m) { views::renderRawLog(expanded, rect, m, ringOf(records)); });
     check(expandedGrid.hasText("path=README.md"), "premise: the record is expanded");
-    check(firstMark(expandedGrid, "tool args resolved") == '+',
-          "and its summary row still starts with the marker");
+    check(firstMark(expandedGrid, "tool args resolved") == views::kRawLogOpenGlyph[0],
+          "and its summary row carries the open glyph while expanded");
+
+    // The continuation lines align under the message column, in the metadata ink.
+    const auto contColOf = [&expandedGrid](int y, const char* needle) {
+        const std::size_t at = expandedGrid.rowText(y).find(needle);
+        return at == std::string::npos ? -1 : static_cast<int>(at);
+    };
+    const int detailRowY = expandedGrid.rowOf("tool args resolved");
+    check(detailRowY > 0, "premise: the expanded record's row is on screen");
+    const int contY = detailRowY + 1;
+    const int msgCol = contColOf(detailRowY, "tool args resolved");
+    check(msgCol > 0, "premise: the summary row has a message column");
+    // The model prefixes each detail line with "  | ", so the first word rides four
+    // cells into the message column.
+    check(contColOf(contY, "args:") == msgCol + 4,
+          "the continuation line starts at the message column");
+    const int probeY = contY + 4;
+    check(expandedGrid.at(4, probeY) == ' ' && expandedGrid.at(6, probeY) == ' ',
+          "premise: the probe row is blank");
+    const Grid inkGrid = frame([&](const ui::Metrics& m) {
+        views::renderRawLog(expanded, rect, m, ringOf(records));
+        probeToken(m, 4, probeY, ui::ColorToken::textLow);
+    });
+    check(inkGrid.fgAt(msgCol + 4, contY) == inkGrid.fgAt(4, probeY),
+          "the continuation line carries the metadata ink");
+}
+
+/// The record row's inks, pinned against same-frame probes: the clock, the location and
+/// the reserved first cell carry the low ink, the level word and the message carry the
+/// level's severity ink, and the action tag rides the right edge in the accent ink.
+void checkRowInk() {
+    g_w = 100;
+    g_h = 30;
+    const ui::Rect rect = surfaceRect(g_w, g_h);
+    const std::deque<model::RawLogRecord> records = mixedRecords();
+    const model::RawLogRing ring = ringOf(records);
+    views::RawLogState state = openSurface(rect, ring);
+    const Grid blankCheck =
+        frame([&](const ui::Metrics& m) { views::renderRawLog(state, rect, m, ring); });
+    const int errorY = blankCheck.rowOf("read_file failed");
+    check(errorY > 0, "premise: the tagged error row is on screen");
+    const int probeY = errorY + 2;
+    check(blankCheck.at(4, probeY) == ' ', "premise: the probe row is blank");
+    check(blankCheck.at(6, probeY) == ' ', "premise: the probe row is blank");
+    check(blankCheck.at(8, probeY) == ' ', "premise: the probe row is blank");
+    check(blankCheck.at(10, probeY) == ' ', "premise: the probe row is blank");
+
+    const Grid grid = frame([&](const ui::Metrics& m) {
+        views::renderRawLog(state, rect, m, ring);
+        probeToken(m, 4, probeY, ui::ColorToken::textLow);
+        probeToken(m, 6, probeY, ui::ColorToken::stateWarn);
+        probeToken(m, 8, probeY, ui::ColorToken::stateDanger);
+        probeToken(m, 10, probeY, ui::ColorToken::accent);
+    });
+    const auto colOf = [&grid](int y, const char* needle) {
+        const std::size_t at = grid.rowText(y).find(needle);
+        return at == std::string::npos ? -1 : static_cast<int>(at);
+    };
+    const int warn = blankCheck.rowOf("ui.conf is read-only");
+    check(warn > 0, "premise: the warn row is on screen");
+    check(grid.rowOf("00:00:02.000") == warn, "premise: the warn row spells its own clock");
+    const int clockCol = colOf(warn, "00:00:02.000");
+    check(clockCol >= 0, "premise: the clock is drawn whole");
+    const int levelCol = colOf(warn, "warn ");
+    check(levelCol == clockCol + 14, "the level word follows the clock by a two-cell gap");
+    const int locCol = colOf(warn, "agent.pool.processTurn pool.d:412");
+    check(locCol == levelCol + 7, "the location follows the level by a two-cell gap");
+    const int msgCol = colOf(warn, "ui.conf is read-only");
+    check(msgCol == locCol + 38, "the message follows the location by a two-cell gap");
+
+    check(grid.fgAt(clockCol, warn) == grid.fgAt(4, probeY), "the clock carries the low ink");
+    check(grid.fgAt(levelCol, warn) == grid.fgAt(6, probeY),
+          "the level word carries the severity ink");
+    check(grid.fgAt(locCol, warn) == grid.fgAt(4, probeY), "the location carries the low ink");
+    check(grid.fgAt(msgCol, warn) == grid.fgAt(6, probeY),
+          "the message carries the level's severity ink");
+    const int taggedMsg = colOf(errorY, "read_file failed");
+    check(taggedMsg == msgCol, "the message column is the same in every record row");
+    check(grid.fgAt(taggedMsg, errorY) == grid.fgAt(8, probeY),
+          "an error row's message carries the danger ink");
+    const std::string tag = "action 1 turn-7";
+    const int tagCol = colOf(errorY, tag.c_str());
+    check(tagCol > taggedMsg, "premise: the action tag is drawn");
+    check(grid.fgAt(tagCol, errorY) == grid.fgAt(10, probeY), "the tag carries the accent ink");
+    const std::string errorRow = grid.rowText(errorY);
+    int last = static_cast<int>(errorRow.size()) - 1;
+    while (last >= 0 && errorRow[last] == ' ')
+        --last;
+    check(tagCol + static_cast<int>(tag.size()) == last + 1, "the tag rides the body's right edge");
+
+    // The reserved first cell: a row with detail shows the marker there, and its message
+    // still starts at the plan's column.
+    const int detailY = grid.rowOf("tool args resolved");
+    check(detailY > 0, "premise: the detail row is on screen");
+    check(grid.at(msgCol - 62, detailY) == '+',
+          "the openability marker sits in the row's first cell");
+    check(colOf(detailY, "tool args resolved") == msgCol,
+          "and the detail row's message starts at the same column");
+}
+
+/// A closed record with detail shows its first detail line as a preview
+/// under its own row - at the message column, in the low ink, with no marker - and
+/// the preview takes a body line in the scroll account while copying nothing.
+void checkPreview() {
+    g_w = 100;
+    g_h = 30;
+    const ui::Rect rect = surfaceRect(g_w, g_h);
+    const std::deque<model::RawLogRecord> records = mixedRecords();
+    const model::RawLogRing ring = ringOf(records);
+    views::RawLogState state = openSurface(rect, ring);
+    const Grid blank =
+        frame([&](const ui::Metrics& m) { views::renderRawLog(state, rect, m, ring); });
+    const int recordY = blank.rowOf("tool args resolved");
+    check(recordY > 0, "premise: the trace record is on screen");
+    const int previewY = recordY + 1;
+    check(blank.rowOf("args: path=README.md") == previewY,
+          "the preview line is the row under the record with detail");
+    check(blank.at(2, previewY) == ' ', "the preview row reserves no marker cell");
+    const auto colOf = [&blank](int y, const char* needle) {
+        const std::size_t at = blank.rowText(y).find(needle);
+        return at == std::string::npos ? -1 : static_cast<int>(at);
+    };
+    const int msgCol = colOf(recordY, "tool args resolved");
+    check(msgCol > 0, "premise: the record row has a message column");
+    // The preview text is the model's detail line verbatim, and the model prefixes
+    // each detail line with "  | " - so the first detail word lands four cells into
+    // the message column, its prefix riding those cells.
+    check(colOf(previewY, "args:") == msgCol + 4,
+          "the preview starts at the message column, prefix and all");
+
+    // The preview's ink, pinned against same-frame probes: low like the auxiliary
+    // text, not the record row's severity ink.
+    const int probeY = previewY + 6;
+    check(blank.at(4, probeY) == ' ' && blank.at(6, probeY) == ' ',
+          "premise: the probe row is blank");
+    const Grid ink = frame([&](const ui::Metrics& m) {
+        views::renderRawLog(state, rect, m, ring);
+        probeToken(m, 4, probeY, ui::ColorToken::textLow);
+        probeToken(m, 6, probeY, ui::ColorToken::textMid);
+    });
+    check(ink.fgAt(msgCol + 4, previewY) == ink.fgAt(4, probeY), "the preview carries the low ink");
+    check(ink.fgAt(msgCol + 4, previewY) != ink.fgAt(6, probeY),
+          "and not the record row's message ink");
+
+    // A record without detail shows no preview at all.
+    const std::deque<model::RawLogRecord> bare{
+        record(model::kRawLogLevelError, "read_file failed", 0)};
+    views::RawLogState bareState = openSurface(rect, ringOf(bare));
+    check(bareState.drawnRows == 1, "a record without detail draws no preview line");
+
+    // Expanding the record replaces the preview with its continuation lines.
+    views::RawLogState expanded = openSurface(rect, ring);
+    expanded.expandedKey = views::rawLogKey(records[1]);
+    const Grid expandedGrid =
+        frame([&](const ui::Metrics& m) { views::renderRawLog(expanded, rect, m, ring); });
+    check(expandedGrid.hasText("limit=200"), "premise: the expansion is drawn");
+    check(expandedGrid.rowOf("args: path=README.md") == recordY + 1,
+          "the expanded record's first detail line is its continuation, not a preview");
+    check(expanded.drawnRows == records.size() + expanded.expandedLines.size(),
+          "an expanded record costs its continuation lines, not a preview line");
+
+    // Scroll accounting: every preview charges one body line, so a window that
+    // cannot show all the lines scrolls by whole records.
+    std::deque<model::RawLogRecord> detailed;
+    for (int i = 0; i < 14; ++i)
+        detailed.push_back(record(model::kRawLogLevelInfo, "detail row " + std::to_string(i), i,
+                                  "args: n=" + std::to_string(i)));
+    views::RawLogState scrolled = openSurface(rect, ringOf(detailed));
+    // One more frame: the follower's pin lands at the bottom of a 28-line body in a
+    // 27-row window, and the clamp is observable on the frame after it applies.
+    frame([&](const ui::Metrics& m) { views::renderRawLog(scrolled, rect, m, ringOf(detailed)); });
+    check(scrolled.firstVisible == 1,
+          "28 body lines in a 27-row window scroll by one line, a preview's worth");
+
+    // The preview row is its own hit target, and its click toggles the same record
+    // the row toggles. One click at (x, y): the press and the release are
+    // separate frames, which is how ImGui's ButtonBehavior activates an item.
+    const auto clickAt = [&](int col, int rowY) {
+        ImGui::GetIO().AddMousePosEvent(static_cast<float>(col), static_cast<float>(rowY));
+        frame([&](const ui::Metrics& m) { views::renderRawLog(state, rect, m, ring); });
+        ImGui::GetIO().AddMouseButtonEvent(0, true);
+        frame([&](const ui::Metrics& m) { views::renderRawLog(state, rect, m, ring); });
+        ImGui::GetIO().AddMouseButtonEvent(0, false);
+        frame([&](const ui::Metrics& m) { views::renderRawLog(state, rect, m, ring); });
+    };
+    clickAt(msgCol + 2, previewY);
+    check(state.expandedKey == views::rawLogKey(records[1]),
+          "a click on the preview line opens the record");
+    clickAt(msgCol + 2, recordY);
+    check(state.expandedKey.empty(), "and a click on the record row closes it again");
+    clickAt(msgCol + 2, previewY);
+    check(state.expandedKey == views::rawLogKey(records[1]),
+          "the toggle works in both directions, from the preview too");
+    clickAt(msgCol + 2, previewY + 1);
+    check(state.expandedKey == views::rawLogKey(records[1]),
+          "a click on a continuation line toggles nothing");
+
+    // At narrow widths the preview line is clipped at the body's edge like any
+    // other drawn text: it is cut whole-cell-wise (the fixture's preview is ASCII)
+    // and no glyph lands outside the body's cells.
+    g_w = 40; // 36 body cells: rung 3, message column at body cell 20
+    g_h = 30;
+    const ui::Rect narrowRect = surfaceRect(g_w, g_h);
+    views::RawLogState narrow = openSurface(narrowRect, ring);
+    const Grid narrowGrid =
+        frame([&](const ui::Metrics& m) { views::renderRawLog(narrow, narrowRect, m, ring); });
+    const int narrowRecordY = narrowGrid.rowOf("tool args");
+    check(narrowRecordY > 0, "premise: the narrow surface still shows the record");
+    const std::string narrowPreview = narrowGrid.rowText(narrowRecordY + 1);
+    check(narrowPreview.find("args:") != std::string::npos,
+          "premise: the preview's first words still fit at the narrow width");
+    check(narrowPreview.find("README.md") == std::string::npos,
+          "the preview is cut at the body's edge, not painted past it");
+    int narrowLast = static_cast<int>(narrowPreview.size()) - 1;
+    while (narrowLast >= 0 && narrowPreview[narrowLast] == ' ')
+        --narrowLast;
+    check(narrowLast < 2 + (g_w - 4), "the preview's last cell sits inside the body");
+    g_w = 100;
+    g_h = 30;
+}
+/// The tag and the clock follow the plan's width decisions: only the widest rung
+/// reserves tag room, a tag too wide for the message's reserved minimum is dropped
+/// whole, and the clock is sliced to the rung's cells.
+void checkTagAndShortClock() {
+    // The widest rung: a tag whose own width would starve the message's reserved
+    // minimum never draws, and the message keeps the full column.
+    g_w = 100;
+    g_h = 30;
+    const ui::Rect rect = surfaceRect(g_w, g_h);
+    model::RawLogRecord bigTag = record(model::kRawLogLevelError, std::string(40, 'x'), 0);
+    bigTag.action = TuiLogAction_Retry;
+    bigTag.actionPayload = "a payload long enough to overflow the tag slack";
+    const std::deque<model::RawLogRecord> wide{bigTag};
+    views::RawLogState state = openSurface(rect, ringOf(wide));
+    const Grid grid = capture();
+    check(!grid.hasText("action "), "a tag that would starve the message is dropped whole");
+    const std::string row = grid.rowText(grid.rowOf("00:00:00.000"));
+    const int msgX = static_cast<int>(row.find("00:00:00.000")) + 59;
+    // The 40-x message is longer than its column, so it is drawn ellipsized:
+    // the x's stop three cells short of the body's right
+    // edge and the ASCII `...` marker fills the rest of the column. The cells
+    // are read from the grid, not the row string: the marker is one cell but
+    // three UTF-8 bytes, so a byte index would lie about where the column ends.
+    const int clockY = grid.rowOf("00:00:00.000");
+    const int columnCells = g_w - 2 - msgX; // the body's right edge less the message column
+    std::string column;
+    for (int x = msgX; x < msgX + columnCells; ++x)
+        column += utf8Of(grid.at(x, clockY));
+    check(column == std::string(columnCells - 3, 'x') + "...",
+          "the message fills the column the dropped tag leaves whole, ellipsized");
+
+    // A narrow body: the rung has no tag slack, so the tagged row shows no tag, both
+    // messages still start at the same column, and the clock is sliced to eight cells.
+    g_w = 54;
+    g_h = 20;
+    const ui::Rect narrow = surfaceRect(g_w, g_h);
+    model::RawLogRecord unstamped = record(model::kRawLogLevelInfo, "session opened", 0);
+    unstamped.timestampMs = 0;
+    model::RawLogRecord tagged = record(model::kRawLogLevelError, "read_file failed", 1);
+    tagged.action = TuiLogAction_Retry;
+    tagged.actionPayload = "turn-7";
+    const std::deque<model::RawLogRecord> pair{unstamped, tagged};
+    views::RawLogState narrowState = openSurface(narrow, ringOf(pair));
+    const Grid narrowGrid = capture();
+    check(narrowGrid.hasText("--:--:--"), "premise: the unstamped clock is drawn");
+    check(!narrowGrid.hasText("--:--:--.---"), "the clock is sliced to the rung's eight cells");
+    check(!narrowGrid.hasText("action"), "a narrow body draws no tag");
+    const int opened = static_cast<int>(
+        narrowGrid.rowText(narrowGrid.rowOf("session opened")).find("session opened"));
+    const int failed = static_cast<int>(
+        narrowGrid.rowText(narrowGrid.rowOf("read_file failed")).find("read_file failed"));
+    check(opened == failed, "the message column is shared at the narrow rung too");
+}
+
+/// The degradation ladder, behaviourally: one unstamped, actionless
+/// record with a long message, driven through widths one cell apart at every rung
+/// boundary. The rung reads the frame width alone, so segments appear and vanish
+/// at exactly the widths the rung table names - and a segment's ink follows the
+/// segment, never the width.
+void checkLadder() {
+    // One probe width per rung boundary: `+ 4` is the surface's padding, two
+    // cells a side; 15 rows leave a 12-row body under title, filter and footer.
+    const auto probe = [](int cells) {
+        g_w = cells + 4;
+        g_h = 15;
+        model::RawLogRecord longRow = record(model::kRawLogLevelInfo, std::string(40, 'x'), 0);
+        longRow.timestampMs = 0;
+        const std::deque<model::RawLogRecord> one{longRow};
+        views::RawLogState state = openSurface(surfaceRect(g_w, g_h), ringOf(one));
+        (void)state;
+        return capture();
+    };
+
+    // Rung 0 (84 cells and up): clock, location and tag slack all fit.
+    check(probe(84).hasText("pool.d:412"), "84 cells: rung 0 draws the location");
+
+    // Rung 1 (74-83): the tag slack goes, clock and location stay.
+    const Grid noTag = probe(83);
+    check(noTag.hasText("--:--:--.---") && noTag.hasText("pool.d:412"),
+          "83 cells: rung 1 keeps the clock and the location");
+
+    // Rung 2 (70-73): the clock slices to eight cells, the location stays.
+    const Grid shortClock = probe(73);
+    check(shortClock.hasText("--:--:--") && !shortClock.hasText("--:--:--.---") &&
+              shortClock.hasText("pool.d:412"),
+          "73 cells: the clock is sliced and the location stays");
+
+    // Rung 3 (32-69): the location goes, the short clock stays.
+    const Grid noLoc = probe(69);
+    check(noLoc.hasText("--:--:--") && !noLoc.hasText("pool.d:412"),
+          "69 cells: rung 3 keeps only the short clock");
+    check(probe(32).hasText("--:--:--"), "32 cells: the short clock still draws");
+
+    // Rung 4 (10-31): no clock, no location - level and message alone.
+    const Grid bare = probe(31);
+    check(!bare.hasText("--:--:--") && bare.hasText("info "),
+          "31 cells: rung 4 keeps the level and the message");
+
+    // The message's own degradation, one cell at a time at rung 4's floor: it is
+    // drawn whole until the plan's segments leave it nothing, then ellipsized
+    // cell by cell - the ellipsis appears exactly when clipping would start,
+    // ASCII `...` on the grid profile, and below the three cells the
+    // marker needs the message is not drawn at all (no partial ellipsis).
+    const std::string prefix = "   info   "; // marker cell, gap, level field, gap
+    for (int cells = 10; cells <= 17; ++cells) {
+        const Grid grid = probe(cells);
+        const int y = grid.rowOf("info");
+        check(y >= 0, "the marker and level still draw at " + std::to_string(cells) + " cells");
+        const std::string row = grid.rowText(y);
+        const int messageCells = cells - 10;
+        std::string expect = prefix;
+        if (messageCells >= 3)
+            expect += std::string(messageCells - 3, 'x') + "...";
+        check(row.compare(2, expect.size(), expect) == 0,
+              "the message is ellipsized cell by cell at " + std::to_string(cells) + " cells");
+    }
+
+    // The lower rung edges too: a drifted table row would show through only at the
+    // exact boundary width, so each edge is probed behaviourally as well.
+    const Grid edgeRung1 = probe(74);
+    check(edgeRung1.hasText("--:--:--.---") && edgeRung1.hasText("pool.d:412"),
+          "74 cells: rung 1 keeps the full clock and the location");
+    const Grid edgeRung2 = probe(70);
+    check(edgeRung2.hasText("--:--:--") && !edgeRung2.hasText("--:--:--.---") &&
+              edgeRung2.hasText("pool.d:412"),
+          "70 cells: rung 2 keeps the short clock and the location");
+    const Grid edgeRung3 = probe(33);
+    check(edgeRung3.hasText("--:--:--") && !edgeRung3.hasText("pool.d:412"),
+          "33 cells: rung 3 keeps the short clock without the location");
+
+    // Below the plan's floor: the body draws no rows at all - not even a
+    // fragment - while the surface itself stays up.
+    const Grid floor = probe(9);
+    check(!floor.hasText("info"), "9 cells: the body draws no record rows at all");
+    check(floor.hasText("Raw Log"), "9 cells: the surface itself stays up");
+
+    // The empty state stays usable at the floor: drawn, clipped like any row.
+    g_w = 13; // nine cells of body
+    g_h = 15;
+    const std::deque<model::RawLogRecord> noRecords{};
+    views::RawLogState emptyState = openSurface(surfaceRect(g_w, g_h), ringOf(noRecords));
+    check(capture().hasText("No recor"), "the empty state still draws, clipped, at the floor");
+
+    // Copy at the floor takes nothing: the body painted no rows, so neither the
+    // button nor the `y` key may hand the clipboard a line the screen never showed.
+    const std::deque<model::RawLogRecord> one{record(model::kRawLogLevelInfo, "a record", 0)};
+    views::RawLogState floorCopy = openSurface(surfaceRect(g_w, g_h), ringOf(one));
+    floorCopy.copiedNow = true;
+    frame([&](const ui::Metrics& m) {
+        views::renderRawLog(floorCopy, surfaceRect(g_w, g_h), m, ringOf(one));
+    });
+    check(floorCopy.drawnRows == 0, "premise: the floor drew no rows");
+    check(floorCopy.copiedRows.empty(), "a copy at the floor puts nothing on the clipboard");
+
+    // A body with no cells at all, and a surface with no width: both render
+    // without crashing and draw no record row.
+    for (const int w : {0, 4, 13}) {
+        g_w = w;
+        g_h = 15;
+        const std::deque<model::RawLogRecord> one{record(model::kRawLogLevelInfo, "probe", 0)};
+        openSurface(surfaceRect(g_w, g_h), ringOf(one));
+        check(!capture().hasText("probe"),
+              "a body with no cells draws no record rows (w=" + std::to_string(w) + ")");
+    }
+
+    // Same width, different content: the rung reads the frame alone, so two
+    // records whose metadata differ in length draw their message at the same
+    // column, and the tag that does not fit changes no other row's geometry.
+    g_w = 88; // 84 cells
+    g_h = 15;
+    model::RawLogRecord plain = record(model::kRawLogLevelInfo, "first row", 0);
+    plain.timestampMs = 0;
+    model::RawLogRecord deep = record(model::kRawLogLevelInfo, "second row", 1);
+    deep.timestampMs = 0;
+    deep.module = "llm.agent.pool.deeper.module.path";
+    deep.function = "processLongerTurn";
+    deep.file = "source/llm/agent/pool/deeper/path.d";
+    deep.line = 9001;
+    deep.action = TuiLogAction_Retry;
+    deep.actionPayload = "turn-7";
+    const std::deque<model::RawLogRecord> pair{plain, deep};
+    views::RawLogState pairState = openSurface(surfaceRect(g_w, g_h), ringOf(pair));
+    const Grid pairGrid = capture();
+    const int firstX =
+        static_cast<int>(pairGrid.rowText(pairGrid.rowOf("first row")).find("first row"));
+    const int secondX =
+        static_cast<int>(pairGrid.rowText(pairGrid.rowOf("second row")).find("second row"));
+    check(firstX >= 0 && firstX == secondX,
+          "the message column is content-independent across rows");
+
+    // The inks follow the segments, not the widths: the sliced clock still
+    // carries textLow at its first drawn cell, and the message still carries its
+    // level ink at its first cell.
+    g_w = 73; // rung 3: sixty-nine cells of body
+    g_h = 15;
+    model::RawLogRecord inkRow = record(model::kRawLogLevelInfo, std::string(40, 'x'), 0);
+    inkRow.timestampMs = 0;
+    const std::deque<model::RawLogRecord> oneInk{inkRow};
+    const model::RawLogRing inkRing = ringOf(oneInk);
+    views::RawLogState inkState = openSurface(surfaceRect(g_w, g_h), inkRing);
+    const Grid inkBlank = capture();
+    const int inkY = inkBlank.rowOf("info");
+    check(inkY >= 0 && inkY + 2 < g_h &&
+              (inkBlank.at(4, inkY + 2) == 0 || inkBlank.at(4, inkY + 2) == ' '),
+          "premise: the ink probe row is blank");
+    const Grid inkGrid = frame([&](const ui::Metrics& mm) {
+        views::renderRawLog(inkState, surfaceRect(g_w, g_h), mm, inkRing);
+        probeToken(mm, 4, inkY + 2, ui::ColorToken::textLow);
+        probeToken(mm, 7, inkY + 2, ui::ColorToken::textHi);
+    });
+    check(inkGrid.fgAt(5, inkY) == inkGrid.fgAt(4, inkY + 2),
+          "the sliced clock still carries the low ink at its first cell");
+    check(inkGrid.fgAt(22, inkY) == inkGrid.fgAt(7, inkY + 2),
+          "and the message still carries its level ink at rung 4's floor");
 }
 
 void checkSave() {
@@ -549,15 +1186,18 @@ void checkSurface() {
     check(grid.hasText(views::kRawLogChipFollow), "the follower's chip is up while following");
     check(grid.hasText("session opened"), "an info record is drawn");
     check(grid.hasText("read_file failed"), "an error record is drawn");
-    check(grid.hasText("llm.agent.pool.processTurn"), "the developer coordinates are drawn");
-    check(grid.hasText("source/llm/agent/pool.d:412"), "including the source line");
+    check(grid.hasText("agent.pool.processTurn"), "the developer coordinates are drawn");
+    check(grid.hasText("pool.d:412"), "including the source line");
     check(grid.hasText(views::kRawLogFilterHint), "the filter field is up");
     check(grid.hasText(views::kRawLogCopyLabel) && grid.hasText(views::kRawLogSaveLabel) &&
               grid.hasText(views::kRawLogCloseLabel),
           "and the three controls");
     check(grid.hasText(views::kRawLogHints), "the overlay lists its keys");
-    check(state.drawnRows > 0 && state.drawnRows <= records.size(),
-          "the body drew the records it has");
+    // The closed record with detail draws its preview line too, so the
+    // drawn bound is records plus their preview lines, not just the records.
+    const std::size_t previewLines = 1; // mixedRecords: one closed record with detail
+    check(state.drawnRows == records.size() + previewLines,
+          "the body drew the records it has, plus their preview lines");
 }
 
 void checkFilterAndStates() {
@@ -602,6 +1242,176 @@ void checkFilterAndStates() {
           "and the dropped counter is drawn when it advances");
 }
 
+/// The filter highlight paints the first case-insensitive occurrence of the
+/// filter inside the message with the accent ink while the rest of the message
+/// keeps the level's severity ink. The other segments are never highlighted,
+/// an empty filter highlights nothing, and a match that survives only in the
+/// clipped-off tail stays plain.
+void checkFilterHighlight() {
+    g_w = 100;
+    g_h = 30;
+    const ui::Rect rect = surfaceRect(g_w, g_h);
+    const std::deque<model::RawLogRecord> records = mixedRecords();
+    const model::RawLogRing ring = ringOf(records);
+
+    const auto withFilter = [&](const char* filter, const model::RawLogRing& r) {
+        views::RawLogState state = openSurface(rect, r);
+        std::snprintf(state.filter.data(), state.filter.size(), "%s", filter);
+        ++state.filterSeq;
+        return state;
+    };
+    const auto blankFrame = [&](views::RawLogState& state, const model::RawLogRing& r) {
+        return frame([&](const ui::Metrics& m) { views::renderRawLog(state, rect, m, r); });
+    };
+    const auto colIn = [](const Grid& g, int y, const char* needle) {
+        const std::size_t at = g.rowText(y).find(needle);
+        return at == std::string::npos ? -1 : static_cast<int>(at);
+    };
+
+    // One record survives the filter, so the row under the warn record is blank
+    // in the very frame the highlight draws.
+    views::RawLogState mid = withFilter("read-only", ring);
+    const Grid midBlank = blankFrame(mid, ring);
+    check(mid.matchingRecords == 1, "premise: the filter narrows the list to the warn record");
+    const int warnY = midBlank.rowOf("ui.conf is read-only");
+    check(warnY > 0, "premise: the filtered warn row is on screen");
+    check(midBlank.rowText(warnY).find("ui.conf is read-only") != std::string::npos,
+          "the highlight leaves the message's characters alone");
+    const int probeY = warnY + 2;
+    check(midBlank.at(6, probeY) == ' ', "premise: the probe row is blank");
+    check(midBlank.at(8, probeY) == ' ', "premise: the probe row is blank");
+    check(midBlank.at(10, probeY) == ' ', "premise: the probe row is blank");
+
+    const Grid midGrid = frame([&](const ui::Metrics& m) {
+        views::renderRawLog(mid, rect, m, ring);
+        probeToken(m, 6, probeY, ui::ColorToken::textLow);
+        probeToken(m, 8, probeY, ui::ColorToken::stateWarn);
+        probeToken(m, 10, probeY, ui::ColorToken::accent);
+    });
+    const int msgCol = colIn(midGrid, warnY, "ui.conf is read-only");
+    check(msgCol > 0, "premise: the message column is found");
+    check(midGrid.rowText(warnY).compare(msgCol + 11, 9, "read-only") == 0,
+          "premise: the match sits where the filter matched");
+    check(midGrid.fgAt(msgCol + 11, warnY) == midGrid.fgAt(10, probeY),
+          "the matched substring carries the accent ink");
+    check(midGrid.fgAt(msgCol + 19, warnY) == midGrid.fgAt(10, probeY),
+          "and so does its last cell");
+    check(midGrid.fgAt(msgCol, warnY) == midGrid.fgAt(8, probeY),
+          "the message before the match keeps the level's ink");
+    check(midGrid.fgAt(msgCol + 20, warnY) != midGrid.fgAt(10, probeY),
+          "and nothing past the match carries the accent");
+    const int clockCol = colIn(midGrid, warnY, "00:00:02.000");
+    check(clockCol > 0, "premise: the clock is drawn");
+    check(midGrid.fgAt(clockCol, warnY) == midGrid.fgAt(6, probeY), "the clock is not highlighted");
+    const int locCol = colIn(midGrid, warnY, "agent.pool.processTurn");
+    check(locCol > 0, "premise: the location is drawn");
+    check(midGrid.fgAt(locCol, warnY) == midGrid.fgAt(6, probeY), "nor the location");
+
+    // The filter matches case-insensitively, so an upper-case filter finds the
+    // same record and highlights the same span.
+    views::RawLogState upper = withFilter("READ-ONLY", ring);
+    const Grid upperGrid = frame([&](const ui::Metrics& m) {
+        views::renderRawLog(upper, rect, m, ring);
+        probeToken(m, 10, probeY, ui::ColorToken::accent);
+    });
+    check(upper.matchingRecords == 1, "the upper-case filter matches the same record");
+    check(upperGrid.fgAt(msgCol + 11, warnY) == upperGrid.fgAt(10, probeY),
+          "and highlights the same span");
+
+    // A match at the message's very start: the span begins in the first
+    // message cell and the cell after it is plain again.
+    views::RawLogState head = withFilter("ui.conf", ring);
+    const Grid headGrid = frame([&](const ui::Metrics& m) {
+        views::renderRawLog(head, rect, m, ring);
+        probeToken(m, 8, probeY, ui::ColorToken::stateWarn);
+        probeToken(m, 10, probeY, ui::ColorToken::accent);
+    });
+    check(head.matchingRecords == 1, "premise: the head filter keeps the warn record");
+    check(headGrid.fgAt(msgCol, warnY) == headGrid.fgAt(10, probeY),
+          "a match at the message start highlights from the first cell");
+    check(headGrid.fgAt(msgCol + 7, warnY) != headGrid.fgAt(10, probeY),
+          "and the cell after the span is plain again");
+
+    // An empty filter draws the message as one plain severity-colored run. The
+    // unfiltered layout carries more rows, so the probes live in the warn
+    // row's own message-box tail, past the twenty-character message.
+    views::RawLogState plain = openSurface(rect, ring);
+    const Grid plainBlank = blankFrame(plain, ring);
+    const int plainWarn = plainBlank.rowOf("ui.conf is read-only");
+    check(plainWarn > 0, "premise: the unfiltered warn row is on screen");
+    const int plainMsg = colIn(plainBlank, plainWarn, "ui.conf is read-only");
+    check(plainMsg > 0, "premise: the unfiltered message column is found");
+    check(plainBlank.at(plainMsg + 30, plainWarn) == ' ', "premise: the message tail is blank");
+    check(plainBlank.at(plainMsg + 31, plainWarn) == ' ', "premise: the message tail is blank");
+    const Grid plainGrid = frame([&](const ui::Metrics& m) {
+        views::renderRawLog(plain, rect, m, ring);
+        probeToken(m, plainMsg + 30, plainWarn, ui::ColorToken::stateWarn);
+        probeToken(m, plainMsg + 31, plainWarn, ui::ColorToken::accent);
+    });
+    check(plainGrid.fgAt(plainMsg, plainWarn) == plainGrid.fgAt(plainMsg + 30, plainWarn),
+          "an empty filter paints the whole message in the level's ink");
+    check(plainGrid.fgAt(plainMsg, plainWarn) != plainGrid.fgAt(plainMsg + 31, plainWarn),
+          "and nothing carries the accent ink");
+
+    // A blanks-only filter is match-all for the matcher, not a filter: every row
+    // is shown, and the highlight agrees by painting nothing.
+    views::RawLogState spaces = withFilter(" \t", ring);
+    const Grid spacesBlank = blankFrame(spaces, ring);
+    check(spaces.matchingRecords == records.size(),
+          "the blanks-only filter is match-all, like the matcher says");
+    check(spacesBlank.rowOf("ui.conf is read-only") == plainWarn,
+          "premise: the blanks-only layout is the unfiltered one");
+    const Grid spacesGrid = frame([&](const ui::Metrics& m) {
+        views::renderRawLog(spaces, rect, m, ring);
+        probeToken(m, plainMsg + 30, plainWarn, ui::ColorToken::stateWarn);
+        probeToken(m, plainMsg + 31, plainWarn, ui::ColorToken::accent);
+    });
+    bool painted = false;
+    for (int c = plainMsg; c < plainMsg + 38 && !painted; ++c) {
+        if (c == plainMsg + 31)
+            continue; // the probe cell itself
+        painted = spacesGrid.fgAt(c, plainWarn) == spacesGrid.fgAt(plainMsg + 31, plainWarn);
+    }
+    check(!painted, "a blanks-only filter highlights nothing");
+    check(spacesGrid.fgAt(plainMsg, plainWarn) == spacesGrid.fgAt(plainMsg + 30, plainWarn),
+          "and the message keeps the level's ink");
+
+    // A match that survives only in the clipped-off tail stays plain: the
+    // record still passes the filter because the match hides in the full
+    // message, but nothing on screen carries the accent.
+    std::deque<model::RawLogRecord> tailRecords;
+    tailRecords.push_back(record(model::kRawLogLevelInfo, std::string(60, 'x') + "needle", 0));
+    const model::RawLogRing tailRing = ringOf(tailRecords);
+    views::RawLogState tail = withFilter("needle", tailRing);
+    check(tail.matchingRecords == 1, "the filter still finds the record behind the cut");
+    const Grid tailBlank = blankFrame(tail, tailRing);
+    const int tailY = tailBlank.rowOf("00:00:00.000");
+    check(tailY > 0, "premise: the filtered record row is on screen");
+    check(tailBlank.rowText(tailY).find("needle") == std::string::npos,
+          "premise: the match itself is clipped off the row");
+    const int tailMsg = colIn(tailBlank, tailY, "xxx");
+    check(tailMsg > 0, "premise: the clipped message column is found");
+    const int tailProbeY = tailY + 2;
+    check(tailBlank.at(8, tailProbeY) == ' ', "premise: the probe row is blank");
+    check(tailBlank.at(10, tailProbeY) == ' ', "premise: the probe row is blank");
+    const Grid tailGrid = frame([&](const ui::Metrics& m) {
+        views::renderRawLog(tail, rect, m, tailRing);
+        probeToken(m, 8, tailProbeY, ui::ColorToken::textHi);
+        probeToken(m, 10, tailProbeY, ui::ColorToken::accent);
+    });
+    bool strayed = false;
+    for (int c = tailMsg; c < tailMsg + 38 && !strayed; ++c)
+        strayed = tailGrid.fgAt(c, tailY) == tailGrid.fgAt(10, tailProbeY);
+    check(!strayed, "a match hidden in the clipped tail highlights nothing");
+    check(tailGrid.fgAt(tailMsg, tailY) == tailGrid.fgAt(8, tailProbeY),
+          "and the shown message keeps the level's ink");
+    const std::string tailRow = tailGrid.rowText(tailY);
+    int last = static_cast<int>(tailRow.size()) - 1;
+    while (last >= 0 && tailRow[last] == ' ')
+        --last;
+    check(tailGrid.fgAt(last, tailY) == tailGrid.fgAt(8, tailProbeY), "through to the ellipsis");
+}
+
 void checkBoundsAndExpansionAndCopy() {
     // 5000 records - the ring's capacity - must draw a viewport, not the list (NFR-18).
     std::deque<model::RawLogRecord> many;
@@ -639,7 +1449,11 @@ void checkBoundsAndExpansionAndCopy() {
     copied.windowRows = 3;
     const std::string payload = views::rawLogVisibleText(copied, ringOf(mixedRecords()), 0, 3);
     check(contains(payload, "session opened"), "the copy payload is the visible window");
-    check(contains(payload, "ui.conf is read-only"), "whole rows, one per line");
+    // windowRows=3 covers the first record's row, its preview line and the
+    // second record's row. The preview takes a screen row but copies nothing - Copy
+    // takes the canonical one-line form, never a detail preview - so only two of the
+    // three rows reach the clipboard.
+    check(!contains(payload, "ui.conf is read-only"), "a preview line copies nothing");
     check(!contains(payload, "read_file failed"), "and not the rows below the fold");
 
     // The copy bound and the drawn bound are *different* numbers (review I1): the body paints one
@@ -656,6 +1470,16 @@ void checkBoundsAndExpansionAndCopy() {
     check(copyLines == live.windowRows, "y copies exactly the viewport rows (" +
                                             std::to_string(copyLines) + " of " +
                                             std::to_string(live.windowRows) + ")");
+    // And the set is exact: these records carry no detail, so every drawn line is a
+    // record row, and the payload is the canonical one-line form of each visible
+    // record, concatenated in screen order.
+    std::string expected;
+    for (std::size_t i = live.firstVisible;
+         i < ring.size() && i < live.firstVisible + live.windowRows; ++i) {
+        expected += model::rawLogRowText(*ring.at(i));
+        expected += '\n';
+    }
+    check(live.copiedRows == expected, "the payload is exactly the visible record rows");
     check(copyLines <= live.drawnRows, "and never copies a row it did not draw (" +
                                            std::to_string(copyLines) + " copied, " +
                                            std::to_string(live.drawnRows) + " drawn)");
@@ -665,6 +1489,21 @@ void checkBoundsAndExpansionAndCopy() {
           "its first line is the first painted row, not the one above it");
     check(!contains(live.copiedRows, "record 4972"),
           "and the row above the painted window is not copied");
+
+    // A ring where a record *does* carry detail: its preview line occupies a screen
+    // row (the scroll account charges it) but contributes nothing to the payload.
+    const std::deque<model::RawLogRecord> mixed = mixedRecords();
+    views::RawLogState mixedLive = openSurface(rect, ringOf(mixed));
+    mixedLive.copiedNow = true;
+    frame([&](const ui::Metrics& m) { views::renderRawLog(mixedLive, rect, m, ringOf(mixed)); });
+    expected.clear();
+    for (std::size_t i = 0; i < mixed.size(); ++i) {
+        expected += model::rawLogRowText(mixed[i]);
+        expected += '\n';
+    }
+    check(mixedLive.copiedRows == expected,
+          "preview lines take a screen row and copy nothing (4 records, 5 drawn rows)");
+    check(mixedLive.drawnRows == mixed.size() + 1, "the preview row was drawn");
 }
 
 /// The ring rotates under a *stable* filter (review I2). At capacity the deque keeps its size, and
@@ -1343,6 +2182,9 @@ void checkGoldens(bool update) {
         check(false, std::string(scene.name) + " " + std::to_string(scene.w) + "x" +
                          std::to_string(scene.h) + " golden matches (first difference on line " +
                          std::to_string(line) + ": " + path + ")");
+        if (g_verbose)
+            std::fprintf(stderr, "--- actual ---\n%s--- expected ---\n%s", text.c_str(),
+                         expected.c_str());
     }
 }
 
@@ -1372,13 +2214,21 @@ int main(int argc, char** argv) {
     ImGui::CreateContext();
     ImTui_ImplText_Init();
 
+    checkInkCapture();
     checkSource();
     checkRowText();
+    checkColumnPlan();
     checkDetailAndFilter();
+    checkN2Identity();
     checkOpenableGlyph();
+    checkRowInk();
+    checkTagAndShortClock();
+    checkLadder();
+    checkPreview();
     checkSave();
     checkSurface();
     checkFilterAndStates();
+    checkFilterHighlight();
     checkBoundsAndExpansionAndCopy();
     checkRingRotation();
     checkModelRules();
