@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -247,7 +248,7 @@ std::string tailFor(const NowBarInput& input, const ui::Metrics& m, const std::s
 
 /// The context meter's ink: the thresholds are `meterLevel()`'s, the colour is this
 /// row's choice, and both profiles draw the same rule.
-ColorToken meterInk(long long used, long long max) {
+ColorToken meterInk(std::int64_t used, std::int64_t max) {
     switch (meterLevel(used, max)) {
     case MeterLevel::Normal:
         return ColorToken::accent;

@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <string>
@@ -41,7 +42,7 @@ struct SessionRow {
     std::size_t messageCount = 0;
     /// `SessionMeta.updatedAt * 1000` (D-SESSION-TS). 0 means unknown, and a
     /// snapshot with any unknown row is drawn flat - dates are never fabricated.
-    long long updatedAtMs = 0;
+    std::int64_t updatedAtMs = 0;
     bool active = false;
     bool running = false;
     bool unread = false;
@@ -98,7 +99,7 @@ struct RailModel {
 /// Exposed because the grouping tests need the same function the grouping uses - with
 /// `TZ` pinned to UTC they can then use plain epoch arithmetic and still be testing the
 /// real rule.
-int civilDay(long long unixMs);
+int civilDay(std::int64_t unixMs);
 
 /// Group, order and filter `rows`.
 ///
@@ -113,7 +114,7 @@ int civilDay(long long unixMs);
 ///
 /// Groups with no rows are omitted, and a group whose header would be the only
 /// thing on screen therefore cannot exist.
-RailModel buildRailRows(const std::vector<SessionRow>& rows, long long nowMs,
+RailModel buildRailRows(const std::vector<SessionRow>& rows, std::int64_t nowMs,
                         std::string_view filter);
 
 /// The UI-local unread set (D-UNREAD, FR-03, D-19).
@@ -158,7 +159,7 @@ public:
     void reset();
 
 private:
-    std::map<std::string, long long> seen_;
+    std::map<std::string, std::int64_t> seen_;
     std::set<std::string> unread_;
     /// The id that was active when `apply()` ran last time. `""` before the first
     /// snapshot, so the first frame exempts nobody.

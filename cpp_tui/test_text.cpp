@@ -782,7 +782,7 @@ void checkPadRight() {
 
 void checkFormatCount() {
     struct CountCase {
-        long long value;
+        std::int64_t value;
         const char* text;
     };
     const CountCase cases[] = {
@@ -836,7 +836,7 @@ void checkFormatCount() {
     int foreignChar = 0;
     int extraDots = 0;
     std::string firstBad;
-    for (long long value = 0; value < 3000000; value += 7) {
+    for (std::int64_t value = 0; value < 3000000; value += 7) {
         const std::string text = ui::formatCount(value);
         const bool badCarry = text.rfind("1000", 0) == 0;
         const bool badDecimal = text.find(".0") != std::string::npos;

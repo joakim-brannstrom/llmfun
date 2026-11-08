@@ -20,6 +20,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -62,7 +63,7 @@ inline constexpr int kActivityLevelError = 4;
 struct LogRecord {
     /// Milliseconds since the epoch, stamped at arrival when the sender had no clock
     /// (`timestampMs == 0` in the inbound record) - the row always has a time to print.
-    long long timestampMs = 0;
+    std::int64_t timestampMs = 0;
     /// One of `kActivityLevelInfo`/`_Warn`/`_Error`: Activity's three-step severity. Trace and
     /// debug clamp to info (`activityLevel()`), so a row never claims a severity the tab
     /// cannot filter on.

@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace llmfun::tui::model {
@@ -71,11 +72,11 @@ struct RuntimeStatus {
     int phase = 0;      ///< phase ordinal (`Phase`)
     std::string detail; ///< current tool or model step, one line
     std::string model;  ///< model display name, as D reports it ("none" when none)
-    long long contextUsed = 0;
-    long long contextMax = 0;
-    long long compactAt = 0;
+    std::int64_t contextUsed = 0;
+    std::int64_t contextMax = 0;
+    std::int64_t compactAt = 0;
     double tokensPerSecond = 0.0;
-    long long elapsedMs = 0;
+    std::int64_t elapsedMs = 0;
     /// Forward-compat: transported and round-trip-tested, but nothing sends it and
     /// nothing reads it yet (the run's pending question count will). Stays 0.
     int pendingQuestions = 0;
@@ -103,13 +104,13 @@ struct StatusChips {
     /// to disagree with the first. `contextMax == 0` means the status carried no
     /// usable pair (the chip is then `kMissingChipValue`), and a meter must not
     /// divide by it.
-    long long contextUsed = 0;
-    long long contextMax = 0;
+    std::int64_t contextUsed = 0;
+    std::int64_t contextMax = 0;
 };
 
 /// Pins the struct's shape to the name list above: a fifth chip changes the size and fails here
 /// instead of leaving the help page naming four chips that no longer match the row.
-static_assert(sizeof(StatusChips) == 4 * sizeof(std::string) + 2 * sizeof(long long),
+static_assert(sizeof(StatusChips) == 4 * sizeof(std::string) + 2 * sizeof(std::int64_t),
               "a new chip needs a name in kStatusChipNames (and its own prose)");
 
 /// The chip value for a field the status does not carry - a `contextMax` of 0

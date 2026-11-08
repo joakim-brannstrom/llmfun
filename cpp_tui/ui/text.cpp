@@ -430,7 +430,7 @@ void wrapParagraph(std::string_view paragraph, int cells, std::vector<std::strin
 /// The decimal ladder: 10^3 .. 10^18. `k` is the smallest, so a magnitude below
 /// 1000 has no unit at all.
 struct CountUnit {
-    unsigned long long scale;
+    std::uint64_t scale;
     char suffix;
 };
 
@@ -442,13 +442,13 @@ constexpr int kCountUnitCount = int(sizeof(kCountUnits) / sizeof(kCountUnits[0])
 
 /// `magnitude` written in `unit`, or an empty string when rounding carries it
 /// into the next larger unit (999.5k round to 1000k, which reads as 1M).
-std::string formatInUnit(unsigned long long magnitude, const CountUnit& unit) {
-    const unsigned long long whole = magnitude / unit.scale;
-    const unsigned long long rest = magnitude % unit.scale;
+std::string formatInUnit(std::uint64_t magnitude, const CountUnit& unit) {
+    const std::uint64_t whole = magnitude / unit.scale;
+    const std::uint64_t rest = magnitude % unit.scale;
     if (whole < 10) {
         // One decimal below ten units: 1.2k, 9.9M. A zero tenth is dropped, so
         // a value never reads as 10.0k or 1.0M.
-        const unsigned long long tenths = (rest * 10 + unit.scale / 2) / unit.scale;
+        const std::uint64_t tenths = (rest * 10 + unit.scale / 2) / unit.scale;
         if (tenths < 10) {
             std::string text = std::to_string(whole);
             if (tenths != 0) {
@@ -460,14 +460,14 @@ std::string formatInUnit(unsigned long long magnitude, const CountUnit& unit) {
         }
         // 9.95k rounded up to 10 units: the integer rule below is the answer.
     }
-    const unsigned long long rounded = whole + (rest + unit.scale / 2) / unit.scale;
+    const std::uint64_t rounded = whole + (rest + unit.scale / 2) / unit.scale;
     if (rounded < 1000) {
         return std::to_string(rounded) + unit.suffix;
     }
     return std::string();
 }
 
-std::string formatMagnitude(unsigned long long magnitude) {
+std::string formatMagnitude(std::uint64_t magnitude) {
     int unit = -1;
     for (int i = 0; i < kCountUnitCount; ++i) {
         if (magnitude >= kCountUnits[i].scale) {
@@ -483,7 +483,7 @@ std::string formatMagnitude(unsigned long long magnitude) {
     }
     if (unit + 1 < kCountUnitCount) {
         // A carry is a whole unit of the next rung: 999999 rounds to 1000k,
-        // which reads as 1M. The ladder is deep enough that a long long cannot
+        // which reads as 1M. The ladder is deep enough that a std::int64_t cannot
         // run off its top.
         return std::string("1") + kCountUnits[unit + 1].suffix;
     }
@@ -557,14 +557,14 @@ std::string padRight(std::string_view utf8, int cells) {
     return text;
 }
 
-std::string formatCount(long long v) {
+std::string formatCount(std::int64_t v) {
     if (v < 0) {
         // Negate in unsigned: -LLONG_MIN has no signed representation, and the
         // magnitude of the smallest value is exactly its two's complement.
-        const unsigned long long magnitude = ~static_cast<unsigned long long>(v) + 1ull;
+        const std::uint64_t magnitude = ~static_cast<std::uint64_t>(v) + 1ull;
         return std::string("-") + formatMagnitude(magnitude);
     }
-    return formatMagnitude(static_cast<unsigned long long>(v));
+    return formatMagnitude(static_cast<std::uint64_t>(v));
 }
 
 int utf8Count(std::string_view utf8) {

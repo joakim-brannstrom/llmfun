@@ -51,7 +51,7 @@ inline constexpr int kRawLogLevelError = 4;
 /// field names are the ones the archive and the Raw Log print, so a reader of either can follow
 /// one vocabulary.
 struct RawLogRecord {
-    long long timestampMs = 0;    ///< Unix-epoch ms (UTC); 0 only for a record that never got one
+    std::int64_t timestampMs = 0;    ///< Unix-epoch ms (UTC); 0 only for a record that never got one
     int level = kRawLogLevelInfo; ///< one of `kRawLogLevel*`
     int action = 0;               ///< the ABI's action id (0 = none); the Raw Log prints the id
     int line = 0;                 ///< the caller's source line, 0 = unknown

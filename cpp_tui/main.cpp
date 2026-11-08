@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -191,14 +192,14 @@ int main(int argc, char** argv) {
             // them, spread over five hours each so a 30-row fixture crosses the
             // TODAY / YESTERDAY / PREVIOUS 7 DAYS / OLDER boundaries. One clock read
             // for the whole fixture, so the spacing is exactly five hours.
-            const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                         std::chrono::system_clock::now().time_since_epoch())
                                         .count();
             for (int i = 0; i < seedSessions; ++i) {
                 const auto k = static_cast<std::size_t>(i);
                 wide.push_back(SessionItem{makeStr(ids[k].c_str()), makeStr(titles[k].c_str()),
                                            makeStr(previews[k].c_str()), k, i == 0 ? 1 : 0,
-                                           nowMs - static_cast<long long>(i) * 5LL * 3'600'000LL,
+                                           nowMs - static_cast<std::int64_t>(i) * 5LL * 3'600'000LL,
                                            /*flags=*/0,
                                            /*reserved=*/0});
             }

@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -717,7 +718,7 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
         const std::string filter = state.filter.data();
         std::string path;
         std::string error;
-        const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::system_clock::now().time_since_epoch())
                                     .count();
         if (model::rawLogSave(ring, filter, nowMs, path, error)) {

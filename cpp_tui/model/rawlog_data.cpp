@@ -8,6 +8,7 @@
 #include "model/settings.h" // kRawLogOff..kRawLogTrace: the `UiLog` preference rawLogFloor() maps
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -59,7 +60,7 @@ namespace {
 /// `HH:MM:SS.mmm` in local time for a millisecond clock reading, or `--:--:--.---` for a record
 /// that never got a stamp. Activity's clock is the same reading in the same zone, so the two
 /// surfaces cannot disagree about *when* a line happened.
-std::string clockText(long long timestampMs) {
+std::string clockText(std::int64_t timestampMs) {
     if (timestampMs <= 0)
         return "--:--:--.---";
     const std::time_t seconds = static_cast<std::time_t>(timestampMs / 1000);

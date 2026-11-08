@@ -160,18 +160,18 @@ static bool fuzzyAlign(const std::string& query, const std::string& text, std::i
             score += kFuzzyBoundary;
         }
         if (prevPos >= 0) {
-            const long long gap = static_cast<long long>(found) - prevPos - 1;
+            const std::int64_t gap = static_cast<std::int64_t>(found) - prevPos - 1;
             if (gap == 0) {
                 score += kFuzzyConsecutive;
             } else {
-                score -= static_cast<long long>(kFuzzyGap) * gap;
+                score -= static_cast<std::int64_t>(kFuzzyGap) * gap;
             }
         }
         prevPos = static_cast<int>(found);
         scan = found + 1;
     }
 
-    score -= static_cast<long long>(kFuzzyFirstPos) * firstPos;
+    score -= static_cast<std::int64_t>(kFuzzyFirstPos) * firstPos;
     *raw = score;
     return true;
 }

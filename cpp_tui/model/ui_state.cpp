@@ -2,6 +2,7 @@
 #include "ui_state.h"
 
 #include <algorithm>
+#include <cstdint>
 
 namespace llmfun::tui::model {
 

@@ -110,7 +110,7 @@ void phase(const char* name) {
     std::exit(2);
 }
 
-std::string toString(long long value) { return std::to_string(value); }
+std::string toString(std::int64_t value) { return std::to_string(value); }
 
 // ---------------------------------------------------------------------------
 // The cell grid the text backend writes
@@ -123,10 +123,10 @@ constexpr int kScreenH = 30;
 
 /// The fake clock every clock check uses: the checks state their offsets outright (`kT0 + 3200`,
 /// say), so what a reading means depends on nothing the wall clock decides.
-constexpr long long kT0 = 1000000;
+constexpr std::int64_t kT0 = 1000000;
 
 /// How much of the answer's clock one fixture update advances (the stream test's cadence).
-constexpr long long kStreamStepMs = 4000;
+constexpr std::int64_t kStreamStepMs = 4000;
 
 std::string utf8Of(uint32_t cp) {
     std::string out;
@@ -337,7 +337,7 @@ struct Fixture {
 
     /// Put a streamed answer in the store and derive its clock at `nowMs` - the same two writes
     /// the store and the frame layer make, with the clock stated instead of read.
-    void stream(const std::string& text, const std::string& thinking, long long nowMs,
+    void stream(const std::string& text, const std::string& thinking, std::int64_t nowMs,
                 bool cancelRequested = false) {
         state.chat.streamMsg = message(0, tui::ChatMessageType::Assistant, "", text, thinking);
         state.chat.hasStreamMsg = true;
@@ -347,7 +347,7 @@ struct Fixture {
     }
 
     /// Advance the clock without touching the text (a frame that changed nothing).
-    void tick(long long nowMs, bool cancelRequested = false) {
+    void tick(std::int64_t nowMs, bool cancelRequested = false) {
         model::refreshStreamClock(state.ui.thread.stream, state.chat.hasStreamMsg,
                                   !state.chat.streamMsg.text.empty(),
                                   !state.chat.streamMsg.thinking.empty(), nowMs, cancelRequested);
@@ -589,8 +589,8 @@ void checkIdentityAndHeight() {
     bool heightStableWithinRevision = true;
     std::uint64_t previousRevision = 0;
     size_t groupId = 0;
-    long long now = kT0;
-    long long reasoningEndedAt = 0;
+    std::int64_t now = kT0;
+    std::int64_t reasoningEndedAt = 0;
 
     for (int step = 1; step <= 300; ++step) {
         const int textSteps = std::max(1, step - kReasoningUpdates);
@@ -606,7 +606,7 @@ void checkIdentityAndHeight() {
         // readings of one revision and the clock only ever moves forward - the derivation treats
         // a reading older than the last one as the same moment (a wall clock can step back). One
         // update per four seconds is slow for a stream and right for a clock test.
-        now = kT0 + static_cast<long long>(step) * kStreamStepMs;
+        now = kT0 + static_cast<std::int64_t>(step) * kStreamStepMs;
         if (step == 1)
             fixture.stream("", reasoning, now);
         else
@@ -638,7 +638,7 @@ void checkIdentityAndHeight() {
         for (int pass = 0; pass < kSamples; ++pass) {
             fixture.draw();
             heights[pass] = fixture.state.threadAdapter.measureHint(groupId);
-            fixture.tick(now + static_cast<long long>(pass) * 100);
+            fixture.tick(now + static_cast<std::int64_t>(pass) * 100);
         }
         for (int pass = 1; pass < kSamples; ++pass) {
             if (heights[pass] < heights[pass - 1] - 0.01f) {
@@ -667,13 +667,13 @@ void checkIdentityAndHeight() {
 
     // The reasoning's duration is the frame's, and it stops when the answer began.
     const model::StreamState& clock = fixture.state.ui.thread.stream;
-    const long long expectedEnd =
-        kT0 + static_cast<long long>(kReasoningUpdates + 1) * kStreamStepMs;
+    const std::int64_t expectedEnd =
+        kT0 + static_cast<std::int64_t>(kReasoningUpdates + 1) * kStreamStepMs;
     check(reasoningEndedAt == expectedEnd,
           "the reasoning ended when the answer's text arrived (got " +
               toString(reasoningEndedAt - kT0) + " ms, expected " + toString(expectedEnd - kT0) +
               ")");
-    check(clock.thinkingElapsedMs == static_cast<long long>(kReasoningUpdates) * kStreamStepMs,
+    check(clock.thinkingElapsedMs == static_cast<std::int64_t>(kReasoningUpdates) * kStreamStepMs,
           "and the row keeps the duration it took (" + toString(clock.thinkingElapsedMs) + " ms)");
 
     // Within one revision a *shorter* draw must not shrink the hint either: a disclosure toggled

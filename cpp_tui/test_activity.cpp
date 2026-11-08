@@ -52,6 +52,7 @@
 #include "imgui/imgui.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -277,7 +278,7 @@ const ui::Metrics& gridMetrics() {
 
 /// Exactly midnight UTC on 2026-06-21: the goldens read 00:00:00 and cannot embed the wall
 /// clock, and the projection checks compare against this value instead of against themselves.
-inline constexpr long long kFixtureEpochMs = 1'782'000'000'000;
+inline constexpr std::int64_t kFixtureEpochMs = 1'782'000'000'000;
 
 /// The inbound record as the C ABI delivers it: borrowed `String` views over `storage`, which
 /// must outlive the call (the projection copies during it, so a local is enough).

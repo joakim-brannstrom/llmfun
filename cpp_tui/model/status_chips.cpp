@@ -3,6 +3,7 @@
 
 #include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <system_error>
 
@@ -27,7 +28,7 @@ std::size_t formatFixed1(double value, char* buffer, std::size_t size) {
 /// The chips' own copy of the count format, so a number reads the same
 /// wherever the UI shows it. The helper lives here, beside the values it
 /// formats.
-std::string formatCount(long long value) {
+std::string formatCount(std::int64_t value) {
     if (value > -1000 && value < 1000)
         return std::to_string(value);
     char number[32];

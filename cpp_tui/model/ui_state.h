@@ -352,19 +352,19 @@ struct AgentLane {
     std::string state = kAgentStateQueued;
     std::string currentTool;
     std::string content;
-    long long elapsedMs = 0;
-    long long tokens = 0;
+    std::int64_t elapsedMs = 0;
+    std::int64_t tokens = 0;
     bool active = false;
 
     /// Bookkeeping for `elapsedMs`: the frame clock (ms) at the lane's first sighting and at
     /// its most recent update. Written by the mirror, read by `refreshAgentLanes()`.
-    long long startedMs = 0;
-    long long lastUpdateMs = 0;
+    std::int64_t startedMs = 0;
+    std::int64_t lastUpdateMs = 0;
 };
 
 /// The lane clock: unix milliseconds, the same epoch the frame layer's `frameClockMs()`
 /// reads, so a lane's `startedMs` and the frame's `now` are comparable numbers.
-inline long long agentClockMs() {
+inline std::int64_t agentClockMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
