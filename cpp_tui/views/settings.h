@@ -1,5 +1,5 @@
-/// The settings sheet (`views/settings.cpp`): the three settings the MVP changes plus the
-/// diagnostics paths (design §4.10, FR-17, task 34).
+/// The settings sheet (`views/settings.cpp`): the user's settings rows, the
+/// diagnostics paths and the wiring that opens and closes the sheet.
 ///
 ///     Settings                                       ALL  7    Close      the title row
 ///     Search                                                             the live filter
@@ -9,7 +9,7 @@
 ///     ▌ Text scale           100 %                                      the selected row's mark
 ///     BEHAVIOUR
 ///       Send key             tab
-///       Raw log level        off
+///       Raw log level        info
 ///     ADVANCED
 ///       Backend              gui (window)
 ///       Workbench settings   ui.conf
@@ -18,40 +18,37 @@
 ///     Esc close  Tab section  ^N/^P move  Enter change  / search         the key hints
 ///
 /// The body is a window on a longer list: when the rows run past its bottom edge, a proportional
-/// thumb in the body's right gutter marks the visible share (one rule glyph per covered cell on the
-/// grid, a bar in the pixel profile), so a row below the fold - the `Copy system info` action among
-/// them - is not a surprise (review M1).
+/// thumb in the body's right gutter marks the visible share (one rule glyph per covered cell on
+/// the grid, a bar in the pixel profile), so a row below the fold - the `Copy system info` action
+/// among them - is not a surprise.
 ///
 /// Units: the geometry fields are in the *profile's* own units (cells on the text grid, pixels in
 /// the pixel profile), because the sheet is the same view in both - they are deliberately not
-/// `…Cells`/`…Px`, and `Rect.cells` is what states which unit a rectangle is in (design §3.9's
-/// suffix rule applies to a local that holds one profile's unit, not to a dual-profile view).
+/// `…Cells`/`…Px`, and `Rect.cells` states which unit a rectangle is in.
 ///
-/// It is the *only* settings surface (design §4.10, R-11): no hidden config keys are added, and
-/// nothing here is a second way to write a file. Every persisted value lives in one struct -
-/// `model::ShellPrefs`, the object `ui.conf` persists - and the sheet edits the values only: the
-/// debounced write and the file path stay in the frame layer. A change applies on the
-/// *next* frame: the layout, the metrics and every region were computed before this view ran.
+/// It is the *only* settings surface: no hidden config keys are added, and nothing here is a
+/// second way to write a file. Every persisted value lives in one struct - `model::ShellPrefs`,
+/// the object `ui.conf` persists - and the sheet edits the values only: the debounced write and
+/// the file path stay in the frame layer. A change applies on the *next* frame: the layout, the
+/// metrics and every region were computed before this view ran.
 ///
 /// What it does not do:
-///   * no theme picker and no density setting (D-13 / design §4.10: Graphite is fixed and the
-///     rows compact automatically);
+///   * no theme picker and no density setting - the theme is fixed and the rows compact
+///     automatically;
 ///   * no chord of its own. `Esc` closes it through the frame's `Esc` chain
-///     (`views::escStepClosesOverlay()` / `closeTopOverlay()`, D-ESC), and the keys it reads are
-///     the palette's proven list set (`Ctrl+P`/`Ctrl+N` for a bare `↑`/`↓`, plan/key_gate.md
-///     §4b/§4c, `Enter`, `Tab`, `/` as a character). Opening is a *visible control* - the top
-///     bar's `Settings` entry, design §4.2's "gear opens Settings" - and the palette's
-///     `open settings` row joins it in task 35; a chord nobody measured would be the dead key
-///     D-KEYGATE forbids;
-///   * no `tui.h`, no `TuiState`, no v4 type: the task's four inputs (`SettingsState&`, a `Rect`,
-///     a `Metrics`, the two preference structs) plus the keyboard flag are everything it reads,
-///     which is what lets `./test_settings_sheet` draw it into a cell grid with no application
-///     state.
+///     (`views::escStepClosesOverlay()` / `closeTopOverlay()`), and the keys it reads are
+///     `Ctrl+P`/`Ctrl+N` (for a bare `↑`/`↓`), `Enter`, `Tab` and `/` as a character. Opening
+///     is a *visible control*: the top bar's `Settings` entry and the palette's `open settings`
+///     row;
+///   * no `tui.h`, no `TuiState`: its inputs (`SettingsState&`, a `Rect`, a `Metrics`, the two
+///     preference structs) plus the keyboard flag are everything it reads, which is what lets
+///     `./test_settings_sheet` draw it into a cell grid with no application state.
 ///
 /// Layering: `model/settings.h` (the value catalogue), `ui/` and imgui. The diagnostics strings
 /// the frame alone can know (the settings path, the version words, the run's flags,
 /// the display size) arrive pre-formatted on `SettingsState`, so this file never reads the
-/// display, the ABI or the aggregate (D-METRICS: a view is a geometry taker).
+/// display, the ABI or the aggregate.
+
 #pragma once
 
 #include <array>

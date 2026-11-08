@@ -1,17 +1,13 @@
-/// The inspector panel (views/inspector.h owns the contract and the anatomy).
+/// The inspector panel.
 ///
 /// What this file deliberately does not do:
 ///   * it does not read the aggregate, the display size or the profile flag - the panel is a
 ///     geometry taker, so `./test_inspector` can draw it into a cell grid with no application
 ///     state;
-///   * it does not own the tab preference: a click or `[`/`]` *asks* (`requestTab`), and the
-///     frame layer writes `ShellPrefs::tab` in the same frame - one owner, one writer;
+///   * it does not write the tab preference: a click or `[`/`]` *asks* (`requestTab`), and the
+///     frame writes `ShellPrefs::tab` in the same frame - one writer;
 ///   * it does not write a colour or a glyph literal: inks come from `ui::color()` and marks
-///     from `ui/icons.h`, like every other view (D-THEME).
-///
-/// Layering note (`tools/gate_ratchet.txt`): no profile branch of its own (`m.textGrid` is
-/// data the metrics handed it), no hand-made colour, no v4 type and no display size, so the
-/// file needs no ledger row.
+///     from `ui/icons.h`, like every other view.
 #include "views/inspector.h"
 
 #include "imgui/imgui.h"
@@ -25,8 +21,9 @@
 #include "ui/text.h"
 #include "ui/tokens.h"
 
+#include "model/status_chips.h"
 #include "model/ui_state.h"
-#include "views/topbar.h" // elapsedLabel() - the one clock formatter
+#include "views/topbar.h"
 
 #include <algorithm>
 #include <cmath>
@@ -131,17 +128,15 @@ std::string unreadMark(const ui::Metrics& m) {
     return std::string(ui::icon(Icon::Unread, glyphSetFor(m)));
 }
 
-// ---------------------------------------------------------------------------
-// The Agents tab's vocabulary (design §5.21, task 30)
-// ---------------------------------------------------------------------------
+// The Agents tab's vocabulary
 
-/// The join between two finished segments of a lane row: ` | ` on the grid and the design's
+/// The join between two finished segments of a lane row: ` | ` on the grid and
 /// ` · ` in the pixel profile - the now bar's split (`views/nowbar.cpp`), for the same
 /// reason: U+00B7 MIDDLE DOT is East-Asian *Ambiguous* (one cell in imtui, two in a CJK
 /// terminal), so the cell renderer gets the ASCII pipe.
 const char* laneSeparator(const ui::Metrics& m) { return m.textGrid ? " | " : " \u00b7 "; }
 
-/// The mark a lane's state is drawn with (D-BLOCK: glyph + word + colour, and the word is
+/// The mark a lane's state is drawn with (glyph + word + colour, and the word is
 /// what carries the meaning on a surface that draws the ASCII column).
 ///
 /// `queued` is the table's empty ring (a slot nothing has filled yet), `running` the live
@@ -198,17 +193,16 @@ std::string cutToUnits(const ui::Metrics& m, std::string_view text, float budget
     return std::string(text.substr(0, best)) + ellipsis;
 }
 
-/// One lane's row: `<mark> <label> | <state> | 00:12 | 1.2k tok | tool: read_file`.
+/// One lane's row, cut to `budget` text units (measured with `m`):
+/// `<mark> <label> | <state> | 00:12 | 1.2k tok | 38.1 tok/s | tool: read_file`.
 ///
-/// The degradation is the panel's rule (the strip's own): the *state* - a glyph and a word -
-/// is reserved first and never dropped, because it is what the row exists to say (D-BLOCK);
-/// the label is cut to whatever room is left beside it; the clock, the token count and the
-/// current tool are dropped whole, from the right, when the row cannot hold them. A partial
-/// clock or half a tool name would be noise, and every one of them is also visible elsewhere
-/// (the now bar's clock, the chips' count, the transcript) - which is why they are the part
-/// that goes.
+/// The mark column is blank unless `focused`. The label is truncated to the room left beside the
+/// state, which is always present. The detail pieces (clock, token count, rate, tool) follow in
+/// that order, each dropped whole when the budget cannot hold it. On a focused lane the row
+/// carries only the state and the clock; every other piece is appended to `*overflow` (when
+/// non-null) instead, for the caller to place on continuation lines.
 std::string laneRowText(const model::AgentLane& lane, bool focused, const ui::Metrics& m,
-                        float budget) {
+                        float budget, std::vector<std::string>* overflow = nullptr) {
     const ui::GlyphSet set = glyphSetFor(m);
     // The focus column: the rail's rest mark (`▸`) says "this row is the one you are looking
     // at", and a blank keeps every other row on the same column.
@@ -235,18 +229,30 @@ std::string laneRowText(const model::AgentLane& lane, bool focused, const ui::Me
     row += state;
     used += stateW;
 
-    // The detail tail, in the design's order, each piece whole or not at all.
+    // The focused lane keeps only the clock on its headline; the rest goes to `overflow`.
     std::vector<std::string> tail;
     if (lane.elapsedMs > 0)
         tail.push_back(views::elapsedLabel(lane.elapsedMs));
-    if (lane.tokens > 0)
-        tail.push_back(ui::formatCount(lane.tokens) + " tok");
-    if (!lane.currentTool.empty())
-        tail.push_back("tool: " + lane.currentTool);
+    if (!focused) {
+        if (lane.tokens > 0)
+            tail.push_back(ui::formatCount(lane.tokens) + " tok");
+        if (lane.tokensPerSecond > 0.0) {
+            const std::string rate = model::formatRate(lane.tokensPerSecond);
+            if (rate != std::string(model::kMissingChipValue))
+                tail.push_back(rate);
+        }
+        if (!lane.currentTool.empty())
+            tail.push_back("tool: " + lane.currentTool);
+    }
     for (const std::string& piece : tail) {
         const float pieceW = textUnits(m, piece);
-        if (used + sepW + pieceW > budget)
+        if (used + sepW + pieceW > budget) {
+            // The focused lane gives nothing up: a piece its headline cannot hold continues
+            // on the lines below instead of vanishing.
+            if (focused && overflow != nullptr)
+                overflow->push_back(piece);
             continue;
+        }
         row += sep;
         row += piece;
         used += sepW + pieceW;
@@ -254,11 +260,37 @@ std::string laneRowText(const model::AgentLane& lane, bool focused, const ui::Me
     return row;
 }
 
+/// The focused lane's detail that its headline leaves off: whatever the headline dropped
+/// (`overflow`, the clock when the column is narrow), then the token count with the rate,
+/// then the current tool, each line indented under the focus column. Empty when the lane has
+/// nothing to continue, so an agent without numbers grows no rows.
+std::vector<std::string> laneTailLines(const model::AgentLane& lane,
+                                       const std::vector<std::string>& overflow,
+                                       const ui::Metrics& m) {
+    std::vector<std::string> lines;
+    std::vector<std::string> pieces(overflow);
+    if (lane.tokens > 0)
+        pieces.push_back(ui::formatCount(lane.tokens) + " tok");
+    if (lane.tokensPerSecond > 0.0) {
+        const std::string rate = model::formatRate(lane.tokensPerSecond);
+        if (rate != std::string(model::kMissingChipValue))
+            pieces.push_back(rate);
+    }
+    std::string numbers;
+    for (const std::string& piece : pieces)
+        numbers += (numbers.empty() ? std::string() : laneSeparator(m)) + piece;
+    if (!numbers.empty())
+        lines.push_back("  " + numbers);
+    if (!lane.currentTool.empty())
+        lines.push_back("  tool: " + lane.currentTool);
+    return lines;
+}
+
 /// The mission strip: every lane in order, `planner ✓ -> coder ◐ -> reviewer ○`.
 ///
 /// One row, always: it is a summary of the run, so the row is cut at the column's edge
 /// rather than wrapped (`ui::truncate()` marks the cut). The lanes keep their rows even when
-/// the strip gives up - the strip is the pre-agreed cut (design §9.2 #2), the list is not.
+/// the strip gives up; the list never does.
 std::string missionRowText(const std::vector<model::AgentLane>& lanes, const ui::Metrics& m,
                            float budget) {
     const ui::GlyphSet set = glyphSetFor(m);
@@ -280,9 +312,7 @@ std::string missionRowText(const std::vector<model::AgentLane>& lanes, const ui:
     return text;
 }
 
-// ---------------------------------------------------------------------------
-// The Activity tab's vocabulary (design §4.8, task 31)
-// ---------------------------------------------------------------------------
+// The Activity tab's vocabulary
 
 /// A row's clock as `HH:MM:SS`, in the reader's own zone: a log line is about *when* it
 /// happened for the person reading it. The archive keeps UTC (one comparable stamp across
@@ -307,7 +337,7 @@ std::string activityClock(std::int64_t timestampMs) {
 
 /// The severity's mark: the table's `◇`/`▲`/`✕` on the glyph column and `i`/`!`/`x` on the
 /// ASCII one (`ui/icons.h`). The word beside it is what carries the meaning; the glyph only
-/// has to be recognisable (D-BLOCK).
+/// has to be recognisable.
 Icon activityLevelIcon(int level) {
     if (level == model::kActivityLevelWarn)
         return Icon::Warn;
@@ -481,8 +511,8 @@ void drawTab(InspectorState& state, const InspectorPart& part, const std::string
         state.requestTab(tab);
 }
 
-/// The keys the panel owns: the character-level `[`/`]` pair (plan/key_gate.md §10/§11 option
-/// (a)). The terminal delivers no key event for a printable character, so the chord form
+/// The keys the panel owns: the character-level `[`/`]` pair. The terminal delivers no
+/// key event for a printable character, so the chord form
 /// (`Ctrl+5`/`Ctrl+6`) cannot reach the grid - and `ui::takeCharacter()` refuses while a text
 /// field owns the keyboard, which is what keeps `[` typed into the composer as typing.
 ///
@@ -595,7 +625,7 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
                    ColorToken::stateWarn);
     }
 
-    // The Activity tab's chrome (task 31): the severity filter and the search box, above the
+    // The Activity tab's chrome: the severity filter and the search box, above the
     // list and outside its scroller - a filter that scrolls away is not a filter. The chips
     // are drawn in the label step they were measured in; the field sizes itself.
     if (state.tab == InspectorTab::Activity) {
@@ -613,7 +643,7 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
         drawActivitySearch(state, parts.search, m);
     }
 
-    // The mission strip (design §5.21): the run in one row, above the list it summarises and
+    // The mission strip: the run in one row, above the list it summarises and
     // outside the scroller - a summary that scrolls away is not a summary.
     if (!parts.mission.empty()) {
         const ui::TypeScope missionType(ui::TypeStep::label, m.textGrid);
@@ -630,14 +660,14 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
     ImGui::BeginChild("##inspector_body", ImVec2(parts.body.w, parts.body.h), ImGuiChildFlags_None);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     // The child's scrollbar overlays the last column of its content, and its padding is
-    // outside the work rect - the rail's lesson: size a row to the *content* region, not to
+    // outside the work rect: size a row to the *content* region, not to
     // the panel's outer width.
     const float rowW = std::max(0.0f, ImGui::GetContentRegionAvail().x);
     ImGui::Dummy(ImVec2(1.0f, std::max(m.row * static_cast<float>(parts.bodyRows), parts.body.h)));
-    // Quiet by default (task 31): nothing pins the list to its newest row while records
+    // Quiet by default: nothing pins the list to its newest row while records
     // arrive - the *content* grows, the view stays where the user left it. The one exception
     // is the frame the tab is shown (an open, a tab switch, a new filter), which is exactly
-    // why this is a latch and not a per-frame `SetScrollHereY` (D-FOLLOW's rule: a pin that
+    // why this is a latch and not a per-frame `SetScrollHereY` (a pin that
     // runs every frame makes the position test self-confirming).
     if (state.tab == InspectorTab::Activity && state.activityScrollToEnd) {
         ImGui::SetScrollHereY(1.0f);
@@ -668,7 +698,7 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
                 continue;
             ++state.drawnRows;
             if (state.tab == InspectorTab::Activity) {
-                // The Activity rows (task 31): the empty sentence on the same path as the
+                // The Activity rows: the empty sentence on the same path as the
                 // list, exactly like the Agents tab - a second, throw-away renderer for
                 // "nothing here" is the duplication the tab bodies exist to avoid.
                 if (parts.activityRows.empty()) {
@@ -702,13 +732,18 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
             const InspectorParts::LaneRow& laneRow = parts.laneRows[index];
             // A focused lane is tinted (the row says "the thread is showing this one") and the
             // rest keep the ordinary ink: the accent is the app's "this one" colour, used for
-            // exactly one row at a time.
-            lineAt(m, row, row.x, laneRow.text,
-                   laneRow.focused ? ColorToken::accent : ColorToken::textHi);
+            // exactly one row at a time. The continuation lines under the headline stay quiet
+            // - the numbers whisper, the headline speaks.
+            const ColorToken ink = laneRow.tail      ? ColorToken::textMid
+                                   : laneRow.focused ? ColorToken::accent
+                                                     : ColorToken::textHi;
+            lineAt(m, row, row.x, laneRow.text, ink);
             const model::AgentLane* lane = laneOf(laneRow.id);
             const RowHit hit = submitRow(row, ("##inspector_lane_" + laneRow.id).c_str());
             if (hit.left)
                 state.focusRequest = laneRow.id;
+            if (laneRow.tail)
+                continue;
             // The row menu: right click on the row, or `m` while it is under the pointer - the
             // rail's two paths to the same menu, and the terminal's only spelling of a key
             // that is not a chord (`ui::takeCharacter`).
@@ -749,8 +784,7 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
 } // namespace
 
 /// The `End` catch-up (`views/inspector.h`): the same one-shot latch the filter press arms, on
-/// the same rule - show the list from its newest record, once, never per frame. It lives here,
-/// outside the anonymous namespace, because the frame's keymap dispatcher calls it (`tui.cpp`).
+/// the same rule - show the list from its newest record, once, never per frame.
 bool scrollActivityToNewest(InspectorState& state) {
     if (!activityVisible(state))
         return false;
@@ -863,7 +897,7 @@ InspectorParts inspectorMeasure(const InspectorState& state,
     float top = bodyTop;
     float bottom = bodyBottom;
 
-    // ---- the Agents tab (design §5.21, task 30) ----------------------------
+    // ---- the Agents tab ----------------------------------------------------
     //
     // Three bands, top to bottom: the mission strip, the lane list (the scroller) and the
     // action row. The strip and the action row are *fixed* - a summary that scrolls away is
@@ -900,7 +934,7 @@ InspectorParts inspectorMeasure(const InspectorState& state,
             }
         }
     }
-    // ---- the Activity tab (design §4.8, task 31) --------------------------
+    // ---- the Activity tab ---------------------------------------------------
     //
     // Two chrome rows above the list, in the order the tab reads: the severity filter, then
     // the search box. Both are given up before the list is - one row of log is still a log,
@@ -945,7 +979,7 @@ InspectorParts inspectorMeasure(const InspectorState& state,
         } else {
             // No field, no filter: a query left over from a taller panel would keep hiding
             // rows with no control to see or clear it, so the body would read `No records
-            // match` and the user could not find out why (task-31 review M3).
+            // match` and the user could not find out why.
             activityQuery.clear();
         }
     }
@@ -962,16 +996,31 @@ InspectorParts inspectorMeasure(const InspectorState& state,
     out.bodyRows = 1;
     if (state.tab == InspectorTab::Agents && !lanes.empty()) {
         const ui::TypeScope bodyType(ui::TypeStep::body, m.textGrid);
-        out.bodyRows = lanes.size();
-        out.laneRows.reserve(lanes.size());
+        out.laneRows.reserve(lanes.size() + 2);
         for (const model::AgentLane& lane : lanes) {
+            const bool focused = state.focusedLane == lane.id;
             InspectorParts::LaneRow row;
             row.id = lane.id;
-            row.focused = state.focusedLane == lane.id;
+            row.focused = focused;
             row.live = lane.active;
-            row.text = laneRowText(lane, row.focused, m, rowBudget);
+            std::vector<std::string> overflow;
+            row.text = laneRowText(lane, focused, m, rowBudget, &overflow);
             out.laneRows.push_back(std::move(row));
+            // The focused lane's detail continues below its headline instead of competing
+            // for the headline's width; the lines carry the lane's id, so clicks and the
+            // row menu stay aimed at the agent they describe.
+            if (focused) {
+                for (std::string& line : laneTailLines(lane, overflow, m)) {
+                    InspectorParts::LaneRow tailRow;
+                    tailRow.id = lane.id;
+                    tailRow.live = lane.active;
+                    tailRow.tail = true;
+                    tailRow.text = std::move(line);
+                    out.laneRows.push_back(std::move(tailRow));
+                }
+            }
         }
+        out.bodyRows = out.laneRows.size();
     }
     if (state.tab == InspectorTab::Activity) {
         // The filter and the search are one predicate (`model::activityMatches`), so the row

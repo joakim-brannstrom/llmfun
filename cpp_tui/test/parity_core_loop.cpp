@@ -1,6 +1,6 @@
 // parity_core_loop.cpp
 //
-// The merge gate's core loop (task 40, design §8 / D-PARITY): one scripted session through the
+// The merge gate's core loop: one scripted session through the
 // workbench's real frame pipeline, asserted step by step, plus the golden screens at the four
 // reference grid sizes and the performance gate.
 //
@@ -17,7 +17,7 @@
 //
 // Three things this binary is, in order:
 //
-//   1. THE LOOP. Twelve steps, one per line of the design's core-loop clause. Each step is
+//   1. THE LOOP. Twelve steps, one per line of the core loop above. Each step is
 //      asserted where it lands: the queued session action, the submit handshake, the live
 //      answer's clock, the stop request (and its consume-once), the answer in the store, the
 //      clipboard payload, the inspector's tab, the Activity rows, the Raw Log's open flag, the
@@ -28,15 +28,12 @@
 //      60x20 and compared against `test/golden/parity-shell-<WxH>.txt` (glyphs *and* the painted
 //      fills, the composer-golden format). `--update` rewrites them; that belongs in the same
 //      commit as the deliberate rendering change. The GUI's screen is captured as a P6 PPM under
-//      `--out` instead of a text golden, because a pixel frame is not comparable across drivers
-//      (Q-05's documented fallback).
+//      `--out` instead of a text golden, because a pixel frame is not comparable across drivers.
 //
-//   3. THE PERF GATE. The fixture set the design names - 1000 messages, 2000 sessions, 5000 raw
-//      records (and the 500 Activity rows the projection keeps out of them) - rendered headless on
-//      one build. The workbench must stay inside the absolute budget `plan/baseline.md` recorded
-//      and inside 10 % of the last measured *pre-removal* workbench run (task 40 recorded it beside
-//      the other renderer's numbers; task 41 removed that renderer, so only this one is left).
-//      Session open (state +
+//   3. THE PERF GATE. The fixture set - 1000 messages, 2000 sessions, 5000 raw records (and the
+//      500 Activity rows the projection keeps out of them) - rendered headless on one build. The
+//      workbench must stay inside the recorded absolute budget and inside 10 % of the last
+//      measured run. Session open (state +
 //      fixture + first frame) is measured the same way.
 //
 // The two backends. The grid is the default: the real imtui text backend with the text-mode
@@ -609,11 +606,9 @@ void updateAgent(Harness& h, const std::string& id, const std::string& role,
     msg.reasoning = makeStr("");
     msg.role = makeStr(role);
     msg.finishReason = makeStr("");
-    msg.status = makeStr("");
     msg.currentTool = makeStr(tool);
     msg.contextUsed = contextUsed;
     msg.contextMax = 8192;
-    msg.reserved = 0;
     tuiPipelineAgentUpdate(h.handle.get(), makeStr(id), msg);
 }
 
@@ -774,8 +769,8 @@ void stepStart(Harness& h) {
         check(h.last.hasText("Ask anything"), "start: the composer shows its placeholder");
         check(h.last.hasText("Send"), "start: the composer's action is Send while idle");
     }
-    check(h.core->ui.prefs.rawLog == model::kRawLogOff,
-          "start: the Raw Log level is the shipped default (off)");
+    check(h.core->ui.prefs.rawLog == model::kRawLogInfo,
+          "start: the Raw Log level is the shipped default (info)");
     check(!h.core->ui.rawLogOpen, "start: the Raw Log is closed on every start (D-RAWLOG)");
     check(h.core->ui.prefs.tab == model::InspectorTab::Activity,
           "start: the inspector's default tab is Activity");
@@ -1221,8 +1216,8 @@ void stepSettings(Harness& h) {
     check(h.core->ui.prefs.rawLog != before, "settings: activating the row moved the value (" +
                                                  std::to_string(before) + " -> " +
                                                  std::to_string(h.core->ui.prefs.rawLog) + ")");
-    check(h.core->ui.prefs.rawLog == model::kRawLogRaw,
-          "settings: off cycles to the first open level (raw)");
+    check(h.core->ui.prefs.rawLog == model::kRawLogTrace,
+          "settings: info cycles to the developer floor (trace)");
 
     h.pressKey(ImGuiKey_Escape);
     h.idle(2);
@@ -1244,7 +1239,7 @@ void stepQuit(Harness& h) {
     h.frame([](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Q, false); });
     check(h.quit, "quit: the frame answered 'user terminated'");
     if (h.text()) {
-        check(fileContains("parity_scratch/ui.conf", "UiLog=raw"),
+        check(fileContains("parity_scratch/ui.conf", "UiLog=trace"),
               "quit: the changed preference reached ui.conf on the quit path (D-UI-CONF)");
         check(fileContains("parity_scratch/ui.conf", "Version=2"),
               "quit: the file carries the format version");

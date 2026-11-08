@@ -1,12 +1,4 @@
-/// `ui.conf`: parsing, atomic writing and the write debounce (model/settings.h
-/// owns the contract, the value catalogue and the format).
-///
-/// The file is named `ui_conf.cpp` and not `settings.cpp` because the settings *sheet* is
-/// `views/settings.cpp` (task 34) and every object of the library ends up flattened into one
-/// archive by basename (`libllmfun_tui_all_lib.a`, CMakeLists.txt): two `settings.cpp.o` members
-/// cannot be told apart, and `ar -x` silently keeps only the last one - every symbol of the other
-/// "undefined". `model/rawlog_data.cpp` and `views/rawlog.cpp` are the same pair for the same
-/// reason (task 33).
+/// `ui.conf`: parsing, atomic writing and the write debounce.
 #include "settings.h"
 
 #include <algorithm>
@@ -121,14 +113,10 @@ void applyLine(ShellPrefs& prefs, std::string_view line) {
         return;
     }
     if (key == "UiLog") {
-        if (equalsWord(value, "off"))
-            prefs.rawLog = kRawLogOff;
-        else if (equalsWord(value, "raw"))
-            prefs.rawLog = kRawLogRaw;
-        else if (equalsWord(value, "debug"))
-            prefs.rawLog = kRawLogDebug;
-        else if (equalsWord(value, "trace"))
-            prefs.rawLog = kRawLogTrace;
+        for (const auto& entry : kUiLogLadder) {
+            if (equalsWord(value, entry.word))
+                prefs.rawLog = entry.severity;
+        }
         return;
     }
     if (key == "RailOpen" || key == "InspectorOpen") {
@@ -375,8 +363,7 @@ struct Debounce {
 };
 
 Debounce g_debounce;
-/// One line, taken once by whoever posts it: the frame layer turns it into the
-/// single Activity warning a read-only directory is allowed (design §5.3).
+/// One warning line, taken once by whoever posts it and then cleared.
 std::string g_warning;
 
 /// The debounce state of one profile. A different path starts from scratch, so a
@@ -416,13 +403,11 @@ void writeAndReport(const std::string& path, const std::string& text) {
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// The settings sheet's catalogue (model/settings.h owns the contract)
-// ---------------------------------------------------------------------------
+// The settings sheet's catalogue
 
 /// No `default:` label on purpose: a new enumerator must add its own word here, because falling
 /// into another one would persist a preference the user never chose. This TU is built with
-/// `-Wswitch-enum -Werror=switch-enum` (CMakeLists.txt), so a missing case fails the build
+/// `-Wswitch-enum -Werror=switch-enum`, so a missing case fails the build
 /// instead of waiting for a warning nobody reads; the `assert` below is only the debug backstop.
 const char* sendKeyWord(SendKey key) {
     switch (key) {
@@ -437,15 +422,34 @@ const char* sendKeyWord(SendKey key) {
     return "none";
 }
 
-/// Clamped, so the writer (and the sheet) never names a level the parser would reject.
-const char* uiLogWord(int level) {
-    if (level <= kRawLogOff)
-        return "off";
-    if (level >= kRawLogTrace)
-        return "trace";
-    if (level == kRawLogDebug)
-        return "debug";
-    return "raw";
+const char* uiLogWord(int severity) {
+    for (const auto& entry : kUiLogLadder) {
+        if (entry.severity == severity)
+            return entry.word;
+    }
+    return "info";
+}
+
+/// A value off the ladder answers the default's index, because it reads as the default.
+/// The static_assert keeps a table edit from silently dropping that default: the fallback
+/// below would then have no entry to answer with.
+constexpr bool uiLogLadderHasDefault() {
+    for (int i = 0; i < kUiLogChoiceCount; ++i)
+        if (kUiLogLadder[i].severity == kRawLogInfo)
+            return true;
+    return false;
+}
+static_assert(uiLogLadderHasDefault(), "the default must stay a ladder entry");
+
+int uiLogIndexOf(int severity) {
+    int fallback = 0;
+    for (int i = 0; i < kUiLogChoiceCount; ++i) {
+        if (kUiLogLadder[i].severity == severity)
+            return i;
+        if (kUiLogLadder[i].severity == kRawLogInfo)
+            fallback = i;
+    }
+    return fallback;
 }
 
 SendKey sendKeyChoice(int index) {

@@ -20,7 +20,7 @@ text:
                      ▌ Text scale                                       1 cell▌
                        BEHAVIOUR                                              ▌
                        Send key                                            tab▌
-                       Raw log level                                       off▌
+                       Raw log level                                      info▌
                        ADVANCED                                               ▌
                        Backend                            text grid (terminal)
                        Workbench settings                         (no profile)

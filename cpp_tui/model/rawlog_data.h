@@ -1,23 +1,17 @@
-/// The Raw Log's own model (design §4.9 / FR-16, D-RAWLOG, task 33).
+/// The Raw Log's own model.
 ///
 /// The Raw Log is the *developer* surface. It draws the one raw ring - `TuiState::logRecords`,
 /// filled by `tuiAddLogRecord` - through a zero-copy view (`RawLogRing`), and this module owns
 /// everything that can be decided without a screen:
 ///
-///   * `RawLogRecord`, the record's value type. It lives here, not in `tui.h`, so
-///     `views/rawlog.h` can name it without including `tui.h` (D-ADAPTER: `views/*` names no
-///     v4 type and no aggregate). `tui.h` aliases it (`using LogRecord = model::RawLogRecord`)
-///     and keeps owning the ring, so there is still one record type, not two.
+///   * `RawLogRecord`, the record's value type;
 ///   * the row text (`time level module.function file:line message`), the filter match and the
 ///     save path - all pure functions, so the surface's content is testable without a screen.
 ///
-/// What is *not* here: the ring itself (`TuiState`, task 32), the surface (`views/rawlog.*`),
-/// and the level raise/restore rule (D's `TextUserInterface`, because the level is D's
-/// `globalLogLevel`). This module never writes a colour or a glyph: it is `model/`.
+/// This module never writes a colour or a glyph.
 ///
-/// Privacy (R-07/NFR-12): the record keeps the developer fields because this surface shows
-/// them; Activity's projection has no path to this struct (`model/activity.h` has no field for
-/// module, file or line), so the split is structural rather than a filter. The save path is
+/// Privacy: the record keeps the developer fields because this surface shows them; the Activity
+/// projection has no field for module, file or line. The save path is
 /// built from the user's data directory and never from the process' working directory - a log
 /// written inside the workarea could be indexed by a RAG.
 #pragma once
@@ -51,7 +45,7 @@ inline constexpr int kRawLogLevelError = 4;
 /// field names are the ones the archive and the Raw Log print, so a reader of either can follow
 /// one vocabulary.
 struct RawLogRecord {
-    std::int64_t timestampMs = 0;    ///< Unix-epoch ms (UTC); 0 only for a record that never got one
+    std::int64_t timestampMs = 0; ///< Unix-epoch ms (UTC); 0 only for a record that never got one
     int level = kRawLogLevelInfo; ///< one of `kRawLogLevel*`
     int action = 0;               ///< the ABI's action id (0 = none); the Raw Log prints the id
     int line = 0;                 ///< the caller's source line, 0 = unknown
@@ -69,12 +63,12 @@ struct RawLogRecord {
     bool loss = false;
 };
 
-/// The ring, seen by the Raw Log: a borrowed view, never a copy (R-08: one sink, one store).
+/// The ring, seen by the Raw Log: a borrowed view, never a copy - one sink, one store.
 ///
 /// `records` is the state's own deque, oldest first; a null view is an empty one (a harness or a
 /// state whose ring was never filled). `dropped` is the ring's monotonic counter - the number of
 /// records the store could not keep - which the surface renders as its own row so nothing is
-/// lost silently (NFR-17).
+/// lost silently.
 ///
 /// `arrivals` is the state's monotonic accept counter (`TuiState::logRecordSeq`). The surface's
 /// filtered index is cached, and at capacity the ring's size never changes while its *front*
@@ -151,16 +145,6 @@ std::string rawLogRowText(const RawLogRecord& record);
 /// a stray glyph).
 std::vector<std::string> rawLogDetailLines(const RawLogRecord& record);
 
-/// The smallest severity the surface shows, from the `UiLog` preference (D-RAWLOG).
-///
-/// `UiLog` is the surface's *level*: `off` is the shipped default (closed at every start, and
-/// only what a normal run logs), `raw` the same floor with the surface named explicitly,
-/// `debug` and `trace` widen it to the developer records the borrowed logger level brings in.
-/// D's `std::logger.LogLevel` has no `debug` member at all (all < trace < info < warning <
-/// error), so `debug` and `trace` name the same floor today - the mapping is spelled out here so
-/// the day a `debug` step exists it changes one line instead of every call site.
-int rawLogFloor(int uiLogPref);
-
 /// Does a record of `level` pass the floor?
 bool rawLogShowsLevel(int level, int minLevel);
 
@@ -169,11 +153,11 @@ bool rawLogShowsLevel(int level, int minLevel);
 /// A case-insensitive substring match over the row text *and* the detail: the Raw Log is a
 /// developer stream, so a search for a file name, a module or a word of the message has to find
 /// the record, and hiding a hit whose detail carries the term would be a search that lies. An
-/// empty or blanks-only filter matches everything (the rail's rule).
+/// empty or blanks-only filter matches everything.
 bool rawLogMatches(const RawLogRecord& record, std::string_view filter);
 
 /// The directory `Save` writes to: `$XDG_DATA_HOME/llmfun/logs`, else
-/// `$HOME/.local/share/llmfun/logs` (design §4.9's `~/.local/share/llmfun/logs`).
+/// `$HOME/.local/share/llmfun/logs`.
 ///
 /// Built from the environment, never from the working directory - the workarea rule. An empty
 /// answer means neither variable names a directory, which `rawLogSave()` reports as an error
@@ -183,7 +167,7 @@ std::string rawLogSaveDir();
 /// The file name `Save` would use for a clock reading: `ui-YYYYMMDD-HHMMSS.log`, in local time.
 ///
 /// `attempt` 0 is the plain name and 1..99 are the `-N` variants `rawLogSave()` falls back to
-/// when the plain one exists - "never overwrite" (design §4.9) is a rule about the file, so the
+/// when the plain one exists - an existing file is never overwritten, so the
 /// name generator has to be able to answer a free one.
 std::string rawLogSaveName(std::int64_t nowMs, int attempt = 0);
 

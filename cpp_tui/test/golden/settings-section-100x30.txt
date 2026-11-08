@@ -18,7 +18,7 @@ text:
                       ALL    APPEARANCE    BEHAVIOUR    ADVANCED
                        BEHAVIOUR
                      ▌ Send key                                            tab
-                       Raw log level                                       off
+                       Raw log level                                      info
 
 
 

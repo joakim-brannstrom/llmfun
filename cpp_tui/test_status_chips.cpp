@@ -14,6 +14,8 @@
 //     answers `Idle`, never a neighbouring phase;
 //   - the numbers the context chip was formatted from are carried back on the
 //     struct (`contextUsed`/`contextMax`), so a meter never parses the chip;
+//   - the rate formatter (`formatRate`): one decimal and the suffix, no zero gate
+//     (the gate lives in the callers), and it joins the locale-independence re-run;
 //   - the seed state a `tuiCreateState` build carries (`model == "none"`, zeroed
 //     numbers) yields exactly `—`, `—`, `none`, `Ready`.
 //
@@ -228,6 +230,20 @@ void scenario6_equality() {
     expect(a != b, "a differing meter number breaks equality");
 }
 
+// The rate formatter, now that the lane rows in the agents tab draw through it
+// too: one rounding decision, one place. The formatter itself has no zero gate -
+// the gate lives in the callers (a 0 rate is "no reading yet"), so a caller that
+// wants the absence glyph asks for it.
+void scenario7_rateFormat() {
+    g_scenario = 7;
+    phase("tok/s format");
+
+    expect(model::formatRate(38.1) == "38.1 tok/s", "one decimal and the suffix");
+    expect(model::formatRate(0.0) == "0.0 tok/s",
+           "no zero gate in the formatter - the callers own the absence");
+    expect(model::formatRate(1234.5) == "1234.5 tok/s", "no abbreviation on a rate");
+}
+
 } // namespace
 
 int main() {
@@ -237,6 +253,7 @@ int main() {
     scenario4_stateWords();
     scenario5_seed();
     scenario6_equality();
+    scenario7_rateFormat();
     // Nothing in the formatter may look at LC_NUMERIC. The app adopts the user's
     // locale (`tui_api.cpp` setlocale(LC_ALL, "")), and a comma-decimal locale
     // would otherwise turn `42k` into `42,0k` through snprintf. The image only
@@ -245,6 +262,7 @@ int main() {
     if (std::setlocale(LC_NUMERIC, "de_DE.UTF-8") != nullptr) {
         scenario1_fullStatus();
         scenario3_countFormat();
+        scenario7_rateFormat();
         std::printf("OK: chips are locale-independent (de_DE.UTF-8)\n");
         std::setlocale(LC_NUMERIC, "C");
     }

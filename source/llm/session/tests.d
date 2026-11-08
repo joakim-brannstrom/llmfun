@@ -122,6 +122,7 @@ unittest {
     JSONValue userMsg;
     userMsg["role"] = "user";
     userMsg["content"] = "hello world";
+    userMsg["save_data"] = JSONValue(["user": JSONValue(true)]);
     doc["messages"].array ~= userMsg;
 
     JSONValue assistantMsg;
@@ -288,6 +289,7 @@ unittest {
     JSONValue userMsg;
     userMsg["role"] = "user";
     userMsg["content"] = "This is a very long message that exceeds the preview limit";
+    userMsg["save_data"] = JSONValue(["user": JSONValue(true)]);
     doc["messages"].array ~= userMsg;
 
     auto savedMeta = store.save(meta.id, meta, doc);
@@ -336,11 +338,13 @@ unittest {
     userMsg1["role"] = "user";
     userMsg1["content"] = JSONValue(); // Array content, not string
     userMsg1["content"].array = [JSONValue("item1"), JSONValue("item2")];
+    userMsg1["save_data"] = JSONValue(["user": JSONValue(true)]);
     doc["messages"].array ~= userMsg1;
 
     JSONValue userMsg2;
     userMsg2["role"] = "user";
     userMsg2["content"] = "actual text message";
+    userMsg2["save_data"] = JSONValue(["user": JSONValue(true)]);
     doc["messages"].array ~= userMsg2;
 
     auto savedMeta = store.save(meta.id, meta, doc);
@@ -368,6 +372,7 @@ unittest {
     JSONValue userMsg;
     userMsg["role"] = "user";
     userMsg["content"] = twentyFourAscii ~ "\u00E9" ~ " rest of message";
+    userMsg["save_data"] = JSONValue(["user": JSONValue(true)]);
     doc["messages"].array ~= userMsg;
 
     auto savedMeta = store.save(meta.id, meta, doc);
@@ -387,6 +392,7 @@ unittest {
     JSONValue userMsg2;
     userMsg2["role"] = "user";
     userMsg2["content"] = twentyFourAscii ~ "e\u0301" ~ "x";
+    userMsg2["save_data"] = JSONValue(["user": JSONValue(true)]);
     doc2["messages"].array ~= userMsg2;
 
     auto savedMeta2 = store.save(meta.id, savedMeta, doc2);
@@ -410,6 +416,7 @@ unittest {
     JSONValue userMsg;
     userMsg["role"] = "user";
     userMsg["content"] = "line1\nline2\ttabbed\r\nend";
+    userMsg["save_data"] = JSONValue(["user": JSONValue(true)]);
     doc["messages"].array ~= userMsg;
 
     auto savedMeta = store.save(meta.id, meta, doc);
@@ -419,6 +426,140 @@ unittest {
             "\t"), "preview must be a single line: got '" ~ preview ~ "'");
     assert(preview == "line1 line2 tabbed  end",
             "control bytes should become spaces: got '" ~ preview ~ "'");
+}
+
+@("preview is empty for a nudge-only session (no real user query stamp)")
+unittest {
+    auto tmpDir = testArea("session_preview_nudge_only");
+    scope (exit)
+        tmpDir.cleanup();
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+
+    // A compression nudge: user role, string content, save_data["user"] = false.
+    JSONValue nudge;
+    nudge["role"] = "user";
+    nudge["content"] = "continue the task";
+    nudge["save_data"] = JSONValue(["user": JSONValue(false)]);
+    doc["messages"].array ~= nudge;
+
+    // The flag must be the boolean true, so a missing save_data is not a
+    // real query either.
+    JSONValue unstamped;
+    unstamped["role"] = "user";
+    unstamped["content"] = "no save_data at all";
+    doc["messages"].array ~= unstamped;
+
+    auto savedMeta = store.save(meta.id, meta, doc);
+    assert(savedMeta.messageCount == 2, "messageCount counts both entries");
+    assert(savedMeta.userMessageCount == 2,
+            "userMessageCount counts every role == user entry, nudges included");
+    assert(savedMeta.preview == "",
+            "a nudge-only session must produce an empty preview: got '" ~ savedMeta.preview ~ "'");
+}
+
+@("preview follows the latest real user query across nudges")
+unittest {
+    auto tmpDir = testArea("session_preview_latest_query");
+    scope (exit)
+        tmpDir.cleanup();
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+
+    JSONValue nudge;
+    nudge["role"] = "user";
+    nudge["content"] = "continue the task";
+    nudge["save_data"] = JSONValue(["user": JSONValue(false)]);
+    doc["messages"].array ~= nudge;
+
+    JSONValue query1;
+    query1["role"] = "user";
+    query1["content"] = "first real question";
+    query1["save_data"] = JSONValue(["user": JSONValue(true)]);
+    doc["messages"].array ~= query1;
+
+    JSONValue query2;
+    query2["role"] = "user";
+    query2["content"] = "second real question";
+    query2["save_data"] = JSONValue(["user": JSONValue(true)]);
+    doc["messages"].array ~= query2;
+
+    auto savedMeta = store.save(meta.id, meta, doc);
+    assert(savedMeta.preview == "second real question",
+            "the latest real user query must win: got '" ~ savedMeta.preview ~ "'");
+}
+
+@("a later real query with empty content keeps the earlier preview")
+unittest {
+    auto tmpDir = testArea("session_preview_latest_empty_query");
+    scope (exit)
+        tmpDir.cleanup();
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+
+    JSONValue query1;
+    query1["role"] = "user";
+    query1["content"] = "the only non-empty query";
+    query1["save_data"] = JSONValue(["user": JSONValue(true)]);
+    doc["messages"].array ~= query1;
+
+    // A real query stamp on an empty-content entry contributes nothing to
+    // the display, so the earlier preview survives.
+    JSONValue query2;
+    query2["role"] = "user";
+    query2["content"] = "";
+    query2["save_data"] = JSONValue(["user": JSONValue(true)]);
+    doc["messages"].array ~= query2;
+
+    auto savedMeta = store.save(meta.id, meta, doc);
+    assert(savedMeta.preview == "the only non-empty query",
+            "an empty later query must keep the earlier preview: got '" ~ savedMeta.preview ~ "'");
+}
+
+@("a non-boolean save_data user value is not a real query")
+unittest {
+    auto tmpDir = testArea("session_preview_user_not_bool");
+    scope (exit)
+        tmpDir.cleanup();
+
+    auto store = new SessionStore(tmpDir.Path);
+    auto meta = store.create();
+
+    JSONValue doc;
+    doc["messages"] = JSONValue();
+    doc["messages"].array = [];
+
+    JSONValue query1;
+    query1["role"] = "user";
+    query1["content"] = "the real query";
+    query1["save_data"] = JSONValue(["user": JSONValue(true)]);
+    doc["messages"].array ~= query1;
+
+    // A hand-edited non-boolean stamp must never become the preview.
+    JSONValue tampered;
+    tampered["role"] = "user";
+    tampered["content"] = "hand-edited entry";
+    tampered["save_data"] = JSONValue(["user": JSONValue("yes")]);
+    doc["messages"].array ~= tampered;
+
+    auto savedMeta = store.save(meta.id, meta, doc);
+    assert(savedMeta.preview == "the real query",
+            "a non-boolean user value is not a real query: got '" ~ savedMeta.preview ~ "'");
 }
 
 @("sweepEmptySessions removes only the empty non-kept session, sparing active and non-empty ones")
@@ -646,6 +787,7 @@ unittest {
     JSONValue userMsg;
     userMsg["role"] = "user";
     userMsg["content"] = "hello world";
+    userMsg["save_data"] = JSONValue(["user": JSONValue(true)]);
     doc["messages"].array ~= userMsg;
 
     JSONValue assistantMsg;

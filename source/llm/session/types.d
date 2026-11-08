@@ -15,7 +15,7 @@ import my.named_type : Comparable, ForwardStringable, Lengthable, NamedType, Tag
 /// Maximum number of attempts (initial + retries) when a generated id collides.
 enum MaxIdRetries = 5;
 
-/// Maximum length of the preview string extracted from the first user message.
+/// Maximum length of the preview string extracted from the latest real user query.
 enum PreviewMaxChars = 25;
 
 /// Strong type for session ids: a session id is not interchangeable with
@@ -44,7 +44,7 @@ struct SessionMeta {
     long updatedAt; // unix seconds; bumped on every save
     size_t messageCount; // total entries in messages[]
     size_t userMessageCount; // entries with role == "user"
-    string preview; // first string-content user message, truncated
+    string preview; // latest real user query, truncated
     JSONValue extra; // unknown header keys, preserved on save
 }
 

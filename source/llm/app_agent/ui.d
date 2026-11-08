@@ -5,7 +5,6 @@ module llm.app_agent.ui;
 
 import std.array : empty;
 import std.conv : text;
-import std.format : format;
 import std.stdio : writeln;
 
 import llm.types : ServerStat, StreamMessage, StreamToolCall, IStreamCallback;
@@ -34,8 +33,8 @@ interface TuiSink {
     void streamRuntimeStatus(UiRuntimeStatus status);
     void streamChatMessage(string msg, string thinking);
     void streamChatDone();
-    void pipelineStreamChatMessage(string agentId, string content, string thinking,
-            string role, string status, string currentTool, long contextUsed, long contextMax);
+    void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
+            double tokensPerSecond, string currentTool, long contextUsed, long contextMax);
     void pipelineStreamDone(string agentId);
     void pipelineClear();
     void sessionList(const(UiSessionItem)[] items);
@@ -105,10 +104,10 @@ class TuiChannelSink : TuiSink {
         ch.uiStreamChatDone();
     }
 
-    override void pipelineStreamChatMessage(string agentId, string content, string thinking,
-            string role, string status, string currentTool, long contextUsed, long contextMax) {
+    override void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
+            double tokensPerSecond, string currentTool, long contextUsed, long contextMax) {
         ch.uiMsg(UiPipelineStreamChatMessage(agentId, content, thinking, role,
-                status, currentTool, contextUsed, contextMax));
+                tokensPerSecond, currentTool, contextUsed, contextMax));
     }
 
     override void pipelineStreamDone(string agentId) {
@@ -176,8 +175,8 @@ class TuiBlockedSink : TuiSink {
     override void streamChatDone() {
     }
 
-    override void pipelineStreamChatMessage(string agentId, string content, string thinking,
-            string role, string status, string currentTool, long contextUsed, long contextMax) {
+    override void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
+            double tokensPerSecond, string currentTool, long contextUsed, long contextMax) {
     }
 
     override void pipelineStreamDone(string agentId) {
@@ -222,7 +221,7 @@ class TuiRecordingSink : TuiSink {
         string agentId;
         string content;
         string role;
-        string status;
+        double tokensPerSecond;
         string currentTool;
         long contextUsed;
         long contextMax;
@@ -307,10 +306,10 @@ class TuiRecordingSink : TuiSink {
         record("streamChatDone");
     }
 
-    override void pipelineStreamChatMessage(string agentId, string content, string thinking,
-            string role, string status, string currentTool, long contextUsed, long contextMax) {
-        laneUpdates ~= LaneUpdate(agentId, content, role, status, currentTool,
-                contextUsed, contextMax);
+    override void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
+            double tokensPerSecond, string currentTool, long contextUsed, long contextMax) {
+        laneUpdates ~= LaneUpdate(agentId, content, role, tokensPerSecond,
+                currentTool, contextUsed, contextMax);
         record("pipelineStreamChatMessage", agentId ~ ": " ~ content);
     }
 
@@ -414,10 +413,10 @@ class UiMessenger {
         sink.streamChatDone();
     }
 
-    void pipelineStreamChatMessage(string agentId, string content, string thinking,
-            string role, string status, string currentTool, long contextUsed, long contextMax) {
+    void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
+            double tokensPerSecond, string currentTool, long contextUsed, long contextMax) {
         sink.pipelineStreamChatMessage(agentId, content, thinking, role,
-                status, currentTool, contextUsed, contextMax);
+                tokensPerSecond, currentTool, contextUsed, contextMax);
     }
 
     void pipelineStreamDone(string agentId) {
@@ -505,18 +504,10 @@ class PipelineStreamMessageUpdater : IStreamCallback {
             }
         }
 
-        // Still sent: the legacy generation paints this sentence in its pipeline panel (D-10's
-        // transition aid). The workbench generation reads the fields below and never parses it.
-        string status = i"Context $(stat.context)/$(contextSize) tokens | $(
-                format!"%.1f"(stat.predictedPerSecond)) tok/s".text;
-
-        // The lane row's tool name is the newest call of this response. `tools` arrives in
-        // protocol-index order (`llm.agent.orderedToolCalls`), so the last element is the newest
-        // whatever order the response's AA yielded.
-        uiMsg.pipelineStreamChatMessage(agentId: agentId, content: content, thinking: msg.reasoning,
-                role: msg.role, status: status, currentTool: tools.empty
-                ? null : tools[$ - 1].toolName, contextUsed: stat.context,
-                contextMax: contextSize);
+        uiMsg.pipelineStreamChatMessage(agentId: agentId, content: content, thinking: msg.reasoning, role: msg.role,
+                tokensPerSecond: stat.predictedPerSecond,
+                currentTool: tools.empty ? null : tools[$ - 1].toolName,
+                contextUsed: stat.context, contextMax: contextSize);
     }
 
     override void streamMessageDone() {

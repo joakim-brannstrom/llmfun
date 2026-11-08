@@ -33,7 +33,6 @@
 #include "model/settings.h"
 
 using llmfun::tui::model::InspectorTab;
-using llmfun::tui::model::kRawLogOff;
 using llmfun::tui::model::kRawLogTrace;
 using llmfun::tui::model::loadUiConf;
 using llmfun::tui::model::saveUiConf;
@@ -208,7 +207,7 @@ int main() {
         ShellPrefs s; // 0 = "no persisted size"
         saveUiConf(s, ini);
         CHECK(readText(confOf(dir)) ==
-              "Version=2\nSendKey=tab\nUiLog=off\nRailOpen=auto\nInspectorOpen=auto\n"
+              "Version=2\nSendKey=tab\nUiLog=info\nRailOpen=auto\nInspectorOpen=auto\n"
               "InspectorTab=activity\nFontScaleMain=1.00\n");
         // ... and the load keeps them at the sentinel (never a clamped 1)
         ShellPrefs loaded;

@@ -1,16 +1,12 @@
-/// The workbench's own state (design §3.8: one writer, the frame thread; views
-/// only read), plus the constants the shell and the thread region share.
+/// The workbench's own state: one writer (the frame thread), views only read,
+/// plus the constants the shell and the thread region share.
 ///
-/// `TuiState::ui` is the aggregate a view reads. The v4 members stay where the
-/// store keeps them; this struct is the seam that lets the shell be written without
-/// them (D-ADAPTER: `views/*` names no v4 type), and it is what tasks 22/25/28/32/33
-/// extend.
-///
-/// Layering: `model` carries plain data and no renderer. It does not depend on
-/// `ui/` either - the layout engine's `LayoutPrefs` is *derived* from
-/// `ShellPrefs` by the shell (`views::layoutPrefsFor`), so the model header stays
-/// includable from a header that has no `cpp_tui` include directory (see
-/// `views/palette.h` for why that matters).
+/// `TuiState::ui` is the aggregate a view reads. This struct carries plain data
+/// and no renderer, and it does not depend on `ui/` either - the layout engine's
+/// `LayoutPrefs` is *derived* from `ShellPrefs` by the shell
+/// (`views::layoutPrefsFor`), so the model header stays includable from a header
+/// that has no `cpp_tui` include directory (see `views/palette.h` for why that
+/// matters).
 #pragma once
 
 #include <array>
@@ -178,15 +174,13 @@ struct HeightHint {
     float h = 0.0f;
 };
 
-/// The thread's cross-frame view state (design §4.4, tasks 18/25).
+/// The thread's cross-frame view state.
 ///
-/// Expansion is *not* here. It lives in the v4 sets the store keeps
-/// (`ChatTab::outputLineOpen`, `ChatTab::openWorkGroups`) and the adapter exposes
-/// them: one store with two readers. A second set keyed by group id would let a
-/// click and a read disagree, which is what D-GROUPID exists to prevent (see
-/// `UiState` for the same note).
+/// Expansion is kept by the store itself (`ChatTab::outputLineOpen`,
+/// `ChatTab::openWorkGroups`) and this state only reads it: one store with two readers, so a
+/// click and a read cannot disagree (`UiState` carries the same note).
 ///
-/// What *is* here is what the window itself owns: the hint cache (dropped on a
+/// This struct holds what the window itself owns: the hint cache (dropped on a
 /// width / row / compact / revision change and on a session switch), the scroll
 /// anchor of a just-toggled group, and the two observations the harnesses read.
 struct ThreadState {
@@ -341,6 +335,10 @@ inline constexpr std::size_t kAgentLaneMax = 16;
 ///   * `tokens` is the context count D reported for this agent (`PipelineChatMessage.contextUsed`,
 ///     sent with `contextMax`); 0 means there is no number to draw, and the row then omits it
 ///     rather than printing a zero it does not know;
+///   * `tokensPerSecond` is the rate D reported for this agent
+///     (`PipelineChatMessage.tokensPerSecond`), sent raw and formatted by the view - never
+///     recomputed here; 0.0 means there is no reading to draw (a queued lane), and the row
+///     omits it like the token count;
 ///   * `currentTool` is the newest tool call of the agent's response
 ///     (`PipelineChatMessage.currentTool`), empty while the agent has called none;
 ///   * `content` is the agent's stream text - the transcript the drill-down shows. It is a
@@ -354,6 +352,9 @@ struct AgentLane {
     std::string content;
     std::int64_t elapsedMs = 0;
     std::int64_t tokens = 0;
+    // The lane's rate, D's own number, never recomputed: 0.0 = "no reading" (queued lane),
+    // the same convention as a `tokens` of 0.
+    double tokensPerSecond = 0.0;
     bool active = false;
 
     /// Bookkeeping for `elapsedMs`: the frame clock (ms) at the lane's first sighting and at
@@ -376,13 +377,10 @@ inline std::int64_t agentClockMs() {
 /// by owner: preferences (persisted), the per-frame derivation (`view`,
 /// `offline`), and the thread's view state (`follow`, `earlierGroups`, `thread`).
 ///
-/// Expansion is deliberately *not* here: it lives in one store, the v4 sets the
-/// store keeps (`ChatTab::outputLineOpen` for a message,
+/// Expansion is kept in one store (`ChatTab::outputLineOpen` for a message,
 /// `ChatTab::openWorkGroups` for a work group), reached through
-/// `store::ThreadStoreAdapter::expanded()/setExpanded()`. A second copy here was
-/// the "two sources of truth" D-GROUPID exists to avoid - a header click would
-/// have had to update both. The restyle (task 26) may move the sets into this
-/// struct; until then the adapter is the seam and this file stays free of them.
+/// `store::ThreadStoreAdapter::expanded()/setExpanded()`: one store with two readers,
+/// so a click and a read cannot disagree (`ThreadState` carries the same note).
 struct UiState {
     /// The user's preferences - the one preferences owner (settings.h), persisted
     /// in `ui.conf` and read back by every view that honours them. Auto (`-1`) is
@@ -486,16 +484,15 @@ struct UiState {
     /// what survives a frame, not what defines the thread.
     ThreadState thread;
 
-    /// The session rail: its search text, its row latches and its answers
-    /// (task 23). The rail's *list* is derived per frame by
-    /// `buildRailRows()` from the snapshot; only the state a user can change
-    /// lives here.
+    /// The session rail: its search text, its row latches and its answers.
+    /// The rail's *list* is derived per frame by
+    /// `buildRailRows()` from the snapshot; this struct keeps only the state a
+    /// user can change.
     RailState rail;
 
-    /// The UI-local unread set (D-UNREAD): `updatedAt` advanced while a session
-    /// was not active, cleared on select, never persisted. It lives here rather
-    /// than in `ShellPrefs` because it is a fact about this process run, not a
-    /// preference - `ui.conf` has no key for it by design (D-19).
+    /// The UI-local unread set: `updatedAt` advanced while a session
+    /// was not active, cleared on select, never persisted - a fact about this
+    /// process run, not a preference.
     UnreadTracker unread;
 
     /// The pipeline agents, one lane each, in arrival order (design §5.21, task 30).
@@ -608,13 +605,11 @@ bool anyLiveAgentLane(const std::vector<AgentLane>& lanes);
 /// subtraction per lane) and idempotent, so the frame layer can call it every frame.
 void refreshAgentLanes(UiState& ui, std::int64_t nowMs);
 
-// ---------------------------------------------------------------------------
-// The mirror's derivations (design §5.21, task 30; fields since task 39a)
-// ---------------------------------------------------------------------------
+// The mirror's derivations.
 //
-// The C ABI's `tuiPipelineAgentUpdate/Done` calls the two functions below - they are here,
-// not in `tui_api.cpp`, because they are model answers (what a lane *is*) rather than a
-// binding of the C surface, and because a headless test can drive them with no ABI in the way.
+// `tuiPipelineAgentUpdate/Done` call the two functions below: they answer what a
+// lane *is* (model answers, not a binding of the C surface), and a headless test can
+// drive them with no ABI in the way.
 //
 // Nothing here reads the agent's stream text (numbers, not sentences). The count and the
 // tool name are fields on `PipelineChatMessage`, so a change to the way D formats the
@@ -629,8 +624,9 @@ void refreshAgentLanes(UiState& ui, std::int64_t nowMs);
 ///
 /// The numbers are D's, not derived here: a `contextUsed` above 0 is the count the row draws,
 /// and 0 - whether D means a real zero (`0/8192`) or has no reading at all (`0/0`) - draws no
-/// number. The lane needs no presence bit of its own because nothing is latched: an update
-/// cannot revive a count D stopped reporting. The tool name is stored as sent.
+/// number. The rate is D's too, sent raw and formatted by the view: a value above 0.0 is the
+/// rate the row draws, and 0.0 draws no rate. Neither number is latched, so an update cannot
+/// revive a value D stopped reporting. The tool name is stored as sent.
 ///
 /// `PipelineChatMessage.contextMax` stops at the ABI seam: it is the producer's zero-vs-none
 /// bit, and this row draws no number for either zero.
@@ -644,7 +640,7 @@ void refreshAgentLanes(UiState& ui, std::int64_t nowMs);
 /// buffer), not to thin the fields.
 void applyAgentUpdate(UiState& ui, std::string_view id, std::string_view role,
                       std::string_view content, std::string_view currentTool,
-                      std::int64_t contextUsed, std::int64_t nowMs);
+                      std::int64_t contextUsed, double tokensPerSecond, std::int64_t nowMs);
 
 /// Apply one `tuiPipelineAgentDone`: the lane is `done`, it stops counting and keeps the
 /// duration it took. A stopped lane stays stopped (the user's answer outranks the runtime's).
@@ -653,8 +649,8 @@ void finishAgentLane(UiState& ui, std::string_view id);
 /// Reset the thread-scoped half of `ui` for a session switch: the `Load earlier`
 /// paging window, the height-hint cache, the scroll anchor and the follow flag
 /// belong to the thread that is being replaced, while the shell preferences belong
-/// to the user and stay. (Expansion lives in the v4 store, so the adapter's own
-/// `reset()` is the other half of a switch - one call each, from the same place.)
+/// to the user and stay. The adapter's `reset()` covers the thread's remaining
+/// state (including expansion) - one call each, from the same place.
 void resetForSessionSwitch(UiState& ui);
 
 } // namespace llmfun::tui::model

@@ -8,10 +8,7 @@
 ///   3. the anatomy: `rawLogParts()` answers every rectangle and every fixed string once, and
 ///      `renderRawLog()` draws from those numbers;
 ///   4. the keys the surface owns (only while it is modal) and the controls.
-///
-/// Layering note (`tools/gate_ratchet.txt`): no colour literal, no display size, no v4 type and
-/// no per-widget profile branch beyond the metrics it was handed, so this file needs no ledger
-/// row.
+
 #include "views/rawlog.h"
 
 #include "imgui/imgui.h"
@@ -621,11 +618,23 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
                     lineAt(m, row, row.x, row.y, text, ColorToken::textMid);
                     continue;
                 }
-                const std::string text = rowTextForWidth(*record, rowW, m);
+                // The openability marker: a record with multi-line detail can be opened, and
+                // the dim `+` says which rows. It leads the row, so a clipped long line
+                // still shows its mark - clipping eats the tail, not the head.
+                const bool openable = !record->detail.empty();
+                const float glyphW = textUnits(m, kRawLogOpenableGlyph);
+                ui::Rect textBox = row;
+                if (openable) {
+                    textBox.x = row.x + glyphW;
+                    textBox.w = std::max(0.0f, row.w - glyphW);
+                }
+                const std::string text = rowTextForWidth(*record, textBox.w, m);
                 // A loss row is not a log line: its message alone, in the dim ink -
                 // the same treatment the detail continuations get.
-                lineAt(m, row, row.x, row.y, text,
+                lineAt(m, textBox, textBox.x, textBox.y, text,
                        record->loss ? ColorToken::textDim : levelInk(record->level));
+                if (openable)
+                    lineAt(m, row, row.x, row.y, kRawLogOpenableGlyph, ColorToken::textDim);
                 const std::string id = "##rawlog_row" + std::to_string(line);
                 const RowHit hit = submitRow(row, id.c_str());
                 if (hit.clicked) {
@@ -719,8 +728,8 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
         std::string path;
         std::string error;
         const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::system_clock::now().time_since_epoch())
-                                    .count();
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count();
         if (model::rawLogSave(ring, filter, nowMs, path, error)) {
             state.savePath = path;
             state.saveError.clear();

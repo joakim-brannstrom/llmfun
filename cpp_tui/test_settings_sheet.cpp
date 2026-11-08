@@ -1,7 +1,5 @@
-// test_settings_sheet.cpp
-//
-// The minimal settings sheet (views/settings.h + model/settings.h, design §4.10 / FR-17 /
-// task 34): the three settings the MVP changes, the diagnostics paths, and the wiring that
+// The settings sheet (views/settings.h + model/settings.h): the settings rows, the
+// diagnostics paths, and the wiring that
 // makes the sheet reachable and closable.
 //
 // What this binary proves, in order:
@@ -10,7 +8,7 @@
 //      no `tui.h`, and keeps its vocabulary in the header; it never touches a file (the frame owns
 //      both write paths);
 //   2. the catalogue. The words the sheet prints are the words `ui.conf` stores, the send keys a
-//      row may *offer* are exactly the ones `plan/key_gate.md` proves, and the font scale clamps
+//      row may *offer* are exactly the ones the catalogue lists, and the font scale clamps
 //      and quantizes to its 0.5..3.0 / 5 % grid;
 //   3. the rows. Three sections plus `ALL`, a header per section in the list, the search filtering
 //      label and section (not prose), the *effective* value shown for a malformed profile, and one
@@ -22,7 +20,7 @@
 //      one press, the z-order is palette > settings > Raw Log, and the rectangle comes from
 //      `ui::computeShell()` (inside the display, never part of the tiling);
 //   6. persistence. A behaviour value round-trips through `ui.conf` (the full-file round trip is
-//      `./test_settings`'s job), a value the sheet can no longer
+//      `./test_settings`'s job), a value the sheet cannot
 //      offer is still *shown*, and an unwritable profile produces exactly one Activity warning
 //      while the session keeps running - never one per frame;
 //   7. the copy action: the six documented fields, and no message text;
@@ -59,6 +57,7 @@
 
 #include "imgui/imgui.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -77,6 +76,14 @@ namespace ui = llmfun::tui::ui;
 namespace views = llmfun::tui::views;
 namespace model = llmfun::tui::model;
 namespace tui = llmfun::tui;
+
+// The sheet's Raw log cycle, as the view walks it: the ladder table by index, clamped in at
+// the nearer end.
+int uiLogNext(int rawLog) {
+    const int current = std::clamp(rawLog, model::kRawLogTrace, model::kRawLogError);
+    return model::kUiLogLadder[(model::uiLogIndexOf(current) + 1) % model::kUiLogChoiceCount]
+        .severity;
+}
 
 namespace {
 
@@ -491,12 +498,12 @@ void checkCatalogue() {
     }
     check(proven == 2, "exactly two send keys are proven in the terminal profile");
 
-    check(std::string(model::uiLogWord(model::kRawLogOff)) == "off", "UiLog off");
-    check(std::string(model::uiLogWord(model::kRawLogRaw)) == "raw", "UiLog raw");
-    check(std::string(model::uiLogWord(model::kRawLogDebug)) == "debug", "UiLog debug");
+    check(std::string(model::uiLogWord(model::kRawLogError)) == "error", "UiLog error");
+    check(std::string(model::uiLogWord(model::kRawLogWarn)) == "warn", "UiLog warn");
+    check(std::string(model::uiLogWord(model::kRawLogInfo)) == "info", "UiLog info");
     check(std::string(model::uiLogWord(model::kRawLogTrace)) == "trace", "UiLog trace");
-    check(std::string(model::uiLogWord(-3)) == "off", "a level below the range reads `off`");
-    check(std::string(model::uiLogWord(99)) == "trace", "and one above it `trace`");
+    check(std::string(model::uiLogWord(-3)) == "info", "a value off the ladder reads the default");
+    check(std::string(model::uiLogWord(99)) == "info", "and so does one above it");
 
     // The font scale: clamped into 0.5..3.0 and quantized to 5 % steps.
     check(std::fabs(model::clampFontScale(0.2f) - 0.50f) < 1e-4f, "a scale below the range clamps");
@@ -622,16 +629,18 @@ void checkRows() {
     prefs.sendKey = model::SendKey::Tab;
     rows = views::settingsRows(sheet, prefs, m);
 
-    // The Raw log level is a choice over the four words, all of which the writer can spell.
+    // The Raw log level is a choice over the ladder's four words, all of which the writer can
+    // spell.
     const views::SettingsRow* rawLog = findRow(rows, views::kSettingsRowRawLog);
     check(rawLog != nullptr && rawLog->kind == views::SettingsRowKind::Choice,
           "the Raw log level is a choice");
-    check(rawLog != nullptr && rawLog->value == "off", "and starts at the shipped default");
-    prefs.rawLog = 9; // out of range: the sheet shows the value the writer would store
+    check(rawLog != nullptr && rawLog->value == "info", "and starts at the shipped default");
+    prefs.rawLog = 9; // out of range: the sheet shows the value a press would act on; the
+                      // writer would store info
     rows = views::settingsRows(sheet, prefs, m);
     rawLog = findRow(rows, views::kSettingsRowRawLog);
-    check(rawLog != nullptr && rawLog->value == "trace", "an out-of-range UiLog reads as `trace`");
-    prefs.rawLog = model::kRawLogOff;
+    check(rawLog != nullptr && rawLog->value == "error", "an out-of-range UiLog reads as `error`");
+    prefs.rawLog = model::kRawLogInfo;
 
     // The font scale is a fact on the grid and a choice in the pixel profile.
     rows = views::settingsRows(sheet, prefs, m);
@@ -733,7 +742,7 @@ void checkKeys() {
     check(std::string(state.settingsSheet.search.data()) == "log",
           "and the query the field held survives the hand-over (the buffer is the caller's)");
     pressKey(state, w, h, ImGuiKey_Enter);
-    check(state.ui.prefs.rawLog == (beforeFieldEnter + 1) % model::kUiLogChoiceCount,
+    check(state.ui.prefs.rawLog == uiLogNext(beforeFieldEnter),
           "and Enter then changes the selected row (got " + std::to_string(state.ui.prefs.rawLog) +
               ")");
     state.ui.prefs.rawLog = beforeFieldEnter;
@@ -794,7 +803,7 @@ void checkKeys() {
     appFrame(state, w, h);
     const int before = state.ui.prefs.rawLog;
     pressKey(state, w, h, ImGuiKey_Enter);
-    check(state.ui.prefs.rawLog == (before + 1) % model::kUiLogChoiceCount,
+    check(state.ui.prefs.rawLog == uiLogNext(before),
           "Enter moves the Raw log level to the next value (got " +
               std::to_string(state.ui.prefs.rawLog) + ")");
     pressKey(state, w, h, ImGuiKey_Enter);
@@ -859,7 +868,7 @@ void checkKeys() {
         check(tabbed.settingsSheet.rowsBuilt == rowsAfterTab, "and filters nothing");
         const int beforeTabEnter = tabbed.ui.prefs.rawLog;
         pressKey(tabbed, w, h, ImGuiKey_Enter);
-        check(tabbed.ui.prefs.rawLog == (beforeTabEnter + 1) % model::kUiLogChoiceCount,
+        check(tabbed.ui.prefs.rawLog == uiLogNext(beforeTabEnter),
               "the first Enter after a Tab changes the row (got " +
                   std::to_string(tabbed.ui.prefs.rawLog) + ")");
     }
@@ -918,8 +927,7 @@ void checkClicks() {
               std::to_string(state.settingsSheet.selected) + ")");
     check(state.ui.prefs.rawLog == before, "but a first click never edits a preference");
     clickAt(state, w, h, x, y);
-    check(state.ui.prefs.rawLog == (before + 1) % model::kUiLogChoiceCount,
-          "a second click on the same row changes it");
+    check(state.ui.prefs.rawLog == uiLogNext(before), "a second click on the same row changes it");
 
     // The strip: clicking a section selects it.
     clickAt(state, w, h, sheet.x + 1.0f + 12.0f, sheet.y + 3.5f);
@@ -1071,14 +1079,14 @@ void checkPersistence() {
     // malformed word: the loader's rules are `./test_ui_settings`'s, and what matters here is that
     // the *sheet* shows the effective value of each.
     writeFile(model::uiConfPath(ini),
-              "Version=1\nSendKey=none\nUiLog=debug\nRailOpen=zoinks\nInspectorTab=agents\n");
+              "Version=1\nSendKey=none\nUiLog=warn\nRailOpen=zoinks\nInspectorTab=agents\n");
     {
         tui::TuiState state = makeState();
         state.iniFilename = ini;
         model::loadUiConf(state.ui.prefs, ini); // the one load `tuiInit` performs
         check(state.ui.prefs.sendKey == model::SendKey::None,
               "a legal SendKey line reaches the preferences");
-        check(state.ui.prefs.rawLog == model::kRawLogDebug, "and so does UiLog");
+        check(state.ui.prefs.rawLog == model::kRawLogWarn, "and so does UiLog");
         check(state.ui.prefs.railOpen != 0, "a malformed RailOpen keeps the current value");
         check(state.ui.prefs.tab == model::InspectorTab::Agents, "and InspectorTab loads");
 
@@ -1088,7 +1096,7 @@ void checkPersistence() {
         check(sendKey != nullptr && sendKey->value == "none",
               "the sheet shows the hand-edited send key, not a silent default");
         const views::SettingsRow* rawLog = findRow(rows, views::kSettingsRowRawLog);
-        check(rawLog != nullptr && rawLog->value == "debug", "and the level it is running at");
+        check(rawLog != nullptr && rawLog->value == "warn", "and the level it is running at");
     }
 
     // A change made in the sheet reaches ui.conf, and the level survives a restart.
@@ -1105,12 +1113,12 @@ void checkPersistence() {
         appFrame(state, 100, 30);
         focusList(state, 100, 30); // the keyboard has to be in the list before `Enter` edits a row
         pressKey(state, 100, 30, ImGuiKey_Enter);
-        pressKey(state, 100, 30, ImGuiKey_Enter); // off -> raw -> debug
-        check(state.ui.prefs.rawLog == model::kRawLogDebug, "two presses reach `debug`");
+        pressKey(state, 100, 30, ImGuiKey_Enter); // info -> trace -> error
+        check(state.ui.prefs.rawLog == model::kRawLogError, "two presses reach `error`");
         // The debounced write needs the idle window; the quit path does not.
         views::uiConfQuit(state.ui, ini);
         const std::string text = readWhole(model::uiConfPath(ini));
-        check(contains(text, "UiLog=debug"), "the level is on disk after a quit save");
+        check(contains(text, "UiLog=error"), "the level is on disk after a quit save");
         check(contains(text, "SendKey=tab"), "with the send key the build ships");
     }
     {
@@ -1118,10 +1126,10 @@ void checkPersistence() {
         restarted.iniFilename = ini;
         model::loadUiConf(restarted.ui.prefs, ini); // the one load `tuiInit` performs
         appFrame(restarted, 100, 30);
-        check(restarted.ui.prefs.rawLog == model::kRawLogDebug,
+        check(restarted.ui.prefs.rawLog == model::kRawLogError,
               "and a restarted session reads it back");
     }
-    // The full frame-level trip for `trace` - three presses reach the top level, the
+    // The full frame-level trip for `trace` - one press reaches the developer floor, the
     // debounced flush puts it on disk while the session still runs, the quit save keeps it,
     // and a restarted session reads it back.
     removeFile(model::uiConfPath(ini));
@@ -1136,10 +1144,8 @@ void checkPersistence() {
             rowIndex(state.settingsSheet.rows, views::kSettingsRowRawLog);
         appFrame(state, 100, 30);
         focusList(state, 100, 30); // the keyboard has to be in the list before `Enter` edits a row
-        pressKey(state, 100, 30, ImGuiKey_Enter);
-        pressKey(state, 100, 30, ImGuiKey_Enter);
-        pressKey(state, 100, 30, ImGuiKey_Enter); // off -> raw -> debug -> trace
-        check(state.ui.prefs.rawLog == model::kRawLogTrace, "three presses reach `trace`");
+        pressKey(state, 100, 30, ImGuiKey_Enter); // info -> trace
+        check(state.ui.prefs.rawLog == model::kRawLogTrace, "one press reaches `trace`");
         pressKey(state, 100, 30, ImGuiKey_Escape);
         check(!state.settingsSheet.open,
               "Esc closed the sheet - the session keeps running, the flush does not need it");
@@ -1193,12 +1199,12 @@ void checkPersistence() {
                            std::string("SendKey=") + model::sendKeyWord(key)),
                   "and is written back with the same word");
         }
-        for (int level = 0; level < model::kUiLogChoiceCount; ++level) {
+        for (int i = 0; i < model::kUiLogChoiceCount; ++i) {
             model::ShellPrefs prefs;
-            prefs.rawLog = level;
+            prefs.rawLog = model::kUiLogLadder[i].severity;
             const std::string text = model::uiConfText(prefs);
-            check(contains(text, std::string("UiLog=") + model::uiLogWord(level)),
-                  std::string("`UiLog=") + model::uiLogWord(level) + "` is the stored word");
+            check(contains(text, std::string("UiLog=") + model::kUiLogLadder[i].word),
+                  std::string("`UiLog=") + model::kUiLogLadder[i].word + "` is the stored word");
         }
     }
 
@@ -1234,7 +1240,7 @@ void checkPersistence() {
         tui::TuiState state = makeState();
         state.iniFilename = blockedIni;
         model::loadUiConf(state.ui.prefs, blockedIni); // the one load `tuiInit` performs: no file
-        state.ui.prefs.rawLog = model::kRawLogDebug;   // a change the user made in the sheet
+        state.ui.prefs.rawLog = model::kRawLogError;   // a change the user made in the sheet
         views::uiConfFrame(state.ui, blockedIni, 0.1); // arms the idle window
         check(state.ui.activity.empty(), "a change alone writes nothing yet");
         views::uiConfFrame(state.ui, blockedIni, 10.0); // the one attempt, which fails
@@ -1250,7 +1256,7 @@ void checkPersistence() {
             views::uiConfFrame(state.ui, blockedIni, 20.0 + i);
         check(state.ui.activity.size() == 1,
               "and never again for the same bytes (no per-frame retry)");
-        check(state.ui.prefs.rawLog == model::kRawLogDebug,
+        check(state.ui.prefs.rawLog == model::kRawLogError,
               "while the value still applies in memory");
         // A *new* choice is a new attempt, and is reported once more - the user changed something.
         state.ui.prefs.rawLog = model::kRawLogTrace;

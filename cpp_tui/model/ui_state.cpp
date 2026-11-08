@@ -1,4 +1,4 @@
-/// The workbench state's non-inline half (model/ui_state.h owns the contract).
+/// The workbench state's non-inline half.
 #include "ui_state.h"
 
 #include <algorithm>
@@ -8,7 +8,7 @@ namespace llmfun::tui::model {
 
 void resetForSessionSwitch(UiState& ui) {
     // The thread is being replaced: its paging window describes messages that are
-    // about to disappear (D-BOUNDS), and its expansion state is the v4 store's -
+    // about to disappear, and its expansion state is the store's -
     // `store::ThreadStoreAdapter::reset()` is the other half of this, called from
     // the same place (`tuiClearOutput`). The shell preferences are the user's and
     // survive the switch.
@@ -140,7 +140,7 @@ bool anyLiveAgentLane(const std::vector<AgentLane>& lanes) {
     return false;
 }
 
-// The live answer's clock (stream_state.h owns the contract).
+// The live answer's clock.
 
 void resetStreamClock(StreamState& stream) { stream = StreamState{}; }
 
@@ -208,7 +208,7 @@ const char* streamPhaseWord(const StreamState& stream, bool hasText) {
 
 void applyAgentUpdate(UiState& ui, std::string_view id, std::string_view role,
                       std::string_view content, std::string_view currentTool,
-                      std::int64_t contextUsed, std::int64_t nowMs) {
+                      std::int64_t contextUsed, double tokensPerSecond, std::int64_t nowMs) {
     if (id.empty())
         return;
     AgentLane* lane = findAgentLane(ui, id);
@@ -245,12 +245,13 @@ void applyAgentUpdate(UiState& ui, std::string_view id, std::string_view role,
     if (!role.empty())
         lane->role = std::string(role);
     lane->content = std::string(content);
-    // TODO: there is a bug on the D side too that sometimes report zero context after a
-    // compression. That should not happen A count D reports is drawn; a 0 is not, whether D means a
-    // real zero (`0/8192`) or has no reading at all (`0/0`) - `views/inspector.cpp` prints the
-    // number only when it is above 0. Nothing is latched, so an update cannot revive a count D
+    // A count D reports is drawn; a 0 is not, whether D means a real zero (`0/8192`) or has
+    // no reading at all (`0/0`) - `views/inspector.cpp` prints the number only when it is
+    // above 0. The rate follows the same rule, and a NaN (`> 0.0` is false) is stored as 0.0
+    // so the row cannot paint one. Nothing is latched, so an update cannot revive a value D
     // stopped reporting.
     lane->tokens = contextUsed > 0 ? contextUsed : 0;
+    lane->tokensPerSecond = tokensPerSecond > 0.0 ? tokensPerSecond : 0.0;
     lane->currentTool = std::string(currentTool);
     lane->lastUpdateMs = nowMs;
     const std::int64_t elapsed = nowMs - lane->startedMs;

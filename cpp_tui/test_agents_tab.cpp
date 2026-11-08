@@ -1,19 +1,18 @@
 // test_agents_tab.cpp
 //
-// The inspector's Agents tab (views/inspector.h, design §5.21 / FR-14 / task 30): the lanes,
-// the mission strip, the lane menu, stop one / stop all (with its confirmation), the
-// transcript drill-down with `Back to main`, and the rail and the inspector standing at the
-// same time.
+// The inspector's Agents tab (views/inspector.h): the lanes, the mission strip, the lane
+// menu, stop one / stop all (with its confirmation), the transcript drill-down with
+// `Back to main`, and the rail and the inspector standing at the same time.
 //
 // What this binary proves, in order:
 //
-//   1. the source. `views/inspector.cpp` still writes no colour literal, takes the profile
+//   1. the source. `views/inspector.cpp` writes no colour literal, takes the profile
 //      from the metrics, reads no display size and names no v4 type; the mirror is the C
 //      ABI's three pipeline calls and nothing else;
 //   2. the mirror. `tuiPipelineAgent*` copies what a lane needs into `UiState::agents` - the
-//      state word, the role, the context count and the tool name as the fields D sent, and the
-//      agent's stream text - and a stopped lane is left alone. Nothing is parsed out of the
-//      stream's text (task 39a);
+//      state word, the role, the context count, the tool name and the rate as the fields D
+//      sent, and the agent's stream text - and a stopped lane is left alone. Nothing is
+//      parsed out of the stream's text;
 //   3. the settling. A lane still `running` when the run ends is `failed`, a lane still
 //      `running` behind a stop is `stopped`, and a settled lane keeps its answer;
 //   4. the tab. The mission strip, one row per lane, the action row and the empty state -
@@ -23,8 +22,7 @@
 //      through the existing stop path (`tuiRequestCancel` -> `/stop`);
 //   6. the drill-down. The thread shows only that agent's transcript with `Back to main`, and
 //      the main transcript comes back byte-identical;
-//   7. the layout. The rail and the inspector are both up at 100x30 and at 1280x820 - the old
-//      mutual exclusion is gone - and the pipeline no longer owns the left slot;
+//   7. the layout. The rail and the inspector are both up at 100x30 and at 1280x820;
 //   8. the goldens: lanes running, a failed lane, and the transcript drill-down.
 //
 // Exit codes: 0 = all checks pass; 1 = a check failed; 2 = usage error.
@@ -58,6 +56,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -298,7 +297,8 @@ const ui::Metrics& gridMetrics() {
 /// One lane, the way the mirror leaves it.
 model::AgentLane lane(const std::string& id, const std::string& state, bool active,
                       const std::string& tool = std::string(), std::int64_t tokens = 0,
-                      std::int64_t elapsedMs = 0, const std::string& content = std::string()) {
+                      std::int64_t elapsedMs = 0, const std::string& content = std::string(),
+                      double tokensPerSecond = 0.0) {
     model::AgentLane out;
     out.id = id;
     out.label = id;
@@ -306,6 +306,7 @@ model::AgentLane lane(const std::string& id, const std::string& state, bool acti
     out.state = state;
     out.currentTool = tool;
     out.tokens = tokens;
+    out.tokensPerSecond = tokensPerSecond;
     out.elapsedMs = elapsedMs;
     out.content = content;
     out.active = active;
@@ -441,9 +442,9 @@ void checkSource() {
     // pipeline calls copy into it and nothing else does.
     const std::string api = readWhole(TEST_AGENTS_API_SOURCE);
     check(!api.empty(), "tui_api.cpp is readable");
-    check(api.find("mirrorLaneUpdate(*state->inner, id, role_, c, tool, ctxUsed);") !=
-              std::string::npos,
-          "tuiPipelineAgentUpdate mirrors into the lane list (both its branches)");
+    check(api.find("mirrorLaneUpdate(*state->inner, id, role_, c, tool, ctxUsed, "
+                   "msg.tokensPerSecond);") != std::string::npos,
+          "tuiPipelineAgentUpdate mirrors into the lane list, rate included (both its branches)");
     const std::size_t updates = api.find("void tuiPipelineAgentUpdate");
     const std::size_t done = api.find("void tuiPipelineAgentDone");
     const std::size_t clear = api.find("void tuiPipelineClear");
@@ -473,7 +474,7 @@ void checkSource() {
 void checkMirror() {
     model::UiState ui;
     const std::int64_t t0 = 1'000'000;
-    model::applyAgentUpdate(ui, "coder", "assistant", "hello", "", 1200, t0);
+    model::applyAgentUpdate(ui, "coder", "assistant", "hello", "", 1200, 0.0, t0);
     check(ui.agents.size() == 1, "the first update registers a lane");
     const model::AgentLane& first = ui.agents.front();
     check(first.id == "coder" && first.label == "coder", "the lane is named after the agent id");
@@ -486,7 +487,8 @@ void checkMirror() {
           "the context count is the number D sent (" + std::to_string(first.tokens) + ")");
     check(first.elapsedMs == 0, "a fresh lane has no duration yet");
 
-    model::applyAgentUpdate(ui, "coder", "assistant", "hello world", "read_file", 1500, t0 + 4000);
+    model::applyAgentUpdate(ui, "coder", "assistant", "hello world", "read_file", 1500, 0.0,
+                            t0 + 4000);
     check(ui.agents.size() == 1, "the next update updates the same lane");
     check(ui.agents.front().tokens == 1500, "...and its count moves with D's field");
     check(ui.agents.front().elapsedMs == 4000,
@@ -495,7 +497,7 @@ void checkMirror() {
     check(ui.agents.front().currentTool == "read_file",
           "the current tool is the field D sent, not a parse of the stream text");
 
-    model::applyAgentUpdate(ui, "reviewer", "assistant", "", "", 0, t0 + 5000);
+    model::applyAgentUpdate(ui, "reviewer", "assistant", "", "", 0, 0.0, t0 + 5000);
     check(ui.agents.size() == 2, "a second agent gets its own lane, in arrival order");
     check(ui.agents[1].state == model::kAgentStateRunning && ui.agents[1].tokens == 0,
           "and a 0 count leaves the number undrawn rather than zero-confident");
@@ -513,11 +515,12 @@ void checkMirror() {
     model::stopAgentLane(ui, "reviewer");
     check(ui.agents[1].state == model::kAgentStateStopped && !ui.agents[1].active,
           "a lane the user stopped says so, and is no longer live");
-    model::applyAgentUpdate(ui, "reviewer", "assistant", "more output", "exec", 9, t0 + 120'000);
+    model::applyAgentUpdate(ui, "reviewer", "assistant", "more output", "exec", 9, 0.0,
+                            t0 + 120'000);
     check(ui.agents[1].state == model::kAgentStateStopped,
           "an update cannot un-stop a lane (the user's answer outranks the runtime's)");
     check(ui.agents[1].content.empty(), "...and it does not fold the late text in either");
-    model::applyAgentUpdate(ui, "coder", "assistant", "late", "", 0, t0 + 130'000);
+    model::applyAgentUpdate(ui, "coder", "assistant", "late", "", 0, 0.0, t0 + 130'000);
     check(ui.agents[0].state == model::kAgentStateRunning && ui.agents[0].active,
           "an update after `done` is a second turn: the lane runs again");
     model::finishAgentLane(ui, "coder");
@@ -535,24 +538,44 @@ void checkMirror() {
     // a 0 is a 0 rather than "keep the last number". `contextMax` (the producer's zero-vs-none bit)
     // stops at the ABI seam, so a 0 here covers both zeros - the row draws no number either way.
     model::UiState counted;
-    model::applyAgentUpdate(counted, "coder", "assistant", "x", "", 1500, 0);
+    model::applyAgentUpdate(counted, "coder", "assistant", "x", "", 1500, 0.0, 0);
     check(counted.agents[0].tokens == 1500, "a reading is stored as sent");
-    model::applyAgentUpdate(counted, "coder", "assistant", "still writing", "", 0, 500);
+    model::applyAgentUpdate(counted, "coder", "assistant", "still writing", "", 0, 0.0, 500);
     check(counted.agents[0].tokens == 0,
           "a 0 replaces the previous count - no latch keeps a number D stopped reporting (" +
               std::to_string(counted.agents[0].tokens) + ")");
-    model::applyAgentUpdate(counted, "coder", "assistant", "again", "", 1600, 1200);
+    model::applyAgentUpdate(counted, "coder", "assistant", "again", "", 1600, 0.0, 1200);
     check(counted.agents[0].tokens == 1600, "...and the next reading replaces it");
+
+    // The rate follows the same rules: D's own number, stored raw and never recomputed,
+    // replaced by every reading and latched by nothing.
+    model::applyAgentUpdate(counted, "coder", "assistant", "x", "", 1600, 38.1, 1300);
+    check(counted.agents[0].tokensPerSecond == 38.1,
+          "a rate is stored as D sent it (no UI-side arithmetic)");
+    model::applyAgentUpdate(counted, "coder", "assistant", "x", "", 1600, 0.0, 1400);
+    check(counted.agents[0].tokensPerSecond == 0.0,
+          "a 0 rate replaces the previous one - no latch keeps a speed D stopped reporting");
+    const double nanRate = std::numeric_limits<double>::quiet_NaN();
+    model::applyAgentUpdate(counted, "coder", "assistant", "x", "", 1600, nanRate, 1500);
+    check(counted.agents[0].tokensPerSecond == 0.0,
+          "a NaN rate is stored as 0, so no row can ever paint one");
+
+    // Finishing a lane keeps the rate it was last seen at: the row's story is how fast the
+    // work ran, not a set of numbers that vanish when the work ends.
+    model::applyAgentUpdate(counted, "coder", "assistant", "x", "", 1600, 21.5, 1600);
+    model::finishAgentLane(counted, "coder");
+    check(counted.agents[0].tokensPerSecond == 21.5, "finishing a lane keeps its last rate");
 
     // The lane list has the pipeline's capacity and its policy (design §"capacity:
     // existing MaxAgents = 16, FIFO (unchanged)"), so the tab can never list an agent the
     // v4 store has already dropped.
     model::UiState burst;
-    model::applyAgentUpdate(burst, "oldest", "assistant", "x", "", 0, 1);
+    model::applyAgentUpdate(burst, "oldest", "assistant", "x", "", 0, 0.0, 1);
     model::focusAgentLane(burst, "oldest");
     const int crowded = static_cast<int>(model::kAgentLaneMax) + 4;
     for (int i = 0; i < crowded; ++i) {
-        model::applyAgentUpdate(burst, "a" + std::to_string(i), "assistant", "x", "", 0, 1000 + i);
+        model::applyAgentUpdate(burst, "a" + std::to_string(i), "assistant", "x", "", 0, 0.0,
+                                1000 + i);
     }
     check(burst.agents.size() == model::kAgentLaneMax,
           "a lane burst is capped at MaxAgents (" + std::to_string(burst.agents.size()) + ")");
@@ -577,7 +600,7 @@ void checkMirror() {
 
     // A session switch is the same rule (the lanes describe the run of the session left).
     model::UiState other;
-    model::applyAgentUpdate(other, "coder", "assistant", "x", "", 0, t0);
+    model::applyAgentUpdate(other, "coder", "assistant", "x", "", 0, 0.0, t0);
     model::focusAgentLane(other, "coder");
     model::resetForSessionSwitch(other);
     check(other.agents.empty() && other.focusedAgent.empty(),
@@ -595,10 +618,11 @@ void checkTextIndependence() {
     // (D-STATUS: numbers are the contract, the sentence is D-10's transition aid).
     model::UiState fromSentence;
     model::applyAgentUpdate(fromSentence, "coder", "assistant",
-                            "hello\n--- Tool ---\nread_file\n```json\n{}\n```\n", "", 1234, 10);
+                            "hello\n--- Tool ---\nread_file\n```json\n{}\n```\n", "", 1234, 0.0,
+                            10);
 
     model::UiState fromPlainText;
-    model::applyAgentUpdate(fromPlainText, "coder", "assistant", "hello", "", 1234, 10);
+    model::applyAgentUpdate(fromPlainText, "coder", "assistant", "hello", "", 1234, 0.0, 10);
 
     check(fromSentence.agents[0].tokens == 1234 && fromPlainText.agents[0].tokens == 1234,
           "the count is the field, not the biggest number in the sentence");
@@ -612,19 +636,20 @@ void checkTextIndependence() {
     // drill-down's transcript and the row's `tool:` tail come from different sources, so a
     // marker-less answer cannot hide a call the agent made.
     model::UiState toolOnly;
-    model::applyAgentUpdate(toolOnly, "coder", "assistant", "no marker here", "write_file", 0, 1);
+    model::applyAgentUpdate(toolOnly, "coder", "assistant", "no marker here", "write_file", 0, 0.0,
+                            1);
     check(toolOnly.agents[0].currentTool == "write_file",
           "the tool name does not need a marker in the content to reach the row");
 
     // ...and a field that is empty clears it. A new response starts with no tool, and a name kept
     // from the previous one would claim the agent is still using it.
-    model::applyAgentUpdate(toolOnly, "coder", "assistant", "next response", "", 0, 2);
+    model::applyAgentUpdate(toolOnly, "coder", "assistant", "next response", "", 0, 0.0, 2);
     check(toolOnly.agents[0].currentTool.empty(),
           "an empty field clears the tool name (no stale name survives into the next response)");
 
     // A negative count is a sender bug, not a reading: it is stored as 0, never as a number the
     // row would have to draw.
-    model::applyAgentUpdate(toolOnly, "coder", "assistant", "x", "", -5, 3);
+    model::applyAgentUpdate(toolOnly, "coder", "assistant", "x", "", -5, 0.0, 3);
     check(toolOnly.agents[0].tokens == 0, "a negative contextUsed clamps to 0");
 }
 
@@ -635,26 +660,26 @@ void checkTextIndependence() {
 void checkSettle() {
     // A run that ended without a `done`: the lane was abandoned, so it failed.
     model::UiState ended;
-    model::applyAgentUpdate(ended, "coder", "assistant", "text", "", 0, 0);
+    model::applyAgentUpdate(ended, "coder", "assistant", "text", "", 0, 0.0, 0);
     model::settleAgentLanes(ended, /*runActive=*/false, /*cancelRequested=*/false);
     check(ended.agents[0].state == model::kAgentStateFailed && !ended.agents[0].active,
           "a lane still running when the run ended is failed");
 
     // A run the user stopped: every lane stopped with it, and a stop is not a failure.
     model::UiState cancelled;
-    model::applyAgentUpdate(cancelled, "coder", "assistant", "text", "", 0, 0);
+    model::applyAgentUpdate(cancelled, "coder", "assistant", "text", "", 0, 0.0, 0);
     model::settleAgentLanes(cancelled, /*runActive=*/false, /*cancelRequested=*/true);
     check(cancelled.agents[0].state == model::kAgentStateStopped,
           "a lane behind a stop is stopped, not failed (the user asked for it)");
 
     // A run still going: nothing settles.
     model::UiState live;
-    model::applyAgentUpdate(live, "coder", "assistant", "text", "", 0, 0);
+    model::applyAgentUpdate(live, "coder", "assistant", "text", "", 0, 0.0, 0);
     model::settleAgentLanes(live, /*runActive=*/true, /*cancelRequested=*/false);
     check(live.agents[0].state == model::kAgentStateRunning, "a live lane keeps running");
 
     // A settled lane keeps its answer through the next run.
-    model::applyAgentUpdate(ended, "planner", "assistant", "text", "", 0, 0);
+    model::applyAgentUpdate(ended, "planner", "assistant", "text", "", 0, 0.0, 0);
     model::settleAgentLanes(ended, /*runActive=*/true, /*cancelRequested=*/false);
     check(ended.agents[0].state == model::kAgentStateFailed,
           "a failed lane is never rewritten by the next run");
@@ -762,6 +787,57 @@ void checkTabRows() {
     check(parts.laneRows[1].text.rfind(std::string(ui::icon(ui::Icon::Rest)), 0) == 0,
           "the mark is the table's rest mark, in the row's first cell (" + parts.laneRows[1].text +
               ")");
+    // The focused lane's numbers are not squeezed onto its headline: they continue on the
+    // indented lines below it, so the highlighted agent gives up nothing to the column. In
+    // the 28-cell column even the clock cannot fit beside the wider focus mark, so it joins
+    // the continuations instead of vanishing.
+    check(parts.laneRows[1].text.find("4.2k tok") == std::string::npos &&
+              parts.laneRows[1].text.find("tool:") == std::string::npos,
+          "the focused headline gives its detail to the continuations (" + parts.laneRows[1].text +
+              ")");
+    check(parts.bodyRows == lanes.size() + 2 && parts.laneRows.size() == lanes.size() + 2,
+          "the focused lane's two detail lines are body rows of their own");
+    check(parts.laneRows[2].tail && parts.laneRows[2].text == "  00:31 | 4.2k tok",
+          "the first continuation carries the clock the headline dropped, then the count (\"" +
+              parts.laneRows[2].text + "\")");
+    check(parts.laneRows[3].tail && parts.laneRows[3].text == "  tool: read_file",
+          "the second continuation carries the current tool");
+    check(parts.laneRows[2].id == "coder" && parts.laneRows[3].id == "coder",
+          "the continuations belong to the lane they describe");
+    check(!parts.laneRows[4].tail && parts.laneRows[4].id == "reviewer",
+          "the lanes after the focused one keep their own rows");
+
+    // The rate joins the count on the first continuation, through the chip's formatter.
+    std::vector<model::AgentLane> rated = lanes;
+    rated[1].tokensPerSecond = 38.1;
+    frame([&](const ui::Metrics& metrics) {
+        parts = views::inspectorMeasure(focused, rated, rect, metrics);
+    });
+    check(parts.laneRows[2].text.find("4.2k tok | 38.1 tok/s") != std::string::npos,
+          "the continuation reads count and rate in one line (" + parts.laneRows[2].text + ")");
+
+    // A focused lane with nothing to continue grows no lines: the clock stays on its
+    // headline, and the list keeps one row per lane.
+    views::InspectorState quiet = openAgents();
+    quiet.focusedLane = "reviewer";
+    frame([&](const ui::Metrics& metrics) {
+        parts = views::inspectorMeasure(quiet, lanes, rect, metrics);
+    });
+    check(parts.bodyRows == lanes.size() && parts.laneRows.size() == lanes.size(),
+          "a focused lane without detail stays one row");
+    check(parts.laneRows[2].focused && !parts.laneRows[2].tail,
+          "and the focused row is still the marked headline");
+
+    // Wide enough, the clock fits on the focused headline: then the continuations carry
+    // only the numbers and the tool.
+    frame([&](const ui::Metrics& metrics) {
+        parts = views::inspectorMeasure(focused, rated, wide, metrics);
+    });
+    check(parts.laneRows[1].text.find("00:31") != std::string::npos,
+          "a wide focused headline keeps the clock (" + parts.laneRows[1].text + ")");
+    check(parts.laneRows[2].tail && parts.laneRows[2].text == "  4.2k tok | 38.1 tok/s",
+          "and the first continuation is the count with the rate (\"" + parts.laneRows[2].text +
+              "\")");
 
     // No lanes: the empty state, one row, no strip and no action row.
     frame([&](const ui::Metrics& metrics) {
@@ -786,7 +862,58 @@ void checkTabRows() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Bounded rendering: viewport + one row, however long the lane list
+// 6. The rate on the row: D's number, drawn between the count and the tool
+// ---------------------------------------------------------------------------
+
+void checkRateRows() {
+    model::ShellPrefs prefs;
+    prefs.inspectorOpen = 1;
+    const ui::Rect rect = inspectorRect(100, 30, prefs);
+    const ui::Rect wide{0.0f, 0.0f, 80.0f, 20.0f, true};
+
+    std::vector<model::AgentLane> lanes;
+    lanes.push_back(lane("coder", model::kAgentStateRunning, true, "read_file", 4200, 31'000,
+                         std::string(), 38.1));
+    lanes.push_back(lane("reviewer", model::kAgentStateQueued, false));
+
+    views::InspectorParts parts;
+    frame([&](const ui::Metrics& metrics) {
+        parts = views::inspectorMeasure(openAgents(), lanes, wide, metrics);
+    });
+    const std::string& row = parts.laneRows[0].text;
+    const std::size_t tok = row.find("4.2k tok");
+    const std::size_t rate = row.find("38.1 tok/s");
+    const std::size_t tool = row.find("tool: read_file");
+    check(tok != std::string::npos && rate != std::string::npos && tool != std::string::npos,
+          "a wide row carries the rate D sent (" + row + ")");
+    check(tok < rate && rate < tool, "...between the token count and the current tool");
+    check(parts.laneRows[1].text.find("tok/s") == std::string::npos,
+          "a lane with no reading shows no rate (0.0 is no number, not a speed of zero)");
+
+    // A done lane keeps the rate it ran at...
+    std::vector<model::AgentLane> finished;
+    finished.push_back(lane("planner", model::kAgentStateDone, false, std::string(), 1200, 12'000,
+                            std::string(), 21.5));
+    frame([&](const ui::Metrics& metrics) {
+        parts = views::inspectorMeasure(openAgents(), finished, wide, metrics);
+    });
+    check(parts.laneRows[0].text.find("21.5 tok/s") != std::string::npos,
+          "a finished lane keeps the rate it ran at (" + parts.laneRows[0].text + ")");
+
+    // ...and a corrupt value paints no rate at all - not `nan`, not a dash.
+    std::vector<model::AgentLane> corrupt;
+    corrupt.push_back(lane("coder", model::kAgentStateRunning, true, std::string(), 4200, 31'000,
+                           std::string(), std::numeric_limits<double>::quiet_NaN()));
+    frame([&](const ui::Metrics& metrics) {
+        parts = views::inspectorMeasure(openAgents(), corrupt, wide, metrics);
+    });
+    check(parts.laneRows[0].text.find("nan") == std::string::npos &&
+              parts.laneRows[0].text.find("tok/s") == std::string::npos,
+          "a corrupt rate paints nothing (neither `nan` nor the missing-value dash)");
+}
+
+// ---------------------------------------------------------------------------
+// 7. Bounded rendering: viewport + one row, however long the lane list
 // ---------------------------------------------------------------------------
 
 void checkBounded() {
@@ -810,7 +937,7 @@ void checkBounded() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. The interaction: drill down, lane menu, stop one, stop all
+// 8. The interaction: drill down, lane menu, stop one, stop all
 // ---------------------------------------------------------------------------
 
 void checkInteraction() {
@@ -836,6 +963,10 @@ void checkInteraction() {
     // --- the lane menu: right click on the row, and its `Stop lane` --------
     tui::TuiState menu = pipelineState();
     menu.ui.prefs.inspectorOpen = 1;
+    // A warm-up frame: the previous block's click leaves the shared ImGui context holding
+    // the lane row as its active id, and the block's first frame renders under that leftover
+    // (the goldens frame twice for the same reason).
+    shellFrame(menu, w, h);
     shellFrameGrid(menu, w, h, grid);
     check(grid.find("coder |", rowX, rowY), "premise: the running lane's row is on screen");
     rightClickAt(menu, w, h, static_cast<float>(rowX), static_cast<float>(rowY));
@@ -1012,7 +1143,7 @@ void checkInteraction() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. The drill-down: the thread is that agent's transcript, and back is back
+// 9. The drill-down: the thread is that agent's transcript, and back is back
 // ---------------------------------------------------------------------------
 
 /// A state with one stored message (the main transcript) and one lane with its own text.
@@ -1084,7 +1215,7 @@ void checkDrilldown() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. The rail and the inspector, standing at the same time
+// 10. The rail and the inspector, standing at the same time
 // ---------------------------------------------------------------------------
 
 void checkRailAndInspector() {
@@ -1276,6 +1407,7 @@ int main(int argc, char** argv) {
     checkTextIndependence();
     checkSettle();
     checkTabRows();
+    checkRateRows();
     checkBounded();
     checkInteraction();
     checkDrilldown();

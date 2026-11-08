@@ -471,9 +471,7 @@ Tuple!(long, "turnStart", long, "turnEnd") turnRangeOf(const(Chat.MessageT)[] ms
 // (non-empty content), and ToolMessages carrying taskDoneAnswer
 // (isFinalAnswer). Harness control traffic (userQuery:false nudges) is
 // excluded. VisionMessage is not classified and appears in neither
-// projection. Entries are returned whole, keeping their typed TurnIDs. Note:
-// isUserQuery() checks save_data["user"] key presence, not its value, so a
-// hand-edited {"user": false} entry would still classify as a user query.
+// projection. Entries are returned whole, keeping their typed TurnIDs.
 //
 // A merged compression summary (an assistant Message with non-empty content)
 // classifies as dialogue here - excluding such entries (and turnId == 0
@@ -520,14 +518,23 @@ private void stampEntry(ref Chat.MessageT entry, long id) @safe nothrow {
             (ref VisionMessage m) => m.turnId = id);
 }
 
-// True only for user-query Messages whose save_data["user"] is the JSON
-// boolean true. The value check (not just key presence) keeps a legacy
-// {"user": false} from opening a spurious turn.
+bool isUserQuerySaveData(const JSONValue saveData) @safe pure nothrow {
+    if (saveData.type != JSONType.object)
+        return false;
+    try {
+        if (auto e = "user" in saveData) {
+            return e !is null && e.type == JSONType.true_;
+        }
+    } catch (Exception e) {
+    }
+    return false;
+}
+
+// Turn-boundary use of the same test: a legacy {"user": false} entry must
+// not open a spurious turn on load.
 private bool isUserQueryEntry(const Chat.MessageT entry) @safe nothrow {
     bool result = false;
-    entry.match!((Message m) {
-        result = getValue!bool(m.saveData, (v) => v["user"].boolean, false);
-    }, (_) {});
+    entry.match!((Message m) { result = m.isUserQuery; }, (_) {});
     return result;
 }
 
@@ -724,13 +731,7 @@ struct Message {
     }
 
     bool isUserQuery() @safe pure const nothrow {
-        if (saveData.type != JSONType.object)
-            return false;
-        try {
-            return ("user" in saveData) !is null;
-        } catch (Exception e) {
-        }
-        return false;
+        return isUserQuerySaveData(saveData);
     }
 
     // toJson - REST API: does NOT include thinking (no change needed)
@@ -1559,6 +1560,30 @@ unittest {
     assert(turnIdOf(msgs[3]) == 1); // {"user": true}: opens turn 1
     assert(turnIdOf(msgs[4]) == 1);
     assert(chat.currentTurnId() == 1);
+
+    // The strict flag test: the false-flagged entry is harness traffic in the
+    // dialogue projection too, not only at the turn boundary.
+    assert(!dialogueOf(chat.getMessages)
+            .canFind!(e => e.match!((Message m) => m.content == "nudge", (_) => false)));
+    assert(dialogueOf(chat.getMessages)
+            .canFind!(e => e.match!((Message m) => m.content == "real", (_) => false)));
+}
+
+@("isUserQuery is the strict flag test: only save_data {\"user\": true}")
+unittest {
+    assert(Message(Role.user, userQuery: true, content: "q", thinking: null).isUserQuery);
+    assert(!Message(Role.user, userQuery: false, content: "n", thinking: null).isUserQuery);
+    assert(!Message(Role.assistant, userQuery: false, content: "a", thinking: null).isUserQuery);
+
+    // A hand-edited or legacy false flag is not a query.
+    auto lie = Message(Role.user, userQuery: false, content: "n", thinking: null);
+    lie.saveData = parseJSON(`{"user": false}`);
+    assert(!lie.isUserQuery);
+
+    // Nor a truthy value of the wrong JSON type.
+    auto coerce = Message(Role.user, userQuery: false, content: "n", thinking: null);
+    coerce.saveData = parseJSON(`{"user": "true"}`);
+    assert(!coerce.isUserQuery);
 }
 
 @("vision message round-tripped through fromUser keeps turn_id")

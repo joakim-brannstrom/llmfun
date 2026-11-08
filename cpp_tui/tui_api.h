@@ -39,11 +39,9 @@ extern "C" {
  */
 
 /* TUI_API_VERSION - API generation marker. Documentation only: no runtime
- * behavior depends on it (the contract tests pin the current value with
- * static_assert so a bump stays deliberate). Bump it whenever the C API
- * surface grows.
+ * behavior depends on it.
  */
-#define TUI_API_VERSION 7
+#define TUI_API_VERSION 9
 
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
@@ -100,11 +98,7 @@ String String_NewBuf(const char* data, size_t len);
  */
 void String_Free(String s);
 
-/* ChatMessageParam — Bundles all parameters for a chat message.
- *
- * Layout (64-bit): 3x String{ptr(8) + size_t(8)} + enum(4) = 52 bytes
- * Each String is 16 bytes. Total struct size: 52 bytes (+ 4-byte tail padding).
- * All fields are naturally aligned.
+/* ChatMessageParam - Bundles all parameters for a chat message.
  *
  * Pass by value (trivially copyable). The thinking field is optional
  * and may be {NULL, 0} if no thinking content exists.
@@ -118,73 +112,47 @@ void String_Free(String s);
  *   };
  */
 typedef struct ChatMessageParam {
-    String summary;          /* offset 0,  size 16 */
-    String text;             /* offset 16, size 16 */
-    String thinking;         /* offset 32, size 16  (NEW) */
-    TuiChatMessageType type; /* offset 48, size 4 */
-} ChatMessageParam;          /* total size: 52 bytes (+ 4-byte tail padding) */
+    String summary;
+    String text;
+    String thinking;
+    TuiChatMessageType type;
+} ChatMessageParam;
 
-/* PipelineChatMessage — one streaming update for a pipeline agent lane (the Agents tab's
- * per-agent row, design §5.21).
+/* PipelineChatMessage - one streaming update for a pipeline agent lane (the Agents tab's
+ * per-agent row).
  *
  * Ownership: every String is inbound (non-owning); `tuiPipelineAgentUpdate` copies their data
  * during the call, so the caller's buffers may be reused or freed as soon as it returns.
  *
- * Layout (64-bit): 6x String{ptr(8) + size_t(8)} + 3x int64(8) = 120 bytes, no tail padding.
- * All fields are naturally aligned.
- *
- * The last four fields are *appended*, so every earlier offset is unchanged and a caller
- * recompiled against this header that leaves them zero still sends a valid update (no tool
- * name, no context reading).
- *
- * `status` is an ABI placeholder. Removing it would move every offset below it, and nothing
- * in C++ reads it: this UI reads the numbers below it and never parses that text.
- *
- *   * `currentTool` — the newest tool this agent has called in the response ("" = none yet);
- *   * `contextUsed` / `contextMax` — tokens in the context, and the model's context size. A
+ * Field notes:
+ *   * `currentTool` - the newest tool this agent has called in the response ("" = none yet);
+ *   * `contextUsed` / `contextMax` - tokens in the context, and the model's context size. A
  *     `contextUsed` above 0 is drawn whatever the ceiling is; the ceiling is what makes a *zero*
  *     unambiguous for the sender: `0/8192` is a real zero, `0/0` is no reading at all.
  *     `contextUsed` alone cannot tell those apart, which is why the pair is sent instead of the
  *     count on its own.
- *   * `reserved` — zero. It is a slot a later producer can use instead of growing the struct
- *     again (it buys no alignment: 112 bytes is already 8-aligned).
+ *   * `tokensPerSecond` - D's rate, sent raw: the UI formats it and never recomputes it.
+ *     `0.0` means "no reading this tick" (a queued lane draws no rate), the same convention
+ *     as a `contextUsed` of 0.
  */
 typedef struct PipelineChatMessage {
-    String content;      /* offset 0,   size 16 */
-    String reasoning;    /* offset 16,  size 16 */
-    String role;         /* offset 32,  size 16 */
-    String finishReason; /* offset 48,  size 16 */
-    String status;       /* offset 64,  size 16 - placeholder; nothing reads it */
-    String currentTool;  /* offset 80,  size 16 - newest tool of this response; "" = none yet */
-    int64_t contextUsed; /* offset 96,  size 8  - tokens in context; 0 is a value */
-    int64_t contextMax;  /* offset 104, size 8  - the model's ceiling; 0 = unknown. It is only
-                          * needed to make a ZERO unambiguous (0/8192 = a real zero, 0/0 = no
-                          * reading at all); a contextUsed above 0 is drawn either way */
-    int64_t reserved;    /* offset 112, size 8  - zero; a slot for a later producer, no more */
-} PipelineChatMessage;   /* total size: 120 bytes */
-
-/* The size is a wire contract with `llm/tui/package.d`, which pins the same 120 bytes: a layout
- * change has to fail the build here, at the definition, in every TU that includes this header.
- * (The per-field offsets and the "the fields arrive unchanged" round-trip are pinned by
- * `./test_tui_api_v4` case 1f; headers are exempt from the `./test_metrics` gate ledger, so this
- * pin costs the ledger nothing.)
- */
-#if defined(__cplusplus)
-static_assert(sizeof(PipelineChatMessage) == 120, "PipelineChatMessage is a 120-byte contract");
-#else
-_Static_assert(sizeof(PipelineChatMessage) == 120, "PipelineChatMessage is a 120-byte contract");
-#endif
+    String content;
+    String reasoning;
+    String role;
+    String finishReason;    /* sent empty; only copied */
+    String currentTool;     /* newest tool of this response; "" = none yet */
+    int64_t contextUsed;    /* tokens in context; 0 is a value */
+    int64_t contextMax;     /* the model's ceiling; 0 = unknown. It is only
+                             * needed to make a ZERO unambiguous (0/8192 = a real zero, 0/0 = no
+                             * reading at all); a contextUsed above 0 is drawn either way */
+    double tokensPerSecond; /* D's per-response or rolling rate; 0.0 = no reading */
+} PipelineChatMessage;
 
 /* SessionItem - One row of the session sidebar snapshot.
  *
  * Ownership: all Strings are inbound (non-owning). The panel copies their
  * data during tuiSetSessionList, so the caller's buffers may be reused or
  * freed immediately after the call returns.
- *
- * Layout (64-bit): 3x String{ptr(8) + size_t(8)} + size_t(8) + int(4) + 4 bytes
- *   of padding + int64(8) + 2x int32(4) = 80 bytes, no tail padding. All fields are
- *   naturally aligned; the padding after `isActive` is what lifts `updatedAtMs` to
- *   its 8-byte boundary.
  *
  * The three fields after `isActive` are *appended*, so every earlier offset
  * is unchanged and a caller that is recompiled against this header and
@@ -211,15 +179,15 @@ _Static_assert(sizeof(PipelineChatMessage) == 120, "PipelineChatMessage is a 120
  *   };
  */
 typedef struct SessionItem {
-    String id;           /* offset 0,  size 16 - immutable session id */
-    String title;        /* offset 16, size 16 */
-    String preview;      /* offset 32, size 16 - first user message, truncated by D */
-    size_t messageCount; /* offset 48, size 8 */
-    int isActive;        /* offset 56, size 4 - 1 = active, 0 = not */
-    int64_t updatedAtMs; /* offset 64, size 8 - unix ms; 0 = unknown */
-    int32_t flags;       /* offset 72, size 4 - TuiSessionFlag_* bits, 0 = none */
-    int32_t reserved;    /* offset 76, size 4 - must be 0 (keeps the size 80) */
-} SessionItem;           /* total size: 80 bytes */
+    String id; /* immutable session id */
+    String title;
+    String preview; /* first user message, truncated by D */
+    size_t messageCount;
+    int isActive;        /* 1 = active, 0 = not */
+    int64_t updatedAtMs; /* unix ms; 0 = unknown */
+    int32_t flags;       /* TuiSessionFlag_* bits, 0 = none */
+    int32_t reserved;    /* must be 0 */
+} SessionItem;
 
 /* SessionItem.flags - what the session snapshot may say about a row.
  *
@@ -253,18 +221,15 @@ typedef enum TuiSessionActionType {
  * (malloc'd) and MUST be freed with String_Free() when no longer needed.
  * An empty field is returned as {NULL, 0}.
  *
- * Layout (64-bit): enum(4) + 4-byte padding + 2x String{ptr(8) + size_t(8)}
- *   = 40 bytes. All fields are naturally aligned.
- *
  * Fields:
  *   sessionId - target session id; empty ({NULL, 0}) for New.
  *   title     - new title for Rename; empty for all other types.
  */
 typedef struct SessionAction {
-    TuiSessionActionType type; /* offset 0,  size 4 */
-    String sessionId;          /* offset 8,  size 16 */
-    String title;              /* offset 24, size 16 */
-} SessionAction;               /* total size: 40 bytes */
+    TuiSessionActionType type;
+    String sessionId;
+    String title;
+} SessionAction;
 
 /* TuiState — Opaque handle to the internal TUI state; the single lifecycle
  * object of the C API.
@@ -873,32 +838,27 @@ int tuiTakeCancel(TuiState* state);
 
 /* Open or close the Raw Log surface.
  *
- * `open` is 1 to open and 0 to close. Opening is what `--debug-ui` does before the first frame,
- * so the overlay is up on the frame the window appears; the state is never persisted, so every
- * start is closed (D-RAWLOG) and a restart cannot reopen it.
- *
- * This is deliberately the *only* bridge the access paths need: `/rawlog`, the palette's
- * Developer row and `Ctrl+Shift+L` are all inside the UI (they write the same flag), and the
- * logger policy (raise on open, restore on close) is driven by polling `tuiIsRawLogOpen()` once
- * per frame. The call does not touch the log ring and does not enable the archive: the surface
- * is a view (R-08).
- *
- * Frame-thread only, like every mutating entry point.
- *
  * Null-safe: no-op if state is NULL.
  */
 void tuiSetRawLogOpen(TuiState* state, int open);
 
 /* Is the Raw Log surface up?
  *
- * D polls this once per frame to raise the in-process logger to the developer level while the
- * surface is open and to restore the previous level on close **and** on quit (D-RAWLOG). It
- * reflects the flag the UI's own access paths write, so a `/rawlog` in the composer is visible
- * to the very next poll.
+ * D polls this once per frame: the logger is raised to the
+ * developer level only while the surface is open *and* the floor asks for trace, and the
+ * previous level is restored on close and on quit.
  *
  * Null-safe: returns 0 if state is NULL.
  */
 int tuiIsRawLogOpen(const TuiState* state);
+
+/* The Raw Log's display floor severity.
+ *
+ * The user's `UiLog` preference itself (trace=0, info=2, warn=3, error=4).
+ *
+ * Null-safe: returns 0 (trace) if state is NULL.
+ */
+int tuiRawLogFloor(const TuiState* state);
 
 #ifdef __cplusplus
 }

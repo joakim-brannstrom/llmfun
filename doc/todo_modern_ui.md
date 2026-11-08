@@ -1062,7 +1062,9 @@ compact at 117,964 (90%)
 - Click a lane → the thread filters to that agent's transcript (read-only), with a
   `Back to main` breadcrumb. This replaces the mutually-exclusive pipeline panel.
 - Stop one agent / stop all (with confirm) in the lane menu.
-- TUI: one row per agent; the active lane is marked `▸`; the strip fits in one row.
+- TUI: the focused lane is marked `▸` and its detail continues on indented lines below it
+  (clock, tokens, rate, current tool) instead of being squeezed onto one row; the other
+  lanes stay one row and drop what does not fit.
 
 ### 5.22 Palette
 

@@ -1,11 +1,9 @@
-/// The Raw Log's model (model/rawlog_data.h owns the contract).
+/// The Raw Log's model.
 ///
 /// Everything here is pure or file-shaped: the row text, the filter, the save path and the one
 /// write. No renderer, no aggregate, no colour - which is what lets `./test_rawlog` prove the
 /// surface's content and its privacy rule with no screen and no application state.
 #include "model/rawlog_data.h"
-
-#include "model/settings.h" // kRawLogOff..kRawLogTrace: the `UiLog` preference rawLogFloor() maps
 
 #include <cerrno>
 #include <cstdint>
@@ -244,25 +242,6 @@ std::vector<std::string> rawLogDetailLines(const RawLogRecord& record) {
         lines.push_back(action);
     }
     return lines;
-}
-
-int rawLogFloor(int uiLogPref) {
-    // The two constant families are deliberately separate and read alike: `prefs.rawLog` is the
-    // `UiLog` word's number (settings.h: off/raw/debug/trace = 0..3) and `kRawLogLevel*` is a
-    // *severity* (the C ABI's 0..4). The names differ only by the `Level` infix; a merge of the
-    // two would make `UiLog=debug` mean "severity 2 = info" and silently widen nothing.
-    switch (uiLogPref) {
-    case kRawLogDebug:
-        return kRawLogLevelDebug;
-    case kRawLogTrace:
-        return kRawLogLevelTrace;
-    case kRawLogOff:
-    case kRawLogRaw:
-        break;
-    }
-    // `off` and an unknown value share the ordinary floor: a preference this build cannot read
-    // must not widen what the developer surface shows.
-    return kRawLogLevelInfo;
 }
 
 bool rawLogShowsLevel(int level, int minLevel) {

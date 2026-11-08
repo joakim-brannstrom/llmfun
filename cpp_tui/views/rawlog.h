@@ -1,5 +1,4 @@
-/// The Raw Log surface (`views/rawlog.cpp`): the opt-in developer stream (design §4.9, FR-16,
-/// D-RAWLOG, task 33).
+/// The Raw Log surface (`views/rawlog.cpp`): the opt-in developer stream.
 ///
 ///     ┌ Raw Log ──────────────────── follow  x 43/5000 ┐   the title row: the surface's name,
 ///     │ Filter: [ llm.agent________ ]   12 match       │   its two mode chips and the counts
@@ -15,35 +14,27 @@
 /// Two shapes, one body. The TUI draws it as a full-screen modal overlay (`Esc` closes, its
 /// plain keys are read from the character queue); the pixel profile draws it as a bottom drawer
 /// that the layout reserves between the thread and the composer, so it can never cover the
-/// composer (design §4.9, `ui/layout.cpp`). Everything below the title row is the same code,
-/// which is why the two profiles cannot disagree about a row's content.
+/// composer. Everything below the title row is the same code, which is why the two profiles
+/// cannot disagree about a row's content.
 ///
-/// What this file does *not* do:
-///   * it does not read the aggregate, the display size or the profile flag - the surface is a
-///     geometry taker, like every other view (D-METRICS);
-///   * it does not own the open state: `UiState::rawLogOpen` is the frame's, never persisted
-///     (D-RAWLOG), and the frame derives `RawLogState::open` from it each frame;
-///   * it does not own the ring: it draws `model::RawLogRing`, a borrowed view of the one raw
-///     store (R-08, task 32);
-///   * it writes no colour or glyph literal (D-THEME): inks come from `ui::color()`, marks from
-///     `ui/icons.h`.
+/// Like every view, the surface is a geometry taker: it reads no display size and no profile
+/// flag beyond the metrics it was handed, and it writes no colour or glyph literal. It does not
+/// own the open state (`UiState::rawLogOpen` is the frame's, never persisted; the frame derives
+/// `RawLogState::open` from it each frame) and it does not own the ring: it draws
+/// `model::RawLogRing`, a borrowed view of the one raw store.
 ///
-/// Keyboard (design §4.9 + plan/key_gate.md §10):
+/// Keyboard:
 ///
 ///     f     follow the newest record again
 ///     p     pause/resume the follower
 ///     /     focus the filter field
 ///     y     copy the rows this window shows
-///     Esc   close (the frame's step, `closeTopOverlay()`)
+///     Esc   close (the frame's step)
 ///
-/// No `Ctrl+Shift+L` row is claimed here: the terminal delivers it as `Ctrl+L` and cannot tell
-/// the two apart (plan/key_gate.md §3/§4), so the *chord* is the keymap's business
-/// (`Action::ToggleRawLog`, delivered in the pixel profile) while the grid reaches the same
-/// surface through `/rawlog`, the palette's Developer row and `--debug-ui`.
-///
-/// Layering: `model/rawlog_data.h` (the record and the ring view), `model/settings.h` and `ui/` -
-/// no `tui.h`, no v4 type. That is what lets `./test_rawlog` draw the surface into a cell grid with
-/// no application state.
+/// The chord people reach for (`Ctrl+Shift+L`) is not a shortcut here: the terminal delivers it
+/// as `Ctrl+L` and cannot tell the two apart, so the chord belongs to the keymap
+/// (`Action::ToggleRawLog`, pixel profile) while the grid reaches the surface through `/rawlog`,
+/// the palette's Developer row and `--debug-ui`.
 #pragma once
 
 #include <array>
@@ -103,13 +94,15 @@ inline constexpr char kRawLogCloseLabel[] = "Close";
 /// list). One join, drawn whole or dropped whole - a hint cut mid-word advertises nothing.
 inline constexpr char kRawLogHints[] = "f follow  p pause  / filter  y copy  Esc close";
 /// The save notice: the path `Save` wrote, and the reason it could not. Both are one line and
-/// the frame publishes the same string as a feedback item (design §4.9: "reports the path in the
-/// now bar"), so the two surfaces cannot print different answers.
+/// the frame publishes the same string as a feedback item, so the two surfaces cannot print
+/// different answers.
 inline constexpr char kRawLogSavedPrefix[] = "Saved to ";
 inline constexpr char kRawLogSaveFailedPrefix[] = "Save failed: ";
-/// What `Copy` answers: the rows that reached the clipboard (task 45). The surface knows both the
+/// What `Copy` answers: the rows that reached the clipboard. The surface knows both the
 /// payload and the count, so it is the one place that can say it.
 inline constexpr char kRawLogCopiedPrefix[] = "Copied ";
+/// The openability marker: one ASCII glyph in dim ink.
+inline constexpr char kRawLogOpenableGlyph[] = "+";
 /// The drawer's grip label: one word, right-aligned on the grip row (a control the user cannot
 /// see is a control they will not find).
 inline constexpr char kRawLogResizeLabel[] = "resize";
@@ -157,9 +150,7 @@ struct RawLogState {
     bool paused = false;
     /// The ring's dropped-record counter (the row the surface draws when it advances).
     std::size_t dropped = 0;
-    /// The smallest severity the surface shows, from `UiLog` (`model::rawLogFloor()`): the
-    /// frame derives it, so a preference change reaches the surface without the view reading a
-    /// preference.
+    /// The smallest severity the surface shows
     int minLevel = model::kRawLogLevelInfo;
 
     // --- the filter field --------------------------------------------------

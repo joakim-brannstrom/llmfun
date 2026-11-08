@@ -733,10 +733,10 @@ void applySettingsAnswers(TuiState& state) {
 ///     shape decides what the surface may claim: only the overlay is modal, only the overlay
 ///     takes `Esc`;
 ///   * *the two view modes* - follow (pointer-owned) and pause;
-///   * *the level floor* - `ShellPrefs::rawLog` names the level the surface starts at. `off` is
-///     the shipped default: the surface is closed on every start and shows what a normal run
-///     logs; `debug`/`trace` widen the floor to the developer records the borrowed logger
-///     level brings in.
+///   * *the level floor* - `ShellPrefs::rawLog` IS the severity the surface shows records at
+///     (`info` the shipped default and the ordinary floor, `trace` widened to the developer
+///     records the borrowed logger level brings in, `warn`/`error` narrowed). The surface's
+///     open state is separate from the floor.
 ///
 /// The ring itself is not touched here: the frame hands the view a borrowed view of the one
 /// store (`rawLogRing()`), which is what keeps R-08 true.
@@ -746,7 +746,7 @@ void deriveRawLog(TuiState& state, const ui::Metrics& m) {
     raw.overlayShape = raw.open && m.textGrid;
     raw.follow = state.ui.rawLogFollow;
     raw.paused = state.ui.rawLogPaused;
-    raw.minLevel = model::rawLogFloor(state.ui.prefs.rawLog);
+    raw.minLevel = state.ui.prefs.rawLog;
 }
 
 /// The ring, as the surface reads it: a borrowed view of the one raw store plus its dropped

@@ -90,7 +90,7 @@ Every session file is a JSON object:
 
 - `messageCount` — total entries in `messages`
 - `userMessageCount` — entries with `role == "user"`
-- `preview` — content of the first user message that has non-empty string content, truncated to 25 characters (`PreviewMaxChars`)
+- `preview` — content of the latest real user query, truncated to 25 characters (`PreviewMaxChars`). A real query is a `role == "user"` entry whose `save_data["user"]` is the JSON boolean `true`, the stamp the chat layer writes for every real user query. Harness nudges (user-role entries without the stamp) are counted in `userMessageCount` but never become the preview. When several real queries qualify, the latest one with non-empty string content wins.
 
 Unknown header keys are preserved in `SessionMeta.extra` and merged back into the file on every save. Future per-session settings (model, temperature, …) can be added without any format migration.
 

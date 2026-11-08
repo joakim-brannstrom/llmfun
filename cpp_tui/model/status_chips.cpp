@@ -26,8 +26,7 @@ std::size_t formatFixed1(double value, char* buffer, std::size_t size) {
 /// 0 → "0", 1234 → "1.2k", 42000 → "42k", 128000 → "128k".
 ///
 /// The chips' own copy of the count format, so a number reads the same
-/// wherever the UI shows it. The helper lives here, beside the values it
-/// formats.
+/// wherever the UI shows it.
 std::string formatCount(std::int64_t value) {
     if (value > -1000 && value < 1000)
         return std::to_string(value);
@@ -42,8 +41,12 @@ std::string formatCount(std::int64_t value) {
     return text + "k";
 }
 
+} // namespace
+
 /// "38.1 tok/s": one decimal and the suffix, one formatter so a chip can never
-/// disagree with itself about rounding.
+/// disagree with itself about rounding. Public so the lane rows in the agents
+/// tab draw their rate through the same formatter as the chip - one rounding
+/// decision, one place (`views/inspector.cpp`).
 std::string formatRate(double value) {
     char text[40];
     const std::size_t length = formatFixed1(value, text, sizeof(text) - (sizeof(" tok/s") - 1));
@@ -53,8 +56,6 @@ std::string formatRate(double value) {
     out += " tok/s";
     return out;
 }
-
-} // namespace
 
 // The phase vocabulary
 
