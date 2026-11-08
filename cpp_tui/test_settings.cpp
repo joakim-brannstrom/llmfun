@@ -1,41 +1,46 @@
 // test_settings.cpp
 //
-// Standalone unit test for the GUI view settings helpers (tui_settings.h):
-// imgui2.gui.conf path derivation, per-key load with strict parsing, clamping
-// and fallbacks, and the save-side guards.
+// Standalone unit test for the merged settings file (model/ui_conf.cpp): the
+// `ui.conf` path derivation, the exact on-disk v2 bytes, per-key load with
+// strict parsing, clamping and fallbacks, and the save-side guards.
 //
-// Compiles the helper TU directly and links only the standard library (no
-// GLFW, no ImGui, no display; tui_settings.cpp includes no imgui.h/tui.h).
-// No test framework: CHECK(cond) prints each check and sets a fail flag;
-// exits 0 if every check passes.
+// Compiles model/ui_conf.cpp directly and links only the standard library (no
+// GLFW, no ImGui, no display). No test framework: CHECK(cond) prints each check
+// and sets a fail flag; exits 0 if every check passes.
 //
 // Covers:
-//   - settingsPath: "imgui2.ini" -> "imgui2.gui.conf"; "imgui2" ->
-//     "imgui2.gui.conf"; "" -> ""; ".ini" replaced only as a trailing suffix
-//     (exact case) - the ".gui." keeps the file away from ShellPrefs' `ui.conf`
+//   - uiConfPath: "imgui2.ini" -> "ui.conf"; "a/b/imgui2.ini" -> "a/b/ui.conf";
+//     "" -> "" and nothing touched
 //   - missing file -> load leaves the struct at its values (defaults)
 //   - empty iniFilename: load/save no-ops, no file touched
-//   - roundtrip and the exact on-disk bytes
-//   - save omits WindowWidth/WindowHeight when 0 ("no persisted size")
-//   - per-key fallbacks: unknown keys and lines without '=' skipped;
-//     malformed/out-of-range values keep the current value; clamping
+//   - roundtrip of all eight keys, the exact on-disk v2 byte block, and the
+//     0-vs-omitted sentinel (the writer omits WindowWidth/WindowHeight 0)
+//   - per-key parse: unknown keys and lines without '=' skipped; malformed
+//     values keep the current value; word keys read case-insensitively, number
+//     keys clamp into range, in-range font scales quantize to the 5 % grid
 //   - save-side guards: empty path, unwritable path
-//   - drag-end-style save with the raw ini filename lands in "<name>.gui.conf",
-//     never "<name>.gui.conf.conf"
 //
-// Run headless from the repo root (scratch files land in the CWD):
+// Run headless from the build dir (scratch files land under
+// ./test_settings_scratch):
 //   ./build/tui/test_settings
 
 #include <array>
 #include <cstdio>
 #include <string>
 
-#include "tui_settings.h"
+#include <sys/stat.h>
 
-using llmfun::tui::loadTuiSettings;
-using llmfun::tui::saveTuiSettings;
-using llmfun::tui::settingsPath;
-using llmfun::tui::TuiSettings;
+#include "model/settings.h"
+
+using llmfun::tui::model::InspectorTab;
+using llmfun::tui::model::kRawLogOff;
+using llmfun::tui::model::kRawLogTrace;
+using llmfun::tui::model::loadUiConf;
+using llmfun::tui::model::saveUiConf;
+using llmfun::tui::model::SendKey;
+using llmfun::tui::model::ShellPrefs;
+using llmfun::tui::model::uiConfPath;
+using llmfun::tui::model::uiConfText;
 
 static int g_failures = 0;
 
@@ -50,25 +55,31 @@ static int g_failures = 0;
 
 namespace {
 
-const char* kIniName = "test_settings.ini";
-const char* kPath = "test_settings.gui.conf";
+const std::string kScratch = "test_settings_scratch";
 
-void writeText(const std::string& text) {
-    std::FILE* f = std::fopen(kPath, "wb");
+std::string iniOf(const std::string& dir) { return dir + "/imgui2.ini"; }
+std::string confOf(const std::string& dir) { return dir + "/ui.conf"; }
+
+void removeFile(const std::string& path) { std::remove(path.c_str()); }
+
+void writeText(const std::string& path, const std::string& text) {
+    std::FILE* f = std::fopen(path.c_str(), "wb");
     if (f == nullptr || std::fwrite(text.data(), 1, text.size(), f) != text.size()) {
-        std::printf("FAIL cannot write scratch file %s\n", kPath);
+        std::printf("FAIL cannot write scratch file %s\n", path.c_str());
         ++g_failures;
+        if (f != nullptr)
+            std::fclose(f);
         return;
     }
     std::fclose(f);
 }
 
-std::string readText() {
-    std::FILE* f = std::fopen(kPath, "rb");
+std::string readText(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr)
         return "<open failed>";
     std::string out;
-    std::array<char, 128> buf{};
+    std::array<char, 256> buf{};
     size_t n = 0;
     while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0)
         out.append(buf.data(), n);
@@ -76,133 +87,202 @@ std::string readText() {
     return out;
 }
 
-bool fileExists(const char* path) {
-    std::FILE* f = std::fopen(path, "rb");
+bool fileExists(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr)
         return false;
     std::fclose(f);
     return true;
 }
 
+/// A case directory of its own: `ui.conf` has a fixed name, and the debounce
+/// state is keyed by path - one directory per case is one clean file and one
+/// clean debounce window (and rerunning the binary is idempotent).
+std::string caseDir(const char* name) {
+    const std::string dir = kScratch + "/" + name;
+    ::mkdir(kScratch.c_str(), 0755);
+    ::mkdir(dir.c_str(), 0755);
+    std::remove((dir + "/ui.conf.tmp").c_str());
+    removeFile(confOf(dir));
+    return dir;
+}
+
 } // namespace
 
 int main() {
-    // settingsPath: trailing ".ini" (exact case) -> ".gui.conf", else append
-    CHECK(settingsPath("imgui2.ini") == "imgui2.gui.conf");
-    CHECK(settingsPath("imgui2") == "imgui2.gui.conf");
-    CHECK(settingsPath("") == "");
-    CHECK(settingsPath("a/b/imgui2.ini") == "a/b/imgui2.gui.conf");
-    // ".ini" only counts at the end: a name ending elsewhere keeps it and
-    // appends; the suffix match is case-sensitive.
-    CHECK(settingsPath("imgui2.ini.old") == "imgui2.ini.old.gui.conf");
-    CHECK(settingsPath("imgui2.INI") == "imgui2.INI.gui.conf");
+    // Scratch hygiene: a leftover ui.conf from an earlier run would make the
+    // "missing file" cases read it instead, so every case starts clean.
 
-    // missing file: the struct keeps its values
-    std::remove(kPath);
+    // The merged struct: one ShellPrefs carries the view keys with 0 = "no
+    // persisted size" and scale 1.0 as the defaults.
     {
-        TuiSettings s; // defaults: 1.0 / 0 / 0
-        loadTuiSettings(s, kIniName);
-        CHECK(s.fontScaleMain == 1.0f && s.windowWidth == 0 && s.windowHeight == 0);
-    }
-    {
-        TuiSettings s;
-        s.fontScaleMain = 1.5f;
-        s.windowWidth = 800;
-        s.windowHeight = 600;
-        loadTuiSettings(s, kIniName); // missing file is a no-op
-        CHECK(s.fontScaleMain == 1.5f && s.windowWidth == 800 && s.windowHeight == 600);
+        const ShellPrefs prefs{};
+        CHECK(prefs.windowWidth == 0);
+        CHECK(prefs.windowHeight == 0);
+        CHECK(prefs.fontScaleMain == 1.0f);
+        CHECK(prefs.sendKey == SendKey::Tab);
+        CHECK(prefs.railOpen == -1);
+        CHECK(prefs.inspectorOpen == -1);
     }
 
-    // empty iniFilename: load/save no-ops, no file created
+    // uiConfPath: the file named "ui.conf" beside the ini file; no name, no path.
+    CHECK(uiConfPath("imgui2.ini") == "ui.conf");
+    CHECK(uiConfPath("a/b/imgui2.ini") == "a/b/ui.conf");
+    CHECK(uiConfPath("imgui2") == "ui.conf");
+    CHECK(uiConfPath("") == "");
+
     {
-        TuiSettings s;
-        s.fontScaleMain = 2.0f;
-        s.windowWidth = 640;
-        s.windowHeight = 480;
-        loadTuiSettings(s, ""); // nothing to read, values untouched
-        CHECK(s.fontScaleMain == 2.0f && s.windowWidth == 640 && s.windowHeight == 480);
-    }
-    // A save with an empty name must not clobber the previously stored file.
-    writeText("WindowWidth=1024\n");
-    {
-        TuiSettings s; // 0/0/1.0: an unconditional save would rewrite the file
-        saveTuiSettings(s, "");
-        CHECK(readText() == "WindowWidth=1024\n");
+        const std::string dir = caseDir("missing");
+        const std::string ini = iniOf(dir);
+        // missing file: the struct keeps its values
+        {
+            ShellPrefs s; // defaults
+            loadUiConf(s, ini);
+            CHECK(s.fontScaleMain == 1.0f && s.windowWidth == 0 && s.windowHeight == 0);
+        }
+        {
+            ShellPrefs s;
+            s.fontScaleMain = 1.5f;
+            s.windowWidth = 800;
+            s.windowHeight = 600;
+            loadUiConf(s, ini); // missing file is a no-op
+            CHECK(s.fontScaleMain == 1.5f && s.windowWidth == 800 && s.windowHeight == 600);
+        }
     }
 
-    // roundtrip and the exact on-disk bytes
-    std::remove(kPath);
     {
-        TuiSettings s;
+        const std::string dir = caseDir("emptyname");
+        const std::string ini = iniOf(dir);
+        writeText(confOf(dir), "Version=1\nSendKey=enter\n");
+        // empty iniFilename: load/save no-ops, the file is not touched
+        {
+            ShellPrefs s;
+            s.fontScaleMain = 2.0f;
+            s.windowWidth = 640;
+            s.windowHeight = 480;
+            loadUiConf(s, ""); // nothing to read, values untouched
+            CHECK(s.fontScaleMain == 2.0f && s.windowWidth == 640 && s.windowHeight == 480);
+            saveUiConf(s, ""); // no name -> no path, nothing written
+            CHECK(readText(confOf(dir)) == "Version=1\nSendKey=enter\n");
+        }
+    }
+
+    // roundtrip: all eight keys and the exact on-disk v2 bytes
+    {
+        const std::string dir = caseDir("roundtrip");
+        const std::string ini = iniOf(dir);
+        const std::string conf = confOf(dir);
+        ShellPrefs s;
+        s.sendKey = SendKey::Enter;
+        s.rawLog = kRawLogTrace;
+        s.railOpen = 1;
+        s.inspectorOpen = 0;
+        s.tab = InspectorTab::Activity;
         s.windowWidth = 1024;
         s.windowHeight = 768;
         s.fontScaleMain = 1.25f;
-        saveTuiSettings(s, kIniName);
-        CHECK(fileExists(kPath));
-        CHECK(readText() == "WindowWidth=1024\nWindowHeight=768\nFontScaleMain=1.25\n");
-        TuiSettings loaded;
-        loadTuiSettings(loaded, kIniName);
-        CHECK(loaded.windowWidth == 1024 && loaded.windowHeight == 768 &&
-              loaded.fontScaleMain == 1.25f);
+        saveUiConf(s, ini);
+        CHECK(fileExists(conf));
+        CHECK(readText(conf) == "Version=2\n"
+                                "SendKey=enter\n"
+                                "UiLog=trace\n"
+                                "RailOpen=1\n"
+                                "InspectorOpen=0\n"
+                                "InspectorTab=activity\n"
+                                "WindowWidth=1024\n"
+                                "WindowHeight=768\n"
+                                "FontScaleMain=1.25\n");
+        ShellPrefs loaded;
+        loadUiConf(loaded, ini);
+        CHECK(loaded.sendKey == SendKey::Enter && loaded.rawLog == kRawLogTrace &&
+              loaded.railOpen == 1 && loaded.inspectorOpen == 0 &&
+              loaded.tab == InspectorTab::Activity && loaded.windowWidth == 1024 &&
+              loaded.windowHeight == 768 && loaded.fontScaleMain == 1.25f);
+        CHECK(uiConfText(loaded) == uiConfText(s));
     }
 
-    // save writes WindowWidth/WindowHeight only when > 0
-    std::remove(kPath);
+    // the writer omits WindowWidth/WindowHeight 0 ("not persisted")
     {
-        TuiSettings s; // 0 = "no persisted size"
-        saveTuiSettings(s, kIniName);
-        CHECK(readText() == "FontScaleMain=1.00\n");
+        const std::string dir = caseDir("nosize");
+        const std::string ini = iniOf(dir);
+        ShellPrefs s; // 0 = "no persisted size"
+        saveUiConf(s, ini);
+        CHECK(readText(confOf(dir)) ==
+              "Version=2\nSendKey=tab\nUiLog=off\nRailOpen=auto\nInspectorOpen=auto\n"
+              "InspectorTab=activity\nFontScaleMain=1.00\n");
+        // ... and the load keeps them at the sentinel (never a clamped 1)
+        ShellPrefs loaded;
+        loadUiConf(loaded, ini);
+        CHECK(loaded.windowWidth == 0 && loaded.windowHeight == 0);
     }
 
     // per-key parse: unknown keys and non-"Key=Value" lines skipped
-    writeText("WindowWidth=1024\nUnknownKey=5\ngarbage without an equals sign\n"
-              "WindowHeight=768\nFontScaleMain=1.5\n");
     {
-        TuiSettings s; // defaults
-        loadTuiSettings(s, kIniName);
+        const std::string dir = caseDir("unknown");
+        const std::string ini = iniOf(dir);
+        writeText(confOf(dir), "WindowWidth=1024\nUnknownKey=5\ngarbage without an equals sign\n"
+                               "WindowHeight=768\nFontScaleMain=1.5\n");
+        ShellPrefs s; // defaults
+        loadUiConf(s, ini);
         CHECK(s.windowWidth == 1024 && s.windowHeight == 768 && s.fontScaleMain == 1.5f);
     }
 
     // file without a trailing newline: the final line is still parsed
-    writeText("WindowWidth=5"); // no '\n'
     {
-        TuiSettings s;
-        loadTuiSettings(s, kIniName);
+        const std::string dir = caseDir("nonewline");
+        const std::string ini = iniOf(dir);
+        writeText(confOf(dir), "WindowWidth=5"); // no '\n'
+        ShellPrefs s;
+        loadUiConf(s, ini);
         CHECK(s.windowWidth == 5);
     }
 
     // malformed values keep the current value
-    writeText("WindowWidth=abc\nWindowHeight=12x\nFontScaleMain=abc\n");
     {
-        TuiSettings s;
+        const std::string dir = caseDir("malformed");
+        const std::string ini = iniOf(dir);
+        writeText(confOf(dir), "WindowWidth=abc\nWindowHeight=12x\nFontScaleMain=abc\n");
+        ShellPrefs s;
         s.windowWidth = 640;
         s.windowHeight = 480;
         s.fontScaleMain = 1.5f;
-        loadTuiSettings(s, kIniName);
+        loadUiConf(s, ini);
         CHECK(s.windowWidth == 640 && s.windowHeight == 480 && s.fontScaleMain == 1.5f);
     }
-    // Empty value, ERANGE and trailing garbage all reject.
-    writeText("WindowWidth=\nWindowHeight=99999999999999999999\n"
-              "FontScaleMain=1.5 nope\n");
+    // Empty value and trailing garbage reject. A magnitude too big for `long`
+    // is different: `parseWholeNumber` clamps it, and the value then lands on
+    // the range's ceiling (clamping, not rejection).
     {
-        TuiSettings s;
+        const std::string dir = caseDir("malformed2");
+        const std::string ini = iniOf(dir);
+        writeText(confOf(dir),
+                  "WindowWidth=\nWindowHeight=99999999999999999999\nFontScaleMain=1.5 nope\n");
+        ShellPrefs s;
         s.windowWidth = 640;
         s.windowHeight = 480;
         s.fontScaleMain = 1.5f;
-        loadTuiSettings(s, kIniName);
-        CHECK(s.windowWidth == 640 && s.windowHeight == 480 && s.fontScaleMain == 1.5f);
+        loadUiConf(s, ini);
+        CHECK(s.windowWidth == 640 && s.windowHeight == 32767 && s.fontScaleMain == 1.5f);
     }
     // Keys are matched case-sensitively, and key text is not trimmed: leading
-    // whitespace and whitespace around '=' make the line an unknown key.
-    writeText("windowwidth=999\n WindowWidth=999\nWindowWidth =999\nwindowscalemain=2.0\n");
+    // whitespace and whitespace around '=' make the line an unknown key. Word
+    // *values*, in contrast, have no case to get wrong.
     {
-        TuiSettings s;
-        loadTuiSettings(s, kIniName);
-        CHECK(s.windowWidth == 0 && s.fontScaleMain == 1.0f);
+        const std::string dir = caseDir("keycase");
+        const std::string ini = iniOf(dir);
+        writeText(confOf(dir),
+                  "windowwidth=999\n WindowWidth=999\nWindowWidth =999\nSendKey=ENTER\n");
+        ShellPrefs s;
+        loadUiConf(s, ini);
+        CHECK(s.windowWidth == 0 && s.windowHeight == 0);
+        CHECK(s.sendKey == SendKey::Enter);
     }
 
-    // window-size clamping into [1, 32767]
+    // window-size clamping into [1, 32767]; a hand-edited 0 is a request, not
+    // the writer's "not persisted" sentinel
     {
+        const std::string dir = caseDir("clamp");
+        const std::string ini = iniOf(dir);
         struct ClampCase {
             const char* text;
             int width;
@@ -217,9 +297,9 @@ int main() {
             {"WindowWidth=1\nWindowHeight=32767\n", 1, 32767},
         }};
         for (const ClampCase& c : cases) {
-            writeText(c.text);
-            TuiSettings s;
-            loadTuiSettings(s, kIniName);
+            writeText(confOf(dir), c.text);
+            ShellPrefs s;
+            loadUiConf(s, ini);
             const bool ok = s.windowWidth == c.width && s.windowHeight == c.height;
             CHECK(ok);
             if (!ok)
@@ -228,33 +308,51 @@ int main() {
         }
     }
 
-    // font scale: in-range values accepted, the rest fall back
+    // font scale: in-range values quantize to the 5 % grid, the rest fall back
     {
-        const std::array<float, 5> accepted = {0.5f, 1.0f, 1.25f, 2.0f, 3.0f};
-        for (float want : accepted) {
-            std::array<char, 64> text{};
-            std::snprintf(text.data(), text.size(), "FontScaleMain=%.4f\n", want);
-            writeText(text.data());
-            TuiSettings s;
-            loadTuiSettings(s, kIniName);
-            const bool ok = s.fontScaleMain == want;
+        const std::string dir = caseDir("scale");
+        const std::string ini = iniOf(dir);
+        struct ScaleCase {
+            const char* text;
+            float want;
+        };
+        // 1.23 is off the grid on purpose: the load answers the value the UI
+        // can actually draw (pinned here so it stays deliberate).
+        const std::array<ScaleCase, 9> cases = {{
+            {"FontScaleMain=0.5\n", 0.5f},
+            {"FontScaleMain=1\n", 1.0f},
+            {"FontScaleMain=1.25\n", 1.25f},
+            {"FontScaleMain=2.0\n", 2.0f},
+            {"FontScaleMain=3\n", 3.0f},
+            {"FontScaleMain=1.23\n", 1.25f},
+            {"FontScaleMain=nan\n", 1.0f},
+            {"FontScaleMain=1e40\n", 1.0f},
+            {"FontScaleMain=4\n", 1.0f},
+        }};
+        for (const ScaleCase& c : cases) {
+            writeText(confOf(dir), c.text);
+            ShellPrefs s;
+            loadUiConf(s, ini);
+            const bool ok = s.fontScaleMain == c.want;
             CHECK(ok);
             if (!ok)
-                std::printf("  (content \"%s\" -> %.4f)\n", text.data(), s.fontScaleMain);
+                std::printf("  (content \"%s\" -> %.4f, want %.4f)\n", c.text, s.fontScaleMain,
+                            c.want);
         }
     }
+    // A value the parser rejects keeps the current one (0, 0.4 and -inf are
+    // outside the range; "1.5x" is malformed).
     {
-        // NaN, inf, 1e40 (overflow to inf), 0, 0.4 and 4.0 all fall back to
-        // the current value.
-        const std::array<const char*, 7> rejected = {"FontScaleMain=nan\n",  "FontScaleMain=inf\n",
-                                                     "FontScaleMain=-inf\n", "FontScaleMain=1e40\n",
-                                                     "FontScaleMain=0\n",    "FontScaleMain=0.4\n",
-                                                     "FontScaleMain=4\n"};
+        const std::string dir = caseDir("scale-reject");
+        const std::string ini = iniOf(dir);
+        const std::array<const char*, 4> rejected = {"FontScaleMain=0\n", "FontScaleMain=0.4\n",
+                                                     "FontScaleMain=-inf\n",
+                                                     "FontScaleMain=1.5x\n"};
         for (const char* text : rejected) {
-            writeText(text);
-            TuiSettings s;
+            writeText(confOf(dir), text);
+            ShellPrefs s;
             s.fontScaleMain = 1.5f;
-            loadTuiSettings(s, kIniName);
+            loadUiConf(s, ini);
             const bool ok = s.fontScaleMain == 1.5f;
             CHECK(ok);
             if (!ok)
@@ -262,28 +360,20 @@ int main() {
         }
     }
 
-    // save-side guards
-    CHECK(settingsPath("").empty()); // no name -> no path, nothing written
-    // Unwritable path: kPath is a file, so kPath + "/x" cannot be created;
-    // the failure is silent (void return, nothing logs).
-    saveTuiSettings(TuiSettings{}, std::string(kPath) + "/x");
-
-    // drag-end-style save: the raw ini filename is passed.
-    // The save derives the .gui.conf path itself (pre-deriving it and saving again
-    // would append a second .gui.conf, producing a stray "<name>.gui.conf.gui.conf").
-    std::remove(kPath);
-    const std::string stray = std::string(kPath) + ".gui.conf"; // the double-derived name
-    std::remove(stray.c_str());
+    // Unwritable path: "blocked" is a file where a directory would be needed,
+    // so confOf + "/ui.conf" cannot be created; the failure is reported through
+    // the one warning channel, not silently.
     {
-        TuiSettings s;
-        s.fontScaleMain = 2.0f;
-        saveTuiSettings(s, kIniName); // raw name, as renderOptionsWindow passes it
-        CHECK(fileExists(kPath));
-        CHECK(readText() == "FontScaleMain=2.00\n");
-        CHECK(!fileExists(stray.c_str()));
+        const std::string dir = caseDir("unwritable");
+        const std::string blocked = dir + "/blocked";
+        writeText(blocked, "not a directory\n");
+        ShellPrefs s;
+        saveUiConf(s, blocked + "/imgui2.ini");
+        std::string warning;
+        CHECK(llmfun::tui::model::takeUiConfWarning(warning));
+        CHECK(warning.find("cannot write") != std::string::npos);
     }
 
-    std::remove(kPath);
     if (g_failures == 0) {
         std::printf("all checks passed\n");
         return 0;

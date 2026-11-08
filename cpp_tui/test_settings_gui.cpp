@@ -12,8 +12,8 @@
 //     boxes the view computed - a clip that ate the values would pass a box-only check;
 //   - the text scale is the one setting whose effect the grid cannot show: changing it reaches the
 //     next frame's `ImGuiStyle::FontScaleMain` and the next frame's metrics (`row` grows), and the
-//     commit is written to `imgui2.gui.conf` once - the file the window's whole
-//     settings state lives in, unchanged.
+//     commit is persisted through the frame's `ui.conf` write debounce - the file the window's
+//     whole settings state lives in, unchanged.
 //
 // The GUI half of "a golden screen in both backends" is this binary: the pixel sheet's type sizes,
 // its search field's frame height and its placement only exist under the real GLFW/OpenGL3 backend
@@ -41,6 +41,7 @@
 #include "ui/metrics.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -167,23 +168,26 @@ int main(int argc, char** argv) {
     state.sessionPanel.activeId = "s1";
 
     // The profile the backend loads: a fixed window and 100 % text, so the capture is 1280x820.
-    llmfun::tui::TuiSettings view;
+    // The workbench loads `ui.conf` once in `tuiInit`; the harness
+    // stands in for it: seed through the model's writer and read the result.
+    llmfun::tui::model::ShellPrefs view;
     view.fontScaleMain = 1.0f;
     view.windowWidth = 1280;
     view.windowHeight = 820;
-    const std::string ini = outDir + "/settings-gui.conf";
-    llmfun::tui::saveTuiSettings(view, ini);
-    std::remove(ini.c_str());
+    const std::string ini = outDir + "/settings-ui.ini";
+    std::remove(llmfun::tui::model::uiConfPath(ini).c_str()); // a stale profile
+    llmfun::tui::model::saveUiConf(view, ini);
+    llmfun::tui::model::loadUiConf(state.ui.prefs, ini);
 
     std::string error;
-    state.backend = llmfun::tui::makeGuiBackend(ini, state.settings);
+    state.backend = llmfun::tui::makeGuiBackend(state.ui.prefs);
     if (state.backend == nullptr || !state.backend->init(error)) {
         std::fprintf(stderr, "GUI backend init failed (no display?): %s\n", error.c_str());
         ImGui::DestroyContext();
         return 2;
     }
-    // The profile name the *frame* layer uses for its own writes (`saveTuiSettings` on a commit,
-    // `ui.conf` beside it): the backend knows its ini file, the state has to be told.
+    // The profile name the *frame* layer uses for its own writes (the debounced `ui.conf`
+    // flush): the backend knows its ini file, the state has to be told.
     state.iniFilename = ini;
     llmfun::tui::initMarkdownGuiMode(state);
     llmfun::tui::applyUiTheme();
@@ -255,12 +259,13 @@ int main(int argc, char** argv) {
     check(footerInk > 20,
           "the note and hint rows are drawn (" + std::to_string(footerInk) + " ink pixels)");
 
-    // The text scale: the sheet's one setting the grid cannot show, and the only one whose commit
-    // writes a *second* file. This drives the view's own path - a key press on the selected row -
-    // rather than assigning the value: the row's `activate()` and the frame's `saveTuiSettings()`
-    // are what "the font scale round-trips" actually has to hold for.
+    // The text scale: the sheet's one setting the grid cannot show. This drives the view's own
+    // path - a key press on the selected row - rather than assigning the value: the row's
+    // `activate()` and the struct it edits are what "the font scale round-trips" actually has
+    // to hold for. The commit writes no file itself: the frame's write debounce
+    // (`kUiConfIdleSeconds`, 2 s) persists it the next time the user stops changing things.
     const float rowBefore = ui::metricsFor().row;
-    const std::string confPath = llmfun::tui::settingsPath(ini);
+    const std::string confPath = model::uiConfPath(ini);
     std::remove(confPath.c_str());
     check(state.settingsSheet.selected == 1, "the cursor starts on the text-scale row");
     // The keyboard has to be in the list before `Enter` edits a row; `./test_settings_sheet` drives
@@ -270,14 +275,27 @@ int main(int argc, char** argv) {
     state.settingsSheet.searchFocused = false;
     state.settingsSheet.searchFocus = false;
     frameOnce(false, ""); // the deactivation takes effect at this frame's NewFrame
-    const float scaleBefore = state.settings.fontScaleMain;
+    const float scaleBefore = state.ui.prefs.fontScaleMain;
     frameOnce(false, "", [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Enter, true); });
     frameOnce(false, "", [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Enter, false); });
-    check(std::fabs(state.settings.fontScaleMain - (scaleBefore + 0.05f)) < 0.001f,
+    check(std::fabs(state.ui.prefs.fontScaleMain - (scaleBefore + 0.05f)) < 0.001f,
           "Enter steps the text scale by one 5 % step (got " +
-              std::to_string(state.settings.fontScaleMain) + ")");
+              std::to_string(state.ui.prefs.fontScaleMain) + ")");
+    check(readWhole(confPath).empty(),
+          "the commit itself writes nothing: the frame's debounce owns the file");
+    // Idle frames until the debounced flush lands - the window is 2 s of real
+    // frame deltas, so bound the wait by the wall clock instead of a frame
+    // count. The bound is generous: a loaded desktop can stretch a frame far
+    // past the debounce itself, and a too-tight deadline reads as a debounce
+    // bug that is really scheduling noise.
+    bool flushed = false;
+    const auto flushDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!flushed && std::chrono::steady_clock::now() < flushDeadline) {
+        frameOnce(false, "");
+        flushed = !readWhole(confPath).empty();
+    }
+    check(flushed, "the debounced flush writes ui.conf once the user stops");
     const std::string conf = readWhole(confPath);
-    check(!conf.empty(), "the commit wrote imgui2.gui.conf");
     check(conf.find("FontScaleMain=1.05") != std::string::npos,
           "with the scale the sheet committed (got '" + conf + "')");
     check(!state.settingsSheet.fontScaleChanged, "and the answer was consumed once");

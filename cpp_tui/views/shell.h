@@ -218,23 +218,12 @@ bool railOwnsEscape(const TuiState& state);
 /// frame's next pass draws the notice. Cleared by the next tab selection or toggle.
 void pressReservedDigit(TuiState& state);
 
-/// Read `ui.conf` once for this profile and keep it up to date (D-UI-CONF).
-///
-/// The first call reads the profile (`model::loadUiConf`, before any view can change a
-/// preference) and sets `loaded`; every call after it offers the debounced write: the profile's
-/// text is rebuilt (a hundred-odd bytes, no I/O) and compared, so a settled preference costs one
-/// string build and a changed one reaches the disk once the user stops
-/// (`kUiConfIdleSeconds`), never per frame. An empty `iniFilename` is "no profile" and does
-/// nothing - which is what every harness that does not set one gets.
-///
-/// `loaded` is the caller's latch (a `TuiState` member) so the read happens on the frame the
-/// frame layer first runs and not on every one.
-void uiConfFrame(model::UiState& ui, bool& loaded, const std::string& iniFilename,
-                 double nowSeconds);
+/// Offer the debounced `ui.conf` write for this frame.
+void uiConfFrame(model::UiState& ui, const std::string& iniFilename, double nowSeconds);
 
-/// The quit path's save: the debounce window may not have elapsed, and a user who quits two
-/// seconds after a change must still find it next time. It carries a change and nothing else -
-/// a quit that changed no preference leaves the file's bytes alone (`model::saveUiConf`).
-void uiConfQuit(const model::UiState& ui, const std::string& iniFilename);
+/// The quit path's save: the debounce window may not have elapsed, and a user
+/// who quits two seconds after a change must still find it next time
+void uiConfQuit(const model::UiState& ui, const std::string& iniFilename,
+                bool windowResized = false);
 
 } // namespace llmfun::tui::views

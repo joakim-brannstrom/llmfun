@@ -481,8 +481,7 @@ void tuiSetMaxWidth(TuiState* state, int maxWidth);
  */
 void tuiSetIdlePark(TuiState* state, int parkMs);
 
-/* Set the file imgui persists its settings to (io.IniFilename); the GUI
-    backend stores the window size in settingsPath(filename).
+/* Set the file imgui persists its settings to (io.IniFilename)
     Call this BEFORE `tuiInit`: the name is captured when tuiInit creates the
     ImGui context, and a later call has no effect. NULL or an empty filename
     disables persistence (imgui's "$cwd/imgui.ini" default is not used).

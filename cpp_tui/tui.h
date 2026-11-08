@@ -327,11 +327,6 @@ struct TuiState {
     /// time; 16 ms is the ~30 fps design cap (24 fps under llvmpipe).
     std::chrono::milliseconds idlePark{16};
 
-    /// The workbench's `ui.conf` was read for this state (D-UI-CONF): the frame layer's
-    /// one-shot latch, because the read happens on the first frame - the first moment the state
-    /// knows its profile name - and the debounced write runs on every frame after it.
-    bool uiConfLoaded{false};
-
     /// How many log records this state has ever accepted.
     ///
     /// Not the same number as `lastStampedSeq` below, this is the *arrival* counter, while
@@ -341,7 +336,6 @@ struct TuiState {
     std::unique_ptr<Backend> backend;
     ImGuiContext* ownedContext = nullptr;
 
-    TuiSettings settings;
     /// Options window open (View -> Options); guards stacking duplicates.
     bool optionsOpen = false;
     /// Options window: content extent measured after the last text widget in
@@ -492,11 +486,10 @@ struct TuiState {
     views::RawLogState rawLog;
 
     /// The settings sheet's state (views/settings.h, task 34). Named `settingsSheet` and not
-    /// `settings`: `TuiState::settings` is the `TuiSettings` of `imgui2.gui.conf` (the font scale
-    /// and the window size), and the sheet *edits* that struct through `renderSettings()` - one
-    /// name for the surface and one for the value keeps the two apart. The open flag lives here
-    /// rather than on `UiState`: it is a mode of this process, never a preference, and `ui.conf`
-    /// has no key for it.
+    /// `settings`: the sheet *edits* the one preferences owner (`state.ui.prefs`, the struct
+    /// `ui.conf` persists) through `renderSettings()` - one name for the surface and one for the
+    /// value keeps the two apart. The open flag lives here rather than on `UiState`: it is a mode
+    /// of this process, never a preference, and `ui.conf` has no key for it.
     views::SettingsState settingsSheet;
 
     /// The help page's state (views/help.h, task 42): its query, its derived rows and the scroll
@@ -703,18 +696,16 @@ void debugMarkFrameThread(TuiState& state);
 /// the loop from another thread without tripping the debug assertion).
 void tuiResetFrameThread(TuiState& state);
 
-/// Set the file imgui persists its settings to (io.IniFilename); the GUI
-/// backend stores the window size in settingsPath(filename).
-/// Call this before the backend attach creates the ImGui context (`tuiInit`
-/// in the v4 C API flow), which captures the name; a later call has no
-/// effect. Empty disables persistence.
+/// Set the file imgui persists its settings to (io.IniFilename).
 void tuiSetIniFilename(TuiState& state, const std::string& filename);
 
-/// The close path's `ui.conf` save (D-UI-CONF, task 29), called by `tuiDestroyState()`: a GUI
+/// The close path's `ui.conf` save, called by `tuiDestroyState()`: a GUI
 /// window closed with its X ends the D loop through `shouldClose()` and never sets
-/// `quitRequested`, so the quit path's save does not run for it. Workbench-only, and a no-op
+/// `quitRequested`, so the quit path's save does not run for it. It runs after the
+/// backend's shutdown has written the closing window size into the struct, so the save
+/// persists the geometry the window actually closed with. Workbench-only, and a no-op
 /// without a profile or without a change; the quit path may have saved the same bytes already.
-void saveUiConfOnShutdown(TuiState& state);
+void saveUiConfOnShutdown(TuiState& state, bool windowResized);
 
 void tuiInitQueryHistory(TuiState& state, const std::vector<std::string>& history);
 

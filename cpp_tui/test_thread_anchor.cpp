@@ -118,14 +118,19 @@ int main(int argc, char** argv) {
     state.readyStatus = true;
 
     const std::string iniPath = outDir + "/thread-anchor.ini";
-    llmfun::tui::TuiSettings view;
+    // The profile the workbench loads in `tuiInit`; this harness stands in
+    // for it: seed the merged `ui.conf` through the model's writer and read it into the
+    // one preferences struct the backend and the frame both share.
+    llmfun::tui::model::ShellPrefs view;
     view.fontScaleMain = 1.0f;
     view.windowWidth = 1280;
     view.windowHeight = 820;
-    llmfun::tui::saveTuiSettings(view, iniPath);
+    std::remove(llmfun::tui::model::uiConfPath(iniPath).c_str()); // a stale profile
+    llmfun::tui::model::saveUiConf(view, iniPath);
+    llmfun::tui::model::loadUiConf(state.ui.prefs, iniPath);
 
     std::string error;
-    state.backend = llmfun::tui::makeGuiBackend(iniPath, state.settings);
+    state.backend = llmfun::tui::makeGuiBackend(state.ui.prefs);
     if (!state.backend->init(error)) {
         std::fprintf(stderr, "GUI backend init failed (no display?): %s\n", error.c_str());
         ImGui::DestroyContext();

@@ -7,7 +7,7 @@
 #include <memory>
 #include <string>
 
-#include "tui_settings.h"
+#include "model/settings.h"
 
 namespace llmfun::tui {
 
@@ -89,6 +89,10 @@ struct Backend {
         (void)geometry;
         return false;
     }
+
+    /// true when the surface's size at shutdown differs from the size the
+    /// backend was granted at open.
+    virtual bool windowResizedSinceOpen() const { return false; }
 };
 
 /// A sink for the window title: what a pixel backend installs when it creates its window.
@@ -130,10 +134,6 @@ const std::string& lastWindowTitle();
 
 std::unique_ptr<Backend> makeNcursesBackend();
 std::unique_ptr<Backend> makeNullBackend();
-/// `iniFilename` is the imgui settings file (io.IniFilename); `settings` is the
-/// non-owning view-settings record: loaded from settingsPath(iniFilename)
-/// before the window, saved (with the final window size) at shutdown. Empty
-/// iniFilename disables persistence.
-std::unique_ptr<Backend> makeGuiBackend(const std::string& iniFilename, TuiSettings& settings);
+std::unique_ptr<Backend> makeGuiBackend(model::ShellPrefs& settings);
 
 } // namespace llmfun::tui

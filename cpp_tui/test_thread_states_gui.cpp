@@ -113,19 +113,22 @@ int main(int argc, char** argv) {
     llmfun::tui::TuiState state;
     ImGui::GetIO().IniFilename = nullptr;
 
-    // The window size is what the pixel-profile golden is taken at (D-GOLDEN:
-    // 1280x820). It comes from the GUI settings file, so write one into the
-    // output directory and let the backend load it; nothing is persisted
-    // anywhere else and the shipped settings are never touched.
+    // The window size is what the pixel-profile golden is taken at (1280x820). The
+    // workbench loads `ui.conf` in `tuiInit`; this harness stands in for it: seed the
+    // merged file through the model's writer and read it into the one preferences
+    // struct the backend sizes the window from. Nothing is persisted anywhere else
+    // and the shipped settings are never touched.
     const std::string iniPath = outDir + "/gui-golden.ini";
-    llmfun::tui::TuiSettings view;
+    llmfun::tui::model::ShellPrefs view;
     view.fontScaleMain = 1.0f;
     view.windowWidth = 1280;
     view.windowHeight = 820;
-    llmfun::tui::saveTuiSettings(view, iniPath);
+    std::remove(llmfun::tui::model::uiConfPath(iniPath).c_str()); // a stale profile
+    llmfun::tui::model::saveUiConf(view, iniPath);
+    llmfun::tui::model::loadUiConf(state.ui.prefs, iniPath);
 
     std::string error;
-    auto backend = llmfun::tui::makeGuiBackend(iniPath, state.settings);
+    auto backend = llmfun::tui::makeGuiBackend(state.ui.prefs);
     if (!backend->init(error)) {
         std::fprintf(stderr, "GUI backend init failed (no display?): %s\n", error.c_str());
         ImGui::DestroyContext();
@@ -362,10 +365,10 @@ int main(int argc, char** argv) {
     state.backend.reset();
     ImGui::DestroyContext();
     // The settings file the backend loaded the golden's window size from is
-    // scratch: shutdown() has just rewritten it with the final window size, so
-    // it is removed here and only the captures remain.
+    // scratch: the case is over, so it is removed here and only the captures
+    // remain.
     std::remove(iniPath.c_str());
-    std::remove(llmfun::tui::settingsPath(iniPath).c_str());
+    std::remove(llmfun::tui::model::uiConfPath(iniPath).c_str());
     std::printf("OK: five GUI captures (four thread states + the block restyle) written to %s\n",
                 outDir.c_str());
 }

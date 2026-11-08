@@ -21,8 +21,8 @@
 //   5. the frame wiring. The top bar's `Settings` entry opens it, `Esc` closes it as one step of
 //      one press, the z-order is palette > settings > Raw Log, and the rectangle comes from
 //      `ui::computeShell()` (inside the display, never part of the tiling);
-//   6. persistence. A behaviour value round-trips through `ui.conf` (and the window settings'
-//      `imgui2.gui.conf` round trip is `./test_settings`'s job), a value the sheet can no longer
+//   6. persistence. A behaviour value round-trips through `ui.conf` (the full-file round trip is
+//      `./test_settings`'s job), a value the sheet can no longer
 //      offer is still *shown*, and an unwritable profile produces exactly one Activity warning
 //      while the session keeps running - never one per frame;
 //   7. the copy action: the six documented fields, and no message text;
@@ -427,12 +427,10 @@ void checkSource() {
     check(!contains(cpp, "\"Settings\""), "the title is the header's string, not a literal");
     check(!contains(cpp, "\"No setting matches\""), "and so is the empty state");
     check(!contains(cpp, "\"Copy system info\""), "and the copy row's label");
-    // The sheet edits values; the *frame* owns both write paths (ui.conf's debounce,
-    // imgui2.gui.conf's save), so a view that opened a file would be a second writer nobody asked
-    // for.
-    check(!contains(cpp, "saveTuiSettings("), "the view never writes imgui2.gui.conf");
+    // The sheet edits values; the *frame* owns the one write path (ui.conf's debounce), so a view
+    // that opened a file would be a second writer nobody asked for.
     check(!contains(cpp, "saveUiConf") && !contains(cpp, "flushUiConf"),
-          "and never writes ui.conf");
+          "the view never writes ui.conf");
     check(!contains(cpp, "fopen"), "and opens no file at all");
     // The `Enter` gate is the sheet's own state: `io.WantTextInput` is process-global and a frame
     // stale, so a composer field that was active when the sheet opened would make the first press
@@ -523,15 +521,14 @@ void checkRows() {
     g_phase = "R: rows";
     tui::TuiState state = makeState();
     model::ShellPrefs prefs = state.ui.prefs;
-    tui::TuiSettings settings;
     const ui::Metrics& m = gridMetrics();
 
     views::SettingsState sheet;
-    std::vector<views::SettingsRow> rows = views::settingsRows(sheet, prefs, settings, m);
+    std::vector<views::SettingsRow> rows = views::settingsRows(sheet, prefs, m);
     // The three sections' rows plus one header each: the `ALL` section shows everything.
     const int headers = 3;
-    check(rows.size() == static_cast<std::size_t>(8 + headers),
-          "ALL lists the eight settings under three section headers (got " +
+    check(rows.size() == static_cast<std::size_t>(7 + headers),
+          "ALL lists the seven settings under three section headers (got " +
               std::to_string(rows.size()) + ")");
     check(std::strcmp(rows.front().label.c_str(), views::kSettingsSectionAppearance) == 0,
           "the list starts with the APPEARANCE header");
@@ -557,8 +554,7 @@ void checkRows() {
     // Each of the three sections on its own.
     for (int section = 1; section < views::kSettingsSectionCount; ++section) {
         sheet.section = section;
-        const std::vector<views::SettingsRow> filtered =
-            views::settingsRows(sheet, prefs, settings, m);
+        const std::vector<views::SettingsRow> filtered = views::settingsRows(sheet, prefs, m);
         check(!filtered.empty(),
               std::string("section ") + views::settingsSectionName(section) + " has rows");
         bool onlyOwn = true;
@@ -592,8 +588,7 @@ void checkRows() {
     const ui::Metrics& pixel = ui::metricsFor(/*textGrid=*/false, 1.0f, 1.0f);
     const model::SendKey storedSendKey = prefs.sendKey;
     prefs.sendKey = model::SendKey::Enter;
-    const std::vector<views::SettingsRow> pixelRows =
-        views::settingsRows(sheet, prefs, settings, pixel);
+    const std::vector<views::SettingsRow> pixelRows = views::settingsRows(sheet, prefs, pixel);
     const views::SettingsRow* pixelSendKey = findRow(pixelRows, views::kSettingsRowSendKey);
     check(pixelSendKey != nullptr && pixelSendKey->value == "enter" &&
               contains(pixelSendKey->note, "Enter sends"),
@@ -607,7 +602,7 @@ void checkRows() {
     bool offeredNothingUnproven = true;
     for (int i = 0; i < model::kSendKeyChoiceCount; ++i) {
         prefs.sendKey = model::sendKeyChoice(i);
-        const std::vector<views::SettingsRow> each = views::settingsRows(sheet, prefs, settings, m);
+        const std::vector<views::SettingsRow> each = views::settingsRows(sheet, prefs, m);
         const views::SettingsRow* row = findRow(each, views::kSettingsRowSendKey);
         check(row != nullptr && row->value == model::sendKeyWord(model::sendKeyEffective(
                                                   prefs.sendKey, m.textGrid)),
@@ -616,7 +611,7 @@ void checkRows() {
         // Activating the row cycles to an offered value: an unproven, hand-edited one
         // is *shown*, never kept - only offered values survive an activation.
         if (row != nullptr)
-            views::activate(sheet, prefs, settings, m, *row);
+            views::activate(sheet, prefs, m, *row);
         if (!model::sendKeyOffered(prefs.sendKey, m.textGrid))
             offeredNothingUnproven = false;
     }
@@ -625,7 +620,7 @@ void checkRows() {
         "no unproven send key survives an activation - the sheet cycles what the profile honours");
     // The loop left the prefs at the last cycled value; restore the shipped one.
     prefs.sendKey = model::SendKey::Tab;
-    rows = views::settingsRows(sheet, prefs, settings, m);
+    rows = views::settingsRows(sheet, prefs, m);
 
     // The Raw log level is a choice over the four words, all of which the writer can spell.
     const views::SettingsRow* rawLog = findRow(rows, views::kSettingsRowRawLog);
@@ -633,47 +628,43 @@ void checkRows() {
           "the Raw log level is a choice");
     check(rawLog != nullptr && rawLog->value == "off", "and starts at the shipped default");
     prefs.rawLog = 9; // out of range: the sheet shows the value the writer would store
-    rows = views::settingsRows(sheet, prefs, settings, m);
+    rows = views::settingsRows(sheet, prefs, m);
     rawLog = findRow(rows, views::kSettingsRowRawLog);
     check(rawLog != nullptr && rawLog->value == "trace", "an out-of-range UiLog reads as `trace`");
     prefs.rawLog = model::kRawLogOff;
 
     // The font scale is a fact on the grid and a choice in the pixel profile.
-    rows = views::settingsRows(sheet, prefs, settings, m);
+    rows = views::settingsRows(sheet, prefs, m);
     const views::SettingsRow* scale = findRow(rows, views::kSettingsRowFontScale);
     check(scale != nullptr, "the text-scale row exists");
     check(scale != nullptr && scale->kind == views::SettingsRowKind::ReadOnly,
           "on the text grid it is read-only (a cell is the terminal's size)");
     check(scale != nullptr && !scale->enabled, "and not activatable");
-    settings.fontScaleMain = 1.25f;
+    prefs.fontScaleMain = 1.25f;
     const std::vector<views::SettingsRow> guiRows =
-        views::settingsRows(sheet, prefs, settings, ui::metricsFor(false, 1.0f, 1.0f));
+        views::settingsRows(sheet, prefs, ui::metricsFor(false, 1.0f, 1.0f));
     scale = findRow(guiRows, views::kSettingsRowFontScale);
     check(scale != nullptr && scale->kind == views::SettingsRowKind::Choice,
           "in the pixel profile it is a choice");
     check(scale != nullptr && scale->value == "125 %", "showing the scale as a percentage");
-    settings.fontScaleMain = 1.0f;
+    prefs.fontScaleMain = 1.0f;
 
     // The diagnostics rows report the frame's derived facts, not a guess.
     sheet.uiConfPath = "/tmp/ui.conf";
-    sheet.iniConfPath = "/tmp/imgui2.gui.conf";
     sheet.logArchive = true;
-    rows = views::settingsRows(sheet, prefs, settings, m);
+    rows = views::settingsRows(sheet, prefs, m);
     const views::SettingsRow* uiConf = findRow(rows, views::kSettingsRowUiConf);
     check(uiConf != nullptr && uiConf->value == "/tmp/ui.conf", "the ui.conf path is drawn");
-    const views::SettingsRow* iniConf = findRow(rows, views::kSettingsRowIniConf);
-    check(iniConf != nullptr && iniConf->value == "/tmp/imgui2.gui.conf",
-          "and so is the imgui2.gui.conf path");
     const views::SettingsRow* logLevel = findRow(rows, views::kSettingsRowLogLevel);
     check(logLevel != nullptr && logLevel->value == views::kSettingsLogLevelOn,
           "an archive that is on reads `all`");
     sheet.logArchive = false;
-    rows = views::settingsRows(sheet, prefs, settings, m);
+    rows = views::settingsRows(sheet, prefs, m);
     logLevel = findRow(rows, views::kSettingsRowLogLevel);
     check(logLevel != nullptr && logLevel->value == views::kSettingsLogLevelOff,
           "and one that is off reads `off`");
     sheet.uiConfPath.clear();
-    rows = views::settingsRows(sheet, prefs, settings, m);
+    rows = views::settingsRows(sheet, prefs, m);
     uiConf = findRow(rows, views::kSettingsRowUiConf);
     check(uiConf != nullptr && uiConf->value == views::kSettingsNoProfile,
           "no profile name is said, not left blank");
@@ -681,20 +672,20 @@ void checkRows() {
     // The search: over the label and the section, never the prose.
     sheet.search.fill(0);
     std::snprintf(sheet.search.data(), sheet.search.size(), "%s", "log");
-    rows = views::settingsRows(sheet, prefs, settings, m);
+    rows = views::settingsRows(sheet, prefs, m);
     check(findRow(rows, views::kSettingsRowRawLog) != nullptr, "`log` finds the Raw log level");
     check(findRow(rows, views::kSettingsRowLogLevel) != nullptr, "and the log level");
     check(findRow(rows, views::kSettingsRowFontScale) == nullptr, "and nothing else");
     check(findRow(rows, views::kSettingsRowBackend) == nullptr, "not the backend row");
     std::snprintf(sheet.search.data(), sheet.search.size(), "%s", "ADVANCED");
-    rows = views::settingsRows(sheet, prefs, settings, m);
-    check(rows.size() == 6, "the section name matches all five ADVANCED rows (+ its header)");
+    rows = views::settingsRows(sheet, prefs, m);
+    check(rows.size() == 5, "the section name matches all four ADVANCED rows (+ its header)");
     std::snprintf(sheet.search.data(), sheet.search.size(), "%s", "RESTART");
-    rows = views::settingsRows(sheet, prefs, settings, m);
+    rows = views::settingsRows(sheet, prefs, m);
     check(rows.empty(), "a search that only matches a note matches nothing");
     std::snprintf(sheet.search.data(), sheet.search.size(), "%s", "   ");
-    rows = views::settingsRows(sheet, prefs, settings, m);
-    check(rows.size() == 11, "a blanks-only search is no search");
+    rows = views::settingsRows(sheet, prefs, m);
+    check(rows.size() == 10, "a blanks-only search is no search");
     sheet.search.fill(0);
 }
 
@@ -712,7 +703,7 @@ void checkKeys() {
     appFrame(state, w, h);
     appFrame(state, w, h);
     check(state.settingsSheet.open, "the sheet is open");
-    check(state.settingsSheet.rowsBuilt == 11, "and built its rows");
+    check(state.settingsSheet.rowsBuilt == 10, "and built its rows");
 
     // The field takes the keyboard on open (the `F` request's one-shot answer), and what is typed
     // into it filters the rows live - the field owns the characters while it holds the keyboard.
@@ -752,7 +743,7 @@ void checkKeys() {
     state.settingsSheet.search.fill('\0');
     ++state.settingsSheet.searchSeq;
     appFrame(state, w, h);
-    check(state.settingsSheet.rowsBuilt == 11, "clearing the field restores every row");
+    check(state.settingsSheet.rowsBuilt == 10, "clearing the field restores every row");
 
     // Tab walks the sections, Shift+Tab walks them back, and the cycle wraps.
     check(state.settingsSheet.section == 0, "the strip starts on ALL");
@@ -1084,7 +1075,7 @@ void checkPersistence() {
     {
         tui::TuiState state = makeState();
         state.iniFilename = ini;
-        appFrame(state, 100, 30); // the first workbench frame loads ui.conf
+        model::loadUiConf(state.ui.prefs, ini); // the one load `tuiInit` performs
         check(state.ui.prefs.sendKey == model::SendKey::None,
               "a legal SendKey line reaches the preferences");
         check(state.ui.prefs.rawLog == model::kRawLogDebug, "and so does UiLog");
@@ -1092,7 +1083,7 @@ void checkPersistence() {
         check(state.ui.prefs.tab == model::InspectorTab::Agents, "and InspectorTab loads");
 
         const std::vector<views::SettingsRow> rows =
-            views::settingsRows(state.settingsSheet, state.ui.prefs, state.settings, gridMetrics());
+            views::settingsRows(state.settingsSheet, state.ui.prefs, gridMetrics());
         const views::SettingsRow* sendKey = findRow(rows, views::kSettingsRowSendKey);
         check(sendKey != nullptr && sendKey->value == "none",
               "the sheet shows the hand-edited send key, not a silent default");
@@ -1105,6 +1096,7 @@ void checkPersistence() {
     {
         tui::TuiState state = makeState();
         state.iniFilename = ini;
+        model::loadUiConf(state.ui.prefs, ini); // the one load `tuiInit` performs
         appFrame(state, 100, 30);
         views::openSettings(state.settingsSheet);
         appFrame(state, 100, 30);
@@ -1124,6 +1116,7 @@ void checkPersistence() {
     {
         tui::TuiState restarted = makeState();
         restarted.iniFilename = ini;
+        model::loadUiConf(restarted.ui.prefs, ini); // the one load `tuiInit` performs
         appFrame(restarted, 100, 30);
         check(restarted.ui.prefs.rawLog == model::kRawLogDebug,
               "and a restarted session reads it back");
@@ -1135,6 +1128,7 @@ void checkPersistence() {
     {
         tui::TuiState state = makeState();
         state.iniFilename = ini;
+        model::loadUiConf(state.ui.prefs, ini); // the one load `tuiInit` performs
         appFrame(state, 100, 30);
         views::openSettings(state.settingsSheet);
         appFrame(state, 100, 30);
@@ -1150,12 +1144,12 @@ void checkPersistence() {
         check(!state.settingsSheet.open,
               "Esc closed the sheet - the session keeps running, the flush does not need it");
         // The debounced write: real frames stamp the change with the process clock, so the
-        // idle window is fast-forwarded from *now* - the same seam `tui.cpp:932` reads.
+        // idle window is fast-forwarded from *now* - the same seam the workbench frame reads.
         const double later =
             std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
                 .count() +
             10.0;
-        views::uiConfFrame(state.ui, state.uiConfLoaded, ini, later);
+        views::uiConfFrame(state.ui, ini, later);
         check(contains(readWhole(model::uiConfPath(ini)), "UiLog=trace"),
               "the idle window flushed trace to disk before any quit");
         views::uiConfQuit(state.ui, ini);
@@ -1167,11 +1161,12 @@ void checkPersistence() {
     {
         tui::TuiState restarted = makeState();
         restarted.iniFilename = ini;
+        model::loadUiConf(restarted.ui.prefs, ini); // the one load `tuiInit` performs
         appFrame(restarted, 100, 30);
         check(restarted.ui.prefs.rawLog == model::kRawLogTrace,
               "and a restarted session reads trace back");
-        const std::vector<views::SettingsRow> rows = views::settingsRows(
-            restarted.settingsSheet, restarted.ui.prefs, restarted.settings, gridMetrics());
+        const std::vector<views::SettingsRow> rows =
+            views::settingsRows(restarted.settingsSheet, restarted.ui.prefs, gridMetrics());
         const views::SettingsRow* rawLog = findRow(rows, views::kSettingsRowRawLog);
         check(rawLog != nullptr && rawLog->value == "trace",
               "and the restarted sheet shows the level it loaded");
@@ -1207,19 +1202,24 @@ void checkPersistence() {
         }
     }
 
-    // The font scale keeps its own file: the sheet's answer is one `saveTuiSettings` call, and the
-    // value itself is `TuiSettings` (the struct the settings file has always used, unchanged).
+    // The font scale is one ShellPrefs key like the rest: the sheet's answer is
+    // `fontScaleChanged` on the state, and the frame's debounce persists it -
+    // no save call anywhere in the view.
     {
         const std::string scaleDir = scratchDir("scale");
         const std::string scaleIni = scaleDir + "/imgui2.ini";
-        removeFile(tui::settingsPath(scaleIni));
-        tui::TuiSettings settings;
-        settings.fontScaleMain = model::stepFontScale(1.0f, 2);
-        tui::saveTuiSettings(settings, scaleIni);
-        tui::TuiSettings loaded;
-        tui::loadTuiSettings(loaded, scaleIni);
+        removeFile(model::uiConfPath(scaleIni));
+        tui::TuiState state = makeState();
+        state.iniFilename = scaleIni;
+        model::loadUiConf(state.ui.prefs, scaleIni); // the one load `tuiInit` performs
+        state.ui.prefs.fontScaleMain = model::stepFontScale(1.0f, 2);
+        views::uiConfFrame(state.ui, scaleIni, 0.1); // arms the idle window
+        check(state.ui.activity.empty(), "the change alone writes nothing yet");
+        views::uiConfFrame(state.ui, scaleIni, 10.0); // past the 2 s window: the one write
+        model::ShellPrefs loaded;
+        model::loadUiConf(loaded, scaleIni);
         check(std::fabs(loaded.fontScaleMain - 1.10f) < 0.005f,
-              "the font scale round-trips through imgui2.gui.conf");
+              "the font scale persists through ui.conf's debounce");
     }
 
     // An unwritable profile: one Activity warning, the session keeps running, no per-frame retry.
@@ -1233,13 +1233,11 @@ void checkPersistence() {
         const std::string blockedIni = blockedDir + "/blocked/imgui2.ini";
         tui::TuiState state = makeState();
         state.iniFilename = blockedIni;
-        bool loaded = false;
-        views::uiConfFrame(state.ui, loaded, blockedIni, 0.0); // reads: there is no file
-        check(loaded, "the profile was read (and found missing)");
-        state.ui.prefs.rawLog = model::kRawLogDebug; // a change the user made in the sheet
-        views::uiConfFrame(state.ui, loaded, blockedIni, 0.1); // arms the idle window
+        model::loadUiConf(state.ui.prefs, blockedIni); // the one load `tuiInit` performs: no file
+        state.ui.prefs.rawLog = model::kRawLogDebug;   // a change the user made in the sheet
+        views::uiConfFrame(state.ui, blockedIni, 0.1); // arms the idle window
         check(state.ui.activity.empty(), "a change alone writes nothing yet");
-        views::uiConfFrame(state.ui, loaded, blockedIni, 10.0); // the one attempt, which fails
+        views::uiConfFrame(state.ui, blockedIni, 10.0); // the one attempt, which fails
         check(state.ui.activity.size() == 1, "the failed write is reported once");
         if (!state.ui.activity.empty()) {
             check(state.ui.activity.back().level == model::kActivityLevelWarn,
@@ -1249,15 +1247,15 @@ void checkPersistence() {
             check(contains(state.ui.activity.back().message, "ui.conf"), "naming the file");
         }
         for (int i = 0; i < 10; ++i)
-            views::uiConfFrame(state.ui, loaded, blockedIni, 20.0 + i);
+            views::uiConfFrame(state.ui, blockedIni, 20.0 + i);
         check(state.ui.activity.size() == 1,
               "and never again for the same bytes (no per-frame retry)");
         check(state.ui.prefs.rawLog == model::kRawLogDebug,
               "while the value still applies in memory");
         // A *new* choice is a new attempt, and is reported once more - the user changed something.
         state.ui.prefs.rawLog = model::kRawLogTrace;
-        views::uiConfFrame(state.ui, loaded, blockedIni, 100.0); // arms
-        views::uiConfFrame(state.ui, loaded, blockedIni, 110.0); // attempt
+        views::uiConfFrame(state.ui, blockedIni, 100.0); // arms
+        views::uiConfFrame(state.ui, blockedIni, 110.0); // attempt
         check(state.ui.activity.size() == 2, "a later change is its own single warning");
     }
 }
@@ -1270,8 +1268,7 @@ void checkCopy() {
     g_phase = "Y: copy";
     views::SettingsState sheet;
     sheet.uiConfPath = "/home/u/.config/llmfun/ui.conf";
-    sheet.iniConfPath = "/home/u/.config/llmfun/imgui2.gui.conf";
-    sheet.versions = "tui api 5, ui.conf v1";
+    sheet.versions = "tui api 7, ui.conf v2";
     sheet.flags = "offline=0 run=1 stop=0 rawlog=0";
     sheet.displayW = 100;
     sheet.displayH = 30;
@@ -1282,7 +1279,7 @@ void checkCopy() {
     check(contains(text, "profile: text grid"), "the profile");
     check(contains(text, "generation: workbench"), "the generation");
     check(contains(text, "flags: offline=0 run=1 stop=0 rawlog=0"), "the run's flags");
-    check(contains(text, "versions: tui api 5, ui.conf v1"), "and the versions");
+    check(contains(text, "versions: tui api 7, ui.conf v2"), "and the versions");
     const std::string pixels = views::systemInfoText(sheet, ui::metricsFor(false, 1.0f, 1.0f));
     check(contains(pixels, "display: 100x30 px"), "a pixel display is labelled in pixels");
     check(contains(pixels, "profile: pixel"), "and names the pixel profile");

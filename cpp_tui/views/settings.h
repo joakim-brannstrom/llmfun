@@ -1,7 +1,7 @@
 /// The settings sheet (`views/settings.cpp`): the three settings the MVP changes plus the
 /// diagnostics paths (design §4.10, FR-17, task 34).
 ///
-///     Settings                                       ALL  8    Close      the title row
+///     Settings                                       ALL  7    Close      the title row
 ///     Search                                                             the live filter
 ///     ALL  APPEARANCE  BEHAVIOUR  ADVANCED                               the section strip
 ///     ───────────────────────────────────────────────                    a hairline
@@ -28,11 +28,9 @@
 /// suffix rule applies to a local that holds one profile's unit, not to a dual-profile view).
 ///
 /// It is the *only* settings surface (design §4.10, R-11): no hidden config keys are added, and
-/// nothing here is a second way to write a file. The two persisted groups keep their owners -
-/// the send key and the Raw Log level live in `model::ShellPrefs` (`ui.conf`, through the
-/// debounced write the frame already runs), the font scale in `TuiSettings`
-/// - so the sheet edits the values
-/// and the debounce/file path stays exactly where tasks 20/22 put it. A change applies on the
+/// nothing here is a second way to write a file. Every persisted value lives in one struct -
+/// `model::ShellPrefs`, the object `ui.conf` persists - and the sheet edits the values only: the
+/// debounced write and the file path stay in the frame layer. A change applies on the
 /// *next* frame: the layout, the metrics and every region were computed before this view ran.
 ///
 /// What it does not do:
@@ -51,7 +49,7 @@
 ///     state.
 ///
 /// Layering: `model/settings.h` (the value catalogue), `ui/` and imgui. The diagnostics strings
-/// the frame alone can know (the two settings paths, the version words, the run's flags,
+/// the frame alone can know (the settings path, the version words, the run's flags,
 /// the display size) arrive pre-formatted on `SettingsState`, so this file never reads the
 /// display, the ABI or the aggregate (D-METRICS: a view is a geometry taker).
 #pragma once
@@ -71,7 +69,6 @@ struct Rect;
 } // namespace llmfun::tui::ui
 
 namespace llmfun::tui {
-struct TuiSettings;
 struct TuiState;
 } // namespace llmfun::tui
 
@@ -138,7 +135,6 @@ inline constexpr char kSettingsRowSendKey[] = "behaviour.sendKey";
 inline constexpr char kSettingsRowRawLog[] = "behaviour.rawLog";
 inline constexpr char kSettingsRowBackend[] = "advanced.backend";
 inline constexpr char kSettingsRowUiConf[] = "advanced.uiConf";
-inline constexpr char kSettingsRowIniConf[] = "advanced.iniConf";
 inline constexpr char kSettingsRowLogLevel[] = "advanced.logLevel";
 inline constexpr char kSettingsRowCopyInfo[] = "advanced.copySystemInfo";
 
@@ -195,10 +191,9 @@ struct SettingsState {
     /// pointed at a file). The sheet prints `kSettingsNoProfile` for an empty one rather than an
     /// empty cell.
     std::string uiConfPath;
-    std::string iniConfPath;
     /// The UI log archive is on (`TuiState::isLogActive`, `--debug-ui`).
     bool logArchive = false;
-    /// `tui api 5, ui.conf v1` - the versions the copy action reports, formatted by the frame
+    /// `tui api 7, ui.conf v2` - the versions the copy action reports, formatted by the frame
     /// because only it can see `TUI_API_VERSION`.
     std::string versions;
     /// The run's flags as `name=0/1` pairs (`offline`, `run`, `stop`, `rawlog`).
@@ -267,20 +262,20 @@ struct SettingsState {
 /// palette's reasoning for its own descriptions). An empty or blanks-only query matches every
 /// row (the rail's rule).
 std::vector<SettingsRow> settingsRows(const SettingsState& state, const model::ShellPrefs& prefs,
-                                      const TuiSettings& settings, const ui::Metrics& m);
+                                      const ui::Metrics& m);
 
 /// Run the selected row: a `Choice` moves to the next value the row offers, an `Action`
-/// performs its one action, a `ReadOnly` does nothing. `prefs` and `settings` are edited in
+/// performs its one action, a `ReadOnly` does nothing. `prefs` is edited in
 /// place (the same one-owner rule `renderSettings()` follows), so a cycle is a change the
 /// frame writes back - the send-key row's cycle steps through the *offered* set only
 /// (`model::sendKeyOffered()`), never the stored-but-unhonourable one.
-void activate(SettingsState& state, model::ShellPrefs& prefs, TuiSettings& settings,
-              const ui::Metrics& m, const SettingsRow& row);
+void activate(SettingsState& state, model::ShellPrefs& prefs, const ui::Metrics& m,
+              const SettingsRow& row);
 
 /// Draw the sheet inside `region` - the box `ui::computeShell()` answered
 /// (`ShellLayout::settingsOverlay`) - and apply the keys it owns.
 ///
-/// `prefs` and `settings` are edited *in place*: they are the one owner of each value,
+/// `prefs` is edited *in place*: it is the one owner of each value,
 /// so a change is a change
 /// to the thing the rest of the frame reads, and the frame's own write paths carry it to disk.
 /// Nothing is written by this file.
@@ -295,7 +290,7 @@ void activate(SettingsState& state, model::ShellPrefs& prefs, TuiSettings& setti
 /// (D-OVERLAY). The frame passes `layout.top == OverlayLayer::Settings`; a standalone harness
 /// keeps the default.
 void renderSettings(SettingsState& state, const ui::Rect& region, const ui::Metrics& m,
-                    model::ShellPrefs& prefs, TuiSettings& settings, bool ownsKeyboard = true);
+                    model::ShellPrefs& prefs, bool ownsKeyboard = true);
 
 /// The text the copy action puts on the clipboard: `backend`, `display`, `profile`,
 /// `generation`, `flags` and `versions`, one `key: value` line each.

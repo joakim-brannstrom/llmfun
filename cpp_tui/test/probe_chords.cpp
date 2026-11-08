@@ -953,9 +953,9 @@ int runGui(const Options& opt) {
         std::fprintf(stderr, "probe: cannot create the ImGui context\n");
         return 2;
     }
-    llmfun::tui::TuiSettings settings; // no persisted file: the probe writes none
+    llmfun::tui::model::ShellPrefs settings; // no persisted file: the probe writes none
     std::string error;
-    const std::unique_ptr<Backend> backend = llmfun::tui::makeGuiBackend("", settings);
+    const std::unique_ptr<Backend> backend = llmfun::tui::makeGuiBackend(settings);
     if (!backend->init(error)) {
         std::fprintf(stderr, "probe: gui backend init failed: %s\n", error.c_str());
         ImGui::DestroyContext();

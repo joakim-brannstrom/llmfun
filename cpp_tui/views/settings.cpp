@@ -6,16 +6,14 @@
 /// failed to parse.
 ///
 /// This file draws, edits the two preference structs and answers; it writes no file and reads no
-/// display. The frame owns both write paths: it saves once when
-/// `fontScaleChanged` says a commit happened, and `ui.conf` reaches the disk through the debounce
-/// the frame already runs - so a sheet that is closed a second after a change still leaves both
-/// files consistent with what the user chose.
+/// display. The frame owns the write path: a commit only edits the struct, and `ui.conf`
+/// reaches the disk through the frame's write debounce (plus the quit and shutdown saves) -
+/// so a sheet that is closed a second after a change still leaves the file consistent
+/// with what the user chose.
 #include "views/settings.h"
 
 #include "imgui/imgui.h"
 #include "imgui/imgui_internal.h"
-
-#include "tui_settings.h"
 
 #include "ui/icons.h"
 #include "ui/input.h"
@@ -43,7 +41,6 @@ constexpr const char* kIdSendKey = kSettingsRowSendKey;
 constexpr const char* kIdRawLog = kSettingsRowRawLog;
 constexpr const char* kIdBackend = kSettingsRowBackend;
 constexpr const char* kIdUiConf = kSettingsRowUiConf;
-constexpr const char* kIdIniConf = kSettingsRowIniConf;
 constexpr const char* kIdLogLevel = kSettingsRowLogLevel;
 constexpr const char* kIdCopyInfo = kSettingsRowCopyInfo;
 
@@ -153,7 +150,7 @@ SettingsRow sectionHeader(const char* section) {
 /// Every row of the sheet, in display order and unfiltered. The values are the *effective* ones:
 /// the catalogue's words for the three preferences, and the frame's derived facts for the rest.
 std::vector<SettingsRow> allRows(const SettingsState& state, const model::ShellPrefs& prefs,
-                                 const TuiSettings& settings, const ui::Metrics& m) {
+                                 const ui::Metrics& m) {
     std::vector<SettingsRow> rows;
 
     // --- Appearance --------------------------------------------------------
@@ -171,12 +168,8 @@ std::vector<SettingsRow> allRows(const SettingsState& state, const model::ShellP
             row.kind = SettingsRowKind::ReadOnly;
             row.enabled = false;
         } else {
-            // The *drawable* percentage: a hand-edited `FontScaleMain=1.02` in `imgui2.gui.conf`
-            // loads (the loader accepts 0.5..3.0), but no step can produce 102 % - so the sheet
-            // prints what `clampFontScale()` answers, which is also where the first `Enter` starts
-            // from.
             row.value =
-                percentText(model::fontScalePercent(model::clampFontScale(settings.fontScaleMain)));
+                percentText(model::fontScalePercent(model::clampFontScale(prefs.fontScaleMain)));
             row.note = "GUI text scale, " +
                        percentText(static_cast<int>(model::kFontScaleMin * 100)) + " to " +
                        percentText(static_cast<int>(model::kFontScaleMax * 100)) + ", " +
@@ -243,16 +236,7 @@ std::vector<SettingsRow> allRows(const SettingsState& state, const model::ShellP
         row.section = kSettingsSectionAdvanced;
         row.label = "Workbench settings";
         row.value = state.uiConfPath.empty() ? std::string(kSettingsNoProfile) : state.uiConfPath;
-        row.note = "ui.conf: send key, raw log level, rail/inspector state";
-        rows.push_back(std::move(row));
-    }
-    {
-        SettingsRow row;
-        row.id = kIdIniConf;
-        row.section = kSettingsSectionAdvanced;
-        row.label = "Window settings";
-        row.value = state.iniConfPath.empty() ? std::string(kSettingsNoProfile) : state.iniConfPath;
-        row.note = "imgui2.gui.conf: window size and text scale";
+        row.note = "ui.conf: window size, text scale, send key, raw log, rail/inspector";
         rows.push_back(std::move(row));
     }
     {
@@ -505,21 +489,17 @@ bool takeKeys(SettingsState& state, bool ownsKeyboard) {
 /// Run the selected row. `Choice` moves to the next legal value, `Action` performs its one action,
 /// `ReadOnly` does nothing (the row's `enabled` is false, so this is only reached through Enter on
 /// a row the sheet drew as live).
-void activate(SettingsState& state, model::ShellPrefs& prefs, TuiSettings& settings,
-              const ui::Metrics& m, const SettingsRow& row) {
+void activate(SettingsState& state, model::ShellPrefs& prefs, const ui::Metrics& m,
+              const SettingsRow& row) {
     if (!row.enabled || row.kind == SettingsRowKind::ReadOnly)
         return;
     if (std::strcmp(row.id, kIdFontScale) == 0) {
         // A scale is a pixel-profile fact; the grid row is read-only and draws that.
         if (m.textGrid)
             return;
-        const float next = model::stepFontScale(settings.fontScaleMain, 1);
-        if (next != settings.fontScaleMain) {
-            settings.fontScaleMain = next;
-            // The frame writes `imgui2.gui.conf` once, in the frame that committed the change: the
-            // view knows *that* it changed, only the frame knows the file. `metricsFor()` reads
-            // the new scale on the next frame (`tui.cpp`), which is what "applies next frame"
-            // means for the one value that changes the metrics themselves.
+        const float next = model::stepFontScale(prefs.fontScaleMain, 1);
+        if (next != prefs.fontScaleMain) {
+            prefs.fontScaleMain = next;
             state.fontScaleChanged = true;
         }
         return;
@@ -578,8 +558,8 @@ const char* settingsSectionName(int section) {
 }
 
 std::vector<SettingsRow> settingsRows(const SettingsState& state, const model::ShellPrefs& prefs,
-                                      const TuiSettings& settings, const ui::Metrics& m) {
-    const std::vector<SettingsRow> all = allRows(state, prefs, settings, m);
+                                      const ui::Metrics& m) {
+    const std::vector<SettingsRow> all = allRows(state, prefs, m);
     const std::string_view query = trim(std::string_view(state.search.data()));
     const std::string_view wanted = settingsSectionName(state.section);
     const bool allSections = state.section <= 0;
@@ -652,24 +632,16 @@ void openSettings(SettingsState& state) {
     state.copiedUntil = 0.0;
 }
 
-// ---------------------------------------------------------------------------
 // The sheet
-// ---------------------------------------------------------------------------
 
 void renderSettings(SettingsState& state, const ui::Rect& region, const ui::Metrics& m,
-                    model::ShellPrefs& prefs, TuiSettings& settings, bool ownsKeyboard) {
+                    model::ShellPrefs& prefs, bool ownsKeyboard) {
     if (!state.open || region.w <= 0.0f || region.h <= 0.0f)
         return;
     if (!ui::rectMatchesProfile(region, m))
         return; // fail closed: a rectangle in the wrong unit is worse than no sheet
 
-    // The rows first: the keys act on them and the frame draws from them.
-    //
-    // Built per frame, unlike the palette's ranked table: this list is eleven entries of short
-    // strings and two of its values (the run's flags, the archive switch) are facts about *this*
-    // frame, so a cache would have to compare exactly what it saved (design §4.12's "matching runs
-    // over the model, not per draw" is about the palette's fuzzy match over the session store).
-    state.rows = settingsRows(state, prefs, settings, m);
+    state.rows = settingsRows(state, prefs, m);
     state.rowsBuilt = state.rows.size();
     state.rowsDrawn = 0;
     {
@@ -683,7 +655,7 @@ void renderSettings(SettingsState& state, const ui::Rect& region, const ui::Metr
     state.searchFocused = false;
     if (activatePressed && state.selected >= 0 &&
         state.selected < static_cast<int>(state.rows.size())) {
-        activate(state, prefs, settings, m, state.rows[static_cast<std::size_t>(state.selected)]);
+        activate(state, prefs, m, state.rows[static_cast<std::size_t>(state.selected)]);
     }
 
     const SheetGeometry g = sheetGeometry(region, m);
@@ -740,10 +712,6 @@ void renderSettings(SettingsState& state, const ui::Rect& region, const ui::Metr
         }
         std::string summary = settingsSectionName(state.section);
         summary += "  ";
-        // The rows a user can *act on*: section headers are structure, not settings, so counting
-        // them would make `ALL 11` a lie about how many settings there are (and `BEHAVIOUR 3` for
-        // two rows reads as a bug). Named for what it counts - the enclosing `settings` is the
-        // `TuiSettings` this view edits.
         std::size_t settingCount = 0;
         for (const SettingsRow& row : state.rows) {
             if (row.id[0] != '\0')
@@ -924,7 +892,7 @@ void renderSettings(SettingsState& state, const ui::Rect& region, const ui::Metr
             const std::string id = "##settings_row" + std::to_string(index);
             if (rowClicked(box, id.c_str())) {
                 if (state.selected == index)
-                    activate(state, prefs, settings, m, row);
+                    activate(state, prefs, m, row);
                 else
                     state.selected = index;
             }

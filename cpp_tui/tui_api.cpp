@@ -161,6 +161,8 @@ int tuiInit(TuiState* state, TuiBackendMode mode) {
         state->inner->iniFilename.empty() ? nullptr : state->inner->iniFilename.c_str();
     state->inner->ownedContext = context;
 
+    ::llmfun::tui::model::loadUiConf(state->inner->ui.prefs, state->inner->iniFilename);
+
     std::unique_ptr<::llmfun::tui::Backend> backend;
     std::string error;
     bool initialized = false;
@@ -173,7 +175,7 @@ int tuiInit(TuiState* state, TuiBackendMode mode) {
         backend = ::llmfun::tui::makeNcursesBackend();
         initialized = backend->init(error);
     } else if (mode == TuiBackendMode_Gui) {
-        backend = ::llmfun::tui::makeGuiBackend(state->inner->iniFilename, state->inner->settings);
+        backend = ::llmfun::tui::makeGuiBackend(state->inner->ui.prefs);
         initialized = backend->init(error);
         if (initialized)
             ::llmfun::tui::initMarkdownGuiMode(*state->inner);
@@ -182,11 +184,9 @@ int tuiInit(TuiState* state, TuiBackendMode mode) {
         // backend first. On failure, fall back to the terminal UI iff both
         // stdio ends are TTYs — a full-screen TUI drawn into a pipe is
         // useless, so there the GUI error is the result.
-        // A failed GUI init() has already loaded the settings into the shared
-        // record (loadTuiSettings runs before window creation), so a TTY
-        // fallback inherits the loaded font scale. Harmless: text mode ignores
-        // it, and a failed init never saves.
-        backend = ::llmfun::tui::makeGuiBackend(state->inner->iniFilename, state->inner->settings);
+        // The settings were loaded above, before any backend ran, so a TTY
+        // fallback inherits the loaded font scale.
+        backend = ::llmfun::tui::makeGuiBackend(state->inner->ui.prefs);
         initialized = backend->init(error);
         if (initialized) {
             ::llmfun::tui::initMarkdownGuiMode(*state->inner);
@@ -257,20 +257,14 @@ void tuiDestroyState(TuiState* state) {
     if (!state)
         return;
     if (state->inner) {
-        // The close path's settings save (D-UI-CONF, task 29): a GUI window closed with its X
-        // ends the D loop through `shouldClose()` and never sets `quitRequested`, so the quit
-        // path's save does not run - this is the one place every exit goes through. It carries a
-        // change and nothing else, and it is idempotent with the quit path's save.
-        ::llmfun::tui::saveUiConfOnShutdown(*state->inner);
-        // The archive handle (task 32): every record line is flushed as it is written, and a
-        // quit closes the descriptor the record path opened lazily.
-        ::llmfun::tui::closeLogArchive(*state->inner);
+        bool windowResized = false;
         if (state->inner->backend) {
             state->inner->backend->shutdown();
+            windowResized = state->inner->backend->windowResizedSinceOpen();
             state->inner->backend.reset();
         }
-        // Destroy only the context tuiInit created FOR THIS state; a context
-        // created by the caller (headless test harness) must survive.
+        ::llmfun::tui::saveUiConfOnShutdown(*state->inner, windowResized);
+        ::llmfun::tui::closeLogArchive(*state->inner);
         if (state->inner->ownedContext != nullptr) {
             ImGui::DestroyContext(state->inner->ownedContext);
             state->inner->ownedContext = nullptr;

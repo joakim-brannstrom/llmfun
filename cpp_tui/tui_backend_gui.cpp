@@ -3,7 +3,6 @@
 /// the vendored GLFW platform backend and OpenGL3 renderer backend.
 #include "tui_backend.h"
 #include "tui_chrome.h"
-#include "tui_settings.h"
 #include "ui/tokens.h"
 
 #include <GLFW/glfw3.h>
@@ -302,8 +301,7 @@ void applyDpiScale() {
 
 class GuiBackend final : public Backend {
 public:
-    explicit GuiBackend(std::string iniFilename, TuiSettings* settings)
-        : iniFilename(std::move(iniFilename)), settings(settings) {}
+    explicit GuiBackend(model::ShellPrefs* settings) : settings(settings) {}
 
     bool init(std::string& error) override {
         glfwLastError.clear();
@@ -317,13 +315,10 @@ public:
         // Missing or malformed values keep the built-in default.
         int width = DefaultGuiWindowWidth;
         int height = DefaultGuiWindowHeight;
-        if (!iniFilename.empty()) {
-            loadTuiSettings(*settings, iniFilename);
-            if (settings->windowWidth > 0)
-                width = settings->windowWidth;
-            if (settings->windowHeight > 0)
-                height = settings->windowHeight;
-        }
+        if (settings->windowWidth > 0)
+            width = settings->windowWidth;
+        if (settings->windowHeight > 0)
+            height = settings->windowHeight;
         // A persisted size below the floor (hand-edited, or a file from an older
         // profile) opens at the floor: the limits set below stop an interactive
         // drag, they do not grow a window that was created underneath them.
@@ -355,10 +350,8 @@ public:
         // log is the evidence a headless capture cannot give (there is no
         // pointer and no window manager to drag with).
         applySizeLimits();
-        int grantedWidth = 0;
-        int grantedHeight = 0;
-        glfwGetWindowSize(window, &grantedWidth, &grantedHeight);
-        std::fprintf(stderr, "ui: window %dx%d (min %dx%d)\n", grantedWidth, grantedHeight,
+        glfwGetWindowSize(window, &openedWidth, &openedHeight);
+        std::fprintf(stderr, "ui: window %dx%d (min %dx%d)\n", openedWidth, openedHeight,
                      MinGuiWindowWidth, MinGuiWindowHeight);
 
         glfwMakeContextCurrent(window);
@@ -448,16 +441,13 @@ public:
     }
 
     void shutdown() override {
-        // Persist the view settings with the final window size while the
-        // window is still alive; the next start recreates the window with it.
-        if (!iniFilename.empty() && window != nullptr) {
+        if (window != nullptr) {
             int width = 0;
             int height = 0;
             glfwGetWindowSize(window, &width, &height);
-            TuiSettings out = *settings;
-            out.windowWidth = width;
-            out.windowHeight = height;
-            saveTuiSettings(out, iniFilename);
+            settings->windowWidth = width;
+            settings->windowHeight = height;
+            resizedSinceOpen = width != openedWidth || height != openedHeight;
         }
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
@@ -506,6 +496,8 @@ public:
 #endif
         return geometry.width > 0 && geometry.height > 0;
     }
+
+    bool windowResizedSinceOpen() const override { return resizedSinceOpen; }
 
 private:
     /// Ask the window system for the resize floor (D-GEOM). The pair is recorded
@@ -566,18 +558,22 @@ private:
     }
 
     GLFWwindow* window = nullptr;
-    std::string iniFilename;
-    TuiSettings* settings = nullptr;
+    model::ShellPrefs* settings = nullptr;
     std::string pendingCapturePath;
     int requestedMinWidth = 0;
     int requestedMinHeight = 0;
     bool limitsRequested = false;
+    /// The size the window was granted at open: the baseline
+    /// `windowResizedSinceOpen()` judges the shutdown capture against.
+    int openedWidth = 0;
+    int openedHeight = 0;
+    bool resizedSinceOpen = false;
 };
 
 } // namespace
 
-std::unique_ptr<Backend> makeGuiBackend(const std::string& iniFilename, TuiSettings& settings) {
-    return std::make_unique<GuiBackend>(iniFilename, &settings);
+std::unique_ptr<Backend> makeGuiBackend(model::ShellPrefs& settings) {
+    return std::make_unique<GuiBackend>(&settings);
 }
 
 } // namespace llmfun::tui

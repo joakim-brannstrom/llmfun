@@ -33,6 +33,8 @@
 
 #include "imtui/imtui.h" // imgui + ImTui_ImplText_* (imtui-impl-text.h)
 
+#include <GLFW/glfw3.h> // glfwGetCurrentContext/glfwSetWindowSize: the resize stand-in
+
 #include "ui/metrics.h" // ui::metricsFor: the scale -> geometry endpoint
 #include "ui/tokens.h"  // ui::scaledTypeSize: the base a run must draw at
 #include <clocale>
@@ -41,6 +43,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <sys/stat.h> // mkdir: one profile directory per window case
 #include <utility>
 #include <vector>
 
@@ -108,7 +111,7 @@ std::string g_scratchIni;
 [[noreturn]] void fail(const std::string& what) {
     std::fprintf(stderr, "SETUP [%s]: %s\n", g_phase, what.c_str());
     std::remove(g_scratchIni.c_str());
-    std::remove(llmfun::tui::settingsPath(g_scratchIni).c_str());
+    std::remove(llmfun::tui::model::uiConfPath(g_scratchIni).c_str());
     std::exit(2);
 }
 
@@ -250,12 +253,15 @@ void checkChromeMetricsApplied(const char* label) {
 }
 
 /// One window case: the settings file it starts from (0 = none at all, i.e. a
-/// fresh profile), the geometry it must produce and the capture it leaves.
+/// fresh profile), the size the session resizes the window to (0 = it does
+/// not), the geometry it must produce and the capture it leaves.
 struct WindowCase {
     const char* name;
     int seededWidth;
     int seededHeight;
     float seededFontScale; // 0 = keep the default 1.0
+    int resizeWidth;
+    int resizeHeight;
     int wantWidth;
     int wantHeight;
     const char* capture; // nullptr = settings round-trip only, no capture
@@ -275,23 +281,32 @@ std::size_t runWindowCase(const WindowCase& c, const std::string& outDir) {
     const std::string label = c.name;
     resetStyleToDefaults();
 
-    const std::string iniPath = outDir + "/" + c.name + "-imgui2.ini";
-    const std::string confPath = llmfun::tui::settingsPath(iniPath);
+    const std::string caseDir = outDir + "/" + c.name;
+    ::mkdir(caseDir.c_str(), 0755); // one profile directory per case: the ini and
+                                    // its ui.conf live together, so each case is a
+                                    // distinct profile to the model (a real process
+                                    // owns one profile; a shared directory would
+                                    // make case N inherit case N-1's debounce state)
+    const std::string iniPath = caseDir + "/imgui2.ini";
+    const std::string confPath = llmfun::tui::model::uiConfPath(iniPath);
     g_scratchIni = iniPath;
     std::remove(iniPath.c_str());
     std::remove(confPath.c_str());
     if (c.seededWidth > 0 || c.seededFontScale > 0.0f) {
-        llmfun::tui::TuiSettings seeded;
+        llmfun::tui::model::ShellPrefs seeded;
         seeded.windowWidth = c.seededWidth;
         seeded.windowHeight = c.seededHeight;
         if (c.seededFontScale > 0.0f)
             seeded.fontScaleMain = c.seededFontScale;
-        llmfun::tui::saveTuiSettings(seeded, iniPath);
+        llmfun::tui::model::saveUiConf(seeded, iniPath);
     }
 
     llmfun::tui::TuiState state;
+    // `tuiInit` performs the one load of the merged profile; the
+    // harness stands in for it before the backend sizes the window.
+    llmfun::tui::model::loadUiConf(state.ui.prefs, iniPath);
     std::string error;
-    auto backend = llmfun::tui::makeGuiBackend(iniPath, state.settings);
+    auto backend = llmfun::tui::makeGuiBackend(state.ui.prefs);
     if (!backend->init(error))
         fail("GUI backend init failed (no display?): " + error);
     state.backend = std::move(backend);
@@ -317,6 +332,18 @@ std::size_t runWindowCase(const WindowCase& c, const std::string& outDir) {
 
     // Two settle frames: the first one lays the shell out at the new size.
     frames(2);
+
+    // A session that resizes stands in for the user dragging the window: the
+    // backend must see the moved geometry at shutdown and the profile must end
+    // up carrying it (the size the app chose at open never persists). The pump
+    // runs the resize through newFrame's event poll before anything reads the
+    // window again.
+    if (c.resizeWidth > 0) {
+        GLFWwindow* window = glfwGetCurrentContext();
+        check(window != nullptr, label + ": the GLFW context is current for the resize");
+        glfwSetWindowSize(window, c.resizeWidth, c.resizeHeight);
+        frames(2);
+    }
 
     // The metrics seam's input chain: the settings value must reach
     // ImGuiStyle::FontScaleMain inside a frame (`applyGuiFontScale()` in tui.cpp)
@@ -428,26 +455,60 @@ std::size_t runWindowCase(const WindowCase& c, const std::string& outDir) {
           label + ": the frames drew at the body step times the scale factors (" +
               std::to_string(drawnFontSize) + ", expected about " + std::to_string(scaledBase) +
               ")");
-    // (including a floor correction), and FontScaleMain survives the save.
-    // The application's teardown order: markdown textures go while the backend
-    // is still alive, then the backend itself (which writes imgui2.gui.conf), then
-    // the context (once, in main).
+    // The teardown: markdown textures go while the backend is still alive,
+    // then the backend's final geometry lands in the shared preferences struct
+    // (it no longer writes a file of its own) and reports whether the window
+    // moved, then the workbench's single writer flushes `ui.conf`.
     llmfun::tui::destroyMarkdown(state);
     state.backend->shutdown();
+    // The fact must match the session: a moved window is the user's geometry,
+    // an untouched one is the app's own choice. Read before the backend goes -
+    // the shutdown save below is the hand-off that carries it.
+    const bool resized = state.backend->windowResizedSinceOpen();
+    check(resized == (c.resizeWidth > 0),
+          label + ": the backend reports whether the window moved (" +
+              std::string(resized ? "moved" : "untouched") + ", expected " +
+              (c.resizeWidth > 0 ? "moved" : "untouched") + ")");
     state.backend.reset();
-    llmfun::tui::TuiSettings persisted;
-    llmfun::tui::loadTuiSettings(persisted, iniPath);
-    check(persisted.windowWidth == c.wantWidth && persisted.windowHeight == c.wantHeight,
-          label + ": shutdown persisted " +
-              sizeText(persisted.windowWidth, persisted.windowHeight) + ", expected " +
-              sizeText(c.wantWidth, c.wantHeight));
-    // FontScaleMain is the other value in this file that has nothing to do with
-    // the window size: a seeded non-default must survive load -> save unchanged,
-    // otherwise the next start silently resets the user's text scale.
-    const float wantFontScale = c.seededFontScale > 0.0f ? c.seededFontScale : 1.0f;
-    check(persisted.fontScaleMain == wantFontScale,
-          label + ": FontScaleMain round-trips (" + std::to_string(persisted.fontScaleMain) +
-              ", expected " + std::to_string(wantFontScale) + ")");
+    llmfun::tui::model::saveUiConf(state.ui.prefs, iniPath, resized); // the shutdown hand-off
+    const bool freshUntouched = c.seededWidth == 0 && c.seededHeight == 0 &&
+                                c.seededFontScale == 0.0f && c.resizeWidth == 0;
+    if (freshUntouched) {
+        // A fresh profile owes nothing: the window the app chose at startup is
+        // not the user's doing, so a session that moved no window and changed
+        // no preference writes no file at all - the size rides only a real
+        // change (the settings' saveUiConf contract).
+        const bool wroteConf = [&] {
+            if (std::FILE* probe = std::fopen(confPath.c_str(), "rb")) {
+                std::fclose(probe);
+                return true;
+            }
+            return false;
+        }();
+        check(!wroteConf, label + ": a fresh profile writes no ui.conf on a clean exit");
+    } else {
+        llmfun::tui::model::ShellPrefs persisted;
+        llmfun::tui::model::loadUiConf(persisted, iniPath);
+        // What the file must carry: the size a moved window ended at, or the
+        // size the profile already had. The floor the app enforces on a
+        // below-floor profile is the app's own choice and never rewrites the
+        // user's file (the resize fact is false when the capture equals the
+        // size the window was granted at open).
+        const int wantFileWidth = c.resizeWidth > 0 ? c.resizeWidth : c.seededWidth;
+        const int wantFileHeight = c.resizeHeight > 0 ? c.resizeHeight : c.seededHeight;
+        check(persisted.windowWidth == wantFileWidth && persisted.windowHeight == wantFileHeight,
+              label + ": shutdown persisted " +
+                  sizeText(persisted.windowWidth, persisted.windowHeight) + ", expected " +
+                  sizeText(wantFileWidth, wantFileHeight));
+        // FontScaleMain is the other value in this file that has nothing to do
+        // with the window size: a seeded non-default must survive load -> save
+        // unchanged, otherwise the next start silently resets the user's text
+        // scale.
+        const float wantFontScale = c.seededFontScale > 0.0f ? c.seededFontScale : 1.0f;
+        check(persisted.fontScaleMain == wantFontScale,
+              label + ": FontScaleMain round-trips (" + std::to_string(persisted.fontScaleMain) +
+                  ", expected " + std::to_string(wantFontScale) + ")");
+    }
 
     std::remove(iniPath.c_str());
     std::remove(confPath.c_str());
@@ -576,17 +637,23 @@ int main(int argc, char** argv) {
     const WindowCase cases[] = {
         // A fresh profile: no settings file at all, so the built-in default is
         // the only size there is.
-        {"fresh-profile", 0, 0, 0.0f, kWantFreshWidth, kWantFreshHeight, "gui-window-1280x820.ppm"},
+        {"fresh-profile", 0, 0, 0.0f, 0, 0, kWantFreshWidth, kWantFreshHeight,
+         "gui-window-1280x820.ppm"},
         // A persisted size wins over the default, and over nothing else.
-        {"persisted-size", 1000, 700, 0.0f, 1000, 700, "gui-window-1000x700-persisted.ppm"},
+        {"persisted-size", 1000, 700, 0.0f, 0, 0, 1000, 700, "gui-window-1000x700-persisted.ppm"},
         // A persisted size below the floor opens at the floor.
-        {"below-floor", 320, 240, 0.0f, kWantMinWidth, kWantMinHeight,
+        {"below-floor", 320, 240, 0.0f, 0, 0, kWantMinWidth, kWantMinHeight,
          "gui-window-640x480-floor.ppm"},
         // FontScaleMain is not a window value and must survive untouched. Seeded
         // non-default on purpose: a case that only ever sees 1.0 cannot tell a
         // round-trip from a reset. No capture - the scale changes the text, and
         // this case is about the settings file.
-        {"persisted-font-scale", 1000, 700, 1.25f, 1000, 700, nullptr},
+        {"persisted-font-scale", 1000, 700, 1.25f, 0, 0, 1000, 700, nullptr},
+        // A fresh profile whose window the session resized: the backend's fact
+        // makes the captured size the user's geometry, so the first move gives
+        // the profile its size (the deadlock a file-shape rule cannot fix). No
+        // capture - this case is about the settings file too.
+        {"resized-fresh", 0, 0, 0.0f, 1100, 750, 1100, 750, nullptr},
     };
     std::size_t freshColours = 0;
     for (const WindowCase& c : cases) {

@@ -1,17 +1,16 @@
 // test_ui_settings.cpp
 //
 // Standalone unit test for the workbench settings file (model/settings.h).
-// `ui.conf` is the fixed-name file that only the
-// workbench reads and writes, beside the ini file - the TuiSettings side lives in
-// the derived `<ini-stem>.gui.conf`, so a settings save can never clobber a
-// preference it has no field for.
+// `ui.conf` is the ONE settings file: every persisted key - the view choices and
+// the window size/text scale alike - lives in it, and `model/ui_conf.cpp` is its
+// only writer.
 //
-// Compiles model/ui_conf.cpp and tui_settings.cpp directly and links only the
+// Compiles model/ui_conf.cpp directly and links only the
 // standard library (no GLFW, no ImGui, no display). No test framework: CHECK(cond)
 // prints each check and sets a fail flag; exits 0 if every check passes.
 //
 // Covers:
-//   - uiConfPath: the sibling of the derived settings file ("imgui2.ini" ->
+//   - uiConfPath: the file named "ui.conf" beside the ini file ("imgui2.ini" ->
 //     "ui.conf", "a/b/imgui2.ini" -> "a/b/ui.conf", "" -> "" and no file touched)
 //   - the exact on-disk bytes, defaults and all-non-default
 //   - a full round-trip of every key and every value
@@ -27,13 +26,10 @@
 //     exactly one after it; a failed write does not become a retry loop
 //   - the read-only-location warning is one line per failed attempt, and the values
 //     still apply in memory
-//   - a legacy save (saveTuiSettings) rewrites imgui2.gui.conf only: ui.conf stays
-//     byte-identical and no MVP key appears in the legacy file
-//   - the two writers keep two files: with the same ini filename, a TuiSettings
-//     save and a ShellPrefs save land in imgui2.gui.conf and ui.conf, each
-//     holding its own format, neither clobbered by the other
+//   - a stale `.gui.conf` beside `ui.conf` is dead to the build: never read,
+//     never rewritten, never removed - no migration, no cleanup code
 //   - an explicit save of identical bytes leaves the file (and its timestamp) alone
-//   - a quit save carries only a change: a Version=2 file and a hand-edited file
+//   - a quit save carries only a change: a Version=3 file and a hand-edited file
 //     keep their bytes, while a real choice replaces them
 //   - a brand-new file is created subject to the process umask (umask 077 -> 0600);
 //     a replaced file keeps the mode the user set on it
@@ -42,6 +38,7 @@
 // ./test_ui_settings_scratch; the directory is left in place and is safe to delete):
 //   ./test_ui_settings
 
+#include <clocale>
 #include <cstdio>
 #include <set>
 #include <string>
@@ -51,12 +48,7 @@
 #include <sys/time.h>
 
 #include "model/settings.h"
-#include "tui_settings.h"
 
-using llmfun::tui::loadTuiSettings;
-using llmfun::tui::saveTuiSettings;
-using llmfun::tui::settingsPath;
-using llmfun::tui::TuiSettings;
 using llmfun::tui::model::flushUiConf;
 using llmfun::tui::model::InspectorTab;
 using llmfun::tui::model::kRawLogDebug;
@@ -166,7 +158,8 @@ bool setFileMode(const std::string& path, mode_t mode) { return ::chmod(path.c_s
 
 bool samePrefs(const ShellPrefs& a, const ShellPrefs& b) {
     return a.sendKey == b.sendKey && a.rawLog == b.rawLog && a.railOpen == b.railOpen &&
-           a.inspectorOpen == b.inspectorOpen && a.tab == b.tab;
+           a.inspectorOpen == b.inspectorOpen && a.tab == b.tab && a.windowWidth == b.windowWidth &&
+           a.windowHeight == b.windowHeight && a.fontScaleMain == b.fontScaleMain;
 }
 
 } // namespace
@@ -219,12 +212,13 @@ int main() {
         const std::string dir = caseDir("bytes");
         removeFile(confOf(dir));
         saveUiConf(ShellPrefs{}, iniOf(dir));
-        CHECK(readText(confOf(dir)) == "Version=1\n"
+        CHECK(readText(confOf(dir)) == "Version=2\n"
                                        "SendKey=tab\n"
                                        "UiLog=off\n"
                                        "RailOpen=auto\n"
                                        "InspectorOpen=auto\n"
-                                       "InspectorTab=activity\n");
+                                       "InspectorTab=activity\n"
+                                       "FontScaleMain=1.00\n");
     }
     {
         const std::string dir = caseDir("bytes-full");
@@ -236,12 +230,13 @@ int main() {
         prefs.inspectorOpen = 0;
         prefs.tab = InspectorTab::Agents;
         saveUiConf(prefs, iniOf(dir));
-        CHECK(readText(confOf(dir)) == "Version=1\n"
+        CHECK(readText(confOf(dir)) == "Version=2\n"
                                        "SendKey=none\n"
                                        "UiLog=debug\n"
                                        "RailOpen=1\n"
                                        "InspectorOpen=0\n"
-                                       "InspectorTab=agents\n");
+                                       "InspectorTab=agents\n"
+                                       "FontScaleMain=1.00\n");
         // Every key and value survives save -> load.
         ShellPrefs loaded;
         loadUiConf(loaded, iniOf(dir));
@@ -309,11 +304,11 @@ int main() {
         const std::string conf = confOf(dir);
 
         // A file from a future build keeps the defaults, wherever its Version line is.
-        writeText(conf, "Version=2\nSendKey=enter\nUiLog=trace\nPin.s-1=1\n");
+        writeText(conf, "Version=3\nSendKey=enter\nUiLog=trace\nPin.s-1=1\n");
         ShellPrefs future;
         loadUiConf(future, ini);
         CHECK(samePrefs(future, ShellPrefs{}));
-        writeText(conf, "SendKey=enter\nUiLog=trace\nVersion=2\n");
+        writeText(conf, "SendKey=enter\nUiLog=trace\nVersion=3\n");
         ShellPrefs futureLast;
         loadUiConf(futureLast, ini);
         CHECK(samePrefs(futureLast, ShellPrefs{}));
@@ -400,12 +395,13 @@ int main() {
         // canonical text a later save would write is the default's (a save of an
         // unchanged load is a no-op - it never canonicalizes a file nobody
         // touched).
-        CHECK(uiConfText(fallback) == "Version=1\n"
+        CHECK(uiConfText(fallback) == "Version=2\n"
                                       "SendKey=tab\n"
                                       "UiLog=off\n"
                                       "RailOpen=auto\n"
                                       "InspectorOpen=auto\n"
-                                      "InspectorTab=activity\n");
+                                      "InspectorTab=activity\n"
+                                      "FontScaleMain=1.00\n");
 
         // Out-of-range tri-states clamp at both ends, and the numbers are read as
         // whole values (no trailing garbage, no hex, no locale).
@@ -566,7 +562,7 @@ int main() {
         const std::string dir = caseDir("future");
         const std::string ini = iniOf(dir);
         const std::string conf = confOf(dir);
-        const std::string newer = "Version=2\nSendKey=enter\nBrand=1\n";
+        const std::string newer = "Version=3\nSendKey=enter\nBrand=1\n";
         writeText(conf, newer);
         ShellPrefs prefs;
         loadUiConf(prefs, ini);
@@ -577,13 +573,24 @@ int main() {
         flushUiConf(prefs, ini, 30.0);
         CHECK(readText(conf) == newer);
         CHECK(!fileExists(conf + ".tmp"));
-        // Starting and quitting this build changes nothing and writes nothing.
+        // Starting and quitting this build changes nothing and writes nothing:
+        // the backend hands the final window size to the settings struct on the
+        // way out (tui_api.cpp's teardown), and that size-only difference is
+        // the app's own doing - the session moved no window - so the newer file
+        // keeps its bytes.
         ShellPrefs untouched;
         loadUiConf(untouched, ini);
+        untouched.windowWidth = 1280;
+        untouched.windowHeight = 820;
         saveUiConf(untouched, ini);
         CHECK(readText(conf) == newer);
+        // Even a moved window must not spend the format guard: a file this
+        // build cannot read is never rewritten for a size - only the real
+        // preference change below does that.
+        saveUiConf(untouched, ini, /*windowResized=*/true);
+        CHECK(readText(conf) == newer);
         // A real choice is the user's own action and settles the profile: the
-        // newer file is replaced by this build's Version=1 file.
+        // newer file is replaced by this build's Version=2 file.
         saveUiConf(prefs, ini);
         CHECK(readText(conf) == uiConfText(prefs));
         ShellPrefs reloaded;
@@ -603,10 +610,209 @@ int main() {
         CHECK(prefs.sendKey == SendKey::Enter); // the value applies, the spelling stays
         saveUiConf(prefs, ini);
         CHECK(readText(conf) == handEdited);
+        // The shutdown size capture is not a change of its own either: the
+        // session moved no window, so the capture is the app's own doing, and
+        // a clean exit still leaves the user's spelling and unknown keys alone.
+        prefs.windowWidth = 1280;
+        prefs.windowHeight = 820;
+        saveUiConf(prefs, ini);
+        CHECK(readText(conf) == handEdited);
         // A change is written in this build's canonical form.
         prefs.rawLog = kRawLogDebug;
         saveUiConf(prefs, ini);
         CHECK(readText(conf) == uiConfText(prefs));
+    }
+
+    // ---------------------------------------------------------------------------
+    section("the merged file: window size and text scale (version 2)");
+    // ---------------------------------------------------------------------------
+    {
+        // Byte-exact v2: all eight persisted keys, in the format's own order.
+        const std::string dir = caseDir("v2-roundtrip");
+        const std::string ini = iniOf(dir);
+        const std::string conf = confOf(dir);
+        removeFile(conf);
+        ShellPrefs prefs;
+        prefs.windowWidth = 1280;
+        prefs.windowHeight = 800;
+        prefs.fontScaleMain = 1.25f;
+        const std::string v2Bytes = "Version=2\n"
+                                    "SendKey=tab\n"
+                                    "UiLog=off\n"
+                                    "RailOpen=auto\n"
+                                    "InspectorOpen=auto\n"
+                                    "InspectorTab=activity\n"
+                                    "WindowWidth=1280\n"
+                                    "WindowHeight=800\n"
+                                    "FontScaleMain=1.25\n";
+        saveUiConf(prefs, ini);
+        CHECK(readText(conf) == v2Bytes);
+        ShellPrefs loaded;
+        loadUiConf(loaded, ini);
+        CHECK(samePrefs(loaded, prefs));
+        // Nothing in the writer may look at LC_NUMERIC (the app adopts the
+        // user's locale, tui_api.cpp): a comma-decimal desktop must not write
+        // `FontScaleMain=1,25`, which this file's own locale-free parser would
+        // reject on the next start. The image only ships C/POSIX/C.utf8, so this
+        // is a no-op there and a real check where the locale exists.
+        if (std::setlocale(LC_NUMERIC, "de_DE.UTF-8") != nullptr) {
+            saveUiConf(prefs, ini);
+            CHECK(readText(conf) == v2Bytes);
+            std::setlocale(LC_NUMERIC, "C");
+            std::printf("OK: the v2 writer is locale-independent (de_DE.UTF-8)\n");
+        }
+    }
+    {
+        // A resize the session made is the user's geometry moving: the backend
+        // reports the fact (the captured size differs from the size the window
+        // was granted at open), and the fact alone when nothing else changed.
+        const std::string dir = caseDir("v2-resize");
+        const std::string ini = iniOf(dir);
+        const std::string conf = confOf(dir);
+        removeFile(conf);
+        ShellPrefs prefs;
+        prefs.windowWidth = 1280;
+        prefs.windowHeight = 800;
+        prefs.fontScaleMain = 1.25f;
+        saveUiConf(prefs, ini);
+        ShellPrefs loaded;
+        loadUiConf(loaded, ini);
+        CHECK(loaded.windowWidth == 1280); // the size the profile carried
+        loaded.windowWidth = 1400;         // the backend's final glfwGetWindowSize
+        loaded.windowHeight = 900;
+        saveUiConf(loaded, ini, /*windowResized=*/true);
+        CHECK(readText(conf) == uiConfText(loaded));
+        CHECK(readText(conf).find("WindowWidth=1400\n") != std::string::npos);
+        ShellPrefs reloaded;
+        loadUiConf(reloaded, ini);
+        CHECK(samePrefs(reloaded, loaded));
+        // The fact, not the profile's shape, decides: the same size-only
+        // difference without a moved window is the app's own doing - the floor
+        // it enforces - and the file keeps the size the profile carries.
+        loadUiConf(reloaded, ini);
+        reloaded.windowWidth = 1500;
+        reloaded.windowHeight = 950;
+        saveUiConf(reloaded, ini);
+        CHECK(readText(conf) == uiConfText(loaded));
+    }
+    {
+        // A fresh profile owes nothing: the window the app chose at startup is
+        // not the user's doing, so a clean exit that moved no window and
+        // changed no preference writes no file at all - the size rides only a
+        // real change.
+        const std::string dir = caseDir("fresh-no-write");
+        const std::string ini = iniOf(dir);
+        const std::string conf = confOf(dir);
+        removeFile(conf);
+        ShellPrefs prefs;
+        loadUiConf(prefs, ini);   // no file: the defaults are the baseline
+        prefs.windowWidth = 1280; // the backend's final glfwGetWindowSize
+        prefs.windowHeight = 820;
+        saveUiConf(prefs, ini);
+        CHECK(!fileExists(conf));
+        CHECK(!fileExists(conf + ".tmp"));
+    }
+    {
+        // A fresh profile whose window the session moved is the user's
+        // geometry: the backend's fact turns the captured size into a real
+        // change, so the first move gives the profile its size - persistence
+        // must not depend on the file already carrying one.
+        const std::string dir = caseDir("fresh-resize");
+        const std::string ini = iniOf(dir);
+        const std::string conf = confOf(dir);
+        removeFile(conf);
+        ShellPrefs prefs;
+        loadUiConf(prefs, ini);   // no file: the defaults are the baseline
+        prefs.windowWidth = 1100; // the backend's final glfwGetWindowSize
+        prefs.windowHeight = 750;
+        saveUiConf(prefs, ini, /*windowResized=*/true);
+        CHECK(readText(conf) == uiConfText(prefs));
+        ShellPrefs reloaded;
+        loadUiConf(reloaded, ini);
+        CHECK(samePrefs(reloaded, prefs));
+    }
+    {
+        // The "not persisted" sentinel is the writer's omission, never a key
+        // with a 0 value: a default struct writes no size keys at all.
+        const std::string text = uiConfText(ShellPrefs{});
+        CHECK(text.find("WindowWidth=") == std::string::npos);
+        CHECK(text.find("WindowHeight=") == std::string::npos);
+        const std::string scaleTail = "FontScaleMain=1.00\n";
+        CHECK(text.size() >= scaleTail.size() &&
+              text.compare(text.size() - scaleTail.size(), scaleTail.size(), scaleTail) == 0);
+    }
+    {
+        // Hand-edited sizes clamp into the legal range: 0 (which the writer
+        // never emits) is a size request, not the "not persisted" sentinel,
+        // and negative or huge magnitudes land on the nearest end.
+        const std::string dir = caseDir("v2-sizes");
+        const std::string ini = iniOf(dir);
+        const std::string conf = confOf(dir);
+        const char* texts[] = {"WindowWidth=0\n", "WindowWidth=-5\n",
+                               "WindowWidth=99999999999999999999\n"};
+        const int widths[] = {1, 1, 32767};
+        bool sizesClamped = true;
+        for (std::size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); ++i) {
+            writeText(conf, texts[i]);
+            ShellPrefs prefs;
+            loadUiConf(prefs, ini);
+            sizesClamped =
+                sizesClamped && prefs.windowWidth == widths[i] && prefs.windowHeight == 0;
+        }
+        CHECK(sizesClamped);
+        // A malformed size keeps the current value.
+        writeText(conf, "WindowWidth=12x8\n");
+        ShellPrefs keep;
+        keep.windowWidth = 800;
+        loadUiConf(keep, ini);
+        CHECK(keep.windowWidth == 800);
+    }
+    {
+        // An in-range hand-edited scale loads snapped to the 5 % grid - a
+        // silent value change, accepted by the format's design (the value the
+        // UI can draw is what a later save writes back). Anything the model
+        // cannot draw - malformed, NaN, out of range - keeps the current value.
+        const std::string dir = caseDir("v2-scale");
+        const std::string ini = iniOf(dir);
+        const std::string conf = confOf(dir);
+        writeText(conf, "FontScaleMain=1.23\n");
+        ShellPrefs snapped;
+        loadUiConf(snapped, ini);
+        CHECK(snapped.fontScaleMain == 1.25f);
+        const char* rejected[] = {"FontScaleMain=abc\n", "FontScaleMain=9.0\n",
+                                  "FontScaleMain=nan\n", "FontScaleMain=1e50\n",
+                                  "FontScaleMain=0.25\n"};
+        bool keptCurrent = true;
+        for (const char* text : rejected) {
+            writeText(conf, text);
+            ShellPrefs prefs;
+            prefs.fontScaleMain = 1.5f;
+            loadUiConf(prefs, ini);
+            keptCurrent = keptCurrent && prefs.fontScaleMain == 1.5f;
+        }
+        CHECK(keptCurrent);
+    }
+    {
+        // A v1 file still loads: its six keys apply and the merged format's
+        // new keys keep their defaults. No migration - and a quit that changed
+        // nothing does not rewrite the old file into v2 bytes either.
+        const std::string dir = caseDir("v1-still-loads");
+        const std::string ini = iniOf(dir);
+        const std::string conf = confOf(dir);
+        const std::string v1 = "Version=1\n"
+                               "SendKey=enter\n"
+                               "UiLog=debug\n"
+                               "RailOpen=1\n"
+                               "InspectorOpen=0\n"
+                               "InspectorTab=agents\n";
+        writeText(conf, v1);
+        ShellPrefs prefs;
+        loadUiConf(prefs, ini);
+        CHECK(prefs.sendKey == SendKey::Enter && prefs.rawLog == kRawLogDebug &&
+              prefs.railOpen == 1 && prefs.inspectorOpen == 0 && prefs.tab == InspectorTab::Agents);
+        CHECK(prefs.windowWidth == 0 && prefs.windowHeight == 0 && prefs.fontScaleMain == 1.0f);
+        saveUiConf(prefs, ini);
+        CHECK(readText(conf) == v1);
     }
 
     // ---------------------------------------------------------------------------
@@ -641,12 +847,13 @@ int main() {
         CHECK(fileExists(conf));
         // A literal expectation, not uiConfText()'s own answer.
         CHECK(prefs.rawLog == kRawLogDebug);
-        CHECK(readText(conf) == "Version=1\n"
+        CHECK(readText(conf) == "Version=2\n"
                                 "SendKey=tab\n"
                                 "UiLog=debug\n"
                                 "RailOpen=auto\n"
                                 "InspectorOpen=auto\n"
-                                "InspectorTab=activity\n");
+                                "InspectorTab=activity\n"
+                                "FontScaleMain=1.00\n");
 
         // Exactly one write: while nothing changes, the file is left alone (even if
         // something else changed it, the debounce compares prefs, not the file).
@@ -726,105 +933,42 @@ int main() {
     }
 
     // ---------------------------------------------------------------------------
-    section("a legacy save cannot clobber ui.conf");
+    section("a stale .gui.conf beside ui.conf is dead to the build");
     // ---------------------------------------------------------------------------
     {
-        const std::string dir = caseDir("legacy");
-        removeFile(confOf(dir));
-        removeFile(settingsPath(iniOf(dir)));
-
-        ShellPrefs prefs;
-        prefs.sendKey = SendKey::None;
-        prefs.rawLog = kRawLogTrace;
-        prefs.railOpen = 1;
-        saveUiConf(prefs, iniOf(dir));
-        const std::string uiBefore = readText(confOf(dir));
-        CHECK(!uiBefore.empty() && uiBefore != "<open failed>");
-
-        TuiSettings legacy;
-        legacy.windowWidth = 1024;
-        legacy.windowHeight = 768;
-        legacy.fontScaleMain = 1.5f;
-        saveTuiSettings(legacy, iniOf(dir));
-        CHECK(readText(confOf(dir)) == uiBefore); // byte-identical
-
-        const std::string legacyText = readText(settingsPath(iniOf(dir)));
-        CHECK(legacyText == "WindowWidth=1024\nWindowHeight=768\nFontScaleMain=1.50\n");
-        CHECK(legacyText.find("SendKey") == std::string::npos);
-        CHECK(legacyText.find("UiLog") == std::string::npos);
-        CHECK(legacyText.find("RailOpen") == std::string::npos);
-        CHECK(legacyText.find("InspectorOpen") == std::string::npos);
-        CHECK(legacyText.find("InspectorTab") == std::string::npos);
-        CHECK(legacyText.find("Pin.") == std::string::npos);
-        CHECK(legacyText.find("Version") == std::string::npos);
-
-        // The other direction too: the workbench reads only ui.conf, so the legacy
-        // file's values are not its business (window size stays there, D-03).
-        TuiSettings legacyLoaded;
-        loadTuiSettings(legacyLoaded, iniOf(dir));
-        CHECK(legacyLoaded.windowWidth == 1024 && legacyLoaded.windowHeight == 768);
-        ShellPrefs reloaded;
-        loadUiConf(reloaded, iniOf(dir));
-        CHECK(samePrefs(reloaded, prefs));
-    }
-
-    // ---------------------------------------------------------------------------
-    section("the two writers keep two files");
-    // ---------------------------------------------------------------------------
-    {
-        // One ini filename, two saves, two files: the TuiSettings side derives
-        // `<stem>.gui.conf`, the ShellPrefs side keeps the fixed `ui.conf`, so a
-        // whole-file save of either can never overwrite the other's format.
-        const std::string dir = caseDir("collision");
+        // A stale `<stem>.gui.conf` beside `ui.conf` is dead to the build: it is
+        // never read, never rewritten and never removed, and no warning mentions
+        // it - the user reconfigures rather than the build migrating anything.
+        const std::string dir = caseDir("stale-gui");
         const std::string ini = iniOf(dir);
-        const std::string conf = confOf(dir);
-        const std::string gui = settingsPath(ini);
-        removeFile(conf); // a leftover from an earlier run would make the first save inert
-        removeFile(gui);
-        CHECK(gui == dir + "/imgui2.gui.conf"); // the new derivation, pinned here too
-        CHECK(conf != gui);
+        const std::string stale = dir + "/imgui2.gui.conf";
+        removeFile(confOf(dir));
+        removeFile(stale);
+        const std::string staleBytes = "WindowWidth=1024\nWindowHeight=768\nFontScaleMain=1.50\n";
+        writeText(stale, staleBytes);
 
-        TuiSettings view;
-        view.windowWidth = 1024;
-        view.windowHeight = 768;
-        view.fontScaleMain = 1.25f;
-        saveTuiSettings(view, ini);
+        // The load reads ui.conf only: the stale file contributes nothing.
         ShellPrefs prefs;
+        loadUiConf(prefs, ini);
+        CHECK(prefs.windowWidth == 0 && prefs.windowHeight == 0 && prefs.fontScaleMain == 1.0f);
+        CHECK(prefs.sendKey == SendKey::Tab);
+
+        // A save rewrites ui.conf and leaves the stale file byte-identical.
         prefs.sendKey = SendKey::Enter;
-        prefs.rawLog = kRawLogDebug;
+        prefs.rawLog = kRawLogTrace;
         saveUiConf(prefs, ini);
+        CHECK(readText(confOf(dir)).find("SendKey=enter") != std::string::npos &&
+              readText(confOf(dir)).find("Version=2") == 0);
+        CHECK(readText(stale) == staleBytes);
+        std::string warning;
+        CHECK(!takeUiConfWarning(warning)); // the ignored file is silent, too
 
-        // Both files exist, each holding its own format and nothing of the other's.
-        CHECK(fileExists(conf) && fileExists(gui));
-        const std::string confText = readText(conf);
-        CHECK(confText.find("Version=") == 0 &&
-              confText.find("SendKey=enter") != std::string::npos &&
-              confText.find("WindowWidth") == std::string::npos);
-        const std::string guiText = readText(gui);
-        CHECK(guiText.find("WindowWidth=1024") != std::string::npos &&
-              guiText.find("FontScaleMain=1.25") != std::string::npos &&
-              guiText.find("SendKey") == std::string::npos);
-
-        // The other save order too, with a change on each side: neither writer
-        // clobbers the other's file, and each loader reads its own file back.
-        TuiSettings view2;
-        view2.fontScaleMain = 2.0f;
-        saveTuiSettings(view2, ini);
-        ShellPrefs prefs2;
-        prefs2.sendKey = SendKey::None;
-        prefs2.railOpen = 0;
-        saveUiConf(prefs2, ini);
-        CHECK(readText(conf).find("RailOpen=0") != std::string::npos &&
-              readText(conf).find("WindowWidth") == std::string::npos);
-        CHECK(readText(gui).find("FontScaleMain=2.00") != std::string::npos &&
-              readText(gui).find("Version=") == std::string::npos);
-        TuiSettings loadedView;
-        loadTuiSettings(loadedView, ini);
-        CHECK(loadedView.fontScaleMain == 2.0f && loadedView.windowWidth == 0 &&
-              loadedView.windowHeight == 0);
-        ShellPrefs loadedPrefs;
-        loadUiConf(loadedPrefs, ini);
-        CHECK(samePrefs(loadedPrefs, prefs2));
+        // A reload applies ui.conf's values; the stale file is still not read,
+        // and a later save still does not touch it.
+        ShellPrefs reloaded;
+        loadUiConf(reloaded, ini);
+        CHECK(samePrefs(reloaded, prefs));
+        CHECK(readText(stale) == staleBytes);
     }
 
     // ---------------------------------------------------------------------------

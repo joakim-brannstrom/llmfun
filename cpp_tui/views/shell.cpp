@@ -696,7 +696,6 @@ void deriveSettings(TuiState& state, ImVec2 display) {
     if (!sheet.open)
         return;
     sheet.uiConfPath = model::uiConfPath(state.iniFilename);
-    sheet.iniConfPath = settingsPath(state.iniFilename);
     sheet.logArchive = state.isLogActive;
     sheet.versions = "tui api " + std::to_string(TUI_API_VERSION) + ", ui.conf v" +
                      std::to_string(model::kUiConfVersion);
@@ -711,13 +710,11 @@ void deriveSettings(TuiState& state, ImVec2 display) {
 }
 
 /// Apply what the sheet answered this frame, and clear the answers.
-/// One write per commit, never one per frame (`saveTuiSettings`).
+/// The sheet only edits the struct: the write debounce and the
+/// quit/shutdown saves persist the change - no save call here.
 void applySettingsAnswers(TuiState& state) {
     views::SettingsState& sheet = state.settingsSheet;
-    if (sheet.fontScaleChanged) {
-        sheet.fontScaleChanged = false;
-        saveTuiSettings(state.settings, state.iniFilename);
-    }
+    sheet.fontScaleChanged = false;
     if (sheet.closeRequested) {
         sheet.closeRequested = false;
         closeSettings(state.settingsSheet);
@@ -1328,7 +1325,7 @@ void renderOverlays(TuiState& state, ShellFrame& frame) {
     if (state.settingsSheet.open) {
         const bool ownsKeyboard = frame.layout.top == ui::OverlayLayer::Settings;
         renderSettings(state.settingsSheet, frame.layout.settingsOverlay, m, state.ui.prefs,
-                       state.settings, ownsKeyboard);
+                       ownsKeyboard);
         applySettingsAnswers(state);
     }
     if (state.palette.open)
@@ -1467,19 +1464,10 @@ ui::OverlayLayer closeTopOverlay(TuiState& state) {
     return ui::OverlayLayer::None;
 }
 
-void uiConfFrame(model::UiState& ui, bool& loaded, const std::string& iniFilename,
-                 double nowSeconds) {
-    // No profile name (a harness, a state D never pointed at a file): nothing to read and
-    // nothing to write. `uiConfPath("")` is empty, so the module would no-op anyway - the
-    // early return just keeps the latch from claiming a load that never happened.
+void uiConfFrame(model::UiState& ui, const std::string& iniFilename, double nowSeconds) {
     if (iniFilename.empty())
         return;
-    if (!loaded) {
-        model::loadUiConf(ui.prefs, iniFilename);
-        loaded = true;
-    } else {
-        model::flushUiConf(ui.prefs, iniFilename, nowSeconds);
-    }
+    model::flushUiConf(ui.prefs, iniFilename, nowSeconds);
     // The read-only-directory rule: a write that fails is reported once and
     // the settings stay in memory, so the failure can never turn into a retry loop. The module
     // keeps one line per failed window; this is its one consumer, and it posts it as an Activity
@@ -1499,10 +1487,10 @@ void uiConfFrame(model::UiState& ui, bool& loaded, const std::string& iniFilenam
     }
 }
 
-void uiConfQuit(const model::UiState& ui, const std::string& iniFilename) {
+void uiConfQuit(const model::UiState& ui, const std::string& iniFilename, bool windowResized) {
     if (iniFilename.empty())
         return;
-    model::saveUiConf(ui.prefs, iniFilename);
+    model::saveUiConf(ui.prefs, iniFilename, windowResized);
 }
 
 } // namespace llmfun::tui::views

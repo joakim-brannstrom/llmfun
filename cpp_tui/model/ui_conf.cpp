@@ -84,6 +84,23 @@ bool parseWholeNumber(std::string_view text, long& out) {
     return parsed.ec == std::errc();
 }
 
+/// A whole float value with the same rejection policy as `parseWholeNumber`
+bool parseStrictFloat(std::string_view text, float& out) {
+    if (text.empty())
+        return false;
+    const char* first = text.data();
+    const char* last = first + text.size();
+    float value = 0.0f;
+    const std::from_chars_result parsed =
+        std::from_chars(first, last, value, std::chars_format::general);
+    if (parsed.ptr != last)
+        return false; // the whole value has to be the number
+    if (parsed.ec != std::errc())
+        return false; // out of range (`1e50`) is a rejection, not a clamp
+    out = value;
+    return true;
+}
+
 /// One `Key=Value` line, split at the first '='. Number keys clamp into their
 /// legal range; word keys take the closed set the format lists. Anything that
 /// does not parse leaves the current value in place (I-09).
@@ -140,6 +157,29 @@ void applyLine(ShellPrefs& prefs, std::string_view line) {
             prefs.tab = InspectorTab::Agents;
         else if (equalsWord(value, "activity"))
             prefs.tab = InspectorTab::Activity;
+        return;
+    }
+    if (key == "WindowWidth" || key == "WindowHeight") {
+        // The writer omits the "not persisted" 0
+        long number = 0;
+        if (!parseWholeNumber(value, number))
+            return;
+        const int clamped =
+            number < kMinWindowDimension
+                ? kMinWindowDimension
+                : (number > kMaxWindowDimension ? kMaxWindowDimension : static_cast<int>(number));
+        if (key == "WindowWidth")
+            prefs.windowWidth = clamped;
+        else
+            prefs.windowHeight = clamped;
+        return;
+    }
+    if (key == "FontScaleMain") {
+        float parsed = 0.0f;
+        if (!parseStrictFloat(value, parsed))
+            return;
+        if (parsed > 0.0f && parsed >= kFontScaleMin && parsed <= kFontScaleMax)
+            prefs.fontScaleMain = clampFontScale(parsed);
         return;
     }
     if (key == "Version")
@@ -348,6 +388,22 @@ Debounce& debounceFor(const std::string& path) {
     return g_debounce;
 }
 
+/// The text without its two window-size lines.
+std::string withoutSizeLines(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    std::size_t start = 0;
+    while (start < text.size()) {
+        const std::size_t end = text.find('\n', start);
+        const std::size_t stop = end == std::string::npos ? text.size() : end + 1;
+        const std::string_view line(text.data() + start, stop - start);
+        if (line.rfind("WindowWidth=", 0) != 0 && line.rfind("WindowHeight=", 0) != 0)
+            out.append(line);
+        start = stop;
+    }
+    return out;
+}
+
 void writeAndReport(const std::string& path, const std::string& text) {
     std::string error;
     if (writeWholeFileAtomic(path, text, error))
@@ -485,6 +541,21 @@ std::string uiConfText(const ShellPrefs& prefs) {
     text += "RailOpen=" + std::string(triStateWord(prefs.railOpen)) + "\n";
     text += "InspectorOpen=" + std::string(triStateWord(prefs.inspectorOpen)) + "\n";
     text += "InspectorTab=" + std::string(inspectorTabWord(prefs.tab)) + "\n";
+    // The window size is written only when > 0 so the struct's 0 = "not
+    // persisted" default never round-trips into a clamped 1.
+    if (prefs.windowWidth > 0)
+        text += "WindowWidth=" + std::to_string(prefs.windowWidth) + "\n";
+    if (prefs.windowHeight > 0)
+        text += "WindowHeight=" + std::to_string(prefs.windowHeight) + "\n";
+    char buf[32];
+    const auto formatted =
+        std::to_chars(buf, buf + sizeof(buf), prefs.fontScaleMain, std::chars_format::fixed, 2);
+    // A failure is unreachable for an in-range scale in 32 bytes; should a
+    // non-finite value ever arrive, dropping the line is the tolerant answer
+    // (the parser keeps the default for a missing key) and never malformed text.
+    if (formatted.ec == std::errc())
+        text += "FontScaleMain=" + std::string(buf, static_cast<std::size_t>(formatted.ptr - buf)) +
+                "\n";
     return text;
 }
 
@@ -528,23 +599,20 @@ void loadUiConf(ShellPrefs& prefs, const std::string& iniFilename) {
     state.pendingText = state.baseline;
 }
 
-void saveUiConf(const ShellPrefs& prefs, const std::string& iniFilename) {
+void saveUiConf(const ShellPrefs& prefs, const std::string& iniFilename, bool windowResized) {
     const std::string path = uiConfPath(iniFilename);
     if (path.empty())
         return;
     Debounce& state = debounceFor(path);
     const std::string text = uiConfText(prefs);
 
-    // The quit save carries a change this session made - it does not canonicalize a
-    // file nobody touched. A newer build's file keeps its bytes, and a hand-edited
-    // one keeps its comments and unknown keys, until the user really chooses
-    // something. A profile that was read (applied, missing, or a newer build's) is
-    // what a change is measured against; without any load the only thing a save may
-    // do is create a profile that does not exist yet, because there is nothing
-    // there to overwrite.
+    // The quit save carries a change this session made
     if (state.loaded || state.futureFile) {
-        if (text != state.pendingText)
-            state.dirty = true;
+        if (text != state.pendingText) {
+            const bool sizeOnly = withoutSizeLines(text) == withoutSizeLines(state.pendingText);
+            if (!sizeOnly || (windowResized && !state.futureFile))
+                state.dirty = true;
+        }
     } else if (!isRegularFile(path)) {
         state.dirty = true;
     }
