@@ -35,6 +35,7 @@
 /// and only the vector is allocated.
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -132,7 +133,7 @@ std::string padRight(std::string_view utf8, int cells);
 /// digits are plain ASCII with no grouping separator and no locale, so a column
 /// of these is stable in a monospace grid. Units are the decimal ladder k, M, G,
 /// T, P, E (10^3 .. 10^18); the sign of a negative value is kept in front.
-std::string formatCount(long long v);
+std::string formatCount(std::int64_t v);
 
 /// `utf8` in codepoints - the "characters" a *rule* counts, as opposed to the cells a
 /// renderer draws.

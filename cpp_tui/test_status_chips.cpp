@@ -26,6 +26,7 @@
 #include "model/status_chips.h"
 
 #include <clocale>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -123,7 +124,7 @@ void scenario3_countFormat() {
     g_scenario = 3;
     phase("used/max abbreviation");
 
-    const auto expectContext = [](long long used, long long max, const std::string& want) {
+    const auto expectContext = [](std::int64_t used, std::int64_t max, const std::string& want) {
         model::RuntimeStatus status;
         status.contextUsed = used;
         status.contextMax = max;

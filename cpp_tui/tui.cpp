@@ -359,7 +359,7 @@ TuiLogRecord toInbound(const LogRecord& record) {
 }
 
 /// The N a queue-drop warning reports, or -1 when the message is not the pinned format.
-long long queueDropReportedN(const std::string& message) {
+std::int64_t queueDropReportedN(const std::string& message) {
     static constexpr char prefix[] = "log queue dropped ";
     static constexpr char suffix[] = " records (the frame loop did not drain in time)";
     if (message.size() < sizeof(prefix) - 1 || message.compare(0, sizeof(prefix) - 1, prefix) != 0)
@@ -374,7 +374,7 @@ long long queueDropReportedN(const std::string& message) {
     // past 18 digits cannot be a real drop count and would overflow the parse.
     if (end - digitsStart > 18)
         return -1;
-    long long n = 0;
+    std::int64_t n = 0;
     for (std::size_t i = digitsStart; i < end; ++i)
         n = n * 10 + (message[i] - '0');
     return n;
@@ -411,7 +411,7 @@ void tuiAddLogRecord(TuiState& state, const LogRecord& record) {
     LogRecord stored = record;
     if (record.seq > 0) {
         const bool queueDrop = record.function == model::kRawLogQueueDropMarker;
-        const long long reportedN = queueDrop ? queueDropReportedN(record.message) : -1;
+        const std::int64_t reportedN = queueDrop ? queueDropReportedN(record.message) : -1;
         if (state.lastStampedSeq == 0) {
             state.lastStampedSeq = record.seq;
         } else if (record.seq > state.lastStampedSeq) {

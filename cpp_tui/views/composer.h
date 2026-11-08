@@ -39,6 +39,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -105,7 +106,7 @@ inline constexpr std::size_t kPasteCaptureAboveChars = 8;
 /// third `Enter` a few frames after the characters. 250 ms is ~15 frames at 60 Hz,
 /// far longer than that trickle and far shorter than a person pressing a key after
 /// pasting.
-inline constexpr long long kPasteFlightMs = 250;
+inline constexpr std::int64_t kPasteFlightMs = 250;
 
 /// The placeholder. The `…` is East-Asian *Ambiguous*, so the grid -
 /// where a CJK terminal may draw it two cells wide - gets the three-dot spelling
@@ -221,7 +222,7 @@ struct PasteState {
     /// question is raised - the view draws a value, it does not format per frame.
     std::string question;
     /// Until this instant, an `Enter` belongs to the paste that is still arriving.
-    long long inFlightUntilMs = 0;
+    std::int64_t inFlightUntilMs = 0;
 
     /// Forget the question, the pending edit and any run still in flight (a session
     /// switch, a send, a discard).
@@ -230,7 +231,7 @@ struct PasteState {
 
 /// Is a paste still in flight at `nowMs`? While it is, no `Enter` may submit:
 /// the payload's own newline must not be read as the user's send.
-bool pasteInFlight(const PasteState& paste, long long nowMs);
+bool pasteInFlight(const PasteState& paste, std::int64_t nowMs);
 
 // The rest of the input policy
 
@@ -307,11 +308,11 @@ bool historyRecall(const std::vector<std::string>& entries, int& pos, std::strin
 /// on its own.
 enum class MeterLevel { Normal, Warn, Danger };
 
-MeterLevel meterLevel(long long used, long long max);
+MeterLevel meterLevel(std::int64_t used, std::int64_t max);
 
 /// The used/max fraction clamped into [0, 1]; 0 when `max` is not positive (an
 /// unknown capacity is not a full one).
-float contextFraction(long long used, long long max);
+float contextFraction(std::int64_t used, std::int64_t max);
 
 // The view
 
@@ -432,7 +433,7 @@ struct ComposerInput {
     /// reads the flag rather than ignoring the key.
     bool focusMode = false;
     /// The frame's clock, in unix milliseconds - the paste flight window's time base.
-    long long nowMs = 0;
+    std::int64_t nowMs = 0;
 
     // the view's own state
     ComposerState* state = nullptr;

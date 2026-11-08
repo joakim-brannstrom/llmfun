@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -150,13 +151,13 @@ RunState barState(const TopBarState& state) {
     return state.rawLogOpen ? RunState::RawLogOpen : state.run;
 }
 
-std::string elapsedLabel(long long ms) {
+std::string elapsedLabel(std::int64_t ms) {
     if (ms < 0)
         ms = 0;
-    const long long totalSeconds = ms / 1000;
-    const long long hours = totalSeconds / 3600;
-    const long long minutes = (totalSeconds / 60) % 60;
-    const long long seconds = totalSeconds % 60;
+    const std::int64_t totalSeconds = ms / 1000;
+    const std::int64_t hours = totalSeconds / 3600;
+    const std::int64_t minutes = (totalSeconds / 60) % 60;
+    const std::int64_t seconds = totalSeconds % 60;
     char buffer[32];
     if (hours > 0)
         std::snprintf(buffer, sizeof buffer, "%lld:%02lld:%02lld", hours, minutes, seconds);

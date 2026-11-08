@@ -5,12 +5,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <ctime>
 
 namespace llmfun::tui::model {
 namespace {
 
-constexpr long long kMsPerDay = 86'400'000LL;
+constexpr std::int64_t kMsPerDay = 86'400'000LL;
 
 /// Empty or whitespace-only = "no filter". The shipped panel's rule, kept: a
 /// query of spaces is not a query.
@@ -68,7 +69,7 @@ const char* groupLabel(Group group) {
     return "SESSIONS";
 }
 
-int civilDay(long long unixMs) {
+int civilDay(std::int64_t unixMs) {
     // A *day ordinal*, i.e. days since 1970-01-01 in the local calendar, so that two
     // consecutive civil days always differ by exactly 1 - across a month end, a year
     // end and a DST edge. The local date is read as if it were UTC and divided by a
@@ -90,7 +91,7 @@ int civilDay(long long unixMs) {
     return static_cast<int>(dayStart / 86'400);
 }
 
-RailModel buildRailRows(const std::vector<SessionRow>& rows, long long nowMs,
+RailModel buildRailRows(const std::vector<SessionRow>& rows, std::int64_t nowMs,
                         std::string_view filter) {
     RailModel model;
 
@@ -171,7 +172,7 @@ RailModel buildRailRows(const std::vector<SessionRow>& rows, long long nowMs,
 
 void UnreadTracker::apply(const std::vector<SessionRow>& rows) {
     std::set<std::string> nextUnread;
-    std::map<std::string, long long> nextSeen;
+    std::map<std::string, std::int64_t> nextSeen;
     std::string nextActive;
 
     for (const SessionRow& row : rows) {

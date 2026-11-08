@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -543,7 +544,7 @@ void PasteState::dismiss() {
     inFlightUntilMs = 0;
 }
 
-bool pasteInFlight(const PasteState& paste, long long nowMs) {
+bool pasteInFlight(const PasteState& paste, std::int64_t nowMs) {
     // `nowMs == 0` is "no clock": the window then behaves as closed, so a harness that
     // does not drive a clock is not permanently "in a paste".
     return nowMs > 0 && nowMs < paste.inFlightUntilMs;
@@ -684,7 +685,7 @@ bool historyRecall(const std::vector<std::string>& entries, int& pos, std::strin
     return true;
 }
 
-MeterLevel meterLevel(long long used, long long max) {
+MeterLevel meterLevel(std::int64_t used, std::int64_t max) {
     const float fraction = contextFraction(used, max);
     if (fraction >= 0.9f)
         return MeterLevel::Danger;
@@ -693,7 +694,7 @@ MeterLevel meterLevel(long long used, long long max) {
     return MeterLevel::Normal;
 }
 
-float contextFraction(long long used, long long max) {
+float contextFraction(std::int64_t used, std::int64_t max) {
     if (max <= 0 || used <= 0)
         return 0.0f;
     const double fraction = static_cast<double>(used) / static_cast<double>(max);

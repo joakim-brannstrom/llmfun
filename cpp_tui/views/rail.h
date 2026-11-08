@@ -50,6 +50,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "ui/tokens.h"
@@ -139,7 +140,7 @@ int railRowLines(const ui::Metrics& m, float displayHeight);
 /// Pure and clock-injected, like the grouping it sits under: the same pair always
 /// answers the same label, and a future stamp (clock skew) is `now` rather than a
 /// negative duration.
-std::string railTimeLabel(long long updatedAtMs, long long nowMs);
+std::string railTimeLabel(std::int64_t updatedAtMs, std::int64_t nowMs);
 
 /// The window of rows a viewport shows: `first` is the index of the first item
 /// that intersects `[scrollY, scrollY + viewportH)` within a sub-list that starts
@@ -174,6 +175,6 @@ RailWindow railWindow(std::size_t slots, float offset, float slotHeight, float v
 /// one and paints over the panel's bottom rows. The floating inspector avoids that with its
 /// own late child window (`views/inspector.cpp`); the rail's panel needs the same treatment.
 void renderRail(model::RailState& rail, const model::RailModel& list, const ui::Rect& region,
-                const ui::Metrics& m, int rowLines, long long nowMs, bool acceptKeys);
+                const ui::Metrics& m, int rowLines, std::int64_t nowMs, bool acceptKeys);
 
 } // namespace llmfun::tui::views

@@ -36,6 +36,7 @@
 #include "imgui/imgui.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -64,7 +65,7 @@ void check(bool condition, const std::string& what) {
 
 /// A twelve-session snapshot: one pinned, and the rest spread over the date groups so
 /// every header the rail can draw is on screen.
-void seedSessions(llmfun::tui::TuiState& state, long long nowMs) {
+void seedSessions(llmfun::tui::TuiState& state, std::int64_t nowMs) {
     struct Fixture {
         const char* id;
         const char* title;
@@ -94,7 +95,7 @@ void seedSessions(llmfun::tui::TuiState& state, long long nowMs) {
         entry.preview = f.preview;
         entry.messageCount = 3;
         entry.isActive = f.active;
-        entry.updatedAtMs = nowMs - static_cast<long long>(f.hoursAgo) * 3'600'000LL;
+        entry.updatedAtMs = nowMs - static_cast<std::int64_t>(f.hoursAgo) * 3'600'000LL;
         if (f.pinned)
             entry.flags |= llmfun::tui::kSessionFlagPinned;
         state.sessionPanel.sessions.push_back(entry);
@@ -188,7 +189,7 @@ void setRunningFlag(llmfun::tui::TuiState& state, const std::string& id, bool ru
 }
 
 /// Write the timestamp on one snapshot row (`0` = unknown, which flattens the rail).
-void setTimestamp(llmfun::tui::TuiState& state, const std::string& id, long long updatedAtMs) {
+void setTimestamp(llmfun::tui::TuiState& state, const std::string& id, std::int64_t updatedAtMs) {
     for (auto& entry : state.sessionPanel.sessions) {
         if (entry.id == id)
             entry.updatedAtMs = updatedAtMs;
@@ -227,7 +228,7 @@ int main(int argc, char** argv) {
 
     llmfun::tui::TuiState state;
     state.readyStatus = true;
-    const long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+    const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::system_clock::now().time_since_epoch())
                                 .count();
     seedSessions(state, nowMs);

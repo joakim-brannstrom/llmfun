@@ -31,6 +31,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <string>
 
 // Forward declarations, not includes (the palette header's rule): this header travels inside
@@ -75,7 +76,7 @@ struct TopBarState {
     /// The run's clock, in milliseconds (drawn by the now bar's clock; the field stays
     /// because `barState()`'s run story and the frame's derivation are unchanged). Ignored
     /// by the two states that do not count (`Ready`, `failed`).
-    long long elapsedMs = 0;
+    std::int64_t elapsedMs = 0;
     /// The Raw Log overlay is up: the `RAW` badge is drawn exactly while this holds.
     bool rawLogOpen = false;
     /// A rename may be queued (the rail's `canQueue`: no run is active). While it is
@@ -144,9 +145,9 @@ const char* runStateName(RunState state);
 RunState barState(const TopBarState& state);
 
 /// `ms` as `mm:ss`, or as `h:mm:ss` past the first hour. Negative, NaN-free by contract
-/// (`long long`) and absurdly large values are all answered, because the clock is wall
+/// (`std::int64_t`) and absurdly large values are all answered, because the clock is wall
 /// time and a clock jump must not print a negative duration or crash a format.
-std::string elapsedLabel(long long ms);
+std::string elapsedLabel(std::int64_t ms);
 
 /// One part of the bar, in the bar's own coordinates and in the metrics' units (cells on the
 /// text grid, pixels in the pixel profile).

@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 
 namespace llmfun::tui::views {
@@ -372,21 +373,21 @@ int railRowLines(const ui::Metrics& m, float displayHeight) {
     return displayHeight >= threshold ? 2 : 1;
 }
 
-std::string railTimeLabel(long long updatedAtMs, long long nowMs) {
+std::string railTimeLabel(std::int64_t updatedAtMs, std::int64_t nowMs) {
     if (updatedAtMs <= 0)
         return std::string();
-    long long delta = nowMs - updatedAtMs;
+    std::int64_t delta = nowMs - updatedAtMs;
     if (delta < 0)
         delta = 0; // a future stamp (clock skew) is "now", not a negative age
-    const long long minutes = delta / 60'000;
+    const std::int64_t minutes = delta / 60'000;
     if (minutes < 1)
         return "now";
     if (minutes < 60)
         return std::to_string(minutes) + "m";
-    const long long hours = minutes / 60;
+    const std::int64_t hours = minutes / 60;
     if (hours < 24)
         return std::to_string(hours) + "h";
-    const long long days = hours / 24;
+    const std::int64_t days = hours / 24;
     if (days < 7)
         return std::to_string(days) + "d";
     return std::to_string(days / 7) + "w";
@@ -541,7 +542,7 @@ void renderStrip(model::RailState& rail, const RailModel& list, const ui::Rect& 
 }
 
 void renderRail(model::RailState& rail, const RailModel& list, const ui::Rect& region,
-                const ui::Metrics& m, int rowLines, long long nowMs, bool acceptKeys) {
+                const ui::Metrics& m, int rowLines, std::int64_t nowMs, bool acceptKeys) {
     // Fail closed: a zero, mixed-unit or unmetered region paints nothing rather than a
     // plausible rail in the wrong coordinate space.
     if (region.w <= 0.0f || region.h <= 0.0f || m.gu <= 0.0f || m.row <= 0.0f ||

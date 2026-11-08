@@ -39,6 +39,7 @@
 //   ./test_ui_settings
 
 #include <clocale>
+#include <cstdint>
 #include <cstdio>
 #include <set>
 #include <string>
@@ -132,14 +133,14 @@ bool isDirectory(const std::string& path) {
 }
 
 /// Whole seconds of the file's mtime; -1 when it cannot be read.
-long long writeTime(const std::string& path) {
+std::int64_t writeTime(const std::string& path) {
     struct stat info {};
     if (::stat(path.c_str(), &info) != 0)
         return -1;
-    return static_cast<long long>(info.st_mtime);
+    return static_cast<std::int64_t>(info.st_mtime);
 }
 
-bool setWriteTime(const std::string& path, long long seconds) {
+bool setWriteTime(const std::string& path, std::int64_t seconds) {
     struct timeval times[2];
     times[0].tv_sec = static_cast<time_t>(seconds);
     times[0].tv_usec = 0;
@@ -147,11 +148,11 @@ bool setWriteTime(const std::string& path, long long seconds) {
     return ::utimes(path.c_str(), times) == 0;
 }
 
-long long fileMode(const std::string& path) {
+std::int64_t fileMode(const std::string& path) {
     struct stat info {};
     if (::stat(path.c_str(), &info) != 0)
         return -1;
-    return static_cast<long long>(info.st_mode & 07777);
+    return static_cast<std::int64_t>(info.st_mode & 07777);
 }
 
 bool setFileMode(const std::string& path, mode_t mode) { return ::chmod(path.c_str(), mode) == 0; }

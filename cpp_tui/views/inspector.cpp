@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <string>
@@ -288,7 +289,7 @@ std::string missionRowText(const std::vector<model::AgentLane>& lanes, const ui:
 /// machines), and `./test_activity` pins `TZ=UTC` around its captures, so a golden never
 /// depends on where it was produced. A record with no stamp (a harness fixture) prints the
 /// dashes rather than `01:00:00` on the epoch.
-std::string activityClock(long long timestampMs) {
+std::string activityClock(std::int64_t timestampMs) {
     if (timestampMs <= 0)
         return "--:--:--";
     const std::time_t seconds = static_cast<std::time_t>(timestampMs / 1000);

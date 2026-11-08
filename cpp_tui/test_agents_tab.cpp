@@ -51,6 +51,7 @@
 
 #include "imgui/imgui.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -296,8 +297,8 @@ const ui::Metrics& gridMetrics() {
 
 /// One lane, the way the mirror leaves it.
 model::AgentLane lane(const std::string& id, const std::string& state, bool active,
-                      const std::string& tool = std::string(), long long tokens = 0,
-                      long long elapsedMs = 0, const std::string& content = std::string()) {
+                      const std::string& tool = std::string(), std::int64_t tokens = 0,
+                      std::int64_t elapsedMs = 0, const std::string& content = std::string()) {
     model::AgentLane out;
     out.id = id;
     out.label = id;
@@ -471,7 +472,7 @@ void checkSource() {
 
 void checkMirror() {
     model::UiState ui;
-    const long long t0 = 1'000'000;
+    const std::int64_t t0 = 1'000'000;
     model::applyAgentUpdate(ui, "coder", "assistant", "hello", "", 1200, t0);
     check(ui.agents.size() == 1, "the first update registers a lane");
     const model::AgentLane& first = ui.agents.front();

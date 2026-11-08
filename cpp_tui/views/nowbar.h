@@ -137,7 +137,7 @@ struct NowBarInput {
     /// meter's bar is drawn only when the number exists. The meter reads the same numbers
     /// the count beside it is drawn from (`StatusChips::contextUsed/contextMax`), so the
     /// bar and its tick cannot disagree with the count.
-    long long compactAt = 0;
+    std::int64_t compactAt = 0;
     model::StatusChips chips;
     bool rawLogOpen = false;
     /// Compact mode (`ShellLayout::compact`): the meter draws its compact count - the pair's

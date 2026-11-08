@@ -2,6 +2,7 @@
 #include "model/toast.h"
 
 #include <algorithm>
+#include <cstdint>
 
 #include "model/ui_state.h"
 

@@ -52,6 +52,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -315,11 +316,11 @@ void clickAt(float x, float y, const std::function<void(const ui::Metrics&)>& bo
 
 /// 2026-06-18T12:00:00Z - a Thursday, mid-day, so "yesterday" and "7 days ago" are
 /// unambiguous.
-constexpr long long kNowMs = 1'781'784'000'000LL;
-constexpr long long kHourMs = 3'600'000LL;
-constexpr long long kDayMs = 24 * kHourMs;
+constexpr std::int64_t kNowMs = 1'781'784'000'000LL;
+constexpr std::int64_t kHourMs = 3'600'000LL;
+constexpr std::int64_t kDayMs = 24 * kHourMs;
 
-model::SessionRow row(const std::string& id, const std::string& title, long long updatedAtMs,
+model::SessionRow row(const std::string& id, const std::string& title, std::int64_t updatedAtMs,
                       bool active = false) {
     model::SessionRow r;
     r.id = id;
@@ -385,7 +386,7 @@ void checkGrouping() {
           "every group has its design label");
 
     // --- a day boundary: 23:59:59 yesterday vs 00:00:01 today -----------------
-    const long long midnight = kNowMs - 12 * kHourMs; // 2026-06-18T00:00:00Z
+    const std::int64_t midnight = kNowMs - 12 * kHourMs; // 2026-06-18T00:00:00Z
     std::vector<model::SessionRow> boundary;
     boundary.push_back(row("late", "Late", midnight - 1000));   // 23:59:59 the day before
     boundary.push_back(row("early", "Early", midnight + 1000)); // 00:00:01 today
@@ -410,7 +411,7 @@ void checkGrouping() {
         t.tm_mon = 11 - 1; // November
         t.tm_mday = 1;
         t.tm_hour = 10;
-        const long long novFirst = static_cast<long long>(timegm(&t)) * 1000; // 10:00 UTC
+        const std::int64_t novFirst = static_cast<std::int64_t>(timegm(&t)) * 1000; // 10:00 UTC
         std::vector<model::SessionRow> month;
         month.push_back(row("today", "Today", novFirst - 1 * kHourMs));
         month.push_back(row("last-night", "Last night", novFirst - 14 * kHourMs)); // 10-31 20:00
@@ -438,7 +439,7 @@ void checkGrouping() {
         t.tm_mon = 1 - 1; // January
         t.tm_mday = 2;
         t.tm_hour = 10;
-        const long long janSecond = static_cast<long long>(timegm(&t)) * 1000;
+        const std::int64_t janSecond = static_cast<std::int64_t>(timegm(&t)) * 1000;
         std::vector<model::SessionRow> year;
         year.push_back(row("jan02", "Jan 02", janSecond - 1 * kHourMs));
         year.push_back(row("jan01", "Jan 01", janSecond - 1 * kDayMs));
@@ -885,7 +886,7 @@ void checkBoundedRendering() {
     for (int i = 0; i < 2000; ++i) {
         // Spread over the date groups so the fixture is not one bucket.
         model::SessionRow r = row("id-" + std::to_string(i), "Session " + std::to_string(i),
-                                  kNowMs - static_cast<long long>(i) * 37 * 60 * 1000);
+                                  kNowMs - static_cast<std::int64_t>(i) * 37 * 60 * 1000);
         r.running = (i == 0);
         r.unread = (i % 17 == 0);
         rows.push_back(std::move(r));

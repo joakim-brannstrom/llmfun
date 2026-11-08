@@ -92,6 +92,7 @@
 #include <chrono>
 #include <clocale>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -546,7 +547,7 @@ String makeStr(const std::string& text) { return makeStr(text.c_str()); }
 /// then draws as garbage. A literal, or a `c_str()` of storage the caller owns, outlives the call
 /// that copies it.
 SessionItem makeSession(const char* id, const char* title, const char* preview, std::size_t count,
-                        int active, long long updatedAtMs) {
+                        int active, std::int64_t updatedAtMs) {
     SessionItem item{};
     item.id = makeStr(id);
     item.title = makeStr(title);
@@ -602,7 +603,7 @@ void addLogRecord(Harness& h, TuiLogLevel level, const std::string& message,
 }
 
 void updateAgent(Harness& h, const std::string& id, const std::string& role,
-                 const std::string& content, const std::string& tool, long long contextUsed) {
+                 const std::string& content, const std::string& tool, std::int64_t contextUsed) {
     PipelineChatMessage msg{};
     msg.content = makeStr(content);
     msg.reasoning = makeStr("");

@@ -55,6 +55,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -237,7 +238,7 @@ const ui::Metrics& gridMetrics() {
 // ---------------------------------------------------------------------------
 
 /// 2026-06-21T00:00:00Z: the goldens read 00:00:xx and cannot embed the wall clock.
-inline constexpr long long kFixtureEpochMs = 1'782'000'000'000;
+inline constexpr std::int64_t kFixtureEpochMs = 1'782'000'000'000;
 
 model::RawLogRecord record(int level, const std::string& message, int index = 0,
                            const std::string& detail = std::string()) {
@@ -407,7 +408,7 @@ void checkSave() {
     check(model::rawLogSaveDir() == root + "/llmfun/logs",
           "the save directory is the data directory, never the workarea");
 
-    const long long stamp = kFixtureEpochMs;
+    const std::int64_t stamp = kFixtureEpochMs;
     check(model::rawLogSaveName(stamp) == "ui-20260621-000000.log",
           "the file name is the design's ui-YYYYMMDD-HHMMSS.log");
     check(model::rawLogSaveName(stamp, 2) == "ui-20260621-000000-2.log",
@@ -603,7 +604,7 @@ void checkRingRotation() {
     check(!before.hasText("record 4"), "and hides its neighbour");
 
     // A rotation inside the same millisecond: the evicted front and the new front share a stamp.
-    const long long frontStamp = ringData.front().timestampMs;
+    const std::int64_t frontStamp = ringData.front().timestampMs;
     model::RawLogRecord fresh = record(model::kRawLogLevelInfo, "record 10", 0);
     fresh.timestampMs = frontStamp;
     ringData.push_back(fresh);
@@ -990,13 +991,13 @@ model::RawLogRecord stampedRecord(int level, const std::string& message, int seq
 /// The equation's remainder: `headN + interiorGapSum - dropped - queueDropNs`. Zero when every
 /// missing seq was explained by a queue-drop warning; anything else is the diagnostic the
 /// surfaces can print (a positive remainder is a loss the stamps prove but nothing explained).
-long long remainderOf(const tui::TuiState& state) {
-    const long long head =
-        static_cast<long long>(model::rawLogHeadGap(state.logRecords, state.droppedRecords));
-    const long long interior =
-        static_cast<long long>(model::rawLogInteriorGapSum(state.logRecords));
-    return head + interior - static_cast<long long>(state.droppedRecords) -
-           static_cast<long long>(state.queueDropRecords);
+std::int64_t remainderOf(const tui::TuiState& state) {
+    const std::int64_t head =
+        static_cast<std::int64_t>(model::rawLogHeadGap(state.logRecords, state.droppedRecords));
+    const std::int64_t interior =
+        static_cast<std::int64_t>(model::rawLogInteriorGapSum(state.logRecords));
+    return head + interior - static_cast<std::int64_t>(state.droppedRecords) -
+           static_cast<std::int64_t>(state.queueDropRecords);
 }
 
 void checkGapAccounting() {

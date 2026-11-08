@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <clocale>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
