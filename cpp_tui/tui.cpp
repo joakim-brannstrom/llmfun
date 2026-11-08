@@ -14,7 +14,7 @@
 
 #include "imgui/imgui_internal.h"
 
-#include "tui_api.h" // String / TuiLogRecord: the ABI's own view of a record (toInbound)
+#include "tui_api.h"
 
 #include <algorithm>
 #include <cassert>
@@ -30,30 +30,20 @@ namespace llmfun::tui {
 
 namespace {
 
-/// Debug-build tripwire for the frame-thread rule (§3.8). NDEBUG compiles the
-/// assertion out (the project builds Release), so the *query* is what the unit
-/// tests pin; the assertion is the developer-build aid on top of it.
 void debugAssertFrameThread(const TuiState& state) {
     assert(debugIsFrameThread(state) && "TUI state touched off the frame thread");
 }
 
 /// The GUI's text scale, applied once per frame before anything is measured.
 ///
-/// `ui::metricsFor()` reads `ImGuiStyle::FontScaleMain`, and `TuiState::settings`
-/// is the only source of that value: this is the writer half of the metrics seam.
-/// It runs at the top of `tuiRender()`, before the root window is begun (a Begun
-/// window has already locked its font size, so a later write would only take
-/// effect next frame). Without this line every GUI length would silently fall
-/// back to 100 %.
+/// `ui::metricsFor()` reads `ImGuiStyle::FontScaleMain`, and the one preferences owner
+/// (`state.ui.prefs`) is the only source of that value. It runs at the top of `tuiRender()`, before
+/// the root window is begun (a Begun window has already locked its font size); the 50-300 %
+/// clamp below is a second line of defence behind the load's snapping.
 void applyGuiFontScale(const TuiState& state) {
-    // The text grid never loads a non-default scale: a cell is a cell, and the
-    // terminal owns its size.
     if (tuiIsTextGrid())
         return;
-    // loadTuiSettings() already rejects NaN and out-of-range values, so this is
-    // the second line of defence; the range matches tui_settings.cpp's
-    // Min/MaxFontScaleMain (50-300 %).
-    const float scale = state.settings.fontScaleMain;
+    const float scale = state.ui.prefs.fontScaleMain;
     ImGui::GetStyle().FontScaleMain = (scale >= 0.5f && scale <= 3.0f) ? scale : 1.0f;
 }
 
@@ -933,13 +923,10 @@ bool tuiRender(TuiState& state) {
     // what the thread area means.
     views::ShellFrame shellFrame;
     {
-        // `ui.conf` (D-UI-CONF, task 29): the first frame reads the profile and every
-        // frame after it offers the debounced write. It runs *before* the shell so a saved
-        // `InspectorOpen=`/`InspectorTab=` shapes this very frame instead of the next one.
         const double nowSeconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
                 .count();
-        views::uiConfFrame(state.ui, state.uiConfLoaded, state.iniFilename, nowSeconds);
+        views::uiConfFrame(state.ui, state.iniFilename, nowSeconds);
         // Bound before the derivation below reads `groupCount()`: the adapter is a
         // member of the state, and a moved state leaves it unbound rather than
         // dangling (see `ThreadStoreAdapter::bind`).
@@ -1150,11 +1137,13 @@ void tuiSetIniFilename(TuiState& state, const std::string& filename) {
         state.iniFilename = filename;
 }
 
-void saveUiConfOnShutdown(TuiState& state) {
-    // A no-op without a profile (D-UI-CONF). Called from `tuiDestroyState()`, which every exit
-    // path reaches - the quit chord's `quitRequested` frame saves too, and the second call
-    // writes nothing because the bytes already match.
-    views::uiConfQuit(state.ui, state.iniFilename);
+void saveUiConfOnShutdown(TuiState& state, bool windowResized) {
+    // A no-op without a profile. Called from `tuiDestroyState()`, which every exit
+    // path reaches - the quit chord's `quitRequested` frame save too - after the
+    // backend's shutdown has written the closing window size into the struct. When
+    // the bytes already match it writes nothing; a resize since open is the one
+    // difference the size-only rule lets it carry.
+    views::uiConfQuit(state.ui, state.iniFilename, windowResized);
 }
 
 void tuiInitQueryHistory(TuiState& state, const std::vector<std::string>& history) {

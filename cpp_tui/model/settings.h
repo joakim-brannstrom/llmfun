@@ -1,32 +1,26 @@
-/// The workbench's own settings file (`ui.conf`): the persisted shell
-/// preferences, kept apart from `imgui2.gui.conf` so a `TuiSettings` save cannot
-/// clobber them (design §5.3, D-UI-CONF / D-03).
+/// The workbench's own settings file (`ui.conf`): the single persisted
+/// settings file.
 ///
 /// `ShellPrefs` is the one owner of the user's choices - the model keeps no
 /// second copy, and the views read its fields instead of their own flags. What
-/// is *not* here is as deliberate: window size and `FontScaleMain` stay in
-/// `imgui2.gui.conf` through `TuiSettings` (a rollback has to find them where the
-/// older build left them), the Raw Log's open state is
-/// never persisted (D-RAWLOG), and the unread set is not persisted either (D-19) -
-/// it belongs on `UiState` next to `rawLogOpen`, never in this struct.
+/// is *not* here is as deliberate: the Raw Log's open state is never
+/// persisted, and the unread set is not persisted either - it belongs on
+/// `UiState` next to `rawLogOpen`, never in this struct.
 ///
-/// Load semantics are `tui_settings`' (I-09: malformed -> keep current): a line
-/// is `Key=Value` split at the first `=`, keys are matched case-sensitively and
-/// are not trimmed, lines without `=` and unknown keys are skipped, and a value
-/// that does not parse leaves the current value alone. Values are read
-/// tolerantly, where a word has no case to get wrong: an enum word is matched
-/// case-insensitively, surrounding blanks are ignored, and a number outside its
-/// range clamps instead of being dropped - including one too large for a `long`.
+/// Load semantics (an unparsable value keeps the current one): `Key=Value`
+/// split at the first `=`, keys case-sensitive and untrimmed, unknown keys
+/// skipped; values parse tolerantly - enum words case-insensitive, blanks
+/// ignored, out-of-range numbers clamped, even past `long`. No migration:
+/// a file from an older version loads with the newer keys at their defaults.
 ///
 /// Reading is never a change: `loadUiConf()` settles the debounce state, so an
 /// untouched profile is not written back behind the user's back.
 ///
-/// Wiring (task 29): the frame layer owns the three calls, in one place (D-UI-CONF: the
-/// frame is the only writer of this file) -
-/// `views::uiConfFrame()` reads the profile on the first frame and offers the debounced flush
-/// on every one after it, and `views::uiConfQuit()` saves on the quit path. The views that
-/// honour a preference (22a/23/27/29/33/34) only read the fields, so a choice reaches the
-/// disk through the debounce the next time the user stops changing things.
+/// Wiring: the frame layer owns the write path - `views::uiConfFrame()`
+/// offers the debounced flush on every frame, `views::uiConfQuit()` saves on
+/// the quit path, and `tuiDestroyState()` runs one more `uiConfQuit()` on
+/// close. The views that honour a preference only read the fields; a choice
+/// reaches the disk through the debounce.
 #pragma once
 
 #include <string>
@@ -90,11 +84,16 @@ bool sendKeyOffered(SendKey key, bool textGrid);
 inline constexpr bool kImeComposingWired = false;
 
 /// The font scale's range and granularity (design §4.10: `0.5 .. 3.0`, in 5 % steps).
-/// `TuiSettings::fontScaleMain` holds the value; this module holds the
-/// rule, so the sheet and `tui_settings.cpp` cannot disagree about what a legal scale is.
+/// `ShellPrefs::fontScaleMain` holds the value; this module holds the
+/// rule, so the sheet and the options window cannot disagree about what a legal scale is.
 inline constexpr float kFontScaleMin = 0.5f;
 inline constexpr float kFontScaleMax = 3.0f;
 inline constexpr int kFontScaleStepPercent = 5;
+
+/// The legal persisted window size in px:
+/// a hand-edited file clamps into this range, and 0 is the "not persisted" sentinel.
+inline constexpr int kMinWindowDimension = 1;
+inline constexpr int kMaxWindowDimension = 32767;
 
 /// `scale` clamped into the range and quantized to the step (a half step rounds up): the value
 /// the UI can actually draw, which is what the sheet prints. Non-finite input answers 1.0 - the
@@ -110,12 +109,7 @@ float stepFontScale(float scale, int steps);
 int fontScalePercent(float scale);
 float fontScaleFromPercent(int percent);
 
-/// The format version this build writes, and the newest one it can read. Version
-/// 2 exists only for the post-MVP merge into a single settings file, so a file
-/// written by the future build is not half-applied here: it keeps the defaults
-/// instead, the unattended flush never rewrites it, and an explicit save from
-/// this build still carries `Version=1`.
-inline constexpr int kUiConfVersion = 1;
+inline constexpr int kUiConfVersion = 2;
 
 /// The idle window before a change reaches the disk (design §5.3: 2 s, plus on
 /// close and on quit). Nothing is written per frame.
@@ -139,6 +133,11 @@ struct ShellPrefs {
     /// (`toggleInspector()`).
     int inspectorOpen = -1;
     InspectorTab tab = InspectorTab::Activity;
+    /// Persisted window size in px; 0 = "not persisted"
+    int windowWidth = 0;
+    int windowHeight = 0;
+    /// Text scale, 1.0 = shipped default. Validated by `clampFontScale`.
+    float fontScaleMain = 1.0f;
 };
 
 /// Show or hide the rail, as the user's own press means it (`Ctrl+B` and the palette's
@@ -168,14 +167,12 @@ inline void toggleInspector(ShellPrefs& prefs, bool visible) {
     prefs.inspectorOpen = visible ? 0 : 1;
 }
 
-/// The `ui.conf` path for a given imgui ini filename: the sibling of the file
-/// `tui_settings::settingsPath()` derives, i.e. `"imgui2.ini"` and
-/// `"a/b/imgui2.ini"` give `"ui.conf"` and `"a/b/ui.conf"`. An empty name has no
-/// path and nothing is ever read or written for it.
+/// The `ui.conf` path for a given imgui ini filename.
 std::string uiConfPath(const std::string& iniFilename);
 
 /// The file's bytes, one `Key=Value` line per setting and a trailing newline:
-/// `Version`, `SendKey`, `UiLog`, `RailOpen`, `InspectorOpen`, `InspectorTab`.
+/// `Version`, `SendKey`, `UiLog`, `RailOpen`, `InspectorOpen`, `InspectorTab`,
+/// `WindowWidth`, `WindowHeight`, `FontScaleMain`.
 ///
 /// This is the format's single owner - the debounce below compares exactly these
 /// bytes, so "the file is up to date" has one definition - and the writer never
@@ -197,24 +194,10 @@ std::string uiConfText(const ShellPrefs& prefs);
 /// so starting and quitting this build leaves its bytes alone.
 void loadUiConf(ShellPrefs& prefs, const std::string& iniFilename);
 
-/// Write the file now: `ui.conf.tmp`, fsync, `rename()` - a crash or a full disk
-/// leaves the previous file intact instead of a truncated one. A replaced file
-/// keeps its mode; a brand-new one is created 0644 subject to the process umask,
-/// so a user whose policy is `umask 077` gets 0600. A temporary left behind by a
-/// killed writer is removed.
-/// Best effort: a write that fails changes nothing on disk and is reported once
-/// through `takeUiConfWarning()`.
-///
-/// This is the close/quit call and the end of a pending debounce window. It
-/// writes only a preference this session actually changed: a quit that changed
-/// nothing leaves the file untouched, so a newer build's file keeps its bytes and
-/// a hand-edited file keeps its comments, unknown keys and spelling. A first save
-/// into a profile with no file yet needs no load - there is nothing to replace -
-/// and a save without a load never overwrites a file this session has not read.
-/// Because it is the user's own action it also settles the profile: a newer
-/// build's file is replaced only by a real choice, and a failed write is not
-/// retried by the flush.
-void saveUiConf(const ShellPrefs& prefs, const std::string& iniFilename);
+/// Write the file now: `ui.conf.tmp`, fsync, `rename()` - a crash or a full
+/// disk leaves the previous file intact instead of a truncated one.
+void saveUiConf(const ShellPrefs& prefs, const std::string& iniFilename,
+                bool windowResized = false);
 
 /// The per-frame call: write the file once `kUiConfIdleSeconds` have passed since
 /// the last change, and never per frame. `nowSeconds` is the frame layer's clock

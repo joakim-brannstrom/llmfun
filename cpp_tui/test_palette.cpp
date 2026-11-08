@@ -1833,9 +1833,8 @@ int runGui(const std::string& outDir) {
 
     const std::string iniPath = outDir + "/palette-imgui2.ini";
     std::remove(iniPath.c_str());
-    std::remove(settingsPath(iniPath).c_str());
     std::string error;
-    auto backend = makeGuiBackend(iniPath, state.settings);
+    auto backend = makeGuiBackend(state.ui.prefs);
     if (!backend->init(error))
         setupError("GUI backend init failed (no display?): " + error);
     state.backend = std::move(backend);

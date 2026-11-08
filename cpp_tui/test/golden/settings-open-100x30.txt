@@ -2,7 +2,7 @@ name: settings-open
 screen: 100x30
 sheet: x=20 y=7 w=60 h=15
 section: ALL search: ''
-rows: built=11 drawn=8 selected=1
+rows: built=10 drawn=8 selected=1
 marks: strip=111 selected=111 row=0
 text:
    llmfun   settings                                           Ctrl+K commands Shift+?   Settings
@@ -13,7 +13,7 @@ text:
     hello                   Summarize this workarea
                             Plan a feature
 
-                     Settings                                 ALL  8    Close
+                     Settings                                 ALL  7    Close
                       Search
                       ALL    APPEARANCE    BEHAVIOUR    ADVANCED
                        APPEARANCE                                             ▌
@@ -21,7 +21,7 @@ text:
                        BEHAVIOUR                                              ▌
                        Send key                                            tab▌
                        Raw log level                                       off▌
-                       ADVANCED
+                       ADVANCED                                               ▌
                        Backend                            text grid (terminal)
                        Workbench settings                         (no profile)
                      a terminal cell is the terminal's size (GUI only)

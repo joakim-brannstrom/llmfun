@@ -334,24 +334,24 @@ glyph ranges are passed (they only matter to legacy backends); a glyph the
 font lacks renders as its fallback (`?`) glyph. Without configuration the
 rendering is exactly as before on a 1.0-scale monitor.
 
-The GUI persists view settings in `imgui2.gui.conf`, a sibling of the imgui
-settings file `imgui2.ini`, with one key=value line per setting:
-`WindowWidth`, `WindowHeight` (clamped to [1, 32767]) and `FontScaleMain`
-(accepted range 0.5 - 3.0). Unknown keys are ignored and malformed values
-are rejected (the current value - normally the default - is kept), so a
-hand-edited or truncated file cannot break the GUI.
+The GUI persists its settings in `ui.conf`, a sibling of the imgui settings
+file `imgui2.ini`. The file starts with a `Version=2` line followed by one
+key=value line per setting: `SendKey`, `UiLog`, `RailOpen`, `InspectorOpen`,
+`InspectorTab`, `WindowWidth`, `WindowHeight` (clamped to [1, 32767]) and
+`FontScaleMain` (accepted range 0.5 - 3.0). A file written by a future build
+is rejected whole (the defaults are kept instead of applying half a newer
+file); unknown keys are ignored and malformed values are rejected (the
+current value - normally the default - is kept), so a hand-edited or
+truncated file cannot break the GUI. There is no migration: a file missing
+newer keys loads with those keys at their defaults.
 
-Precedence is: environment variables, then `imgui2.gui.conf`, then built-in
+Precedence is: environment variables, then `ui.conf`, then built-in
 defaults. `LLMFUN_GUI_FONT` / `LLMFUN_GUI_FONT_SIZE` pick the BASE font and
 its pixel size; the saved `FontScaleMain` multiplies on top of whichever
 base the environment chose - the two knobs compose
 (ImGui::GetFontSize() == FontSizeBase * FontScaleMain * FontScaleDpi), e.g.
 a 16 px base with a saved 1.25 scale renders 20 px. `FontScaleMain` is
 changed in the GUI under View -> Options.
-
-The old window-size sibling file `<iniFilename>.win` is gone; window size is
-now stored in `imgui2.gui.conf` (`WindowWidth` / `WindowHeight`). The first run
-after this change starts once with the default window size.
 
 The text grid instead runs markdown at 1-cell fonts (see Markdown Support),
 with `io.FontDefault` pinned to the imtui 1 px font BY NAME after init —
@@ -365,7 +365,7 @@ the style metrics once (`style.ScaleAllSizes(scale)`) and sets the font scale
 per-monitor query requires GLFW 3.3+; older GLFW compiles the call out inside
 the vendored backend and reports 1.0, so the defaults stay unscaled
 (Wayland/macOS report 1.0 as well). The window size is not changed — the
-layout scales inside the existing 1280x820 window (a persisted `imgui2.gui.conf`
+layout scales inside the existing 1280x820 window (a persisted `ui.conf`
 size wins; one below 640x480 opens at the floor).
 
 **The resize floor is observed.** `glfwSetWindowSizeLimits()` only writes

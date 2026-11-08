@@ -232,15 +232,20 @@ int main(int argc, char** argv) {
                                 .count();
     seedSessions(state, nowMs);
 
-    TuiSettings view;
+    // The profile the workbench loads in `tuiInit`; this harness stands in
+    // for it: seed the merged `ui.conf` through the model's writer and read it into the
+    // one preferences struct the backend and the frame both share.
+    model::ShellPrefs view;
     view.fontScaleMain = 1.0f;
     view.windowWidth = 1280;
     view.windowHeight = 820;
-    const std::string ini = outDir + "/rail-gui.conf";
-    saveTuiSettings(view, ini);
+    const std::string ini = outDir + "/rail-ui.ini";
+    std::remove(model::uiConfPath(ini).c_str()); // a stale profile from an earlier run
+    model::saveUiConf(view, ini);
+    model::loadUiConf(state.ui.prefs, ini);
 
     std::string error;
-    state.backend = makeGuiBackend(ini, state.settings);
+    state.backend = makeGuiBackend(state.ui.prefs);
     if (!state.backend->init(error)) {
         std::fprintf(stderr, "GUI backend init failed (no display?): %s\n", error.c_str());
         ImGui::DestroyContext();

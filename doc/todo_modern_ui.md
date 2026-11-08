@@ -1174,13 +1174,15 @@ A searchable sheet (GUI modal, TUI overlay), sections:
 - **Advanced**: backend mode (auto/gui/tui), ini/settings path, log level, diagnostics
   (copy system info).
 
-Preferences persist in `ui.conf` (a sibling of the imgui ini `imgui2.ini`);
-window size and `FontScaleMain` live in `imgui2.gui.conf` (the TuiSettings file
-the settings rule derives from the ini). Each file has one writer and one
-format, so neither save can clobber the other. Same tolerant key=value parser:
-unknown keys ignored, malformed values rejected. Settings changes apply on the next frame
-(except backend mode, which needs a restart and says so). Merging the two files into one
-is optional future cleanup.
+Preferences persist in one `ui.conf` file (a sibling of the imgui ini
+`imgui2.ini`): the sheet's choices, the window size and `FontScaleMain` -
+one file, one format, one writer module whose only write caller is the
+frame layer (it saves on quit and after a short idle, so per-frame edits
+stay in memory). Same tolerant key=value parser: unknown keys ignored,
+malformed values rejected, a file written by a newer build keeps the
+defaults, and there is no migration - a file missing newer keys loads with
+those keys at their defaults. Settings changes apply on the next frame
+(except backend mode, which needs a restart and says so).
 
 ### 5.28 Help overlay (`?`)
 
@@ -2311,10 +2313,10 @@ virtualization (pixel-perfect), keymap overhaul.
   separate from the feature commits.
 - **Dogfood:** one week of daily use before release, on the same
   sessions/settings files.
-- **Compatibility:** no data migration. All renderers read the same session files. Window
-  size and `FontScaleMain` live in `imgui2.gui.conf`, MVP-only settings in the sibling
-  `ui.conf`; each file has one writer and one format, so neither save can clobber the
-  other. Unknown keys are ignored on load.
+- **Compatibility:** no data migration. All renderers read the same session files. All
+  settings - window size, `FontScaleMain` and the MVP-only choices - live in the one
+  `ui.conf` file: one format, one writer, no second settings file. Unknown keys are
+  ignored on load; a file written by a newer build keeps the defaults.
 - **Release:** document the one intentional behaviour change (Enter
   sends) and the setting that selects newline instead.
 

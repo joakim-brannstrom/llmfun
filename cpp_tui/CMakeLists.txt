@@ -263,41 +263,33 @@ target_link_libraries(probe_chords PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
-# Standalone unit test for the GUI view settings (tui_settings): imgui2.conf
-# path derivation, strict per-key parsing/clamping/fallbacks, save-side guards.
-# Compiles the helper TU directly; links only the standard library (no
-# GLFW/ImGui/display; tui_settings.cpp includes imgui.h/tui.h only outside the
-# headless test build, see TUI_SETTINGS_HEADLESS_TEST below). Built by
-# `make -f tui.mak`, run headless: ./test_settings
+# Standalone unit test for the merged settings file (model/ui_conf.cpp): the
+# `ui.conf` format, strict per-key parsing/clamping/fallbacks, save-side guards.
+# Compiles `model/ui_conf.cpp` directly and links only the standard library (no
+# GLFW/ImGui/display). Run headless from the build dir: ./test_settings
 add_executable(test_settings
     test_settings.cpp
-    tui_settings.cpp
+    model/ui_conf.cpp
 )
-# Keeps the ImGui-dependent renderOptionsWindow out of the test TU (see above).
-target_compile_definitions(test_settings PRIVATE TUI_SETTINGS_HEADLESS_TEST)
 
-# The workbench's own settings file (task 22, design §5.3 / D-UI-CONF): `ui.conf` is
-# the sibling of `imgui2.conf` that only the workbench reads and writes, so a
-# `TuiSettings` save cannot clobber a preference it has no field for. This harness pins the path
+# The workbench's own settings file: `ui.conf`
+# is the one settings file the workbench reads and writes, so nothing else in the
+# tree writes a settings file. This harness pins the path
 # derivation, the exact on-disk bytes, a full round-trip of every key and value, the
 # `Version` gate, unknown/malformed/out-of-range handling, pin pruning, the atomic
 # write (a temporary left behind by a killed writer is never read), the 2 s debounce,
-# the read-only-directory warning, and that `saveTuiSettings` leaves `ui.conf`
-# byte-identical.
+# the read-only-directory warning, and that a stale `.gui.conf` is ignored.
 #
-# It compiles `model/ui_conf.cpp` and `tui_settings.cpp` directly and links only the
+# It compiles `model/ui_conf.cpp` directly and links only the
 # standard library (no GLFW, no ImGui, no display, like test_settings), which also
 # pins the module's layering: `model/` owns no renderer and no v4 payload.
-# `tui_settings.cpp` needs TUI_SETTINGS_HEADLESS_TEST for the same reason as above.
 #
 # Run headless from the build dir; scratch files land under ./test_ui_settings_scratch:
 #   ./test_ui_settings
 add_executable(test_ui_settings
     test_ui_settings.cpp
     model/ui_conf.cpp
-    tui_settings.cpp
 )
-target_compile_definitions(test_ui_settings PRIVATE TUI_SETTINGS_HEADLESS_TEST)
 
 # Headless clamp test for tuiSetMaxWidth / the tuiRender clamp. Text backend only (no ncurses, no PTY) — runs a real TuiState through tuiRender and checks the grid width. Invoke: ./test_tui_maxwidth
 add_executable(test_tui_maxwidth

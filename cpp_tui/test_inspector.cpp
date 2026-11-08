@@ -397,19 +397,31 @@ void checkSource() {
     const std::string frame = readWhole(TEST_INSPECTOR_FRAME_SOURCE);
     check(!frame.empty(), "tui.cpp is readable");
     check(frame.find("views::uiConfFrame(") != std::string::npos,
-          "the frame layer reads and flushes ui.conf (views/shell.h owns the call)");
+          "the frame layer flushes ui.conf (views/shell.h owns the call)");
     check(frame.find("views::uiConfQuit(") != std::string::npos,
           "...and saves it on the quit path");
-    // D-UI-CONF: there is one renderer, and the frame layer owns the file - one read/flush per
-    // frame and two save sites (the quit frame and the destroy path, which every exit reaches).
+    // There is one renderer, and the frame layer owns the one file. The
+    // frame loop flushes only - the one read sits in `tuiInit` - and there is one save site
+    // family: the quit frame and the destroy path (which every exit reaches) both go through
+    // `uiConfQuit`, the latter via the named `saveUiConfOnShutdown` wrapper.
+    check(frame.find("loadUiConf") == std::string::npos,
+          "the frame loop reads nothing: the one ui.conf read is tuiInit's");
+    {
+        std::size_t flushes = 0;
+        for (std::size_t at = frame.find("views::uiConfFrame("); at != std::string::npos;
+             at = frame.find("views::uiConfFrame(", at + 1))
+            ++flushes;
+        check(flushes == 1, "one flush per frame, in the frame layer");
+    }
     {
         std::size_t calls = 0;
         for (std::size_t at = frame.find("views::uiConfQuit("); at != std::string::npos;
              at = frame.find("views::uiConfQuit(", at + 1))
             ++calls;
-        check(calls == 2,
-              "the ui.conf save sits on the quit frame and on the shutdown path (D-UI-CONF)");
+        check(calls == 2, "one save site family: the quit frame and the shutdown path");
     }
+    check(frame.find("void saveUiConfOnShutdown(") != std::string::npos,
+          "the shutdown save goes through the named wrapper tuiDestroyState calls");
     check(frame.find("model::Action::ToggleInspector") != std::string::npos &&
               frame.find("model::Action::InspectorReserved") != std::string::npos,
           "the frame layer handles the inspector's actions");
@@ -1118,9 +1130,7 @@ void checkPersistence() {
     std::remove((std::string(kScratch) + "/profile/ui.conf").c_str());
 
     model::UiState freshRun;
-    bool loaded = false;
-    views::uiConfFrame(freshRun, loaded, ini, 0.0);
-    check(loaded, "the first frame reads the profile");
+    model::loadUiConf(freshRun.prefs, ini); // the one load `tuiInit` performs
     check(freshRun.prefs.inspectorOpen == -1, "a missing file keeps the defaults (auto)");
 
     // The user's choices: the panel open, the Agents tab. One press from `-1 auto` opens it -
@@ -1128,51 +1138,51 @@ void checkPersistence() {
     model::toggleInspector(freshRun.prefs, /*visible=*/false);
     check(freshRun.prefs.inspectorOpen == 1, "premise: the user opened the panel by hand");
     freshRun.prefs.tab = model::InspectorTab::Agents;
-    views::uiConfFrame(freshRun, loaded, ini, 1.0); // the change opens the window
-    views::uiConfFrame(freshRun, loaded, ini, 1.5); // still inside it: no write
+    views::uiConfFrame(freshRun, ini, 1.0); // the change opens the window
+    views::uiConfFrame(freshRun, ini, 1.5); // still inside it: no write
     std::string text;
     check(!readFile(std::string(kScratch) + "/profile/ui.conf", text),
           "nothing is written inside the idle window");
-    views::uiConfFrame(freshRun, loaded, ini, 4.0); // idle long enough
+    views::uiConfFrame(freshRun, ini, 4.0); // idle long enough
     check(readFile(std::string(kScratch) + "/profile/ui.conf", text),
           "the debounced flush writes the file once the user stops");
 
     // A restart: the same profile, a new state.
     model::UiState restart;
-    bool restartLoaded = false;
-    views::uiConfFrame(restart, restartLoaded, ini, 0.0);
+    model::loadUiConf(restart.prefs, ini);
     check(restart.prefs.inspectorOpen == 1, "InspectorOpen survives the restart");
     check(restart.prefs.tab == model::InspectorTab::Agents, "InspectorTab survives it too");
 
     // The quit path saves without waiting for the window.
     model::UiState quitting;
-    bool quitLoaded = false;
-    views::uiConfFrame(quitting, quitLoaded, ini, 0.0);
+    model::loadUiConf(quitting.prefs, ini);
     quitting.prefs.tab = model::InspectorTab::Activity;
     views::uiConfQuit(quitting, ini);
     model::UiState afterQuit;
-    bool afterQuitLoaded = false;
-    views::uiConfFrame(afterQuit, afterQuitLoaded, ini, 0.0);
+    model::loadUiConf(afterQuit.prefs, ini);
     check(afterQuit.prefs.tab == model::InspectorTab::Activity,
           "a quit two seconds after a change still saves it");
 
-    // An empty profile name (every headless harness) touches nothing.
+    // An empty profile name (every headless harness) touches nothing: the frame's
+    // flush is a no-op for it and so is the quit save.
     model::UiState noProfile;
-    bool noProfileLoaded = false;
-    views::uiConfFrame(noProfile, noProfileLoaded, "", 0.0);
-    check(!noProfileLoaded, "an empty ini filename is no profile: nothing is read");
+    views::uiConfFrame(noProfile, "", 0.0);
     views::uiConfQuit(noProfile, "");
-    check(true, "and the quit save is a no-op for it");
+    model::UiState untouched;
+    model::loadUiConf(untouched.prefs, ini);
+    check(untouched.prefs.tab == model::InspectorTab::Activity,
+          "an empty ini filename is no profile: the frame and the quit save touch nothing");
 
     // The close path (a GUI window's X never sets `quitRequested`, so `tuiDestroyState()` is
-    // the one place every exit reaches): the sheet's choice is saved there (D-UI-CONF).
+    // the one place every exit reaches): the sheet's choice is saved there. No
+    // window backend stands behind this bare state, so the resize fact is false - the same
+    // default every non-GUI exit carries.
     tui::TuiState workbench;
     workbench.iniFilename = ini;
     workbench.ui.prefs.tab = model::InspectorTab::Agents;
-    tui::saveUiConfOnShutdown(workbench);
+    tui::saveUiConfOnShutdown(workbench, /*windowResized=*/false);
     model::UiState afterClose;
-    bool afterCloseLoaded = false;
-    views::uiConfFrame(afterClose, afterCloseLoaded, ini, 0.0);
+    model::loadUiConf(afterClose.prefs, ini);
     check(afterClose.prefs.tab == model::InspectorTab::Agents,
           "the close path saves the workbench's choice");
 }

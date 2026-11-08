@@ -777,19 +777,6 @@ void makeLocalSetupFileStructure(LlmConfig conf) {
         ensureMemoryTierDirs([conf.dataDir ~ "memory"]);
 }
 
-/// Path of the TuiSettings file derived from an imgui ini filename,
-/// mirroring `tui_settings::settingsPath` in cpp_tui: a trailing ".ini"
-/// (exact case) is replaced with ".gui.conf"; any other name gets
-/// ".gui.conf" appended.
-private Path tuiSettingsPath(Path iniFile) @safe {
-    import std.algorithm : endsWith;
-
-    auto name = iniFile.toString;
-    if (endsWith(name, ".ini"))
-        name = name[0 .. $ - 4];
-    return Path(name ~ ".gui.conf");
-}
-
 /// Copy the central UI profile into the locations a local-setup instance
 /// reads. First run only.
 void inheritCentralUiProfile(LlmConfig conf) @safe {
@@ -823,7 +810,6 @@ void inheritCentralUiProfile(LlmConfig conf) @safe {
     copyIfAbsent(centralIni, localIni);
     copyIfAbsent(Path(dirName(centralIni.toString)) ~ "ui.conf",
             Path(dirName(localIni.toString)) ~ "ui.conf");
-    copyIfAbsent(tuiSettingsPath(centralIni), tuiSettingsPath(localIni));
 }
 
 struct ToolFilter {

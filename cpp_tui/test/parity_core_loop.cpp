@@ -712,17 +712,21 @@ void harnessInitGui(Harness& h, const std::string& iniPath) {
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
 
-    // 1280x820 is D-GEOM's window (D-GOLDEN's pixel size). It comes from the settings file the
-    // backend loads, written next to the capture so nothing outside the output directory is
-    // touched.
-    tui::TuiSettings view;
+    // 1280x820 is the reference window size. The workbench loads
+    // `ui.conf` once in `tuiInit`; the harness stands in for it: seed
+    // the merged profile next to the capture through the model's writer and read
+    // it into the one preferences struct the backend sizes the window from, so
+    // nothing outside the output directory is touched.
+    model::ShellPrefs view;
     view.fontScaleMain = 1.0f;
     view.windowWidth = 1280;
     view.windowHeight = 820;
-    tui::saveTuiSettings(view, iniPath);
+    std::remove(model::uiConfPath(iniPath).c_str()); // a stale profile
+    model::saveUiConf(view, iniPath);
+    model::loadUiConf(h.core->ui.prefs, iniPath);
 
     std::string error;
-    std::unique_ptr<tui::Backend> backend = tui::makeGuiBackend(iniPath, h.core->settings);
+    std::unique_ptr<tui::Backend> backend = tui::makeGuiBackend(h.core->ui.prefs);
     if (!backend->init(error)) {
         std::fprintf(stderr, "parity_core_loop: the GUI backend did not start (no display?): %s\n",
                      error.c_str());
@@ -1241,7 +1245,7 @@ void stepQuit(Harness& h) {
     if (h.text()) {
         check(fileContains("parity_scratch/ui.conf", "UiLog=raw"),
               "quit: the changed preference reached ui.conf on the quit path (D-UI-CONF)");
-        check(fileContains("parity_scratch/ui.conf", "Version=1"),
+        check(fileContains("parity_scratch/ui.conf", "Version=2"),
               "quit: the file carries the format version");
     }
 }
