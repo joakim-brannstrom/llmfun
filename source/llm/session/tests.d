@@ -1,53 +1,28 @@
-/// Unit tests for the session store and reference resolver. Temp-dir based,
+/// Unit tests for the session store and reference resolver. TestArea based,
 /// mirroring the `llm.tool_call.io.tests` pattern.
 module llm.session.tests;
 
 version (unittest) {
     import std.algorithm : canFind;
-    import std.datetime : Clock;
-    import std.file : exists, rmdirRecurse, readText, mkdirRecurse;
+    import std.file : exists, readText, write;
     import std.json : JSONValue, JSONType;
     import std.path : buildPath;
-    import std.string : format, strip;
+    import std.string : strip;
 
     import my.optional : hasValue, orElse;
     import my.path : Path;
 
+    import llm.test_util : testArea;
+
     import llm.session : SessionId, SessionStore, SessionMeta, SessionFile, resolveSessionRef;
     import llm.session.types : isValidId, PreviewMaxChars;
-
-    private string makeTempDir(string name) {
-        auto now = Clock.currTime();
-        auto ts = format("%04d%02d%02d%02d%02d%02d", now.year, now.month,
-                now.day, now.hour, now.minute, now.second);
-        auto base = buildPath("llmfun_test", "session_" ~ name ~ "_" ~ ts);
-        mkdirRecurse(base);
-        return base;
-    }
-
-    private void cleanupDir(string dir) {
-        try {
-            rmdirRecurse(dir);
-        } catch (Exception) {
-            // Silently ignore cleanup failures during test teardown
-        }
-    }
-
-    private void writeFileContent(string path, string content) {
-        import std.stdio : File;
-
-        auto f = File(path, "w");
-        f.write(content);
-    }
 }
-
-// --- Test: create() generates valid id and writes file ---
 
 @("create() generates a valid-format id and writes a session file with initialized meta fields")
 unittest {
-    auto tmpDir = makeTempDir("create");
+    auto tmpDir = testArea("session_create");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -72,9 +47,9 @@ unittest {
 
 @("create() produces unique ids across 100 consecutive creations")
 unittest {
-    auto tmpDir = makeTempDir("create_unique");
+    auto tmpDir = testArea("session_create_unique");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     const N = 100;
@@ -88,9 +63,9 @@ unittest {
 
 @("load() round-trips a freshly created session with its id, title, and object document")
 unittest {
-    auto tmpDir = makeTempDir("load_roundtrip");
+    auto tmpDir = testArea("session_load_roundtrip");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -105,9 +80,9 @@ unittest {
 
 @("load() returns none for a missing session file")
 unittest {
-    auto tmpDir = makeTempDir("load_missing");
+    auto tmpDir = testArea("session_load_missing");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto loadOpt = store.load(SessionId("nonexistent-id"));
@@ -116,9 +91,9 @@ unittest {
 
 @("has() tracks the session files the store holds")
 unittest {
-    auto tmpDir = makeTempDir("has_probe");
+    auto tmpDir = testArea("session_has_probe");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -132,9 +107,9 @@ unittest {
 
 @("save() with user and assistant messages updates the counts, preview, and updatedAt")
 unittest {
-    auto tmpDir = makeTempDir("save_messages");
+    auto tmpDir = testArea("session_save_messages");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -163,9 +138,9 @@ unittest {
 
 @("rename() rejects an empty title")
 unittest {
-    auto tmpDir = makeTempDir("rename_empty");
+    auto tmpDir = testArea("session_rename_empty");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -176,9 +151,9 @@ unittest {
 
 @("rename() updates the title while preserving updatedAt")
 unittest {
-    auto tmpDir = makeTempDir("rename_preserve");
+    auto tmpDir = testArea("session_rename_preserve");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -193,9 +168,9 @@ unittest {
 
 @("rename() fails for a missing session")
 unittest {
-    auto tmpDir = makeTempDir("rename_missing");
+    auto tmpDir = testArea("session_rename_missing");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto result = store.rename(SessionId("nonexistent-id"), "New Title");
@@ -204,9 +179,9 @@ unittest {
 
 @("remove() deletes the file of an existing session")
 unittest {
-    auto tmpDir = makeTempDir("remove_existing");
+    auto tmpDir = testArea("session_remove_existing");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -219,9 +194,9 @@ unittest {
 
 @("remove() is a no-op for missing files, both invalid and valid-format ids")
 unittest {
-    auto tmpDir = makeTempDir("remove_missing");
+    auto tmpDir = testArea("session_remove_missing");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     store.remove(SessionId("nonexistent-id")); // invalid: no-op
@@ -230,9 +205,9 @@ unittest {
 
 @("list() returns sessions sorted by updatedAt descending")
 unittest {
-    auto tmpDir = makeTempDir("list_sorted");
+    auto tmpDir = testArea("session_list_sorted");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto m1 = store.create();
@@ -248,15 +223,15 @@ unittest {
 
 @("list() skips corrupt session files and lists only the valid one")
 unittest {
-    auto tmpDir = makeTempDir("list_corrupt");
+    auto tmpDir = testArea("session_list_corrupt");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
 
     // Create a corrupt file
-    writeFileContent(buildPath(tmpDir, "20250101-120000-abcd.json"), "not valid json");
+    tmpDir.createFile("20250101-120000-abcd.json", "not valid json");
 
     auto sessions = store.list();
     assert(sessions.length == 1, "should skip corrupt file");
@@ -281,9 +256,9 @@ unittest {
 
 @("save() with an invalid id leaves the session meta unchanged")
 unittest {
-    auto tmpDir = makeTempDir("save_invalid_id");
+    auto tmpDir = testArea("session_save_invalid_id");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -298,9 +273,9 @@ unittest {
 
 @("preview is truncated to exactly PreviewMaxChars")
 unittest {
-    auto tmpDir = makeTempDir("preview_truncate");
+    auto tmpDir = testArea("session_preview_truncate");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -324,9 +299,9 @@ unittest {
 
 @("preview is empty when the session has no user messages")
 unittest {
-    auto tmpDir = makeTempDir("preview_no_user");
+    auto tmpDir = testArea("session_preview_no_user");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -346,9 +321,9 @@ unittest {
 
 @("preview skips non-string content and uses the next string user message")
 unittest {
-    auto tmpDir = makeTempDir("preview_nonstring");
+    auto tmpDir = testArea("session_preview_nonstring");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -375,9 +350,9 @@ unittest {
 
 @("preview truncation is grapheme-safe, keeping multi-byte and combining graphemes intact")
 unittest {
-    auto tmpDir = makeTempDir("preview_grapheme");
+    auto tmpDir = testArea("session_preview_grapheme");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -421,9 +396,9 @@ unittest {
 
 @("preview normalizes newlines, tabs, and control bytes to single spaces")
 unittest {
-    auto tmpDir = makeTempDir("preview_single_line");
+    auto tmpDir = testArea("session_preview_single_line");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -448,9 +423,9 @@ unittest {
 
 @("sweepEmptySessions removes only the empty non-kept session, sparing active and non-empty ones")
 unittest {
-    auto tmpDir = makeTempDir("sweep_empty");
+    auto tmpDir = testArea("session_sweep_empty");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
 
@@ -482,15 +457,15 @@ unittest {
 
 @("sweepEmptySessions never touches corrupt session files")
 unittest {
-    auto tmpDir = makeTempDir("sweep_corrupt");
+    auto tmpDir = testArea("session_sweep_corrupt");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto empty1 = store.create();
     auto empty2 = store.create();
 
-    writeFileContent(buildPath(tmpDir, "20250101-120000-abcd.json"), "not valid json");
+    tmpDir.createFile("20250101-120000-abcd.json", "not valid json");
 
     // keep id not in the store: all empty sessions are swept
     auto removed = store.sweepEmptySessions(SessionId("20250101-120000-9999"));
@@ -501,9 +476,9 @@ unittest {
 
 @("sweepEmptySessions on an empty store removes nothing")
 unittest {
-    auto tmpDir = makeTempDir("sweep_empty_store");
+    auto tmpDir = testArea("session_sweep_empty_store");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto removed = store.sweepEmptySessions(SessionId("20250101-120000-9999"));
@@ -512,9 +487,9 @@ unittest {
 
 @("extra JSON keys are preserved through a load and save round-trip")
 unittest {
-    auto tmpDir = makeTempDir("extra_keys");
+    auto tmpDir = testArea("session_extra_keys");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -525,7 +500,7 @@ unittest {
     // Insert extra key before closing brace
     content = content.strip;
     content = content[0 .. $ - 1] ~ ",\"customKey\":\"customValue\"}";
-    writeFileContent(filePath, content);
+    write(filePath, content);
 
     // Load and verify extra key is preserved
     auto loadOpt = store.load(meta.id);
@@ -548,12 +523,12 @@ unittest {
 
 @("the constructor sweeps stale .tmp files from the session directory")
 unittest {
-    auto tmpDir = makeTempDir("tmp_sweep");
+    auto tmpDir = testArea("session_tmp_sweep");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     // Pre-create a stale .tmp file
-    writeFileContent(buildPath(tmpDir, "20250101-120000-abcd.json.tmp"), "{}");
+    tmpDir.createFile("20250101-120000-abcd.json.tmp", "{}");
 
     // Constructor should sweep it
     auto store = new SessionStore(tmpDir.Path);
@@ -657,9 +632,9 @@ unittest {
 @(
         "clone() writes a fresh valid id with identical messages, recomputed counts, and an untouched original")
 unittest {
-    auto tmpDir = makeTempDir("clone_fresh");
+    auto tmpDir = testArea("session_clone_fresh");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -718,9 +693,9 @@ unittest {
 
 @("clone() preserves unknown header keys through the round-trip")
 unittest {
-    auto tmpDir = makeTempDir("clone_extra");
+    auto tmpDir = testArea("session_clone_extra");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
@@ -755,9 +730,9 @@ unittest {
 
 @("clone() returns none for invalid and unknown ids and leaves the store unchanged")
 unittest {
-    auto tmpDir = makeTempDir("clone_none");
+    auto tmpDir = testArea("session_clone_none");
     scope (exit)
-        cleanupDir(tmpDir);
+        tmpDir.cleanup();
 
     auto store = new SessionStore(tmpDir.Path);
     auto meta = store.create();
