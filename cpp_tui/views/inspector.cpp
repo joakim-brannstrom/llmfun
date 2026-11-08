@@ -739,7 +739,11 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
                                                      : ColorToken::textHi;
             lineAt(m, row, row.x, laneRow.text, ink);
             const model::AgentLane* lane = laneOf(laneRow.id);
-            const RowHit hit = submitRow(row, ("##inspector_lane_" + laneRow.id).c_str());
+            // Continuations share the lane's logical id (focus, menu) but must not share the
+            // row's ImGui id with the headline - two widgets with one id collide.
+            const std::string rowId =
+                "##inspector_lane_" + laneRow.id + (laneRow.tail ? "#tail" : "");
+            const RowHit hit = submitRow(row, rowId.c_str());
             if (hit.left)
                 state.focusRequest = laneRow.id;
             if (laneRow.tail)
