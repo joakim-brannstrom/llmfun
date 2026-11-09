@@ -17,20 +17,6 @@
 
 namespace llmfun::tui {
 
-void AgentStream::finished() {
-    if (stream.content.empty() && stream.thinking.empty()) {
-        stream = AgentStreamMessage{};
-        return;
-    }
-
-    updateCnt++;
-    messages.emplace_back(stream);
-    if (messages.size() > MaxMessages) {
-        messages.erase(messages.begin());
-    }
-    stream = AgentStreamMessage{};
-}
-
 static size_t countNewLines(const std::string& str) {
     return std::count(str.begin(), str.end(), '\n');
 }

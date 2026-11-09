@@ -19,7 +19,7 @@ import llm.pipeline.graph;
 import llm.rag.rag : RAG;
 import llm.summary_agent : SummaryAgent;
 import llm.tool_call.pipeline : PipelineControlContext;
-import llm.types : IBasicAgent, IAgent, ProcessResult, IStreamCallback;
+import llm.types : IBasicAgent, IAgent, ProcessResult, IStreamCallback, IStepEventEmitter;
 
 public import llm.pipeline.graph;
 
@@ -80,6 +80,16 @@ class PipelineNode : Node {
         agent.addUserQuery(query);
     }
 
+    /// The per-step hook: what a completed step hands the emitter. Stored on
+    /// the node because the `PipelineAgent` wrapper is created fresh at each submit -
+    /// anything wired only on the wrapper would be dropped - and the wrapper copies it
+    /// into its own `storedStep_` at construction.
+    void delegate(ProcessResult result) stepDelegate_;
+
+    void setStepDelegate(void delegate(ProcessResult) cb) {
+        stepDelegate_ = cb;
+    }
+
     string output() @safe pure nothrow const @nogc {
         return ctx.output;
     }
@@ -100,12 +110,18 @@ class PipelineNode : Node {
 class PipelineAgent : IBasicAgent {
     IBasicAgent wrappedAgent;
     PipelineNode node;
+    /// The wrapped agent's per-step hook, copied from the node at
+    /// construction: the wrapper is created fresh at each submit, so a delegate wired
+    /// only onto the wrapper would never survive. An explicit `setStepDelegate` on the
+    /// wrapper still overrides it.
+    private void delegate(ProcessResult) storedStep_;
 
     this(IBasicAgent wrappedAgent, PipelineNode node)
     in (wrappedAgent !is null)
     in (node !is null) {
         this.wrappedAgent = wrappedAgent;
         this.node = node;
+        storedStep_ = node.stepDelegate_;
     }
 
     override string id() {
@@ -114,6 +130,10 @@ class PipelineAgent : IBasicAgent {
 
     override void setStreamUpdate(IStreamCallback callback) {
         wrappedAgent.setStreamUpdate(callback);
+    }
+
+    void setStepDelegate(void delegate(ProcessResult) cb) {
+        storedStep_ = cb;
     }
 
     override void addUserQuery(string query) {
@@ -135,7 +155,8 @@ class PipelineAgent : IBasicAgent {
         node.clearOutput;
 
         while (true) {
-            result = wrappedAgent.runToCompletion(step, compressCallback, interrupt);
+            result = wrappedAgent.runToCompletion(step !is null ? step
+                    : storedStep_, compressCallback, interrupt);
 
             if (!node.output.empty) {
                 return result; // Agent produced output
@@ -804,6 +825,8 @@ struct PipelineBuilder {
                 auto s = streamCallback_.clone;
                 s.setId(n.id);
                 n.setStreamUpdate(s);
+                if (auto em = cast(IStepEventEmitter) s)
+                    n.setStepDelegate(stepHookFor(em));
             }
             g.add(n);
         }
@@ -821,4 +844,13 @@ struct PipelineBuilder {
 
 PipelineBuilder pipelineBuilder() {
     return PipelineBuilder.init;
+}
+
+/// One node's step hook, built outside the builder's node loop: a lambda that
+/// captures a loop-body local would make every node's hook share the loop's
+/// last emitter (one closure slot per local), so every step event would arrive
+/// tagged with the last node's id. Owning the capture through a call frame
+/// gives each node its own.
+private void delegate(ProcessResult result) stepHookFor(IStepEventEmitter emitter) {
+    return result => emitter.stepEvent(result);
 }

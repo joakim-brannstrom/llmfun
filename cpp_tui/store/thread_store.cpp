@@ -122,12 +122,17 @@ static const char* roleLabel(ChatMessageType type) {
     return "SYSTEM";
 }
 
+static bool structuredToolRow(const ChatMessage& m) {
+    return !m.toolName.empty() && m.summary.empty() && m.text.empty();
+}
+
+/// The body text of a structured tool row: a call shows its arguments, a result
+/// its output.
+static const std::string& toolRowBody(const ChatMessage& m, model::BlockKind kind) {
+    return kind == model::BlockKind::ToolCall ? m.toolArgs : m.toolResult;
+}
+
 /// A summary as the header needs it: the preview text and the display time.
-///
-/// The v4 summary is `"<body>"` or `"[nr] <body> [<time>]"` - the D side's
-/// display policy (llm/tui/package.d: addChatMessage + timeSuffix). The header
-/// shows the time as " - 1.2s" and keeps the body as the one-line preview, so
-/// neither decoration reaches the screen twice.
 struct SummaryParts {
     std::string_view body;
     std::string_view time;
@@ -458,6 +463,14 @@ static bool workItemDefaultOpen(std::size_t index, std::size_t count) {
     return (index + 5) > count;
 }
 
+/// A structured tool row (see `structuredToolRow`) is born closed: its second line is
+/// then the tool's name - the one thing the row must always say - and the args or
+/// result wait behind the expand, where the row's body already lives.
+static bool workItemExpansionDefault(const ChatMessage& item, std::size_t index,
+                                     std::size_t count) {
+    return !structuredToolRow(item) && workItemDefaultOpen(index, count);
+}
+
 /// Applies the one-shot expansion defaults of a group that has just appeared.
 ///
 /// This is where "new" is decided, and it is a property of the group build rather
@@ -476,7 +489,8 @@ static void seedNewGroup(ChatTab& chat, GroupKind kind, std::size_t start, std::
         // closed. This seeds them before the group's expansion gate for exactly that
         // reason, with the same "the last five unfold" rule.
         for (std::size_t i = start; i < end; ++i)
-            applyExpansionDefault(chat, chat.outputLines[i].id, workItemDefaultOpen(i, count));
+            applyExpansionDefault(chat, chat.outputLines[i].id,
+                                  workItemExpansionDefault(chat.outputLines[i], i, count));
         // Only the newest work group unfolds. `isNewestGroup` means the newest
         // *group*, which is `gi + 1 == renderGroups.size()` in the v4 body: the
         // streamed message is not a group, so a work group can be the newest one
@@ -557,12 +571,38 @@ store::GroupKind toViewKind(TuiGroupKind kind) {
 
 } // namespace
 
-ThreadStoreAdapter::ThreadStoreAdapter(TuiState& state) : state_(&state) {}
+ThreadStoreAdapter::ThreadStoreAdapter(TuiState& state)
+    : chat_(&state.chat), thread_(&state.ui.thread) {}
+
+void ThreadStoreAdapter::bind(TuiState& state) {
+    chat_ = &state.chat;
+    thread_ = &state.ui.thread;
+}
+
+void ThreadStoreAdapter::bind(ChatTab& chat, model::ThreadState& thread) {
+    // The mount rebinds every frame with the pair it was given; a *different* store
+    // than the caches were built from (the user moved the focus to another agent) is
+    // a full drop: the caches are group ids of one store's lines, so carrying them to
+    // another store would answer agent B's ids for agent A's entries. The reset also
+    // discards the view state bound next to the caches: a fresh `ThreadState`.
+    if (chat_ != &chat)
+        *this = ThreadStoreAdapter();
+    chat_ = &chat;
+    thread_ = &thread;
+}
+
+void ThreadStoreAdapter::dropChat(const ChatTab* chat) {
+    // The store this mount was built from is being destroyed (an eviction, a
+    // pipeline clear): the binding - and with it the caches that name its lines -
+    // goes with it. A different store's eviction leaves this mount alone.
+    if (chat_ == chat)
+        *this = ThreadStoreAdapter();
+}
 
 void ThreadStoreAdapter::sync() const {
     // Unbound (the state moved since the last frame): nothing to sync, and every
     // accessor downstream sees an empty thread instead of a dangling pointer.
-    if (state_ == nullptr) {
+    if (!bound()) {
         groups_.clear();
         indexById_.clear();
         synced_ = false;
@@ -579,7 +619,7 @@ void ThreadStoreAdapter::sync() const {
     // (`seedNewGroup`). That is the same state the draw path writes, and the reason it
     // happens here is that "new" is a property of the group build, not of the frame
     // that happens to draw the group.
-    ChatTab& chat = state_->chat;
+    ChatTab& chat = *chat_;
     const size_t count = chat.outputLines.size();
     const size_t front = count != 0 ? chat.outputLines.front().id : 0;
     const size_t back = count != 0 ? chat.outputLines.back().id : 0;
@@ -623,8 +663,8 @@ void ThreadStoreAdapter::sync() const {
     // One group build for the whole page (`buildRenderGroups`), so a page and a
     // whole-thread walk cannot disagree about where a group starts. The store's own
     // cached copy is refreshed too, which keeps the next reader warm for free.
-    buildRenderGroups(state_->chat);
-    const std::vector<RenderGroup>& built = state_->chat.renderGroups;
+    buildRenderGroups(*chat_);
+    const std::vector<RenderGroup>& built = chat_->renderGroups;
 
     std::vector<Entry> groups;
     groups.reserve(built.size() + 1);
@@ -701,8 +741,8 @@ void ThreadStoreAdapter::sync() const {
             streamGroupId_ = nextId_++;
             // The streamed reasoning starts open: seed its identity when the group is
             // born, the one time it is new. A later toggle is the user's own.
-            state_->ui.thread.thinkingOpen.insert(model::BlockId{
-                streamGroupId_, model::kStreamMessageId, model::BlockKind::Thinking});
+            thread_->thinkingOpen.insert(model::BlockId{streamGroupId_, model::kStreamMessageId,
+                                                        model::BlockKind::Thinking});
         }
         Entry entry;
         entry.view.id = streamGroupId_;
@@ -716,17 +756,17 @@ void ThreadStoreAdapter::sync() const {
         groups.push_back(std::move(entry));
     } else {
         if (streamGroupId_ != 0) {
-            state_->ui.thread.thinkingOpen.erase(model::BlockId{
-                streamGroupId_, model::kStreamMessageId, model::BlockKind::Thinking});
-            if (state_->ui.thread.focus.group == streamGroupId_)
-                state_->ui.thread.focus = {};
+            thread_->thinkingOpen.erase(model::BlockId{streamGroupId_, model::kStreamMessageId,
+                                                       model::BlockKind::Thinking});
+            if (thread_->focus.group == streamGroupId_)
+                thread_->focus = {};
             // The menu opened on one of its rows goes with the rows (task 44): the owner
             // must name a block that exists, or an open popup survives its block.
-            if (state_->ui.thread.menuBlockId.group == streamGroupId_)
-                state_->ui.thread.menuBlockId = {};
+            if (thread_->menuBlockId.group == streamGroupId_)
+                thread_->menuBlockId = {};
             // The stream ended without a clear (a store the harness wrote directly): its clock
             // counted an answer that is over, so it goes with the group id (task 38).
-            model::resetStreamClock(state_->ui.thread.stream);
+            model::resetStreamClock(thread_->stream);
         }
         // The ended stream's fence answers go with it: whatever streams next is
         // a body the scans have never seen.
@@ -851,7 +891,7 @@ void ThreadStoreAdapter::sync() const {
         for (std::size_t m = e.start; m < e.end; ++m) {
             const auto& item = chat.outputLines[m]; // `auto`: the ledger counts the v4 type name
             if (item.id > chat.expansionDefaultThroughId)
-                applyExpansionDefault(chat, item.id, workItemDefaultOpen(m, count));
+                applyExpansionDefault(chat, item.id, workItemExpansionDefault(item, m, count));
         }
     }
 
@@ -860,7 +900,7 @@ void ThreadStoreAdapter::sync() const {
     // lose a live hint. `UiState::thread.hints` is the cache (design §5.1) - the
     // adapter only decides which entries are still live, and a session switch clears
     // it wholesale in `resetForSessionSwitch()`.
-    auto& hints = state_->ui.thread.hints;
+    auto& hints = thread_->hints;
     for (auto it = hints.begin(); it != hints.end();)
         it = indexById_.count(it->first) != 0 ? std::next(it) : hints.erase(it);
 }
@@ -918,11 +958,11 @@ size_t ThreadStoreAdapter::takeExpandedGroup() {
 }
 bool ThreadStoreAdapter::expanded(size_t id) const {
     const Entry* entry = entryFor(id);
-    if (entry == nullptr || state_ == nullptr)
+    if (entry == nullptr || !bound())
         return false;
     if (entry->stream)
         return true; // the streaming message is always open
-    const ChatTab& chat = state_->chat;
+    const ChatTab& chat = *chat_;
     if (entry->start >= chat.outputLines.size())
         return false;
     const size_t headId = chat.outputLines[entry->start].id;
@@ -933,20 +973,19 @@ bool ThreadStoreAdapter::expanded(size_t id) const {
 
 void ThreadStoreAdapter::setExpanded(size_t id, bool open) {
     sync();
-    if (state_ == nullptr)
+    if (!bound())
         return;
     const auto found = indexById_.find(id);
     if (found == indexById_.end())
         return;
     const Entry& entry = groups_[found->second];
-    if (entry.stream || entry.start >= state_->chat.outputLines.size())
+    if (entry.stream || entry.start >= chat_->outputLines.size())
         return;
-    const size_t headId = state_->chat.outputLines[entry.start].id;
+    const size_t headId = chat_->outputLines[entry.start].id;
     if (entry.view.kind == GroupKind::AssistantWork)
         autoOpenWorkGroups_.erase(headId); // the user owns this group from now on
-    std::set<size_t>& target = entry.view.kind == GroupKind::AssistantWork
-                                   ? state_->chat.openWorkGroups
-                                   : state_->chat.outputLineOpen;
+    std::set<size_t>& target =
+        entry.view.kind == GroupKind::AssistantWork ? chat_->openWorkGroups : chat_->outputLineOpen;
     if (open)
         target.insert(headId);
     else
@@ -955,15 +994,15 @@ void ThreadStoreAdapter::setExpanded(size_t id, bool open) {
 
 float ThreadStoreAdapter::measureHint(size_t id) const {
     const Entry* entry = entryFor(id);
-    if (entry == nullptr || state_ == nullptr)
+    if (entry == nullptr || !bound())
         return 0.0f;
     const ui::Metrics m = ui::metricsFor();
     // The cache is `UiState::thread.hints` (design §5.1), keyed by the box the view
     // announced: a font-scale change moves `row`, a resize moves `width`, compact
     // mode changes how much of a group is drawn - and any of the three makes the
     // cached number a statement about a different box.
-    const auto hint = state_->ui.thread.hints.find(id);
-    if (hint != state_->ui.thread.hints.end()) {
+    const auto hint = thread_->hints.find(id);
+    if (hint != thread_->hints.end()) {
         const model::HeightHint& cached = hint->second;
         if (cached.revision == entry->view.revision && cached.width == hintWidth_ &&
             cached.row == m.row && cached.compact == hintCompact_)
@@ -975,16 +1014,16 @@ float ThreadStoreAdapter::measureHint(size_t id) const {
 
 bool ThreadStoreAdapter::blockHasTable(size_t k, std::size_t b) const {
     const BlockEntry* block = blockEntryAt(k, b);
-    if (block == nullptr || state_ == nullptr || block->kind == model::BlockKind::WorkGroup)
+    if (block == nullptr || !bound() || block->kind == model::BlockKind::WorkGroup)
         return false;
     // A thinking body is markdown too - it is drawn through the same renderer - so only a stored
     // or streamed *message* row has to pass the verbatim check: a tool transcript is drawn
     // verbatim (a fence inside it would be printed literally), so a TOOL row has nothing to show.
     // That is what stops `s` from setting an invisible bit on such a row.
     if (!block->thinking && !groups_[k].stream) {
-        if (block->message >= state_->chat.outputLines.size())
+        if (block->message >= chat_->outputLines.size())
             return false;
-        if (!renderAsMarkdown(state_->chat.outputLines[block->message].type))
+        if (!renderAsMarkdown(chat_->outputLines[block->message].type))
             return false;
     }
     const std::string body = blockText(k, b);
@@ -1012,10 +1051,10 @@ std::size_t ThreadStoreAdapter::blockCount(size_t k) const {
 model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
     model::BlockDesc out;
     const BlockEntry* block = blockEntryAt(k, b);
-    if (block == nullptr || state_ == nullptr)
+    if (block == nullptr || !bound())
         return out;
     const Entry& entry = groups_[k];
-    const ChatTab& chat = state_->chat;
+    const ChatTab& chat = *chat_;
 
     out.kind = block->kind;
     out.state = block->state;
@@ -1044,7 +1083,7 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
         // The stream's timing, derived once per frame by the frame layer: this file
         // formats nothing and reads no wall clock, so the thinking row's duration
         // cannot disagree with the elapsed time the now bar shows.
-        const model::StreamState& clock = state_->ui.thread.stream;
+        const model::StreamState& clock = thread_->stream;
         if (block->thinking) {
             out.label = "Thinking";
             out.hasBody = !stream.thinking.empty();
@@ -1078,6 +1117,17 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
     const SummaryParts parts = splitSummary(message.summary);
     std::string preview(parts.body);
     if (block->kind == model::BlockKind::ToolCall || block->kind == model::BlockKind::ToolResult) {
+        if (structuredToolRow(message)) {
+            // The structured row composes itself: the tool name is the summary, the
+            // args / result text is the body, and the outcome glyph comes from
+            // `toolOk` - a call has no outcome of its own, its result is the next row.
+            out.summary = oneLine(message.toolName);
+            out.hasBody = !toolRowBody(message, block->kind).empty();
+            out.state = block->kind == model::BlockKind::ToolCall
+                            ? model::BlockState::Pending
+                            : (message.toolOk ? model::BlockState::Ok : model::BlockState::Failed);
+            return out;
+        }
         // The outcome the store wrote into the summary becomes the row's state, and the
         // summary keeps the rest of the sentence ("keeps today's text").
         out.state = takeStateMarker(preview);
@@ -1098,7 +1148,7 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
 
 bool ThreadStoreAdapter::blockExpanded(size_t k, std::size_t b) const {
     const BlockEntry* block = blockEntryAt(k, b);
-    if (block == nullptr || state_ == nullptr)
+    if (block == nullptr || !bound())
         return false;
     const Entry& entry = groups_[k];
     if (entry.stream && !block->thinking)
@@ -1106,10 +1156,10 @@ bool ThreadStoreAdapter::blockExpanded(size_t k, std::size_t b) const {
     if (block->thinking) {
         // Stored and streamed reasoning share one expansion set, keyed by the
         // block's identity; the stream group id is what keeps the two apart.
-        return state_->ui.thread.thinkingOpen.count(
+        return thread_->thinkingOpen.count(
                    model::BlockId{entry.view.id, block->key, model::BlockKind::Thinking}) != 0;
     }
-    const ChatTab& chat = state_->chat;
+    const ChatTab& chat = *chat_;
     if (block->kind == model::BlockKind::WorkGroup) {
         if (entry.start >= chat.outputLines.size())
             return false;
@@ -1120,7 +1170,7 @@ bool ThreadStoreAdapter::blockExpanded(size_t k, std::size_t b) const {
 
 bool ThreadStoreAdapter::setBlockExpanded(size_t k, std::size_t b, bool open) {
     const BlockEntry* block = blockEntryAt(k, b);
-    if (block == nullptr || state_ == nullptr || !block->expandable)
+    if (block == nullptr || !bound() || !block->expandable)
         return false;
     const Entry& entry = groups_[k];
     const model::BlockId thinkingId{entry.view.id, block->key, model::BlockKind::Thinking};
@@ -1128,28 +1178,27 @@ bool ThreadStoreAdapter::setBlockExpanded(size_t k, std::size_t b, bool open) {
         if (!block->thinking)
             return true; // the streamed body is always open
         if (open)
-            state_->ui.thread.thinkingOpen.insert(thinkingId);
+            thread_->thinkingOpen.insert(thinkingId);
         else
-            state_->ui.thread.thinkingOpen.erase(thinkingId);
+            thread_->thinkingOpen.erase(thinkingId);
         // No anchor latch: the view's own report (`BlockResult::toggled`) names the group
         // to anchor, and `endGroup()` deliberately skips the latch for the stream.
         return open;
     }
     if (block->thinking) {
         if (open)
-            state_->ui.thread.thinkingOpen.insert(thinkingId);
+            thread_->thinkingOpen.insert(thinkingId);
         else
-            state_->ui.thread.thinkingOpen.erase(thinkingId);
+            thread_->thinkingOpen.erase(thinkingId);
     } else {
-        const ChatTab& chat = state_->chat;
+        const ChatTab& chat = *chat_;
         const bool group = block->kind == model::BlockKind::WorkGroup;
         if (group && entry.start >= chat.outputLines.size())
             return false;
         const size_t key = group ? chat.outputLines[entry.start].id : block->key;
         if (group)
             autoOpenWorkGroups_.erase(key); // the user owns this group now
-        std::set<size_t>& target =
-            group ? state_->chat.openWorkGroups : state_->chat.outputLineOpen;
+        std::set<size_t>& target = group ? chat_->openWorkGroups : chat_->outputLineOpen;
         if (open)
             target.insert(key);
         else
@@ -1163,20 +1212,25 @@ bool ThreadStoreAdapter::setBlockExpanded(size_t k, std::size_t b, bool open) {
 
 std::string ThreadStoreAdapter::blockText(size_t k, std::size_t b) const {
     const BlockEntry* block = blockEntryAt(k, b);
-    if (block == nullptr || state_ == nullptr || block->kind == model::BlockKind::WorkGroup)
+    if (block == nullptr || !bound() || block->kind == model::BlockKind::WorkGroup)
         return {};
     const Entry& entry = groups_[k];
     if (entry.stream)
-        return block->thinking ? state_->chat.streamMsg.thinking : state_->chat.streamMsg.text;
-    if (block->message >= state_->chat.outputLines.size())
+        return block->thinking ? chat_->streamMsg.thinking : chat_->streamMsg.text;
+    if (block->message >= chat_->outputLines.size())
         return {};
-    const auto& message = state_->chat.outputLines[block->message];
+    const auto& message = chat_->outputLines[block->message];
+    if (!block->thinking &&
+        (block->kind == model::BlockKind::ToolCall ||
+         block->kind == model::BlockKind::ToolResult) &&
+        structuredToolRow(message))
+        return toolRowBody(message, block->kind);
     return block->thinking ? message.thinking : message.text;
 }
 
 void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect& cell) {
     const BlockEntry* block = blockEntryAt(k, b);
-    if (block == nullptr || state_ == nullptr)
+    if (block == nullptr || !bound())
         return;
     if (!ui::rectMatchesProfile(cell, ui::metricsFor()))
         return;
@@ -1185,11 +1239,19 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
     const bool thinking = block->thinking;
     bool markdown = true;
     if (entry.stream) {
-        body = block->thinking ? state_->chat.streamMsg.thinking : state_->chat.streamMsg.text;
+        body = block->thinking ? chat_->streamMsg.thinking : chat_->streamMsg.text;
     } else if (block->kind != model::BlockKind::WorkGroup &&
-               block->message < state_->chat.outputLines.size()) {
-        const auto& message = state_->chat.outputLines[block->message];
-        body = thinking ? message.thinking : message.text;
+               block->message < chat_->outputLines.size()) {
+        const auto& message = chat_->outputLines[block->message];
+        if (thinking)
+            body = message.thinking;
+        else if (structuredToolRow(message) && (block->kind == model::BlockKind::ToolCall ||
+                                                block->kind == model::BlockKind::ToolResult))
+            // A structured tool row's body is its args / result text, not `message.text`
+            // (which the real API path leaves empty).
+            body = toolRowBody(message, block->kind);
+        else
+            body = message.text;
         // A tool row is a transcript, not prose: it is drawn verbatim. Everything else goes
         // through the markdown wrapper.
         markdown = renderAsMarkdown(message.type);
@@ -1208,8 +1270,7 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
     // source flag names the block by its stable id, so a redraw after a paging change or a
     // stream update asks the same question.
     const model::BlockId blockId{entry.view.id, block->key, block->kind};
-    const bool showTableSource =
-        state_->ui.thread.tableSource.find(blockId) != state_->ui.thread.tableSource.end();
+    const bool showTableSource = thread_->tableSource.find(blockId) != thread_->tableSource.end();
 
     // While the plain-text fallback is active the block's `s` toggle is a
     // visual no-op: the body is already raw text. A future "the toggle does
@@ -1231,7 +1292,7 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
 
 bool ThreadStoreAdapter::beginGroup(size_t k, const ui::Rect& cell) {
     sync();
-    if (state_ == nullptr || k >= groups_.size())
+    if (!bound() || k >= groups_.size())
         return false;
     // A rectangle in the wrong unit is a mixed-unit bug: fail closed (paint nothing)
     // rather than draw a plausible thread in the wrong coordinate space.
@@ -1255,7 +1316,7 @@ bool ThreadStoreAdapter::beginGroup(size_t k, const ui::Rect& cell) {
     // This is only a toggle signal while the draw does not write the sets itself: the
     // one-shot defaults are seeded in `sync()` at build time, so the writes between
     // these two samples are the user's own activations.
-    groupOpenBefore_ = state_->chat.outputLineOpen.size() + state_->chat.openWorkGroups.size();
+    groupOpenBefore_ = chat_->outputLineOpen.size() + chat_->openWorkGroups.size();
     groupTop_ = ImGui::GetCursorScreenPos().y;
     // One block scope per group, keyed by the adapter's own group id (D-GROUPID:
     // monotonic, never reused, never a frame counter) - rich_md's fragment ids are keyed
@@ -1266,7 +1327,7 @@ bool ThreadStoreAdapter::beginGroup(size_t k, const ui::Rect& cell) {
 }
 
 void ThreadStoreAdapter::endGroup(size_t k, const ui::Rect& cell) {
-    if (state_ == nullptr || k >= groups_.size() || !groupOpen_)
+    if (!bound() || k >= groups_.size() || !groupOpen_)
         return;
     const Entry& entry = groups_[k];
     ui::endBlock();
@@ -1277,8 +1338,7 @@ void ThreadStoreAdapter::endGroup(size_t k, const ui::Rect& cell) {
     // id even when the toggle happened on a row inside it: the anchor can only hold a
     // header row the view knows about, so the group's header is what stays put - the
     // row above the content the user just changed.
-    const std::size_t openAfter =
-        state_->chat.outputLineOpen.size() + state_->chat.openWorkGroups.size();
+    const std::size_t openAfter = chat_->outputLineOpen.size() + chat_->openWorkGroups.size();
     if (!entry.stream &&
         (expanded(entry.view.id) != groupExpandedBefore_ || openAfter != groupOpenBefore_))
         expandedGroup_ = entry.view.id;
@@ -1294,7 +1354,7 @@ void ThreadStoreAdapter::endGroup(size_t k, const ui::Rect& cell) {
     if (cell.w > 0.0f)
         hintWidth_ = cell.w;
     const ui::Metrics m = ui::metricsFor();
-    model::HeightHint& hint = state_->ui.thread.hints[entry.view.id];
+    model::HeightHint& hint = thread_->hints[entry.view.id];
     const float drawnH = std::max(m.row, ImGui::GetCursorScreenPos().y - groupTop_);
     // The live answer may grow while it streams and must never *shrink* within one revision
     // (design FR-08: "the group height may grow but never shrink within a revision"). Two
@@ -1320,23 +1380,23 @@ void ThreadStoreAdapter::endGroup(size_t k, const ui::Rect& cell) {
 }
 
 void ThreadStoreAdapter::commitSeen() {
-    if (state_ == nullptr)
+    if (!bound())
         return;
-    commitExpansionDefaults(state_->chat);
+    commitExpansionDefaults(*chat_);
 }
 
 void ThreadStoreAdapter::clearStream() {
-    if (streamGroupId_ != 0 && state_ != nullptr) {
-        state_->ui.thread.thinkingOpen.erase(
+    if (streamGroupId_ != 0 && bound()) {
+        thread_->thinkingOpen.erase(
             model::BlockId{streamGroupId_, model::kStreamMessageId, model::BlockKind::Thinking});
         // A focus on one of the stream's rows names a block that is gone with the
         // stream; do not leave `y` consuming a character for a target that no row
         // can match. The menu's owner (task 44) goes with it: a menu opened on the
         // answer must not outlive the answer.
-        if (state_->ui.thread.focus.group == streamGroupId_)
-            state_->ui.thread.focus = {};
-        if (state_->ui.thread.menuBlockId.group == streamGroupId_)
-            state_->ui.thread.menuBlockId = {};
+        if (thread_->focus.group == streamGroupId_)
+            thread_->focus = {};
+        if (thread_->menuBlockId.group == streamGroupId_)
+            thread_->menuBlockId = {};
     }
     streamGroupId_ = 0;
     streamRevision_ = 0;
@@ -1355,8 +1415,8 @@ void ThreadStoreAdapter::clearStream() {
     // The live answer's clock goes with the stream it was counting: a new stream starts at
     // 00:00 and uncancelled. `refreshStreamClock()` re-stamps `startedMs` on the new stream's
     // first sighting.
-    if (state_ != nullptr)
-        model::resetStreamClock(state_->ui.thread.stream);
+    if (bound())
+        model::resetStreamClock(thread_->stream);
 }
 
 void ThreadStoreAdapter::reset() {
@@ -1367,8 +1427,8 @@ void ThreadStoreAdapter::reset() {
     // clear or a session switch, and `resetForSessionSwitch()` is called from the
     // same place - but clearing here too keeps "ids are reset" and "hints are reset"
     // one call, so an adapter reset in a harness cannot leave a stale height behind.
-    if (state_ != nullptr)
-        state_->ui.thread.hints.clear();
+    if (bound())
+        thread_->hints.clear();
     hintWidth_ = 0.0f;
     hintCompact_ = false;
     expandedGroup_ = 0;
@@ -1382,12 +1442,12 @@ void ThreadStoreAdapter::reset() {
     // reasoning is seeded open again when its new group is born. The table source flags
     // (task 37) are the same kind of state - the next session's block can be the one the
     // flag would name - so they go with them.
-    if (state_ != nullptr) {
-        state_->ui.thread.thinkingOpen.clear();
-        state_->ui.thread.tableSource.clear();
+    if (bound()) {
+        thread_->thinkingOpen.clear();
+        thread_->tableSource.clear();
         // The block menu's owner too (task 44): the ids restart below, so a latch that
         // survived would name a block of the *next* thread.
-        state_->ui.thread.menuBlockId = {};
+        thread_->menuBlockId = {};
     }
     nextId_ = 1;
     autoOpenWorkGroups_.clear();
@@ -1405,8 +1465,8 @@ void ThreadStoreAdapter::reset() {
     streamThinkingFence_ = {};
     // The thread is being replaced: the live answer's clock counted an answer of the thread
     // that is going away (task 38), so the next stream starts its own.
-    if (state_ != nullptr)
-        model::resetStreamClock(state_->ui.thread.stream);
+    if (bound())
+        model::resetStreamClock(thread_->stream);
 }
 
 } // namespace llmfun::tui::store

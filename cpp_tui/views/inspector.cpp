@@ -611,6 +611,9 @@ void drawPanelBody(InspectorState& state, const std::vector<model::AgentLane>& l
         const ui::TypeScope stripType(ui::TypeStep::label, m.textGrid);
         drawTab(state, parts.agents, parts.agentsText, InspectorTab::Agents, "##inspector_agents",
                 m);
+        if (!parts.agentsDot.empty())
+            lineAt(m, rectOf(parts.agentsDot, m), parts.agentsDot.x, unreadMark(m),
+                   ColorToken::accent);
         drawTab(state, parts.activity, parts.activityText, InspectorTab::Activity,
                 "##inspector_activity", m);
         if (!parts.badge.empty()) {
@@ -866,6 +869,17 @@ InspectorParts inspectorMeasure(const InspectorState& state,
     out.agents = InspectorPart{x, stripY, textUnits(m, out.agentsText), m.row};
     x = out.agents.right() + m.pad1;
     out.activity = InspectorPart{x, stripY, textUnits(m, out.activityText), m.row};
+
+    if (state.agentsActive) {
+        const std::string mark = unreadMark(m);
+        const float dx = out.agents.right() + static_cast<float>(kInspectorBadgeGapGu) * m.gu;
+        const float markW = textUnits(m, mark);
+        if (dx + markW <= right) {
+            out.agentsDot = InspectorPart{dx, stripY, markW, m.row};
+            x = out.agentsDot.right() + m.pad1;
+            out.activity = InspectorPart{x, stripY, textUnits(m, out.activityText), m.row};
+        }
+    }
 
     // The badge: the count while it fits, the bare mark after that (the strip keeps "there is
     // something new" even where the number cannot be shown), nothing when there is nothing

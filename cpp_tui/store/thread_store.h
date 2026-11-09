@@ -62,8 +62,13 @@
 // works with and without the `cpp_tui/` include path.
 #include "../ui/markdown.h"
 
+namespace llmfun::tui::model {
+struct ThreadState;
+} // namespace llmfun::tui::model
+
 namespace llmfun::tui {
 struct TuiState;
+struct ChatTab;
 } // namespace llmfun::tui
 
 namespace llmfun::tui::ui {
@@ -96,17 +101,34 @@ struct GroupView {
 /// The only v4-aware class the shell touches.
 class ThreadStoreAdapter {
 public:
+    /// Unbound: every accessor answers empty until a `bind()`.
+    ThreadStoreAdapter() = default;
+
+    /// The main-window binding: `state.chat` + `state.ui.thread`.
     explicit ThreadStoreAdapter(TuiState& state);
 
     /// Point the adapter at `state`.
     ///
-    /// The adapter is a member of `TuiState`, so its pointer is normally that
-    /// state's own address - but a state can be *reassigned* (`state =
+    /// The adapter is a member of `TuiState`, so its pointers are normally that
+    /// state's own members - but a state can be *reassigned* (`state =
     /// TuiState()`, which a harness does). A move leaves the adapter unbound
     /// instead of dangling (see below), so the contract is simply: the frame layer
     /// binds once per frame, before anything reads the thread; between a state
     /// assignment and that bind every accessor answers empty.
-    void bind(TuiState& state) { state_ = &state; }
+    void bind(TuiState& state);
+
+    /// Bind a different store/view pair: a mount over an agent's `ChatTab`
+    /// store and the drill-down's own `UiState::agentThread`. Same per-frame
+    /// contract as the state bind: called before anything reads. A pair *change*
+    /// under live caches (the user moved the focus) is a full drop, because a
+    /// cache built from one store's group ids is meaningless over another.
+    void bind(ChatTab& chat, model::ThreadState& thread);
+
+    /// Unbind when this store is going away (an eviction, `tuiPipelineClear`): the
+    /// mount must never carry a dead store's address across a frame. A no-op when
+    /// the adapter holds a different store, so one agent's eviction cannot cost
+    /// another agent's mount its caches.
+    void dropChat(const ChatTab* chat);
 
     /// A moved-into adapter forgets its state instead of carrying a stale pointer.
     ///
@@ -127,7 +149,8 @@ public:
         groups_.clear();
         indexById_.clear();
         idByStart_.clear();
-        state_ = nullptr;
+        chat_ = nullptr;
+        thread_ = nullptr;
         nextId_ = 1;
         streamGroupId_ = 0;
         streamRevision_ = 0;
@@ -152,12 +175,15 @@ public:
 
     /// False on an adapter that has not been bound since its state moved. Only the
     /// frame layer's `bind()` makes it true again.
-    bool bound() const { return state_ != nullptr; }
+    bool bound() const { return chat_ != nullptr && thread_ != nullptr; }
 
     /// Groups in the thread, streaming message included as the last one. Cheap:
     /// the group list is rebuilt only when the store changed (append, eviction,
-    /// clear, stream update), never per call.
+    /// clear, stream update), never per call. Unbound, the sync inside answers
+    /// an empty list, so the count/entry accessors answer empty without a
+    /// dereference - the frame layer still binds before it reads.
     size_t groupCount() const;
+
     /// The group at `k`, `k` in `[0, groupCount())`; a zeroed view for anything
     /// out of range (never a crash, never a neighbour's data).
     GroupView groupAt(size_t k) const;
@@ -352,7 +378,10 @@ private:
     /// The block list of one group (`nullptr` out of range). A probe, not a walk.
     const BlockEntry* blockEntryAt(size_t k, std::size_t b) const;
 
-    TuiState* state_;
+    /// The bound pair: the store the groups are built from and the
+    /// view state the caches read. Null together (unbound) or set together
+    ChatTab* chat_ = nullptr;
+    model::ThreadState* thread_ = nullptr;
 
     // The group cache (mutable: `sync()` runs from the const accessors).
     mutable std::vector<Entry> groups_;

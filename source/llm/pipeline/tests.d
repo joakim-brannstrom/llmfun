@@ -322,3 +322,205 @@ unittest {
             "Retry nudge should have been sent exactly once (continuing the turn)");
     assert(!node.output.empty, "Node output should be set after second attempt");
 }
+
+@("the per-step emitter rides the builder's stream-callback seam and the wrapper's stored hook")
+unittest {
+    import llm.types : IStepEventEmitter, StreamMessage, StreamToolCall, ServerStat;
+
+    // A callback that also implements the seam: this is the shape
+    // PipelineStreamMessageUpdater has. The clone is the object the builder
+    // actually wires (it is cloned per node and setId'd), so this fake returns
+    // itself from clone to keep one shared recording buffer.
+    class RecordingEmitter : IStreamCallback, IStepEventEmitter {
+        ProcessResult[] seen;
+
+        override void setId(string) {
+        }
+
+        override void messageUpdate(StreamMessage, StreamToolCall[], ServerStat) {
+        }
+
+        override void streamMessageDone() {
+        }
+
+        override IStreamCallback clone() {
+            return this;
+        }
+
+        override void stepEvent(ProcessResult result) {
+            seen ~= result;
+        }
+    }
+
+    // Minimal wrapped agent: records whether a step hook reached it and calls
+    // it once with a canned step, then publishes its output so the wrapper's
+    // retry loop stops after one round.
+    class StepRecordingAgent : IBasicAgent {
+        size_t runs;
+        size_t stepCalls;
+        ProcessResult cannedStep;
+        PipelineControlContext ctx;
+
+        override string id() {
+            return "n1";
+        }
+
+        override void setStreamUpdate(IStreamCallback) {
+        }
+
+        override void addUserQuery(string) {
+        }
+
+        override void addContinueMessage(string) {
+        }
+
+        override void setPipelineContext(PipelineControlContext ctx) {
+            this.ctx = ctx;
+        }
+
+        override ProcessResult runToCompletion(void delegate(ProcessResult) step = null,
+                SummaryAgent.ProgressCallback compressCallback = null,
+                bool delegate() interrupt = null) {
+            runs++;
+            if (step !is null) {
+                stepCalls++;
+                step(cannedStep);
+            }
+            if (ctx)
+                ctx.setPipelineOutput("done");
+            return ProcessResult.init;
+        }
+    }
+
+    auto emitter = new RecordingEmitter();
+    auto agent = new StepRecordingAgent();
+    agent.cannedStep = ProcessResult(status: ProcessResult.Status.ok);
+
+    // The builder wires the seam: a callback implementing
+    // IStepEventEmitter becomes the node's step delegate beside the stream hook.
+    auto builder = pipelineBuilder().streamCallback(emitter).addNode("n1",
+            agent).startNode("n1").stopNode("n1");
+    auto node = builder.nodes[0];
+    builder.build();
+    assert(node.stepDelegate_ !is null, "build wires the emitter onto the node's step hook");
+
+    // The pool-driven path: the wrapper is created fresh per submit and copies
+    // the node's hook into its stored slot, so a run without an explicit step
+    // still delivers the step to the emitter.
+    auto wrapper = new PipelineAgent(agent, node);
+    wrapper.runToCompletion();
+
+    assert(agent.runs == 1, "setup: the wrapped agent ran once");
+    assert(agent.stepCalls == 1, "the agent received the stored step hook (not null)");
+    assert(emitter.seen.length == 1 && emitter.seen[0].status == ProcessResult.Status.ok,
+            "the step reached the emitter through the seam");
+}
+
+// A two-node pipeline must tag BOTH the stream ticks and the step events with
+// each node's own id. Regression: the step hook once captured a loop-body
+// emitter local, so every node's hook fired the loop's last emitter and every
+// step event arrived tagged with the last node's id (all tool rows landed in
+// one agent's transcript while the stream text stayed on its own lanes).
+@("a two-node pipeline tags stream ticks and step events with each node's own id") unittest {
+    import std.algorithm : equal;
+    import std.array : join;
+    import std.conv : to;
+
+    import llm.types : IStepEventEmitter, ServerStat, StreamMessage, StreamToolCall;
+
+    class IdLog {
+        string[] streamIds;
+        string[] stepIds;
+    }
+
+    class IdRecorder : IStreamCallback, IStepEventEmitter {
+        string id;
+        IdLog log;
+
+        override void setId(string s) {
+            id = s;
+        }
+
+        override void messageUpdate(StreamMessage, StreamToolCall[], ServerStat) {
+            log.streamIds ~= id;
+        }
+
+        override void streamMessageDone() {
+        }
+
+        override IStreamCallback clone() {
+            auto c = new IdRecorder;
+            c.id = id;
+            c.log = log;
+            return c;
+        }
+
+        override void stepEvent(ProcessResult) {
+            log.stepIds ~= id;
+        }
+    }
+
+    class StepFiringAgent : IBasicAgent {
+        string _id;
+        IStreamCallback streamCb;
+        PipelineControlContext ctx;
+        size_t runs;
+
+        this(string id) {
+            _id = id;
+        }
+
+        override string id() {
+            return _id;
+        }
+
+        override void setStreamUpdate(IStreamCallback callback) {
+            streamCb = callback;
+        }
+
+        override void addUserQuery(string) {
+        }
+
+        override void addContinueMessage(string) {
+        }
+
+        override void setPipelineContext(PipelineControlContext c) {
+            ctx = c;
+        }
+
+        override ProcessResult runToCompletion(void delegate(ProcessResult) step = null,
+                SummaryAgent.ProgressCallback compressCallback = null,
+                bool delegate() interrupt = null) {
+            runs++;
+            if (streamCb !is null)
+                streamCb.messageUpdate(StreamMessage.init, [], ServerStat.init);
+            if (step !is null)
+                step(ProcessResult.init);
+            if (ctx)
+                ctx.setPipelineOutput("done");
+            return ProcessResult.init;
+        }
+    }
+
+    auto log = new IdLog;
+    auto recorder = new IdRecorder;
+    recorder.log = log;
+    auto agentA = new StepFiringAgent("agentA");
+    auto agentB = new StepFiringAgent("agentB");
+    auto builder = pipelineBuilder().streamCallback(recorder).addNode("nodeA",
+            agentA).addNode("nodeB", agentB).addEdge("nodeA", "nodeB")
+        .startNode("nodeA").stopNode("nodeB");
+    builder.build();
+    assert(agentA.streamCb !is null, "setup: build wired agentA's stream callback");
+    assert(agentB.streamCb !is null, "setup: build wired agentB's stream callback");
+    foreach (node; builder.nodes)
+        new PipelineAgent(node.agent, node).runToCompletion();
+
+    assert(agentA.runs == 1 && agentB.runs == 1,
+            "setup: both wrappers ran their agents (" ~ agentA.runs.to!string
+            ~ "," ~ agentB.runs.to!string ~ ")");
+    assert(equal(log.streamIds, ["nodeA", "nodeB"]),
+            "stream ticks carry the running node's id (got " ~ log.streamIds.join(",") ~ ")");
+    assert(equal(log.stepIds, ["nodeA", "nodeB"]),
+            "step events carry the running node's id (got " ~ log.stepIds.join(",") ~ ")");
+}

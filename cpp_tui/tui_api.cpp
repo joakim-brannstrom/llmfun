@@ -75,6 +75,71 @@ void mirrorLaneUpdate(::llmfun::tui::TuiState& state, const std::string& id,
                                            tokensPerSecond, ::llmfun::tui::model::agentClockMs());
 }
 
+/// Find-or-insert the agent's store entry, evicting by `lastUpdate` at capacity —
+/// the same policy the streamed path applies. A tool event may arrive before the
+/// first streamed tick, so this path must not create a lane: lanes are born only
+/// in `mirrorLaneUpdate`, and a store without a lane is a state the drill-down
+/// handles by showing the store alone.
+::llmfun::tui::AgentStream& agentStore(::llmfun::tui::TuiState& state, const std::string& id) {
+    auto& agents = state.left.agents;
+    for (auto& agent : agents) {
+        if (agent.agentId == id)
+            return agent;
+    }
+    if (agents.size() >= state.left.MaxAgents) {
+        const auto oldest = std::min_element(
+            agents.begin(), agents.end(),
+            [](const ::llmfun::tui::AgentStream& a, const ::llmfun::tui::AgentStream& b) {
+                return a.lastUpdate < b.lastUpdate;
+            });
+        if (state.ui.focusedAgent == oldest->agentId)
+            state.ui.focusedAgent.clear();
+        state.agentThreadAdapter.dropChat(&oldest->chat);
+        agents.erase(oldest);
+    }
+    agents.emplace_back(::llmfun::tui::AgentStream{id, std::chrono::system_clock::now(), {}});
+    return agents.back();
+}
+
+/// Append one tool row to the agent's store under the cap: the cap
+/// counts `outputLines` entries and the streaming slot is never in the list, so
+/// the oldest entry is simply dropped. Ids come from the tab's own counter — the
+/// same minting the main writes use.
+void appendToolRow(::llmfun::tui::AgentStream& agent, ::llmfun::tui::ChatMessage row) {
+    auto& chat = agent.chat;
+    row.id = chat.outputLineNextId++;
+    chat.outputLines.push_back(std::move(row));
+    while (chat.outputLines.size() > ::llmfun::tui::kAgentChatMaxMessages)
+        chat.outputLines.pop_front();
+}
+
+/// Apply one stream snapshot to the agent's `ChatTab` with the main thread's park
+/// semantics (the `pendingStream` doc in `tui.h`): the first snapshot of an answer
+/// applies immediately, a snapshot inside the throttle window parks, and an
+/// unchanged resend is not a repaint (D re-sends the accumulated message every tick).
+void applyAgentSnapshot(::llmfun::tui::AgentStream& agent, ::llmfun::tui::ChatMessage snapshot,
+                        std::int64_t nowMs) {
+    auto& chat = agent.chat;
+    const auto& current = chat.pendingStream ? chat.pendingStreamMsg : chat.streamMsg;
+    if (chat.hasStreamMsg && snapshot.text == current.text &&
+        snapshot.thinking == current.thinking && snapshot.type == current.type) {
+        return; // unchanged: not a repaint
+    }
+    const bool fresh = !chat.hasStreamMsg;
+    const bool windowElapsed =
+        agent.streamLastApplyMs == 0 || nowMs < agent.streamLastApplyMs ||
+        nowMs - agent.streamLastApplyMs >= ::llmfun::tui::model::kStreamUpdateIntervalMs;
+    if (fresh || windowElapsed) {
+        chat.streamMsg = snapshot;
+        chat.hasStreamMsg = true;
+        chat.pendingStream = false;
+        agent.streamLastApplyMs = nowMs;
+    } else {
+        chat.pendingStreamMsg = snapshot;
+        chat.pendingStream = true;
+    }
+}
+
 } // namespace
 
 #ifdef __cplusplus
@@ -663,51 +728,65 @@ void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage
     std::string r(msg.reasoning.data ? msg.reasoning.data : "",
                   msg.reasoning.data ? msg.reasoning.len : 0);
     std::string role_(msg.role.data ? msg.role.data : "", msg.role.data ? msg.role.len : 0);
-    std::string fr(msg.finishReason.data ? msg.finishReason.data : "",
-                   msg.finishReason.data ? msg.finishReason.len : 0);
     std::string tool(msg.currentTool.data ? msg.currentTool.data : "",
                      msg.currentTool.data ? msg.currentTool.len : 0);
     // `msg.contextMax` is deliberately not read: it is the producer's zero-vs-none bit, and the
     // lane draws no number for either zero, so it has no consumer on this side.
     const std::int64_t ctxUsed = msg.contextUsed;
+    // `msg.finishReason` is part of the wire contract but has no consumer on this side:
+    // the per-agent stream path reads no finish reason.
 
-    auto& agents = state->inner->left.agents;
-    for (auto& agent : agents) {
-        if (agent.agentId == id) {
-            agent.stream.content = c;
-            agent.stream.thinking = r;
-            agent.stream.role = role_;
-            agent.stream.finishReason = fr;
-            agent.stream.tokensPerSecond = msg.tokensPerSecond;
-            agent.lastUpdate = std::chrono::system_clock::now();
-            agent.activity = true;
-            mirrorLaneUpdate(*state->inner, id, role_, c, tool, ctxUsed, msg.tokensPerSecond);
-            return;
-        }
-    }
+    auto& agent = agentStore(*state->inner, id);
+    agent.lastUpdate = std::chrono::system_clock::now();
 
-    // Not found - auto-register
-    // If at capacity, evict the agent with the oldest lastUpdate
-    if (agents.size() >= state->inner->left.MaxAgents) {
-        auto oldestIt = std::min_element(
-            agents.begin(), agents.end(),
-            [](const ::llmfun::tui::AgentStream& a, const ::llmfun::tui::AgentStream& b) {
-                return a.lastUpdate < b.lastUpdate;
-            });
-        agents.erase(oldestIt);
-    }
+    ::llmfun::tui::ChatMessage snapshot;
+    snapshot.id = ::llmfun::tui::ChatTab::StreamChatMessageId;
+    snapshot.type = role_ == "user" ? ::llmfun::tui::ChatMessageType::User
+                                    : ::llmfun::tui::ChatMessageType::Assistant;
+    snapshot.text = c;
+    snapshot.thinking = r;
+    applyAgentSnapshot(agent, snapshot, ::llmfun::tui::model::agentClockMs());
 
-    agents.emplace_back(::llmfun::tui::AgentStream{
-        id,
-        ::llmfun::tui::AgentStreamMessage{c, r, role_, fr, msg.tokensPerSecond},
-        std::chrono::system_clock::now(),
-        1,
-        true,
-        std::vector<::llmfun::tui::AgentStreamMessage>{},
-    });
     mirrorLaneUpdate(*state->inner, id, role_, c, tool, ctxUsed, msg.tokensPerSecond);
 }
 
+void tuiPipelineAgentToolCall(TuiState* state, String agentId, TuiToolCallParam call) {
+    if (!state || !state->inner)
+        return;
+    std::string id(agentId.data ? agentId.data : "", agentId.data ? agentId.len : 0);
+    if (id.empty())
+        return;
+    std::string name(call.name.data ? call.name.data : "", call.name.data ? call.name.len : 0);
+    std::string args(call.arguments.data ? call.arguments.data : "",
+                     call.arguments.data ? call.arguments.len : 0);
+
+    auto& agent = agentStore(*state->inner, id);
+    ::llmfun::tui::ChatMessage row;
+    row.type = ::llmfun::tui::ChatMessageType::ToolCall;
+    row.toolName = name;
+    row.toolArgs = args;
+    appendToolRow(agent, std::move(row));
+}
+
+void tuiPipelineAgentToolResult(TuiState* state, String agentId, TuiToolResultParam result) {
+    if (!state || !state->inner)
+        return;
+    std::string id(agentId.data ? agentId.data : "", agentId.data ? agentId.len : 0);
+    if (id.empty())
+        return;
+    std::string name(result.name.data ? result.name.data : "",
+                     result.name.data ? result.name.len : 0);
+    std::string text(result.text.data ? result.text.data : "",
+                     result.text.data ? result.text.len : 0);
+
+    auto& agent = agentStore(*state->inner, id);
+    ::llmfun::tui::ChatMessage row;
+    row.type = ::llmfun::tui::ChatMessageType::ToolResponse;
+    row.toolName = name;
+    row.toolResult = text;
+    row.toolOk = result.ok != 0;
+    appendToolRow(agent, std::move(row));
+}
 void tuiPipelineAgentDone(TuiState* state, String agentId) {
     if (!state || !state->inner)
         return;
@@ -718,7 +797,18 @@ void tuiPipelineAgentDone(TuiState* state, String agentId) {
     auto& agents = state->inner->left.agents;
     for (auto& agent : agents) {
         if (agent.agentId == id) {
-            agent.finished();
+            auto& chat = agent.chat;
+            ::llmfun::tui::ChatMessage done =
+                chat.pendingStream ? chat.pendingStreamMsg : chat.streamMsg;
+            chat.pendingStream = false;
+            if (chat.hasStreamMsg && (!done.text.empty() || !done.thinking.empty())) {
+                done.id = chat.outputLineNextId++;
+                chat.outputLines.push_back(done);
+                while (chat.outputLines.size() > ::llmfun::tui::kAgentChatMaxMessages)
+                    chat.outputLines.pop_front();
+            }
+            chat.hasStreamMsg = false;
+            chat.streamMsg = {};
             // Note: lastUpdate is NOT refreshed — done agents are evicted
             // first (LRU policy) if capacity is exceeded.
             ::llmfun::tui::model::finishAgentLane(state->inner->ui, id);
@@ -731,6 +821,8 @@ void tuiPipelineClear(TuiState* state) {
     if (!state || !state->inner)
         return;
     state->inner->left.agents.clear();
+    state->inner->agentThreadAdapter = {};
+    state->inner->ui.focusedAgent.clear();
     ::llmfun::tui::model::clearAgentLanes(state->inner->ui);
 }
 

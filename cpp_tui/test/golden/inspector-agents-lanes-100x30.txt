@@ -10,7 +10,7 @@ lane: '  coder | ◐ running'
 lane: '  reviewer | ○ queued'
 text:
    llmfun                                                      Ctrl+K commands Shift+?   Settings
-  Search                                                                 [5] Agents [6] Activity
+  Search                                                                 [5] Agents • [6] Activity
                                                                          planner ✓ -> coder ◐ -> r…
  No sessions yet            llmfun                                         planner | ✓ done | 00:12
                             Ask, plan, or code - the agent can read you…   coder | ◐ running

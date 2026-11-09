@@ -5,15 +5,19 @@ module llm.app_agent.ui;
 
 import std.array : empty;
 import std.conv : text;
+import std.json : JSONType, JSONValue;
 import std.stdio : writeln;
+import std.sumtype : match;
 
-import llm.types : ServerStat, StreamMessage, StreamToolCall, IStreamCallback;
+import llm.types : ServerStat, StreamMessage, StreamToolCall, IStreamCallback,
+    IStepEventEmitter, ProcessResult;
 import llm.tui; // Ui* message types (UiChatMessage, UiPipelineClear, ...)
 import llmfun_tui; // TuiChatMessageType (C binding)
 import my.path : Path;
 import my.actor.channel : Channel;
 import my.actor.mailbox : TypedAddress;
-import llm.chat : MessageTime, NoProcessingTime;
+import llm.chat : MessageTime, NoProcessingTime, Message, ToolMessage,
+    ToolResponse, VisionMessage;
 
 /// One-way sink for agent->TUI messages. Abstracts where TUI traffic goes so
 /// the agent can target a live TUI actor (channel), the console (one-shot),
@@ -37,6 +41,8 @@ interface TuiSink {
             double tokensPerSecond, string currentTool, long contextUsed, long contextMax);
     void pipelineStreamDone(string agentId);
     void pipelineClear();
+    void pipelineToolCall(string agentId, string name, string arguments, string id);
+    void pipelineToolResult(string agentId, string name, int ok, string text);
     void sessionList(const(UiSessionItem)[] items);
     void initHistory(immutable(string)[] history);
 }
@@ -114,6 +120,14 @@ class TuiChannelSink : TuiSink {
         ch.uiMsg(UiPipelineStreamDone(agentId));
     }
 
+    override void pipelineToolCall(string agentId, string name, string arguments, string id) {
+        ch.uiMsg(UiPipelineToolCall(agentId, name, arguments, id));
+    }
+
+    override void pipelineToolResult(string agentId, string name, int ok, string text) {
+        ch.uiMsg(UiPipelineToolResult(agentId, name, ok, text));
+    }
+
     override void pipelineClear() {
         ch.uiPipelineClear();
     }
@@ -182,6 +196,12 @@ class TuiBlockedSink : TuiSink {
     override void pipelineStreamDone(string agentId) {
     }
 
+    override void pipelineToolCall(string agentId, string name, string arguments, string id) {
+    }
+
+    override void pipelineToolResult(string agentId, string name, int ok, string text) {
+    }
+
     override void pipelineClear() {
     }
 
@@ -228,6 +248,27 @@ class TuiRecordingSink : TuiSink {
     }
 
     LaneUpdate[] laneUpdates;
+
+    /// pipelineToolCall calls in call order: field-by-field copies, same
+    /// rationale as LaneUpdate.
+    struct ToolCallEvent {
+        string agentId;
+        string name;
+        string arguments;
+        string id;
+    }
+
+    ToolCallEvent[] toolCalls;
+
+    /// pipelineToolResult calls in call order.
+    struct ToolResultEvent {
+        string agentId;
+        string name;
+        int ok;
+        string text;
+    }
+
+    ToolResultEvent[] toolResults;
 
     int countOf(string kind) const {
         int n;
@@ -315,6 +356,16 @@ class TuiRecordingSink : TuiSink {
 
     override void pipelineStreamDone(string agentId) {
         record("pipelineStreamDone", agentId);
+    }
+
+    override void pipelineToolCall(string agentId, string name, string arguments, string id) {
+        toolCalls ~= ToolCallEvent(agentId, name, arguments, id);
+        record("pipelineToolCall", agentId ~ ": " ~ name);
+    }
+
+    override void pipelineToolResult(string agentId, string name, int ok, string text) {
+        toolResults ~= ToolResultEvent(agentId, name, ok, text);
+        record("pipelineToolResult", agentId ~ ": " ~ name);
     }
 
     override void pipelineClear() {
@@ -423,6 +474,14 @@ class UiMessenger {
         sink.pipelineStreamDone(agentId);
     }
 
+    void pipelineToolCall(string agentId, string name, string arguments, string id) {
+        sink.pipelineToolCall(agentId, name, arguments, id);
+    }
+
+    void pipelineToolResult(string agentId, string name, int ok, string text) {
+        sink.pipelineToolResult(agentId, name, ok, text);
+    }
+
     void pipelineClear() {
         sink.pipelineClear();
     }
@@ -480,8 +539,67 @@ class StreamMessageUpdater : IStreamCallback {
     }
 }
 
+/// Cut a tool payload to the wire cap: D is the producer, so the C side
+/// never sees an unbounded string. A cut ends with `...`, and backs off to a
+/// code-point boundary first: a byte-level cut can split a UTF-8 sequence, and
+/// the garbage glyph ImGui then renders at the cut is worse than a byte or two
+/// less of payload.
+private string truncatedForWire(string payload) {
+    if (payload.length <= 1000)
+        return payload;
+    size_t end = 1000;
+    while (end > 0 && (payload[end] & 0xC0) == 0x80)
+        --end;
+    return payload[0 .. end] ~ "...";
+}
+
+/// Read `obj[key]` if it is a JSON string, null otherwise.
+private string jsonStringAt(const JSONValue obj, string key) {
+    if (obj.type != JSONType.object)
+        return null;
+    auto v = key in obj;
+    if (v is null || v.type != JSONType.string)
+        return null;
+    return v.str;
+}
+
+/// Send every tool call in a ToolMessage's `toolCalls` JSON as its own structured
+/// message. Entries without a usable `function.name` are skipped.
+private void emitToolCallsFromJson(UiMessenger uiMsg, string agentId, const JSONValue toolCalls) {
+    if (toolCalls.type != JSONType.array)
+        return;
+    foreach (entry; toolCalls.array) {
+        if (entry.type != JSONType.object)
+            continue;
+        auto fn = "function" in entry;
+        if (fn is null || fn.type != JSONType.object)
+            continue;
+        auto name = jsonStringAt(*fn, "name");
+        if (name.empty)
+            continue;
+        uiMsg.pipelineToolCall(agentId, name, truncatedForWire(jsonStringAt(*fn,
+                "arguments")), jsonStringAt(entry, "id"));
+    }
+}
+
+/// The per-step emitter: walk one completed step's chat in order and send
+/// each tool call and tool result as its own structured message, beside the streamed
+/// content instead of spliced into it. Tool messages and tool responses carry the
+/// traffic; finish reasons are never consulted. This is the pipeline's UI seam: the
+/// pipeline knows only IStepEventEmitter, and this function supplies the UI knowledge.
+void emitStepToolEvents(UiMessenger uiMsg, string agentId, ProcessResult result) {
+    foreach (ref msg; result.chat) {
+        msg.match!((ToolMessage tool) {
+            emitToolCallsFromJson(uiMsg, agentId, tool.toolCalls);
+        }, (ToolResponse resp) {
+            uiMsg.pipelineToolResult(agentId, resp.toolName, resp.success()
+                ? 1 : 0, truncatedForWire(resp.content));
+        }, (Message _) {}, (VisionMessage _) {});
+    }
+}
+
 /// Forwards streaming pipeline output to the TUI (per-agent messages).
-class PipelineStreamMessageUpdater : IStreamCallback {
+class PipelineStreamMessageUpdater : IStreamCallback, IStepEventEmitter {
     UiMessenger uiMsg;
     long contextSize;
     string modelName;
@@ -496,13 +614,6 @@ class PipelineStreamMessageUpdater : IStreamCallback {
 
     override void messageUpdate(StreamMessage msg, StreamToolCall[] tools, ServerStat stat) {
         string content = msg.content;
-        if (!tools.empty) {
-            foreach (tool; tools) {
-                content ~= "\n--- Tool ---\n";
-                content ~= tool.toPrettyString(1000);
-                content ~= "\n";
-            }
-        }
 
         uiMsg.pipelineStreamChatMessage(agentId: agentId, content: content, thinking: msg.reasoning, role: msg.role,
                 tokensPerSecond: stat.predictedPerSecond,
@@ -512,6 +623,10 @@ class PipelineStreamMessageUpdater : IStreamCallback {
 
     override void streamMessageDone() {
         uiMsg.pipelineStreamDone(agentId);
+    }
+
+    override void stepEvent(ProcessResult result) {
+        emitStepToolEvents(uiMsg, agentId, result);
     }
 
     override void setId(string id) {

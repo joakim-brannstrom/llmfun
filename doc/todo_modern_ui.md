@@ -2550,10 +2550,9 @@ Resolved decisions are in §10.3. These are the remaining design details:
   last 10 messages).
     - There is no message count beside the agent. Add a `[NR]`-style count beside the
       agent row.
-- I also want to see tok/s for the active agent
-- There is no highlight that there is activity under the Agents tab, like there is for the Activity tab
-- In the last agent that is executed the used context is not shown.
-- I only see the tool call part when I have an agent focus. No thinking, no content
+- Future improvement: show the agent's task (the query that spawned it) in the agent view,
+  as a user-role message, so the drill-down reads as a full turn like the chat window.
+  Deferred - no good design for it yet.
 
 ### Main window
 - The D side should stop adding x and v to tool responses. The UI should instead show the success status and the D side just send over the data such as the status. I am trying to say that the D side should not "decorate" the answer with a success/fail status but rather that the UI do that in a "prettier" way.
@@ -2564,22 +2563,7 @@ Resolved decisions are in §10.3. These are the remaining design details:
 
 - optimization. The main window should not "show" all messages but rather only the 20. The others are loaded on demand if the user scroll up. They then have a decay time that start when the user have scrolled to the bottom of the screen. After 30s they are "unloaded". By load and unload I mean that they stop rendering.
   
-### Raw Log
-- I cannot scroll horizontal when needed.
-- It is very unclear which log messages I can open for more information. It seems to be only StreamResponse
-- I see the records dropped counter increasing. It started increasing by a lot at 1500+. It like "marked" each message that it showed as dropped, but it wasn't dropped. So I think some counter that is used isn't working as expected.
-    - When a record is dropped an empty "log message" should be added at its position so it is possible to see where it was dropped
-- in settings what really do log level "raw"?
-- "--debug-ui" should set the log level to trace
-- the trace log level is not saved
-
-### Input field
-
-- history is navigatable with up and down arrow keys. Only page up and page down should work.
-
 # Misc
-- It is very annoying that while a "execute_command" is running a newline keep on being printed and removed.
-    This seems to not be limited to only execute_command but rather when the agent is working
 - make the colors configurable for user/agent/answer
 - make the whole color schema swappable/configurable
 - make it possible to control how much is printed when it is working such as "minimal" where you only see it is working compared to "maximum" where you see everything.

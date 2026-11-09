@@ -131,8 +131,23 @@ struct RowPlan {
     float msgX, msgW;       // msgW = bodyW - msgX (rest of the row); msgX constant per frame
     float tagW; // tag slack (kRawLogTagGapCells + kRawLogTagMinCells) at rung 0; 0 from rung 1, and
                 // a tag draws only where this is positive
+    int locationCells; // the draw budget the location's text gets: the narrow plan's cell
+                       // count; the wide plan's is large enough that the measured widest
+                       // location draws whole (its own column is sized to fit it)
 };
 RowPlan rawRowPlan(float bodyW, const ui::Metrics& m);
+
+/// The wide variant: the message at its full natural width, the location
+/// column at the measured widest (capped at `kRawLogMaxLocationCells` cells), the tag
+/// dropped whole. The rungs the two plans share keep their geometry, so the columns stay
+/// put while the surface scrolls horizontally. A degenerate `maxDrawnW` (nothing was
+/// measured) answers the narrow plan.
+RowPlan rawRowPlanWide(float rowW, const ui::Metrics& m, float maxLocationW, float maxDrawnW);
+
+/// The wide surface's content width: the wide plan's message start, the widest drawn
+/// extent and one trailing gap. Wide mode is engaged exactly while this exceeds the
+/// body width.
+float rawLogContentW(const RowPlan& wide, float maxDrawnW, const ui::Metrics& m);
 
 /// The location segment's text inside a `cells`-wide column. Widest form first,
 /// whole pieces, never a fragment:
@@ -255,6 +270,24 @@ struct RawLogState {
     std::size_t builtSize = 0;
     std::size_t builtArrivals = 0;
     int builtMinLevel = model::kRawLogLevelInfo;
+    /// The rebuild walk's measured maxima, in the profile's own unit - exactly
+    /// what `textUnits()` answers (cells on the text grid, px in the pixel
+    /// profile): the widest drawn message text, the widest location text and
+    /// the widest detail line of the expanded record. `rawRowPlanWide()` and
+    /// the frame's `contentW` read them; 0.0f means "never measured".
+    float maxMessageW = 0.0f;
+    float maxLocationW = 0.0f;
+    float maxDetailW = 0.0f;
+    /// The font-scale/profile identity in the rebuild key: a value whose
+    /// units changed must re-measure rather than reuse the stale maxima.
+    /// Compared with `!=` - the value only takes a handful of discrete states.
+    float builtGu = 0.0f;
+    /// This frame's wide-mode facts, set by the frame and never cached: whether
+    /// the wide plan is engaged, and the drawn surface's content width (the
+    /// scrollbar exists exactly while `contentW` exceeds the body). Kept on the
+    /// state for the tests and for anything downstream that wants the number.
+    bool wideMode = false;
+    float contentW = 0.0f;
     /// The one expanded record (the detail's continuation lines are drawn under it), by
     /// `rawLogKey()`. One at a time: the surface's job is a stream, and a stream with three
     /// open disclosures is a tree nobody asked for. `expandedAt` is its index in `matching` and

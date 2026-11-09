@@ -32,6 +32,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <string>
 #include <vector>
@@ -117,6 +118,10 @@ inline constexpr char kInspectorReservedHint[] = "not available yet";
 /// The badge's separator, in `gu`: one unit between the Activity label and its count.
 inline constexpr int kInspectorBadgeGapGu = 1;
 
+/// How long the Agents tab keeps showing the activity mark after the last lane went
+/// quiet.
+inline constexpr int kAgentsActivityLatchMs = 10000;
+
 /// The Agents tab's controls (design §5.21, task 30). `Stop all` is a two-press action: the
 /// first press arms the question, the second answers it - a run stop is not undoable, and the
 /// design asks for the confirmation explicitly ("stop all (confirm)").
@@ -156,6 +161,10 @@ struct InspectorState {
     /// Records that arrived while the Activity tab was not on screen (D-UNREAD's rule for
     /// the record stream, cleared the moment the tab is shown). 0 draws no badge.
     int unreadActivity = 0;
+    /// The Agents tab's activity mark: a lane is live now, or was within
+    /// the latch window (`kAgentsActivityLatchMs`, armed by writing `agentsActiveUntilMs`).
+    bool agentsActive = false;
+    std::int64_t agentsActiveUntilMs = 0;
 
     // --- the Agents tab (design §5.21, task 30) -----------------------------
     /// The lane whose transcript the thread draws (`UiState::focusedAgent`): the tab marks
@@ -269,8 +278,13 @@ struct InspectorPart {
 /// The `*Text` strings are exactly what is drawn, so a golden, a test and the screen can only
 /// agree. `badgeText` is the count form (`•3`) or its degradation, the bare mark (`•`), or
 /// empty when there is nothing unread.
+///
+/// `agentsDot` is the Agents tab's activity mark: measured after the Agents label
+/// while a lane is live or was within the latch window, drawn in accent ink, and never a
+/// click target - it is a status mark, not a control.
 struct InspectorParts {
     InspectorPart agents;
+    InspectorPart agentsDot;
     InspectorPart activity;
     InspectorPart badge;
     InspectorPart notice;

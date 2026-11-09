@@ -90,6 +90,12 @@ struct ChatMessage {
     std::string thinking;
     ChatMessageType type = ChatMessageType::Assistant;
     size_t id{0}; // Unique, monotonic increasing ID number
+    // Tool row fields: a non-empty `toolName` makes the message a tool row
+    // (the call and, when filled, its result); empty = an ordinary line.
+    std::string toolName;
+    std::string toolArgs;
+    std::string toolResult;
+    bool toolOk = false;
 };
 
 struct LogMessage {
@@ -163,37 +169,6 @@ struct RenderGroup {
     size_t start; // inclusive index into outputLines
     size_t end;   // exclusive index into outputLines
     GroupKind kind;
-};
-
-struct AgentStreamMessage {
-    std::string content;
-    std::string thinking;
-    std::string role;
-    std::string finishReason;
-    double tokensPerSecond{0.0};
-};
-
-struct AgentStream {
-    std::string agentId;
-    AgentStreamMessage stream;
-    std::chrono::system_clock::time_point lastUpdate = std::chrono::system_clock::now();
-
-    int64_t updateCnt{1};
-    // each time updateCnt is incremented activity is set to true
-    bool activity{false};
-
-    std::vector<AgentStreamMessage> messages;
-    static constexpr size_t MaxMessages = 10;
-
-    void finished();
-};
-
-/// The pipeline's v4 agent store: `tuiPipelineAgentUpdate` fills it (with the LRU eviction the
-/// lane mirror repeats) and `tuiPipelineClear` empties it. Nothing draws it any more - the
-/// Inspector's Agents tab draws `model::UiState::agents`, the lane mirror built beside this one.
-struct ChatTabLeftPanel {
-    std::vector<AgentStream> agents;
-    static constexpr size_t MaxAgents = 16;
 };
 
 // Internal C++ mirror of the C TuiSessionActionType (tui_api.h).
@@ -309,6 +284,33 @@ struct ChatTab {
     ChatMessage pendingStreamMsg;
     bool pendingStream{false};
 };
+
+/// One pipeline agent's chat store
+struct AgentStream {
+    std::string agentId;
+    // refreshed each agent tick
+    std::chrono::system_clock::time_point lastUpdate = std::chrono::system_clock::now();
+
+    ChatTab chat;
+
+    /// The stream throttle's clock: when the newest snapshot was applied
+    /// to `chat.streamMsg`, in `model::agentClockMs()` units (0 = never applied).
+    /// Per-agent, because `ui.thread.stream.lastAppliedMs` is the main thread's.
+    std::int64_t streamLastApplyMs{0};
+};
+
+/// The pipeline's v4 agent store: `tuiPipelineAgentUpdate` fills it (with the LRU eviction the
+/// lane mirror repeats) and `tuiPipelineClear` empties it. The Inspector's Agents tab draws
+/// `model::UiState::agents`, the lane mirror built beside this one; the drill-down
+/// draws the stores through a thread adapter.
+struct ChatTabLeftPanel {
+    std::vector<AgentStream> agents;
+    static constexpr size_t MaxAgents = 16;
+};
+
+/// The per-agent store cap: each agent's `ChatTab` holds at most this
+/// many messages.
+inline constexpr size_t kAgentChatMaxMessages = 10;
 
 struct TuiState {
     bool isLogActive{false};
@@ -497,6 +499,13 @@ struct TuiState {
     /// the group ids - monotonic, never reused, reset by `tuiClearOutput()` - the
     /// expansion seam and the drawn-height cache.
     store::ThreadStoreAdapter threadAdapter{*this};
+
+    /// The drill-down's own adapter: the focused agent's `ChatTab` store seen
+    /// through the same seam as the main thread, bound per frame by the thread view
+    /// with `ui.agentThread`. Unbound (and cache-free) whenever no agent store is
+    /// mounted; binding a *different* store than the caches were built from is a full
+    /// reset, which is also how the view state resets when the focus moves.
+    store::ThreadStoreAdapter agentThreadAdapter{};
 
     /// True while an overlay owns the keyboard (D-OVERLAY).
     /// *frame-global* key handlers - the rail's Esc, the End-follow - must stand

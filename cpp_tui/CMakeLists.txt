@@ -1033,6 +1033,44 @@ target_link_libraries(test_rawlog_gui PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
+# The drill-down: the focused agent's transcript drawn by the real thread renderer over
+# the agent's own `ChatTab` store and `ui.agentThread` view state, through the real
+# GLFW/OpenGL3 backend - thinking rows open and closed, prose, tool call/result rows with
+# copy chips, follow pinning, the back row, both profiles, and the paragraph fallback.
+# Needs a display: xvfb-run -s "-screen 0 1280x820x24" ./test_agents_tab_gui [--out DIR]
+add_executable(test_agents_tab_gui
+    test_agents_tab_gui.cpp
+)
+add_dependencies(test_agents_tab_gui llmfun_tui_all_lib)
+target_include_directories(test_agents_tab_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_agents_tab_gui PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
+)
+
+# The whole workbench in one scripted run: the real frame composition
+# (`renderShell` + the overlay layer in the root window) driven through the C
+# API the D host talks to - a two-agent pipeline run with tool rows, the
+# drill-down over the live store, the back row, the Agents tab's activity mark
+# and its latch, the Raw Log drawer's wide mode and horizontal wheel, the
+# narrow surface's layout, and the store's cap.
+# Needs a display: xvfb-run -s "-screen 0 1280x820x24" ./test_e2e_gui [--out DIR]
+add_executable(test_e2e_gui
+    test_e2e_gui.cpp
+)
+add_dependencies(test_e2e_gui llmfun_tui_all_lib)
+target_include_directories(test_e2e_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_e2e_gui PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
+)
+
 # The composer (task 27, design §4.6 / FR-09 / D-PASTE): the paste policy (CRLF fold, the
 # 5000-character question), the send rule (the action button sends; no key does while the
 # key gate is closed), the submit handshake, history with draft preservation, auto-grow

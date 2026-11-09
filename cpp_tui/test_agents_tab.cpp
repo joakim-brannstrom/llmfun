@@ -37,6 +37,7 @@
 #include "views/shell.h"
 
 #include "tui.h"
+#include "tui_api.h"
 
 #include "model/settings.h"
 #include "model/ui_state.h"
@@ -46,6 +47,8 @@
 #include "ui/text.h"
 
 #include "imtui/imtui.h"
+
+#include "test/tui_state_handle.h"
 
 #include "imgui/imgui.h"
 
@@ -455,6 +458,14 @@ void checkSource() {
           "tuiPipelineClear forgets the lanes (and the drill-down with them)");
     check(api.find("msg.currentTool") > updates && api.find("msg.currentTool") < done,
           "the update copies the tool name off the struct (no parse of the stream text)");
+    // The store reshape: the tool events land in the agent's ChatTab through
+    // their own entry points; the stream path carries no AgentStreamMessage
+    // bookkeeping.
+    check(api.find("void tuiPipelineAgentToolCall") != std::string::npos &&
+              api.find("void tuiPipelineAgentToolResult") != std::string::npos,
+          "the tool events have their own entry points beside the streamed update");
+    check(api.find("AgentStreamMessage") == std::string::npos,
+          "the write path carries no AgentStreamMessage");
 
     // The model parses nothing: task 39a deleted both readers of the stream's own text, so a
     // formatting change on the D side can no longer silently zero or mislabel a row.
@@ -1215,6 +1226,242 @@ void checkDrilldown() {
 }
 
 // ---------------------------------------------------------------------------
+// 9b. The mount: the drill-down draws the agent's store through the real
+//     thread renderer, not the paragraph
+// ---------------------------------------------------------------------------
+
+void checkDrilldownMount() {
+    const int w = 100;
+    const int h = 30;
+    tui::TuiState state = drillState();
+
+    // The agent's store: two committed tool rows and a live stream - the traffic
+    // a real agent store carries. The paragraph fallback cannot render this; only
+    // the thread renderer can, so its presence on screen is the mount's signature.
+    tui::AgentStream stream;
+    stream.agentId = "coder";
+    tui::ChatMessage call;
+    call.id = stream.chat.outputLineNextId++;
+    call.type = tui::ChatMessageType::ToolCall;
+    call.summary = "[1] read_file src/app.d";
+    call.toolName = "read_file";
+    call.toolArgs = "src/app.d";
+    stream.chat.outputLines.push_back(call);
+    tui::ChatMessage response;
+    response.id = stream.chat.outputLineNextId++;
+    response.type = tui::ChatMessageType::ToolResponse;
+    response.summary = "[2] read_file failed";
+    response.toolName = "read_file";
+    response.toolResult = "read 120 lines";
+    response.toolOk = false;
+    stream.chat.outputLines.push_back(response);
+    stream.chat.streamMsg.id = tui::ChatTab::StreamChatMessageId;
+    stream.chat.streamMsg.type = tui::ChatMessageType::Assistant;
+    stream.chat.streamMsg.text = "the coder is rewriting the parser";
+    stream.chat.streamMsg.thinking = "the coder is thinking about tokens";
+    stream.chat.hasStreamMsg = true;
+    state.left.agents.push_back(stream);
+
+    Grid mainGrid;
+    shellFrameGrid(state, w, h, mainGrid);
+    check(mainGrid.hasText("the main thread's own words"), "premise: the main transcript is up");
+    check(!mainGrid.hasText("read_file"),
+          "premise: the agent's traffic is not on the main thread's screen");
+    const std::string mainText = mainGrid.allText();
+
+    // The mount: the drill-down binds the store and renders it through the same
+    // body the main transcript uses.
+    model::focusAgentLane(state.ui, "coder");
+    Grid agentGrid;
+    shellFrameGrid(state, w, h, agentGrid);
+    check(state.agentThreadAdapter.bound(),
+          "the mount binds the agent's store to the thread adapter");
+    check(state.ui.agentThread.drawnGroups >= 1,
+          "the mount renders through the real thread renderer (groups drawn)");
+    // The work group drew (the newest stored group opens by default). Its rows
+    // belong to the thread's column, not to the lane inspector beside it - the
+    // column is how the test tells the transcript from the mirror.
+    int workX = -1;
+    int workY = -1;
+    check(agentGrid.find("WORK - 2 steps", workX, workY) && workX < 74,
+          "the agent's work group draws in the thread's column");
+    check(agentGrid.find("TOOL", workX, workY) && workX < 74,
+          "the agent's tool rows draw in the thread's column");
+    check(agentGrid.hasText("the coder is rewriting the parser"), "the agent's live stream draws");
+    check(!agentGrid.hasText("the main thread's own words"),
+          "the main transcript stays filtered out");
+    check(!agentGrid.hasText("the coder's private notes"),
+          "the store wins over the lane mirror (the paragraph is only the fallback)");
+
+    // Back, with the store still behind the drill-down: the main thread returns
+    // byte-identical, and the adapter keeps its binding (the caches survive the
+    // round trip - a re-entry binds the same pair and pays nothing).
+    int backX = -1;
+    int backY = -1;
+    check(agentGrid.find("Back to main", backX, backY), "premise: the way back is on screen");
+    clickAt(state, w, h, static_cast<float>(backX), static_cast<float>(backY));
+    check(state.ui.focusedAgent.empty(), "`Back to main` leaves the drill-down");
+    parkPointer(state, w, h);
+    Grid restored;
+    shellFrameGrid(state, w, h, restored);
+    check(restored.allText() == mainText, "the main transcript is restored unchanged");
+
+    // Re-entry binds the same pair, so the same view state (and its caches) come
+    // back: the drill-down is a lens, not a reload.
+    model::focusAgentLane(state.ui, "coder");
+    Grid again;
+    shellFrameGrid(state, w, h, again);
+    check(state.agentThreadAdapter.bound(), "re-entry binds the agent's store again");
+    check(state.ui.agentThread.drawnGroups >= 1, "and draws the same groups again");
+
+    // The thinking disclosure belongs to the agent's own view state: a click
+    // flips it through the adapter, the way it flips on the main thread.
+    const bool thinkingOpen = again.hasText("the coder is thinking about tokens");
+    int toggleX = -1;
+    int toggleY = -1;
+    check(again.find("Thinking", toggleX, toggleY), "premise: the stream's thinking row is up");
+    clickAt(state, w, h, static_cast<float>(toggleX), static_cast<float>(toggleY));
+    Grid afterThinking;
+    shellFrameGrid(state, w, h, afterThinking);
+    check(afterThinking.hasText("the coder is thinking about tokens") != thinkingOpen,
+          "the thinking disclosure answers a click through the agent's own view state");
+
+    // The eviction fallback, on the grid too: no store, the paragraph draws and
+    // the adapter is left unbound - never carrying the evicted address.
+    Grid scratch;
+    shellFrameGrid(state, w, h, scratch);
+    check(state.agentThreadAdapter.bound(), "premise: the mount is up once more");
+    state.left.agents.clear();
+    Grid fallback;
+    shellFrameGrid(state, w, h, fallback);
+    check(!state.agentThreadAdapter.bound(),
+          "an evicted store leaves the adapter unbound (no dangling address)");
+    check(fallback.hasText("the coder's private notes"),
+          "the lane mirror takes over where the store was");
+}
+
+/// The structured tool row: the events arrive through the real C API path
+/// (`tuiPipelineAgentToolCall` / `tuiPipelineAgentToolResult`), which sets only the
+/// structured fields; what the drill-down shows is the adapter's composition, not
+/// seeded display data. The compact window rides along: with no `Load earlier` row
+/// the window must cover the whole capped store even where the layout budgets one group.
+void checkStructuredToolRows() {
+    const int w = 100;
+    const int h = 30;
+    tui::TuiState state = drillState();
+    state.agentThreadAdapter = {};
+
+    const auto wire = [](const char* s) { return String{s, std::strlen(s)}; };
+    ::TuiState api{&state};
+    // The lane's store starts empty (the lane mirror alone exists); the tool events
+    // create it. Eight plain notes go in first: several groups, so the compact-window
+    // check below has something to floor over (one work group alone fits any window).
+    {
+        tui::AgentStream stream;
+        stream.agentId = "coder";
+        state.left.agents.push_back(stream);
+        tui::AgentStream& seeded = state.left.agents.front();
+        for (int k = 0; k < 8; ++k) {
+            tui::ChatMessage note;
+            note.id = seeded.chat.outputLineNextId++;
+            note.type = k % 2 == 0 ? tui::ChatMessageType::User : tui::ChatMessageType::Assistant;
+            note.summary = "note " + std::to_string(k);
+            note.text = "agent note " + std::to_string(k);
+            seeded.chat.outputLines.push_back(note);
+        }
+    }
+    TuiToolCallParam readCall{};
+    readCall.name = wire("read_file");
+    readCall.arguments = wire("src/app.d");
+    readCall.id = wire("call-1");
+    tuiPipelineAgentToolCall(&api, wire("coder"), readCall);
+    TuiToolResultParam readResult{};
+    readResult.name = wire("read_file");
+    readResult.ok = 1;
+    readResult.text = wire("12 lines");
+    tuiPipelineAgentToolResult(&api, wire("coder"), readResult);
+    TuiToolCallParam writeCall{};
+    writeCall.name = wire("write_file");
+    writeCall.arguments = wire("out.txt");
+    writeCall.id = wire("call-2");
+    tuiPipelineAgentToolCall(&api, wire("coder"), writeCall);
+    TuiToolResultParam writeResult{};
+    writeResult.name = wire("write_file");
+    writeResult.ok = 0;
+    writeResult.text = wire("disk full");
+    tuiPipelineAgentToolResult(&api, wire("coder"), writeResult);
+
+    check(state.left.agents.size() == 1, "premise: the tool events made the agent's store");
+    const tui::ChatTab& store = state.left.agents.front().chat;
+    check(store.outputLines.size() == 10, "premise: six notes and four tool rows, the cap holds");
+    check(store.outputLines[6].summary.empty() && store.outputLines[6].text.empty(),
+          "premise: the real API path sets only the structured fields");
+
+    // The adapter composes each row from the structured fields.
+    llmfun::tui::store::ThreadStoreAdapter probe;
+    model::ThreadState probeView;
+    probe.bind(state.left.agents.front().chat, probeView);
+    check(probe.groupCount() >= 5, "premise: the notes and the work group make several groups");
+    const std::size_t work = probe.groupCount() - 1;
+    const model::BlockDesc readDesc = probe.blockAt(work, 2);
+    check(readDesc.label == std::string("TOOL"), "the structured call row keeps its role label");
+    check(readDesc.summary == "read_file", "the call's summary is the tool name");
+    check(readDesc.state == model::BlockState::Pending, "a call states itself pending");
+    check(readDesc.hasBody && probe.blockText(work, 2) == "src/app.d",
+          "the call's body is its arguments");
+    const model::BlockDesc okDesc = probe.blockAt(work, 3);
+    check(okDesc.summary == "read_file" && okDesc.state == model::BlockState::Ok,
+          "a successful result states itself ok");
+    check(okDesc.hasBody && probe.blockText(work, 3) == "12 lines",
+          "the result's body is its result text");
+    const model::BlockDesc writeDesc = probe.blockAt(work, 4);
+    check(writeDesc.summary == "write_file" && writeDesc.state == model::BlockState::Pending,
+          "the second call states itself pending too");
+    const model::BlockDesc failDesc = probe.blockAt(work, 5);
+    check(failDesc.summary == "write_file" && failDesc.state == model::BlockState::Failed,
+          "a failed result states itself failed");
+    check(failDesc.hasBody && probe.blockText(work, 5) == "disk full",
+          "the failed result's body is its result text");
+
+    // On screen: the composed names draw in the thread's column, not in the inspector
+    // beside it (whose lane mirror also carries the tool name - the column is the test).
+    model::focusAgentLane(state.ui, "coder");
+    Grid agentGrid;
+    shellFrameGrid(state, w, h, agentGrid);
+    check(state.agentThreadAdapter.bound(), "the mount binds the API-driven store");
+    bool namedInThread = false;
+    for (int y = 0; y < agentGrid.ny && !namedInThread; ++y) {
+        if (agentGrid.rowText(y).find("read_file") != std::string::npos &&
+            agentGrid.colOf(y, "read_file") < 74)
+            namedInThread = true;
+    }
+    check(namedInThread, "the structured call row names its tool in the thread's column");
+    check(agentGrid.hasText("write_file"), "the failed call's row names its tool too");
+
+    // The compact window: on a narrow display the layout budgets the main thread a
+    // small group window; with the drill-down up the window covers the whole store -
+    // there is no `Load earlier` row to reveal the rest, so nothing may be stranded.
+    state.ui.focusedAgent.clear();
+    Grid narrow;
+    shellFrameGrid(state, 56, h, narrow);
+    const int unfocusedWindow = state.ui.thread.pageGroups;
+    check(unfocusedWindow == 3, "premise: a narrow display windows the main thread small");
+    model::focusAgentLane(state.ui, "coder");
+    shellFrameGrid(state, 56, h, narrow);
+    check(state.ui.agentThread.drawnGroups >= 1, "the compact drill-down still draws its store");
+    check(state.ui.agentThread.pageGroups >= static_cast<int>(probe.groupCount()),
+          "the drill-down's window covers the whole capped store (got " +
+              std::to_string(state.ui.agentThread.pageGroups) + ", store has " +
+              std::to_string(probe.groupCount()) + " groups)");
+
+    // A pipeline clear takes the stores with it: the adapter must not carry a dead
+    // `ChatTab`'s address into the next frame.
+    check(state.agentThreadAdapter.bound(), "premise: the mount is bound");
+    tuiPipelineClear(&api);
+    check(!state.agentThreadAdapter.bound(), "a pipeline clear unbinds the drill-down's adapter");
+}
+
+// ---------------------------------------------------------------------------
 // 10. The rail and the inspector, standing at the same time
 // ---------------------------------------------------------------------------
 
@@ -1411,6 +1658,8 @@ int main(int argc, char** argv) {
     checkBounded();
     checkInteraction();
     checkDrilldown();
+    checkDrilldownMount();
+    checkStructuredToolRows();
     checkRailAndInspector();
     checkGoldens(update);
 

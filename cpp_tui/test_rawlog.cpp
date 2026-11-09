@@ -294,6 +294,16 @@ model::RawLogRecord record(int level, const std::string& message, int index = 0,
     out.detail = detail;
     out.module = "llm.agent.pool";
     out.function = "processTurn";
+    out.file = "pool.d";
+    return out;
+}
+
+/// The long-location variant the location rule and the wide plan measure against: its
+/// full form needs 54 cells, six past the narrow column's 36, so only the tests that
+/// pin truncation and the wide stretch reach for it.
+model::RawLogRecord longLocationRecord(int level, const std::string& message, int index = 0,
+                                       const std::string& detail = std::string()) {
+    model::RawLogRecord out = record(level, message, index, detail);
     out.file = "source/llm/agent/pool.d";
     return out;
 }
@@ -361,7 +371,7 @@ void checkSource() {
 // ---------------------------------------------------------------------------
 
 void checkRowText() {
-    model::RawLogRecord full = record(model::kRawLogLevelWarn, "ui.conf is read-only", 0);
+    model::RawLogRecord full = longLocationRecord(model::kRawLogLevelWarn, "ui.conf is read-only");
     const std::string row = model::rawLogRowText(full);
     check(contains(row, "00:00:00.000"), "the row starts with the millisecond clock");
     check(contains(row, " warn  "), "the level is a padded five-cell field");
@@ -460,7 +470,7 @@ void checkColumnPlan() {
     }
 
     // The location rule: widest form first, whole pieces, never a fragment.
-    const model::RawLogRecord located = record(model::kRawLogLevelInfo, "warming up");
+    const model::RawLogRecord located = longLocationRecord(model::kRawLogLevelInfo, "warming up");
     check(views::rawLogLocationText(located, 54) ==
               "llm.agent.pool.processTurn source/llm/agent/pool.d:412",
           "the location's full form when the column fits it");
@@ -483,6 +493,105 @@ void checkColumnPlan() {
         check(text.empty() || contains(text, "pool.d:412"),
               "and it never cuts the file part away (" + std::to_string(cells) + " cells)");
     }
+}
+
+// The wide plan and the measured maxima
+
+void checkWidePlanAndMaxima() {
+    const ui::Metrics m = gridMetrics();
+    const float gu = m.gu;
+
+    // A degenerate measurement answers the narrow plan: nothing measured, nothing to widen.
+    const views::RowPlan narrow = views::rawRowPlan(100.0f * gu, m);
+    const views::RowPlan degenerate = views::rawRowPlanWide(100.0f * gu, m, 54.0f * gu, 0.0f);
+    check(degenerate.rung == narrow.rung && degenerate.msgX == narrow.msgX &&
+              degenerate.msgW == narrow.msgW && degenerate.locW == narrow.locW &&
+              degenerate.tagW == narrow.tagW,
+          "a wide plan without a measurement answers the narrow plan's shape");
+
+    // The measured widest location widens the column; the message loses its ellipsis and the
+    // tag its column. The leading rungs and the location's start stay put.
+    const views::RowPlan wide = views::rawRowPlanWide(100.0f * gu, m, 54.0f * gu, 200.0f * gu);
+    check(wide.rung == narrow.rung, "the wide plan keeps the narrow plan's rung");
+    check(wide.locW == 54.0f * gu, "the location column widens to the measured widest");
+    check(wide.locX == narrow.locX, "and the location column keeps its narrow start");
+    check(wide.msgX == wide.locX + wide.locW + 2.0f * gu,
+          "the message starts one gap past the widened location column");
+    check(wide.msgW == 200.0f * gu, "the message draws at its full natural width");
+    check(wide.tagW == 0.0f, "and the tag is dropped whole in wide mode");
+    check(wide.clockX == narrow.clockX && wide.clockW == narrow.clockW &&
+              wide.levelX == narrow.levelX && wide.levelW == narrow.levelW,
+          "the leading rungs keep their narrow geometry");
+
+    // The cap: one pathological location cannot own the surface.
+    const views::RowPlan capped = views::rawRowPlanWide(100.0f * gu, m, 500.0f * gu, 200.0f * gu);
+    check(capped.locW == 72.0f * gu, "the location column clamps at kRawLogMaxLocationCells");
+
+    // A rung that dropped the location keeps it dropped: the wide variant widens a
+    // column the ladder still carries, never one the rung gave up.
+    const views::RowPlan rung3 = views::rawRowPlanWide(69.0f * gu, m, 54.0f * gu, 40.0f * gu);
+    check(rung3.rung == 3 && rung3.locW == 0.0f &&
+              rung3.msgX == views::rawRowPlan(69.0f * gu, m).msgX,
+          "the wide plan never resurrects a location the rung dropped");
+
+    // The content width: the message's start, the widest drawn extent and one trailing gap.
+    check(views::rawLogContentW(wide, 200.0f * gu, m) == wide.msgX + 200.0f * gu + 2.0f * gu,
+          "the content width is the message start plus the widest extent plus a gap");
+    check(views::rawLogContentW(wide, 200.0f * gu, m) > 100.0f * gu,
+          "premise: this content overflows the body, so wide mode engages");
+
+    // The walk measures what the rows draw, so the maxima are the surface's own answer. The
+    // record's full location is 54 cells (the unit the tests above pin) - six past the
+    // narrow column, so the walk's untruncated number is the interesting one.
+    const ui::Rect rect = surfaceRect(100, 30);
+    const std::deque<model::RawLogRecord> records{
+        longLocationRecord(model::kRawLogLevelInfo, std::string(200, 'x'), 0)};
+    views::RawLogState state = openSurface(rect, ringOf(records));
+    check(state.builtGu == gu, "the rebuild key carries the profile's font identity");
+    check(state.maxMessageW == 200.0f, "the walk measured the widest message");
+    check(state.maxLocationW == 54.0f, "and the widest location, untruncated");
+
+    // The expanded record's detail lines join the measurement through the expansion.
+    const std::deque<model::RawLogRecord> withDetail{
+        record(model::kRawLogLevelInfo, "short", 0, "args: path=README.md\nargs: limit=200")};
+    views::RawLogState expanded = openSurface(rect, ringOf(withDetail));
+    expanded.expandedKey = views::rawLogKey(withDetail[0]);
+    frame([&](const ui::Metrics& mm) {
+        views::renderRawLog(expanded, rect, mm, ringOf(withDetail));
+    });
+    float widestDetail = 0.0f;
+    for (const std::string& line : model::rawLogDetailLines(withDetail[0]))
+        widestDetail = std::max(widestDetail, static_cast<float>(ui::displayWidth(line)));
+    check(expanded.maxDetailW == widestDetail,
+          "the expanded record's widest detail line is measured");
+    check(expanded.maxMessageW == static_cast<float>(ui::displayWidth("short")),
+          "and the message maximum is the message's own width");
+
+    // An append re-runs the walk: the arrival counter changes on every arrival,
+    // so the appended record's wider message becomes the maximum.
+    std::deque<model::RawLogRecord> appended = records;
+    appended.push_back(record(model::kRawLogLevelInfo, std::string(260, 'y'), 1));
+    frame([&](const ui::Metrics& mm) { views::renderRawLog(state, rect, mm, ringOf(appended)); });
+    check(state.maxMessageW == 260.0f,
+          "an append re-measures, so the wider message becomes the maximum");
+
+    // A filter that hides the widest row makes the maximum drop: a hidden
+    // record can never own a column.
+    frame([&](const ui::Metrics& mm) {
+        std::snprintf(state.filter.data(), state.filter.size(), "%s", "x");
+        ++state.filterSeq;
+        views::renderRawLog(state, rect, mm, ringOf(appended));
+    });
+    check(state.maxMessageW == 200.0f,
+          "a filter that hides the widest row drops the maximum to the kept rows' widest");
+    std::snprintf(state.filter.data(), state.filter.size(), "%s", "");
+    ++state.filterSeq;
+
+    // A font-scale change re-runs the walk: the key carries the identity, so the maxima are
+    // never trusted across a profile whose unit changed.
+    const ui::Metrics scaled = ui::metricsFor(true, 2.0f, 1.0f);
+    frame([&](const ui::Metrics&) { views::renderRawLog(state, rect, scaled, ringOf(records)); });
+    check(state.builtGu == scaled.gu, "a font-scale change re-runs the measurement walk");
 }
 
 void checkDetailAndFilter() {
@@ -924,20 +1033,27 @@ void checkTagAndShortClock() {
     views::RawLogState state = openSurface(rect, ringOf(wide));
     const Grid grid = capture();
     check(!grid.hasText("action "), "a tag that would starve the message is dropped whole");
-    const std::string row = grid.rowText(grid.rowOf("00:00:00.000"));
-    const int msgX = static_cast<int>(row.find("00:00:00.000")) + 59;
-    // The 40-x message is longer than its column, so it is drawn ellipsized:
-    // the x's stop three cells short of the body's right
-    // edge and the ASCII `...` marker fills the rest of the column. The cells
-    // are read from the grid, not the row string: the marker is one cell but
+    // The message is longer than the body, so wide mode engages: the tag is dropped
+    // whole and the message draws at its full natural width, the window itself doing
+    // the clipping - the x's ride the body's right edge and no ellipsis appears. The
+    // cells are read from the grid, not the row string: the marker is one cell but
     // three UTF-8 bytes, so a byte index would lie about where the column ends.
     const int clockY = grid.rowOf("00:00:00.000");
-    const int columnCells = g_w - 2 - msgX; // the body's right edge less the message column
+    int firstX = -1;
+    int lastInk = -1;
+    for (int x = 0; x < g_w - 2; ++x) {
+        const std::string cell = utf8Of(grid.at(x, clockY));
+        if (cell == "x" && firstX < 0)
+            firstX = x;
+        if (cell != " ")
+            lastInk = x;
+    }
+    check(firstX > 0, "the wide row still draws its message");
     std::string column;
-    for (int x = msgX; x < msgX + columnCells; ++x)
+    for (int x = firstX; x <= lastInk; ++x)
         column += utf8Of(grid.at(x, clockY));
-    check(column == std::string(columnCells - 3, 'x') + "...",
-          "the message fills the column the dropped tag leaves whole, ellipsized");
+    check(!column.empty() && column.find_first_not_of('x') == std::string::npos,
+          "the clipped message keeps its cells whole, no ellipsis with the tag");
 
     // A narrow body: the rung has no tag slack, so the tagged row shows no tag, both
     // messages still start at the same column, and the clock is sliced to eight cells.
@@ -1006,11 +1122,11 @@ void checkLadder() {
     check(!bare.hasText("--:--:--") && bare.hasText("info "),
           "31 cells: rung 4 keeps the level and the message");
 
-    // The message's own degradation, one cell at a time at rung 4's floor: it is
-    // drawn whole until the plan's segments leave it nothing, then ellipsized
-    // cell by cell - the ellipsis appears exactly when clipping would start,
-    // ASCII `...` on the grid profile, and below the three cells the
-    // marker needs the message is not drawn at all (no partial ellipsis).
+    // The message's own degradation, one cell at a time at rung 4's floor: wide mode
+    // has taken over the too-long message - it draws at its full natural width and the
+    // window itself clips it, one visible cell fewer per narrower probe, and no
+    // ellipsis ever appears. The cells the body hides ride behind the horizontal
+    // scrollbar the wide plan engages.
     const std::string prefix = "   info   "; // marker cell, gap, level field, gap
     for (int cells = 10; cells <= 17; ++cells) {
         const Grid grid = probe(cells);
@@ -1018,11 +1134,9 @@ void checkLadder() {
         check(y >= 0, "the marker and level still draw at " + std::to_string(cells) + " cells");
         const std::string row = grid.rowText(y);
         const int messageCells = cells - 10;
-        std::string expect = prefix;
-        if (messageCells >= 3)
-            expect += std::string(messageCells - 3, 'x') + "...";
+        const std::string expect = prefix + std::string(messageCells < 0 ? 0 : messageCells, 'x');
         check(row.compare(2, expect.size(), expect) == 0,
-              "the message is ellipsized cell by cell at " + std::to_string(cells) + " cells");
+              "the message draws whole, window-clipped, at " + std::to_string(cells) + " cells");
     }
 
     // The lower rung edges too: a drifted table row would show through only at the
@@ -2218,6 +2332,7 @@ int main(int argc, char** argv) {
     checkSource();
     checkRowText();
     checkColumnPlan();
+    checkWidePlanAndMaxima();
     checkDetailAndFilter();
     checkN2Identity();
     checkOpenableGlyph();

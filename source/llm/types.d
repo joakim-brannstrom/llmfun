@@ -82,6 +82,10 @@ interface IStreamCallback {
     IStreamCallback clone();
 }
 
+interface IStepEventEmitter {
+    void stepEvent(ProcessResult result);
+}
+
 struct ServerStat {
     long startContext;
     long tokenCount;

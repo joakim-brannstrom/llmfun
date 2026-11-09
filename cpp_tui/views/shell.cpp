@@ -569,10 +569,13 @@ void deriveInspector(TuiState& state, const ui::ShellLayout& layout) {
     if (inspector.stopAllArmed && !model::anyLiveAgentLane(state.ui.agents))
         inspector.stopAllArmed = false;
 
-    // A notice about a key nobody can act on any more is noise - but a notice pressed while the
-    // panel was closed *is* the answer to that press, so it is not cleared here: the next tab
-    // selection, the toggle and the overlay's close clear it (`applyInspectorAnswers()`,
-    // `Action::ToggleInspector`, `closeTopOverlay()`).
+    // The Agents tab's activity dot: a lane live now lights it, and the last lane's stop
+    // latches it for `kAgentsActivityLatchMs`
+    if (model::anyLiveAgentLane(state.ui.agents)) {
+        inspector.agentsActive = true;
+        inspector.agentsActiveUntilMs = model::agentClockMs() + views::kAgentsActivityLatchMs;
+    } else if (inspector.agentsActive && model::agentClockMs() >= inspector.agentsActiveUntilMs)
+        inspector.agentsActive = false;
 
     const bool activityOnScreen = views::activityVisible(inspector);
     // Showing the tab *is* reading it: the projection's count is cleared the moment the tab is
@@ -1180,8 +1183,39 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     const bool acceptThreadKeys = !escStepClosesOverlay(state) && !state.escapeConsumed;
     // The transcript is drawn into the readable column, not the region: focus mode
     // caps and centres it, and with the mode off the two rectangles are the same one.
-    renderThread(state.ui, state.threadAdapter, layout.threadColumn, layout.loadEarlier, m,
-                 layout.compactGroups, layout.compact, acceptThreadKeys);
+    // The thread's mount decision: a focused lane is the drill-down. The mount is per
+    // frame, exactly like the main thread's bind: the found store binds the agent adapter
+    // (a different pair than the caches were built from drops them and resets the agent's
+    // view state), and a lane without a store entry leaves the adapter unbound, so the
+    // transcript falls back to the lane mirror rather than an evicted store's address.
+    if (const model::AgentLane* focused = model::findAgentLane(state.ui, state.ui.focusedAgent)) {
+        AgentStream* stream = nullptr;
+        for (AgentStream& candidate : state.left.agents) {
+            if (candidate.agentId == focused->id) {
+                stream = &candidate;
+                break;
+            }
+        }
+        if (stream != nullptr)
+            state.agentThreadAdapter.bind(stream->chat, state.ui.agentThread);
+        else
+            state.agentThreadAdapter = store::ThreadStoreAdapter{};
+        // The main mount drew nothing this frame: its window and its latches are
+        // dormant while the drill-down is up (the same reset the dispatcher applied
+        // when the dispatch lived inside `renderThread`).
+        state.ui.thread.drawnGroups = 0;
+        state.ui.thread.firstGroupId = 0;
+        state.ui.thread.firstGroupY = 0.0f;
+        state.ui.thread.anchorGroupId = 0;
+        state.ui.thread.anchorPending = false;
+        state.ui.thread.menuBlockId = {};
+        renderAgentTranscript(state.ui, state.agentThreadAdapter, state.ui.agentThread, *focused,
+                              layout.threadColumn, m, layout.compactGroups, layout.compact,
+                              acceptThreadKeys);
+    } else {
+        renderThread(state.ui, state.threadAdapter, layout.threadColumn, layout.loadEarlier, m,
+                     layout.compactGroups, layout.compact, acceptThreadKeys);
+    }
     // The rail (views/rail.h): the frame derives its rows from the snapshot, the view
     // draws the visible window of them into the rectangle the layout answered, and the answers (a
     // select, a rename, a delete, a pin) are applied through `queueSessionAction()` in this same

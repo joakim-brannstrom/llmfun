@@ -32,7 +32,7 @@ import llm.rag.rag : RAG;
 import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
 import llm.skill;
-import llm.types : ServerStat, IStreamCallback, StreamMessage, StreamToolCall;
+import llm.types : ServerStat, IStreamCallback, StreamMessage, StreamToolCall, ProcessResult;
 import llm.utility;
 import llmfun_tui;
 
@@ -2868,10 +2868,110 @@ unittest {
     assert(last.contextUsed == 15, "the numbers move with the stat");
     assert(last.tokensPerSecond == 0.0, "the rate is the stat's field too (0 = no reading)");
     assert(last.role == "assistant", "the role crosses");
-    assert(last.content.canFind("--- Tool ---"),
-            "the marker blocks are still written into the content (the legacy panel reads them)");
-    assert(last.content.canFind("grep_files")
-            && last.content.canFind("write_file"), "both tool blocks are in the text");
+    assert(last.content == "done",
+            "the content carries no tool decoration: tool traffic rides the structured rows");
+}
+
+@("the pipeline emitter sends each step's tool calls and results as structured rows")
+unittest {
+    import std.json : parseJSON;
+
+    auto sink = new TuiRecordingSink();
+    auto ui = new UiMessenger(sink);
+
+    // One step: a user message, two tool calls, then their responses - one
+    // succeeding, one failing. The emitter walks the chat in order, so the
+    // recorded rows line up with that order; nothing here is conditioned on a
+    // finish reason (the step result carries none and still emits).
+    const calls = parseJSON(`[
+        {"id": "call-1", "type": "function", "function": {"name": "grep_files",
+                "arguments": "{\"pattern\": \"x\"}"}},
+        {"id": "call-2", "type": "function", "function": {"name": "write_file", "arguments": "{}"}}
+    ]`);
+    auto step = ProcessResult(chat: [
+        Chat.MessageT(Message(Role.user, true, "prompt", "")),
+        Chat.MessageT(ToolMessage("thinking", calls)),
+        Chat.MessageT(ToolResponse("ok-1", "call-1", "grep_files", true)),
+        Chat.MessageT(ToolResponse("ok-2", "call-2", "write_file", false))
+    ]);
+
+    emitStepToolEvents(ui, "coder", step);
+
+    assert(sink.toolCalls.length == 2,
+            "one structured row per tool call: " ~ sink.toolCalls.length.to!string);
+    assert(sink.toolCalls[0].agentId == "coder", "the agent id travels");
+    assert(sink.toolCalls[0].name == "grep_files", "the call's name travels");
+    assert(sink.toolCalls[0].arguments == `{"pattern": "x"}`, "the call's arguments travel");
+    assert(sink.toolCalls[0].id == "call-1", "the protocol id travels");
+    assert(sink.toolCalls[1].name == "write_file"
+            && sink.toolCalls[1].id == "call-2", "the second call follows in chat order");
+
+    assert(sink.toolResults.length == 2, "one structured row per tool response");
+    assert(sink.toolResults[0].agentId == "coder" && sink.toolResults[0].name == "grep_files",
+            "the response's agent and tool name travel");
+    assert(sink.toolResults[0].ok == 1, "a successful response reports ok=1");
+    assert(sink.toolResults[0].text == "ok-1", "the response's text travels");
+    assert(sink.toolResults[1].ok == 0, "a failed response reports ok=0");
+    assert(sink.toolResults[1].text == "ok-2");
+
+    // The lane rows are untouched by the emitter: content updates stay content.
+    assert(sink.laneUpdates.length == 0, "the emitter sends no lane content updates");
+}
+
+@("the pipeline emitter truncates oversized payloads to the wire cap")
+unittest {
+    import std.array : join;
+    import std.json : JSONValue, parseJSON;
+    import std.range : repeat;
+
+    const big = "x".repeat(1200).join;
+    auto sink = new TuiRecordingSink();
+    auto ui = new UiMessenger(sink);
+
+    auto calls = parseJSON(`[{"id": "c", "type": "function",
+            "function": {"name": "write_file", "arguments": ""}}]`);
+    // The oversized arguments ride the JSON: patch them in after parsing.
+    auto patched = calls;
+    patched.array[0]["function"]["arguments"] = JSONValue(big);
+
+    auto step = ProcessResult(chat: [
+        Chat.MessageT(ToolMessage("t", patched)),
+        Chat.MessageT(ToolResponse(big, "c", "write_file", true))
+    ]);
+
+    emitStepToolEvents(ui, "coder", step);
+
+    assert(sink.toolCalls.length == 1 && sink.toolResults.length == 1,
+            "setup: one call and one response recorded");
+    assert(sink.toolCalls[0].arguments.length == 1003
+            && sink.toolCalls[0].arguments[$ - 3 .. $] == "...",
+            "arguments cut to the wire cap with a trailing ellipsis");
+    assert(sink.toolResults[0].text.length == 1003 && sink.toolResults[0].text[$ - 3 .. $] == "...",
+            "response text cut to the wire cap with a trailing ellipsis");
+}
+
+@("the pipeline emitter tolerates unusable tool call entries without emitting them")
+unittest {
+    import std.json : parseJSON;
+
+    auto sink = new TuiRecordingSink();
+    auto ui = new UiMessenger(sink);
+
+    // A non-array payload, an entry that is not an object, one without a
+    // function object, and one without a name: none of them emit, and none of
+    // them throw - the emitter is defensive by design.
+    const calls = parseJSON(`[42, {"id": "a"}, {"id": "b", "function": {}},
+            {"id": "c", "function": {"name": ""}}]`);
+    auto step = ProcessResult(chat: [
+        Chat.MessageT(ToolMessage("t", calls)),
+        Chat.MessageT(ToolResponse("r", "x", "grep_files", true))
+    ]);
+
+    emitStepToolEvents(ui, "coder", step);
+
+    assert(sink.toolCalls.length == 0, "no unusable entry emits a row");
+    assert(sink.toolResults.length == 1 && sink.toolResults[0].text == "r",
+            "the response still emits");
 }
 
 @("sidebar pin toggle flips the persisted pin set and refreshes the list")
