@@ -1155,13 +1155,12 @@ struct StreamResponse {
             try {
                 long index = jcall["index"].integer;
                 long txtLen;
+                auto arg = getValue(jcall, (v) => v["function"]["arguments"].str, null); // arguments is optional for both new tool call and existing
                 if (auto a = index in toolCalls) {
-                    auto arg = jcall["function"]["arguments"].str;
                     (*a).arguments ~= arg;
                     txtLen = arg.length;
                 } else {
                     auto name = jcall["function"]["name"].str;
-                    auto arg = getValue(jcall, (v) => v["function"]["arguments"].str, null); // arguments is optional for a new tool call
                     toolCalls[index] = ToolCall(id: jcall["id"].str, name: name, arguments: arg);
                     txtLen = arg.length + name.length;
                 }
