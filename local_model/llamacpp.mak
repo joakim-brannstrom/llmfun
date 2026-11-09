@@ -8,7 +8,7 @@ build/llama_cpp.stamp:
 	touch build/llama_cpp.stamp
 
 build/llama_cpp: build/llama_cpp.stamp
-	cd build/llama_cpp && make -j $(nproc) llama-common
+	cd build/llama_cpp && make llama-common
 
 build/llama_cpp_install.stamp: build/llama_cpp
 	mkdir -p build
