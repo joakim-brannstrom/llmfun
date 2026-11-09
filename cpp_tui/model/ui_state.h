@@ -484,6 +484,10 @@ struct UiState {
     /// what survives a frame, not what defines the thread.
     ThreadState thread;
 
+    /// The focused agent's transcript view.
+    /// Reset when the focus changes.
+    ThreadState agentThread;
+
     /// The session rail: its search text, its row latches and its answers.
     /// The rail's *list* is derived per frame by
     /// `buildRailRows()` from the snapshot; this struct keeps only the state a

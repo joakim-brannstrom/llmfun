@@ -116,6 +116,14 @@ constexpr int kRawLogClockCells = 12;     // "HH:MM:SS.mmm"
 constexpr int kRawLogShortClockCells = 8; // "HH:MM:SS"
 constexpr int kRawLogLevelCells = 5;      // rawLogLevelField()'s width
 constexpr int kRawLogLocationCells = 36;  // the fixed location column
+/// Wide mode's cap on the location column: the measured widest
+/// location clamps here instead of owning the surface. The residue a longer
+/// location leaves unreachable by scroll is accepted.
+constexpr int kRawLogMaxLocationCells = 72;
+/// The untruncated location: `rawLogLocationText()` asked for a column wider than
+/// any location can fill, so the answer is the full `module.function file:line`
+/// join - the wide plan's cap, not the measurement, bounds the column.
+constexpr int kRawLogLocationUnlimitedCells = 1 << 20;
 constexpr int kRawLogMinMessageCells = 12;
 constexpr int kRawLogTagGapCells = 2;
 constexpr int kRawLogTagMinCells = 8; // "action N", the shortest possible tag
@@ -186,10 +194,15 @@ std::string countText(const RawLogState& state, const model::RawLogRing& ring) {
 /// changes only the expansion (the index is untouched), while an arrival or a keystroke changes
 /// only the index. Folding them together would re-filter 5000 records - with a `localtime_r` and
 /// two lower-case copies per record - every time a row is clicked.
-void refreshExpansion(RawLogState& state, const model::RawLogRing& ring) {
+void refreshExpansion(RawLogState& state, const model::RawLogRing& ring, const ui::Metrics& m) {
     state.expandedAt = std::string::npos;
     state.expandedLines.clear();
     state.builtExpanded = state.expandedKey;
+    // The expanded record's own contribution to the wide measurement: it resets with
+    // the expansion (a closed record draws no detail) and is re-measured from the
+    // lines this call resolved. The frame runs this whenever the index rebuild ran,
+    // so the extent is never staler than the maxima the walk fills.
+    state.maxDetailW = 0.0f;
     if (state.expandedKey.empty())
         return;
     for (std::size_t i = 0; i < state.matching.size(); ++i) {
@@ -198,29 +211,38 @@ void refreshExpansion(RawLogState& state, const model::RawLogRing& ring) {
             continue;
         state.expandedAt = i;
         state.expandedLines = model::rawLogDetailLines(*record);
+        for (const std::string& line : state.expandedLines)
+            state.maxDetailW = std::max(state.maxDetailW, textUnits(m, line));
         return;
     }
 }
 
-/// Rebuild `state.matching` when the filter, the ring or the floor changed, and answer whether it
-/// was rebuilt.
+/// Rebuild `state.matching` when the filter, the ring, the floor or the font identity
+/// changed, and answer whether it was rebuilt.
 ///
 /// The ring is 5000 records and §6.4 forbids a per-record string on the render path, so the
 /// filtered index list is a cache with the palette's trigger: one string compare and three
-/// integers per frame, and one pass only when the question changed. Three facts form the key:
+/// integers per frame, and one pass only when the question changed. Four facts form the key:
 /// the filter, the ring's *arrival counter* (a deque at capacity keeps its size while evicting, and
 /// a front timestamp is ambiguous when a burst stamps several records with the same millisecond -
-/// the accept counter changes on every arrival, so a rotated ring can never look unchanged), and
-/// the floor. The expansion is *not* part of it: `refreshExpansion()` owns that.
-bool rebuildIndex(RawLogState& state, const model::RawLogRing& ring) {
+/// the accept counter changes on every arrival, so a rotated ring can never look unchanged), the
+/// floor, and the profile's `gu`: the wide measurement below is cells or px depending on the
+/// profile, so a font-scale or profile change must re-measure rather than reuse stale maxima
+/// (the expansion is not part of it; `refreshExpansion()` owns that). The same pass also
+/// measures the widest drawn message and location; a hidden record is never measured.
+bool rebuildIndex(RawLogState& state, const model::RawLogRing& ring, const ui::Metrics& m) {
     const bool changed = std::strcmp(state.filter.data(), state.builtFilter.c_str()) != 0 ||
                          ring.size() != state.builtSize || ring.arrivals != state.builtArrivals ||
-                         state.minLevel != state.builtMinLevel;
+                         state.minLevel != state.builtMinLevel || state.builtGu != m.gu;
     state.matchingRecords = state.matching.size();
     if (!changed)
         return false;
 
     state.matching.clear();
+    // The maxima are this walk's answer, not an incremental max over arrivals: the
+    // walk re-measures everything the list it just built draws.
+    state.maxMessageW = 0.0f;
+    state.maxLocationW = 0.0f;
     if (state.matching.capacity() == 0)
         state.matching.reserve(std::min<std::size_t>(ring.size(), 512));
     for (std::size_t i = 0; i < ring.size(); ++i) {
@@ -229,11 +251,16 @@ bool rebuildIndex(RawLogState& state, const model::RawLogRing& ring) {
             !model::rawLogMatches(*record, state.filter.data()))
             continue;
         state.matching.push_back(i);
+        state.maxMessageW = std::max(state.maxMessageW, textUnits(m, record->message));
+        state.maxLocationW =
+            std::max(state.maxLocationW,
+                     textUnits(m, rawLogLocationText(*record, kRawLogLocationUnlimitedCells)));
     }
     state.builtFilter = state.filter.data();
     state.builtSize = ring.size();
     state.builtArrivals = ring.arrivals;
     state.builtMinLevel = state.minLevel;
+    state.builtGu = m.gu;
     state.matchingRecords = state.matching.size();
     return true;
 }
@@ -498,7 +525,40 @@ RowPlan rawRowPlan(float bodyW, const ui::Metrics& m) {
     plan.msgX = x;
     plan.msgW = std::max(0.0f, bodyW - plan.msgX);
     plan.tagW = static_cast<float>(tagCells) * m.gu;
+    plan.locationCells = locCells;
     return plan;
+}
+
+/// The wide variant: the message draws at its full natural width - no ellipsis - and the
+/// location column widens to the measured widest location, capped so one pathological
+/// location cannot own the surface. A zero `maxLocationW` or degenerate `maxDrawnW` keeps
+/// the narrow plan. A rung that dropped its location keeps it dropped, the tag is dropped
+/// whole, and the marker, clock and level rungs keep their narrow geometry.
+RowPlan rawRowPlanWide(float rowW, const ui::Metrics& m, float maxLocationW, float maxDrawnW) {
+    RowPlan plan = rawRowPlan(rowW, m);
+    if (maxDrawnW <= 0.0f)
+        return plan;
+    const float gap = static_cast<float>(kRawLogGapCells) * m.gu;
+    // A zero `maxLocationW` keeps the narrow column: a surface whose records all have
+    // empty locations must not slide its message start left when wide mode engages.
+    if (plan.locW > 0.0f && maxLocationW > 0.0f) {
+        plan.locW = std::min(maxLocationW, static_cast<float>(kRawLogMaxLocationCells) * m.gu);
+        plan.msgX = plan.locX + plan.locW + gap;
+        plan.locationCells = maxLocationW <= static_cast<float>(kRawLogMaxLocationCells) * m.gu
+                                 ? kRawLogLocationUnlimitedCells
+                                 : kRawLogMaxLocationCells;
+    }
+    plan.msgW = maxDrawnW;
+    plan.tagW = 0.0f;
+    return plan;
+}
+
+/// The wide surface's content width: the wide plan's message start, the widest drawn extent
+/// (the message and the expanded detail lines share one starting column, so one max covers
+/// both) and one trailing gap. Wide mode is engaged exactly while this exceeds the body
+/// width - below it the frame draws the narrow plan and no scrollbar exists.
+float rawLogContentW(const RowPlan& wide, float maxDrawnW, const ui::Metrics& m) {
+    return wide.msgX + maxDrawnW + static_cast<float>(kRawLogGapCells) * m.gu;
 }
 
 std::string rawLogLocationText(const model::RawLogRecord& record, int cells) {
@@ -656,12 +716,12 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
         return; // fail closed: a rectangle in the wrong unit is worse than no surface
 
     // The index first: the parts need the counts, and the counts are the cache's answer.
-    const bool indexRebuilt = rebuildIndex(state, ring);
+    const bool indexRebuilt = rebuildIndex(state, ring, m);
     // The expansion is a second, cheaper question (a click, not an arrival) - but a rebuild moves
     // the indices it is expressed in, so both triggers refresh it. The index just built is the one
     // it walks, so the two can never disagree about which record is open.
     if (indexRebuilt || state.builtExpanded != state.expandedKey)
-        refreshExpansion(state, ring);
+        refreshExpansion(state, ring, m);
     state.dropped = ring.dropped;
     state.drawnRows = 0;
     state.filterFocused = false;
@@ -764,15 +824,41 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
     const std::size_t totalLines = (headRow ? 1u : 0u) + lineMap.total;
     if (parts.body.h >= rowH) {
         ImGui::SetCursorScreenPos(ImVec2(parts.body.x, parts.body.y));
-        ImGui::BeginChild("##rawlog_body", ImVec2(parts.body.w, parts.body.h),
-                          ImGuiChildFlags_None);
+        ImGui::BeginChild("##rawlog_body", ImVec2(parts.body.w, parts.body.h), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_HorizontalScrollbar);
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const float rowW = std::max(0.0f, ImGui::GetContentRegionAvail().x);
+        // The body's live vertical extent: the inner height this frame actually offers,
+        // with whatever scrollbars the previous frame reserved already accounted for.
+        const float availY = std::max(0.0f, ImGui::GetContentRegionAvail().y);
         // The frame's column plan: every record row draws from these offsets, so the
         // message column cannot move between rows. Loss rows and the placeholder row
         // are full-width lines outside the plan.
-        const RowPlan plan = rawRowPlan(rowW, m);
-        ImGui::Dummy(ImVec2(1.0f, std::max(rowH * static_cast<float>(totalLines), parts.body.h)));
+        const RowPlan narrow = rawRowPlan(rowW, m);
+        // Wide mode: engagement is about the drawn text, not the location column - when the
+        // widest message or expanded detail line does not fit the narrow row's message room, the
+        // wide variant engages and the filler below grows to the content width, which drives the
+        // child's horizontal scrollbar. A stretched location alone never engages it, and the
+        // ultra-narrow guard below still reads the ladder the rungs fix, so it keeps the narrow
+        // plan.
+        const float maxDrawnW = std::max(state.maxMessageW, state.maxDetailW);
+        RowPlan plan = narrow;
+        float contentW = rowW;
+        const bool wideEngaged = maxDrawnW > narrow.msgW;
+        if (wideEngaged) {
+            const RowPlan wide = rawRowPlanWide(rowW, m, state.maxLocationW, maxDrawnW);
+            plan = wide;
+            contentW = rawLogContentW(wide, maxDrawnW, m);
+        }
+        state.wideMode = wideEngaged;
+        state.contentW = contentW;
+        // The filler's width is the surface's horizontal extent, and the scrollbar's only input.
+        // Its height: when the content is going to scroll horizontally the scrollbar will consume
+        // the inner height's last row, so the filler reserves that row now - otherwise the filler
+        // sized for the taller inner would read as a phantom scroll row, and the follower's pin
+        // would park the view past a fold the new geometry does not have.
+        const float innerY = contentW > rowW ? std::max(0.0f, availY - rowH) : availY;
+        ImGui::Dummy(ImVec2(contentW, std::max(rowH * static_cast<float>(totalLines), innerY)));
 
         // D-FOLLOW, the Raw Log's half: follow is pointer-owned and content-driven. A wheel
         // notch or a scrollbar press is the user taking the view, so the flag drops; the pin
@@ -785,7 +871,11 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
         }
         if (state.follow && !state.paused) {
             const double now = ImGui::GetTime();
-            const float maxY = ImGui::GetScrollMaxY();
+            // The fold is measured against this frame's own content, not the child's
+            // carried-over scroll maximum: right after a resize the carried value still
+            // describes the pre-resize geometry, and a pin that trusted it would jump the
+            // view rows past a fold the new geometry does not have.
+            const float maxY = std::max(0.0f, rowH * static_cast<float>(totalLines) - availY);
             if (now >= state.nextPinAt && ImGui::GetScrollY() < maxY - 0.5f) {
                 ImGui::SetScrollHereY(1.0f);
                 state.nextPinAt = now + kFollowIntervalSeconds;
@@ -805,8 +895,13 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
         // that was never on screen (review I1).
         const float scrollY = ImGui::GetScrollY();
         const std::size_t rowCount = totalLines == 0 ? 1 : totalLines;
+        // The horizontal scrollbar consumes the body's last row, so in wide mode the viewport
+        // the copy spans is the row count of the height that is left - copying the full body
+        // height would hand the clipboard a top line scrolled off the view and a bottom line
+        // sitting under the scrollbar. Narrow mode keeps the full body.
+        const float visibleH = contentW > rowW ? std::max(0.0f, parts.body.h - rowH) : parts.body.h;
         const std::size_t viewportRows =
-            static_cast<std::size_t>(std::max(0.0f, std::ceil(parts.body.h / rowH)));
+            static_cast<std::size_t>(std::max(0.0f, std::ceil(visibleH / rowH)));
         const std::size_t drawRows = viewportRows + 1;
         const std::size_t maxFirst = rowCount > viewportRows ? rowCount - viewportRows : 0;
         const std::size_t first = std::min(
@@ -817,8 +912,8 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
             const ui::TypeScope bodyType(ui::TypeStep::body, m.textGrid);
             for (std::size_t i = 0; i < drawRows && first + i < rowCount; ++i) {
                 const std::size_t line = first + i;
-                const ui::Rect row{origin.x, origin.y + rowH * static_cast<float>(line), rowW, rowH,
-                                   m.textGrid};
+                const ui::Rect row{origin.x, origin.y + rowH * static_cast<float>(line), contentW,
+                                   rowH, m.textGrid};
                 if (row.y >= parts.body.bottom() || row.bottom() <= parts.body.y)
                     continue;
                 // The ultra-narrow rung: below kRawLogMarkerCells + kRawLogGapCells +
@@ -826,8 +921,10 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
                 // + kRawLogGapCells = 10 cells the plan's own segments exceed the body, so no
                 // record row can be drawn at all - not even partially, because a markerless
                 // fragment would pretend to be a row. The empty state and the filter field stay
-                // usable, and an undrawn line must not count as a drawn one for Copy.
-                if (totalLines > 0 && plan.msgX > rowW)
+                // usable, and an undrawn line must not count as a drawn one for Copy. The
+                // narrow plan answers this even in wide mode: wide mode widens the location
+                // column, which would blank a narrow body that the ladder itself still fits.
+                if (totalLines > 0 && narrow.msgX > rowW)
                     continue;
                 ++state.drawnRows;
 
@@ -904,13 +1001,14 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
                     lineAt(m, row, row.x + plan.levelX, row.y,
                            model::rawLogLevelField(record->level), levelInk(record->level));
                     if (plan.locW > 0.0f) {
-                        const std::string where =
-                            rawLogLocationText(*record, static_cast<int>(plan.locW / m.gu));
+                        const std::string where = rawLogLocationText(*record, plan.locationCells);
                         lineAt(m, row, row.x + plan.locX, row.y, where, ColorToken::textLow);
                     }
                     float messageW = plan.msgW;
                     if (plan.tagW > 0.0f && record->action != 0) {
-                        // Only the plan's widest rung reserves tag room. There the tag rides
+                        // Only the plan's widest rung reserves tag room, and the wide plan
+                        // reserves none at all (its tagW is 0): a tag right-aligns to a row
+                        // edge a scrolled surface carries off-screen. There the tag rides
                         // the body's right edge and takes its room from the message: a row
                         // that cannot fit both keeps the message whole and drops the tag
                         // whole, because a cut tag lies about the action.
@@ -989,6 +1087,11 @@ void renderRawLog(RawLogState& state, const ui::Rect& region, const ui::Metrics&
         // hand the clipboard rows the user cannot see (review M10).
         state.firstVisible = 0;
         state.windowRows = 0;
+        // The wide answers go stale with the geometry: a folded body has no wide layout to
+        // describe, so the next frame's measurement starts from the same ground the scrolled
+        // window reset above gives firstVisible/windowRows.
+        state.wideMode = false;
+        state.contentW = 0.0f;
     }
 
     // The dropped counter: its own row, and only when the ring lost something (NFR-17: a bound

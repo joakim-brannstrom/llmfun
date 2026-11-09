@@ -28,6 +28,8 @@ struct Rect;
 
 namespace llmfun::tui::model {
 struct UiState;
+struct AgentLane;
+struct ThreadState;
 enum class ThreadView;
 } // namespace llmfun::tui::model
 
@@ -84,9 +86,23 @@ int loadEarlierPage(int windowGroups);
 /// while an overlay owns the keyboard, or when a press was already spent (the rail takes
 /// its own row keys under the same flag). It gates exactly one key here: `y`, which
 /// copies the focused block (task 26).
+///
+/// The mount is the caller's decision, not this function's: the shell passes
+/// the main thread's adapter and view state, and it dispatches the drill-down
+/// to `renderAgentTranscript()` itself.
 void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const ui::Rect& region,
                   const ui::Rect& loadEarlierRow, const ui::Metrics& m, int windowGroups,
                   bool compact, bool acceptKeys);
+
+/// The drill-down: the focused agent's transcript, drawn through the agent adapter
+/// the shell bound for this frame. The header and the way back are this function's
+/// own; the body is the same `renderThreadBody()` the main thread draws. An adapter
+/// the shell left unbound (no store entry for the focused lane) falls back to the
+/// lane mirror's paragraph. No `Load earlier` row: the agent store is capped.
+void renderAgentTranscript(model::UiState& ui, store::ThreadStoreAdapter& agent,
+                           model::ThreadState& agentThread, const model::AgentLane& lane,
+                           const ui::Rect& region, const ui::Metrics& m, int windowGroups,
+                           bool compact, bool acceptKeys);
 
 /// Reveal one page of older groups: what `PgUp` / `Ctrl+U` and the palette's
 /// `Load earlier` row do (D-BOUNDS, D-PALETTE).

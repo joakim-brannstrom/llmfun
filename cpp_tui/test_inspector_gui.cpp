@@ -344,6 +344,102 @@ int main(int argc, char** argv) {
     }
     state.backend->renderFrame();
 
+    // The Agents tab's activity dot
+    //
+    // A live lane lights the mark, the strip measures it after the Agents label (the
+    // Activity label slides right), and a press on it is nothing - the label beside it
+    // keeps the tab switch.
+    std::vector<model::AgentLane> dotLanes;
+    model::AgentLane liveLane;
+    liveLane.id = "coder";
+    liveLane.label = "coder";
+    liveLane.role = "assistant";
+    liveLane.state = model::kAgentStateRunning;
+    liveLane.active = true;
+    dotLanes.push_back(liveLane);
+    state.ui.agents.push_back(liveLane);
+    state.readyStatus = false; // a run is in flight, so the lane survives the frame's settle
+    state.ui.prefs.inspectorOpen = 1;
+    state.ui.prefs.tab = model::InspectorTab::Activity;
+    state.backend->newFrame();
+    tuiRender(state);
+    state.backend->renderFrame();
+    check(state.inspector.agentsActive, "a live lane lights the dot in the pixel profile");
+
+    // The strip's geometry, measured against the panel's own rectangle so the parts sit
+    // where the drawn strip sits.
+    views::InspectorParts strip;
+    float gu = 0.0f;
+    state.backend->newFrame();
+    {
+        const ui::Metrics pm = ui::metricsFor();
+        gu = pm.gu;
+        ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+        ImGui::SetNextWindowSize(ImVec2(900.0f, 600.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("dot-strip", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
+                         ImGuiWindowFlags_NoBringToFrontOnFocus);
+        strip = views::inspectorMeasure(state.inspector, dotLanes, layout.inspector, pm);
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
+    state.backend->renderFrame();
+    check(!strip.agentsDot.empty(), "the strip measures the dot while the lane is live");
+    check(strip.agentsDot.x ==
+              strip.agents.right() + static_cast<float>(views::kInspectorBadgeGapGu) * gu,
+          "the dot sits one badge gap after the Agents label");
+    check(strip.activity.x == strip.agentsDot.right() + 8.0f,
+          "and the Activity label slides right of it (pad = 1 gu = 8 px)");
+    check(strip.agentsDot.h > 0.0f, "premise: the dot has ink to click on");
+
+    // A press on the dot: nothing. The tab stays where it was.
+    const ImVec2 dotHit(strip.agentsDot.x + strip.agentsDot.w * 0.5f,
+                        strip.agentsDot.y + strip.agentsDot.h * 0.5f);
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMousePosEvent(dotHit.x, dotHit.y);
+    state.backend->newFrame();
+    tuiRender(state); // the hover registers
+    state.backend->renderFrame();
+    io.AddMousePosEvent(dotHit.x, dotHit.y);
+    io.AddMouseButtonEvent(0, true);
+    state.backend->newFrame();
+    tuiRender(state);
+    state.backend->renderFrame();
+    io.AddMouseButtonEvent(0, false);
+    state.backend->newFrame();
+    tuiRender(state);
+    state.backend->renderFrame();
+    state.backend->newFrame();
+    tuiRender(state); // the answer is applied the frame the click landed
+    state.backend->renderFrame();
+    check(state.inspector.tab == model::InspectorTab::Activity,
+          "a press on the dot switches nothing");
+
+    // A press on the Agents label beside it: the label's own tab switch.
+    const ImVec2 agentsHit(strip.agents.x + strip.agents.w * 0.5f,
+                           strip.agents.y + strip.agents.h * 0.5f);
+    io.AddMousePosEvent(agentsHit.x, agentsHit.y);
+    state.backend->newFrame();
+    tuiRender(state);
+    state.backend->renderFrame();
+    io.AddMousePosEvent(agentsHit.x, agentsHit.y);
+    io.AddMouseButtonEvent(0, true);
+    state.backend->newFrame();
+    tuiRender(state);
+    state.backend->renderFrame();
+    io.AddMouseButtonEvent(0, false);
+    state.backend->newFrame();
+    tuiRender(state);
+    state.backend->renderFrame();
+    state.backend->newFrame();
+    tuiRender(state);
+    state.backend->renderFrame();
+    check(state.inspector.tab == model::InspectorTab::Agents,
+          "a press on the Agents label still selects the tab");
+
     state.backend->shutdown();
     ImGui::DestroyContext();
     if (g_failures != 0) {

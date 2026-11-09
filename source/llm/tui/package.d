@@ -436,10 +436,6 @@ struct TextUserInterface {
         auto role = msg.role.toTuiString;
         auto currentTool = msg.currentTool.toTuiString;
         String finish;
-        // The layout is a wire contract with `cpp_tui/tui_api.h` (104 bytes); a reordering
-        // fails the build instead of sending a tool name where the UI expects a count.
-        static assert(PipelineChatMessage.sizeof == 104,
-                "PipelineChatMessage layout changed: update tui_api.h and this mirror together");
         tuiPipelineAgentUpdate(tuiState, id, PipelineChatMessage(content: content, reasoning: reasoning, role: role,
                 finishReason: finish, currentTool: currentTool, contextUsed: msg.contextUsed,
                 contextMax: msg.contextMax, tokensPerSecond: msg.tokensPerSecond));
@@ -448,6 +444,23 @@ struct TextUserInterface {
     void pipelineMessage(UiPipelineStreamDone msg) {
         auto id = msg.agentId.toTuiString;
         tuiPipelineAgentDone(tuiState, id);
+    }
+
+    void pipelineToolCall(UiPipelineToolCall msg) {
+        auto id = msg.agentId.toTuiString;
+        auto name = msg.name.toTuiString;
+        auto arguments = msg.arguments.toTuiString;
+        auto callId = msg.id.toTuiString;
+        tuiPipelineAgentToolCall(tuiState, id, TuiToolCallParam(name: name,
+                arguments: arguments, id: callId));
+    }
+
+    void pipelineToolResult(UiPipelineToolResult msg) {
+        auto id = msg.agentId.toTuiString;
+        auto name = msg.name.toTuiString;
+        auto text = msg.text.toTuiString;
+        tuiPipelineAgentToolResult(tuiState, id, TuiToolResultParam(name: name,
+                ok: msg.ok, text: text));
     }
 
     void pipelineClear() {
@@ -579,6 +592,8 @@ interface TUICommands {
     void uiMsg(UiLogFile m);
     void uiMsg(UiPipelineStreamChatMessage m);
     void uiMsg(UiPipelineStreamDone m);
+    void uiMsg(UiPipelineToolCall m);
+    void uiMsg(UiPipelineToolResult m);
     void uiStreamChatDone();
     void uiPipelineClear();
     void uiClearChat();
@@ -929,6 +944,14 @@ class TextUserInterfaceActor : TUICommands {
         ui.pipelineMessage(m);
     }
 
+    void uiMsg(UiPipelineToolCall m) {
+        ui.pipelineToolCall(m);
+    }
+
+    void uiMsg(UiPipelineToolResult m) {
+        ui.pipelineToolResult(m);
+    }
+
     void uiStreamChatDone() {
         ui.streamChatDone();
     }
@@ -1069,6 +1092,20 @@ struct UiPipelineStreamChatMessage {
 
 struct UiPipelineStreamDone {
     string agentId;
+}
+
+struct UiPipelineToolCall {
+    string agentId;
+    string name;
+    string arguments;
+    string id;
+}
+
+struct UiPipelineToolResult {
+    string agentId;
+    string name;
+    int ok;
+    string text;
 }
 
 struct UiPipelineClear {

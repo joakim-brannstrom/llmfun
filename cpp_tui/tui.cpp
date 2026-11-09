@@ -605,6 +605,25 @@ void flushPendingStream(TuiState& state, std::int64_t nowMs) {
     applyPendingStream(state, nowMs);
 }
 
+/// The agent stores' flush: a snapshot a per-agent update parked inside
+/// its throttle window is applied by the first frame after it, the same promise the
+/// main thread's flush makes - the drill-down never trails more than one window
+/// behind the live answer.
+void flushPendingAgentStreams(TuiState& state, std::int64_t nowMs) {
+    for (AgentStream& agent : state.left.agents) {
+        ChatTab& chat = agent.chat;
+        if (!chat.pendingStream)
+            continue;
+        if (agent.streamLastApplyMs != 0 && nowMs >= agent.streamLastApplyMs &&
+            nowMs - agent.streamLastApplyMs < model::kStreamUpdateIntervalMs)
+            continue;
+        chat.streamMsg = chat.pendingStreamMsg;
+        chat.hasStreamMsg = true;
+        chat.pendingStream = false;
+        agent.streamLastApplyMs = nowMs != 0 ? nowMs : 1;
+    }
+}
+
 } // namespace
 
 void tuiUpdateStreamChatMessage(TuiState& state, const ChatMessage& msg) {
@@ -807,6 +826,9 @@ bool tuiRender(TuiState& state) {
     // coalesced update lands here - before anything reads the thread, which is what keeps
     // `revision` and the store the same age on screen.
     flushPendingStream(state, model::agentClockMs());
+    // The agent stores' parked snapshots flush on the same frame, before anything
+    // reads them (the drill-down draws from the same frame's data).
+    flushPendingAgentStreams(state, model::agentClockMs());
 
     // The metrics seam's input, set for THIS frame and before any window is
     // begun: every GUI length (`ui::metricsFor()`) is derived from the text

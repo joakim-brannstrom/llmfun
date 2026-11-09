@@ -148,6 +148,31 @@ typedef struct PipelineChatMessage {
     double tokensPerSecond; /* D's per-response or rolling rate; 0.0 = no reading */
 } PipelineChatMessage;
 
+/* TuiToolCallParam - One tool call a pipeline agent made.
+ *
+ * Ownership: all Strings are inbound (non-owning). The receiver copies the
+ * data during tuiPipelineAgentToolCall, so the caller's buffers may be reused
+ * or freed immediately after the call returns. `arguments` is truncated
+ * D-side to 1000 chars, so the wire never carries an unbounded tool payload.
+ */
+typedef struct TuiToolCallParam {
+    String name;      /* tool name, copied by the receiver */
+    String arguments; /* truncated D-side to <=1000 chars */
+    String id;        /* the call id, as sent by the model */
+} TuiToolCallParam;
+
+/* TuiToolResultParam - The result of one tool call a pipeline agent made.
+ *
+ * Ownership: all Strings are inbound (non-owning), copied by the receiver.
+ * `text` is truncated D-side to 1000 chars. `ok` is `int` rather than a C++
+ * `bool` so the struct's padding is deterministic on every ABI.
+ */
+typedef struct TuiToolResultParam {
+    String name; /* tool name (repeated from the call, keeps rows self-contained) */
+    int ok;      /* 1 = success, 0 = failure (saveData["success"], default 0) */
+    String text; /* result text, truncated D-side to <=1000 chars */
+} TuiToolResultParam;
+
 /* SessionItem - One row of the session sidebar snapshot.
  *
  * Ownership: all Strings are inbound (non-owning). The panel copies their
@@ -615,6 +640,20 @@ void tuiStreamChatMessageClear(TuiState* state);
  * Null-safe: no-op if state is NULL or agentId is empty.
  */
 void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage msg);
+
+/* Announce a tool call a pipeline agent made: the Agents tab draws it as a
+ * row on the agent's transcript.
+ * All String members are inbound — their data is copied internally.
+ * Null-safe: no-op if state is NULL or agentId is empty.
+ */
+void tuiPipelineAgentToolCall(TuiState* state, String agentId, TuiToolCallParam call);
+
+/* Announce a tool call's result: the Agents tab draws it under the call's
+ * row. `ok` is the run's own success reading (1 = success, 0 = failure).
+ * All String members are inbound — their data is copied internally.
+ * Null-safe: no-op if state is NULL or agentId is empty.
+ */
+void tuiPipelineAgentToolResult(TuiState* state, String agentId, TuiToolResultParam result);
 
 /* Mark a pipeline agent's current message as done.
  * Moves the current streaming content/reasoning/role to `finished`

@@ -32,6 +32,13 @@
 #include <vector>
 
 namespace llmfun::tui::views {
+/// The thread's drawing body, mounted: declared here so the drill-down's
+/// renderer can call it with the agent adapter before the definition below.
+static void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread,
+                             model::ThreadState& ts, const ui::Rect& region,
+                             const ui::Rect& loadEarlierRow, const ui::Metrics& m, int windowGroups,
+                             bool compact, bool acceptKeys);
+
 namespace {
 
 /// One text line at an absolute position, clipped to `box`.
@@ -136,18 +143,20 @@ bool copyBlock(store::ThreadStoreAdapter& thread, std::size_t groupIndex, std::s
 /// block's stable id (D-GROUPID). Whether there is anything to show is the *adapter's* answer
 /// (`blockHasTable()`), so a row drawn verbatim - a tool transcript - and a body with no table
 /// both leave the state alone instead of setting an invisible bit. Answers true when it flipped.
-bool toggleTableSource(model::UiState& ui, store::ThreadStoreAdapter& thread, std::size_t k,
+bool toggleTableSource(model::ThreadState& ts, store::ThreadStoreAdapter& thread, std::size_t k,
                        std::size_t b, const model::BlockDesc& desc) {
     const model::BlockId id = desc.id();
     if (!id.valid() || !thread.blockHasTable(k, b))
         return false;
-    const auto found = ui.thread.tableSource.find(id);
-    if (found == ui.thread.tableSource.end())
-        ui.thread.tableSource.insert(id);
+    const auto found = ts.tableSource.find(id);
+    if (found == ts.tableSource.end())
+        ts.tableSource.insert(id);
     else
-        ui.thread.tableSource.erase(found);
+        ts.tableSource.erase(found);
     return true;
 }
+
+} // namespace
 
 /// The drill-down (design §5.21, task 30): one agent's transcript, read-only, under the row
 /// that leads back to the conversation.
@@ -158,12 +167,20 @@ bool toggleTableSource(model::UiState& ui, store::ThreadStoreAdapter& thread, st
 /// its groups, the paging window and the expansion state, so going back is a redraw and not a
 /// reload (which is what "the main transcript is restored unchanged" means).
 ///
-/// The body is plain flowing text, one body step, wrapped by ImGui's own wrapper - a
-/// transcript is prose, not a cell-exact row list - and it scrolls with the one follower
-/// every scroller here uses (`ui::followNewest`, D-FOLLOW). No markdown: a tool block would
-/// need the fenced-code renderer and the design's tool cards are P3 (task 30's own note).
-void renderAgentTranscript(model::UiState& ui, const model::AgentLane& lane, const ui::Rect& region,
-                           const ui::Metrics& m) {
+/// The body is the real thread renderer over the agent's store: the same
+/// `renderThreadBody` the main thread uses, driven by `agentThreadAdapter` bound to
+/// the agent's `ChatTab` and `ui.agentThread` - so a focused agent shows thinking
+/// rows, tool blocks and the group chrome, not a flat paragraph. The paragraph
+/// below is the eviction fallback; a store change under live caches is a full reset.
+void renderAgentTranscript(model::UiState& ui, store::ThreadStoreAdapter& agent,
+                           model::ThreadState& agentThread, const model::AgentLane& lane,
+                           const ui::Rect& region, const ui::Metrics& m, int windowGroups,
+                           bool compact, bool acceptKeys) {
+    // A region in the wrong unit, or one with no room, paints nothing: the guard the
+    // main mount's `renderThread` carries, applied before the back button is measured -
+    // a zero-width region would otherwise still draw a back row at `region.y`.
+    if (region.w <= 0.0f || region.h <= 0.0f || !ui::rectMatchesProfile(region, m))
+        return;
     // The row back. It is a real button and the first row of the region, the way the thread's
     // `Load earlier` row is: the control that leaves a filtered view belongs where the
     // filtered view starts.
@@ -197,6 +214,32 @@ void renderAgentTranscript(model::UiState& ui, const model::AgentLane& lane, con
     if (bodyH <= 0.0f)
         return;
 
+    // The mount: when the shell bound a store for this lane, the body is
+    // the real thread renderer over that store - the paragraph below is only the
+    // eviction fallback. The bind is per frame and happens in the shell; a different
+    // store than the caches were built from (a focus change) is the adapter's signal
+    // to drop its caches and reset this view state.
+    if (agent.bound()) {
+        ui::Rect body = region;
+        body.y = bodyTop;
+        body.h = bodyH;
+        // No `Load earlier` row in the drill-down: the agent store is capped at a
+        // handful of messages, so there is nothing older to reveal. But the window
+        // the layout budgets is the *main* thread's - one or three groups in compact -
+        // and a full capped store is more groups than that: the mount shows the whole
+        // store, however big the frame's window is.
+        const int mountGroups = std::max(windowGroups, static_cast<int>(agent.groupCount()));
+        renderThreadBody(ui, agent, agentThread, body, ui::Rect{}, m, mountGroups, compact,
+                         acceptKeys);
+        return;
+    }
+
+    // No store entry (evicted under the LRU cap, or the lane never streamed through
+    // a store): the paragraph fallback below draws, and the shell leaves the agent
+    // adapter unbound for such a frame - no frame ever reads through an evicted
+    // store's address. The bind state is also the observable: a fallback frame
+    // leaves the adapter unbound, a mount frame leaves it bound.
+
     ImGui::SetCursorScreenPos(ImVec2(region.x, bodyTop));
     ImGui::BeginChild("##thread_agent_transcript", ImVec2(region.w, bodyH), false);
     {
@@ -218,8 +261,6 @@ void renderAgentTranscript(model::UiState& ui, const model::AgentLane& lane, con
     ui.follow = ui::followNewest(ui.follow);
     ImGui::EndChild();
 }
-
-} // namespace
 
 ThreadWindow threadWindow(std::size_t groupCount, int windowGroups, int earlierGroups) {
     // A window of zero groups would look like a rendering bug rather than a
@@ -252,7 +293,10 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
 
     // The window this frame is drawn with, published before anything reads it: the
     // `Load earlier` key is dispatched after the shell (tui.cpp), so it pages by the
-    // number the thread just used - the frame layer does not own the layout.
+    // number the thread just used - the frame layer does not own the layout. The
+    // drill-down publishes its own window into `ui.agentThread` (the body below does
+    // it for whichever view state it was mounted with) and leaves these zeroed on a
+    // frame that draws no main-thread group.
     ui.thread.pageGroups = std::max(1, windowGroups);
     ui.thread.drawnGroups = 0;
     ui.thread.firstGroupId = 0;
@@ -265,30 +309,44 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
     // The block menu's owner goes with it (task 44): a menu whose block is not drawn is
     // closed by ImGui at the end of this frame, and the latch must not outlive the popup
     // it describes - a recycled `BlockId` would otherwise re-own it. Both latches name
-    // something that only exists while the thread draws.
-    const auto dropLatches = [&ui] {
+    // something that only exists while the thread draws. The body path does *not* drop
+    // them here: the body consumes the anchor latch itself, the one path where the latch
+    // must survive into the draw.
+    if (ui.view != model::ThreadView::Ready) {
         ui.thread.anchorGroupId = 0;
         ui.thread.anchorPending = false;
         ui.thread.menuBlockId = {};
-    };
-
-    // The drill-down outranks the state cards: while a lane is focused the thread *is* that
-    // agent's transcript, and an Empty/Loading/Offline card would claim the thread has nothing
-    // to show while it is showing something (design §5.21, task 30). The focus names a lane
-    // that may have been cleared away in the meantime - then it is not a mode any more and the
-    // ordinary body draws, exactly like a stale row id in the rail.
-    if (const model::AgentLane* focused = model::findAgentLane(ui, ui.focusedAgent)) {
-        dropLatches();
-        renderAgentTranscript(ui, *focused, region, m);
-        return;
-    }
-
-    if (ui.view != model::ThreadView::Ready) {
-        dropLatches();
         renderThreadState(ui.view, m, region);
         return;
     }
 
+    renderThreadBody(ui, thread, ui.thread, region, loadEarlierRow, m, windowGroups, compact,
+                     acceptKeys);
+}
+
+/// The thread's body, shared by the main thread and the drill-down: the same
+/// store walk, the same block loop, the same anchoring and follow, mounted over whatever
+/// store/view pair the caller bound. The main thread passes the shell's thread adapter
+/// and `ui.thread`; the drill-down passes the agent adapter and `ui.agentThread`. Each
+/// mount keeps its own drawing-specific `ThreadState`, so the two share the body, not the state.
+void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, model::ThreadState& ts,
+                      const ui::Rect& region, const ui::Rect& loadEarlierRow, const ui::Metrics& m,
+                      int windowGroups, bool compact, bool acceptKeys) {
+    // The same latch rule the dispatcher applies to the main view state, applied to
+    // the view state this body was mounted with.
+    const auto dropLatches = [&ts] {
+        ts.anchorGroupId = 0;
+        ts.anchorPending = false;
+        ts.menuBlockId = {};
+    };
+
+    // The window this mount draws with, published into its own view state: the
+    // `Load earlier` row below pages by the number the *last frame of this mount*
+    // used (`requestEarlierPage` keeps paging the main thread - the shell's key path).
+    ts.pageGroups = std::max(1, windowGroups);
+    ts.drawnGroups = 0;
+    ts.firstGroupId = 0;
+    ts.firstGroupY = 0.0f;
     // The indices this frame draws. The live answer is not part of the window (task 38): it is
     // appended after it, so `Load earlier` pages the *stored* conversation and a live answer can
     // never be paged out from under the user, whatever the window arithmetic does. When there is
@@ -323,7 +381,7 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
         // count taken from the window the row was entered with would print "88
         // more" beside a thread that already shows 48.
         if (ui::buttonPressed(spec, m, buttonRect)) {
-            requestEarlierPage(ui);
+            ui.earlierGroups += loadEarlierPage(ts.pageGroups);
             window = threadWindow(storedGroups, windowGroups, ui.earlierGroups);
             drawn = drawnIndices(window);
         }
@@ -344,7 +402,7 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
     ImGui::SetCursorScreenPos(ImVec2(region.x, firstRowY));
     // No horizontal scrollbar: a code block renders unwrapped, and one overwide
     // line would otherwise turn into a grey bar along the bottom of the child.
-    if (ui.thread.scrollToBottom > 0) {
+    if (ts.scrollToBottom > 0) {
         // The switch request: `SetNextWindowScroll` is consumed by `BeginChild`,
         // but it clamps against the ScrollMax the child measured *last* frame. The
         // first request therefore lands on the old extent; the second one lands on
@@ -366,11 +424,11 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
     // route. `ui::takeCharacter()` is what keeps a text field's typing its own, and the
     // press is only taken while a block actually holds the focus: a `y` with nothing
     // focused stays in the queue for whoever else may want it this frame.
-    const bool copyKey = acceptKeys && ui.thread.focus.valid() && ui::takeCharacter('y');
+    const bool copyKey = acceptKeys && ts.focus.valid() && ui::takeCharacter('y');
     // `s` shows the focused block's table source (design §6.8, task 37). The same character
     // route as `y` for the same reason (plan/key_gate.md §4f: the grid never delivers a
     // printable key as a key event), and taken only while a block holds the focus.
-    const bool sourceKey = acceptKeys && ui.thread.focus.valid() && ui::takeCharacter('s');
+    const bool sourceKey = acceptKeys && ts.focus.valid() && ui::takeCharacter('s');
     // Every drawn group's header row, sampled as the group is drawn: the anchor compare
     // needs the row of one specific group, and this is the only place that knows where a
     // group starts. The rows are *child-relative* (net of the window position): the
@@ -396,10 +454,10 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
         const store::GroupView group = thread.groupAt(index);
         const float headerScreenY = ImGui::GetCursorScreenPos().y;
         headerRows.emplace_back(group.id, headerScreenY - ImGui::GetWindowPos().y);
-        if (ui.thread.firstGroupId == 0 && headerScreenY >= clipMin.y &&
+        if (ts.firstGroupId == 0 && headerScreenY >= clipMin.y &&
             headerScreenY + m.row <= clipMax.y) {
-            ui.thread.firstGroupId = group.id;
-            ui.thread.firstGroupY = headerScreenY;
+            ts.firstGroupId = group.id;
+            ts.firstGroupY = headerScreenY;
         }
         // The cell is what the caller reserves for the group: its width is the content
         // width and its height the adapter's own expectation. The hint is a hint - the
@@ -423,18 +481,18 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
             row.y = ImGui::GetCursorScreenPos().y;
             row.w = std::max(0.0f, ImGui::GetContentRegionAvail().x);
             row.cells = m.textGrid;
-            const bool focused = desc.id() == ui.thread.focus;
+            const bool focused = desc.id() == ts.focus;
             // The block menu's owner (task 44): the one block the state names may submit
             // the popup, so an ImGui id that a transcript reset recycled cannot re-own a
             // menu the user opened on a different message.
-            const BlockDraw draw{desc.expanded, focused, desc.id() == ui.thread.menuBlockId};
+            const BlockDraw draw{desc.expanded, focused, desc.id() == ts.menuBlockId};
             row.h = measureBlockHeader(desc, m, draw);
             const BlockResult result = renderBlock(desc, row, m, draw);
             if (result.menuRequested) {
                 // The right-click asked for *this* row's menu: latch the owner, and the
                 // next frames submit it from here alone (`blockMenuOpen` below keeps the
                 // latch alive exactly as long as the popup really is open).
-                ui.thread.menuBlockId = desc.id();
+                ts.menuBlockId = desc.id();
                 blockMenuOpen = true;
             }
             if (result.menuOpen)
@@ -445,7 +503,7 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
                 // adapter gave the block, and its kind, never a position that paging or a
                 // new row in front of it could move (D-GROUPID's rule, applied to the
                 // focus).
-                ui.thread.focus = desc.id();
+                ts.focus = desc.id();
             }
             if (result.toggled) {
                 thread.setBlockExpanded(index, b, !desc.expanded);
@@ -468,7 +526,7 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
             // The source toggle changes what the body draws, so it is a content change for the
             // anchor exactly like a disclosure: the group's header is what stays put while the
             // body under it grows or shrinks.
-            if (focused && sourceKey && toggleTableSource(ui, thread, index, b, desc))
+            if (focused && sourceKey && toggleTableSource(ts, thread, index, b, desc))
                 toggledGroup = group.id;
             if (result.drawBody) {
                 // The body sits one step in from the row's rule - the indent a message body
@@ -492,12 +550,12 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
         }
         thread.endGroup(index, cell);
     }
-    ui.thread.drawnGroups = drawn.size();
+    ts.drawnGroups = drawn.size();
     // The menu's owner is validated on every drawn frame (task 44): a popup ImGui has
     // closed, or a block that is no longer in the window, drops the latch here - so the
     // next frame cannot submit it from a recycled id.
-    if (!blockMenuOpen && ui.thread.menuBlockId.valid())
-        ui.thread.menuBlockId = {};
+    if (!blockMenuOpen && ts.menuBlockId.valid())
+        ts.menuBlockId = {};
     // One group draw per visible group per frame: the shell mounted the thread once,
     // not twice. (An `assert` is compiled out of the shipped build, so the golden
     // harness reads `renderCalls()` deltas itself - that is the real guard.)
@@ -536,18 +594,18 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
     const std::size_t toggled = toggledGroup != 0 ? toggledGroup : adapterToggled;
     if (toggled != 0) {
         ui.follow = false;
-        ui.thread.anchorGroupId = toggled;
-        ui.thread.anchorScreenY = headerRowOf(toggled);
-        ui.thread.anchorPending = true;
-    } else if (ui.thread.anchorPending) {
-        const float rowNow = headerRowOf(ui.thread.anchorGroupId);
-        if (rowNow >= 0.0f && ui.thread.anchorScreenY >= 0.0f) {
-            const float delta = rowNow - ui.thread.anchorScreenY;
+        ts.anchorGroupId = toggled;
+        ts.anchorScreenY = headerRowOf(toggled);
+        ts.anchorPending = true;
+    } else if (ts.anchorPending) {
+        const float rowNow = headerRowOf(ts.anchorGroupId);
+        if (rowNow >= 0.0f && ts.anchorScreenY >= 0.0f) {
+            const float delta = rowNow - ts.anchorScreenY;
             if (delta != 0.0f)
                 ImGui::SetScrollY(ImGui::GetScrollY() + delta);
         }
-        ui.thread.anchorGroupId = 0;
-        ui.thread.anchorPending = false;
+        ts.anchorGroupId = 0;
+        ts.anchorPending = false;
     } else {
         // Follow the newest, one implementation for every scroller (D-FOLLOW): the
         // pointer owns the flag, so this is read back into the model every frame.
@@ -556,8 +614,8 @@ void renderThread(model::UiState& ui, store::ThreadStoreAdapter& thread, const u
 
     ImGui::EndChild();
 
-    if (ui.thread.scrollToBottom > 0)
-        --ui.thread.scrollToBottom;
+    if (ts.scrollToBottom > 0)
+        --ts.scrollToBottom;
 }
 
 } // namespace llmfun::tui::views

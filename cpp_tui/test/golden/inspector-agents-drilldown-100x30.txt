@@ -12,7 +12,7 @@ lane: '  tool: read_file'
 lane: '  reviewer | ○ queued'
 text:
    llmfun                                                      Ctrl+K commands Shift+?   Settings
-  Search                    Back to main   coder                         [5] Agents [6] Activity
+  Search                    Back to main   coder                         [5] Agents • [6] Activity
                           coder: reading the parser                      planner ✓ -> coder ◐ -> r…
  No sessions yet                                                           planner | ✓ done | 00:12
                                                                          ▸ coder | ◐ running

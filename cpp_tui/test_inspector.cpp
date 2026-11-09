@@ -964,6 +964,112 @@ void checkPaintOrder() {
 // 8c. A reserved digit with the panel closed: the notice has to be visible
 // ---------------------------------------------------------------------------
 
+// The Agents tab's activity dot
+
+/// One lane, the fields `anyLiveAgentLane` and the lane rows read.
+model::AgentLane dotLane(bool active) {
+    model::AgentLane out;
+    out.id = "coder";
+    out.label = "coder";
+    out.role = "assistant";
+    out.state = model::kAgentStateRunning;
+    out.active = active;
+    return out;
+}
+
+void checkAgentsDot() {
+    const ui::Metrics& m = gridMetrics();
+    const model::ShellPrefs prefs = [] {
+        model::ShellPrefs prefs;
+        prefs.inspectorOpen = 1;
+        prefs.tab = model::InspectorTab::Agents;
+        return prefs;
+    }();
+    bool overlay = false;
+    const ui::Rect rect = inspectorRect(100, 30, prefs, overlay);
+    const float gap = static_cast<float>(views::kInspectorBadgeGapGu) * m.gu;
+
+    // The frame derives the mark: a live lane lights it, and the deadline is armed while
+    // live - so a frame that still sees a live lane always answers active.
+    tui::TuiState state;
+    state.readyStatus = false; // a run is in flight, or the frame settles the lane
+    state.ui.prefs = prefs;
+    state.ui.agents.push_back(dotLane(/*active=*/true));
+    shellFrame(state, 100, 30);
+    check(state.inspector.agentsActive, "a live lane lights the Agents tab's dot");
+    const std::int64_t armedUntil = state.inspector.agentsActiveUntilMs;
+    check(armedUntil >= model::agentClockMs() + views::kAgentsActivityLatchMs - 1,
+          "the live frame arms the latch deadline");
+    shellFrame(state, 100, 30);
+    check(state.inspector.agentsActiveUntilMs >= armedUntil &&
+              state.inspector.agentsActiveUntilMs > model::agentClockMs(),
+          "a still-live frame re-arms the deadline (it never slides behind now)");
+
+    // Measured: the dot sits after the Agents label, one `gu` gap out, the Activity label
+    // slides right, and nothing of it changes when the mark is off.
+    views::InspectorState marked = openInspector(model::InspectorTab::Agents);
+    marked.agentsActive = true;
+    marked.unreadActivity = 2;
+    std::vector<model::AgentLane> oneLane;
+    oneLane.push_back(dotLane(false));
+    views::InspectorParts markedParts;
+    views::InspectorParts quietParts;
+    g_w = 100;
+    g_h = 30;
+    frame([&](const ui::Metrics& fm) {
+        markedParts = views::inspectorMeasure(marked, oneLane, rect, fm);
+        quietParts =
+            views::inspectorMeasure(openInspector(model::InspectorTab::Agents), oneLane, rect, fm);
+    });
+    check(!markedParts.agentsDot.empty(), "an active frame measures the dot");
+    check(markedParts.agentsDot.x == markedParts.agents.right() + gap,
+          "the dot sits one badge gap after the Agents label");
+    check(markedParts.agentsDot.h == m.row && markedParts.agentsDot.y == markedParts.agents.y,
+          "the dot rides the strip row");
+    check(markedParts.activity.x == markedParts.agentsDot.right() + m.pad1,
+          "the Activity label slides right of the dot");
+    check(quietParts.agentsDot.empty(), "an inactive frame measures no dot");
+    check(quietParts.activity.x == quietParts.agents.right() + m.pad1,
+          "without the mark the strip lays out exactly as before");
+    check(markedParts.agentsText == quietParts.agentsText &&
+              markedParts.activityText == quietParts.activityText &&
+              markedParts.badgeText == quietParts.badgeText,
+          "the mark changes no label the strip draws");
+
+    // The latch: the mark survives the last lane's stop until the deadline, then drops.
+    state.ui.agents.clear();
+    state.inspector.agentsActiveUntilMs = model::agentClockMs() + views::kAgentsActivityLatchMs;
+    shellFrame(state, 100, 30);
+    check(state.inspector.agentsActive, "the mark survives the last lane's stop");
+    state.inspector.agentsActiveUntilMs = model::agentClockMs() - 1;
+    shellFrame(state, 100, 30);
+    check(!state.inspector.agentsActive, "past the deadline the mark drops");
+
+    // The screen: the dot glyph draws between the two tab labels, and only while active.
+    tui::TuiState onScreen;
+    onScreen.readyStatus = false;
+    onScreen.ui.prefs = prefs;
+    onScreen.ui.agents.push_back(dotLane(true));
+    g_w = 100;
+    g_h = 30;
+    Grid on =
+        frame([&](const ui::Metrics&) { views::renderShell(onScreen, ImVec2(100.0f, 30.0f)); });
+    const int stripRow = on.rowOf("[5] Agents");
+    check(stripRow >= 0, "premise: the strip row is on screen");
+    const int agentsCol = on.colOf(stripRow, "[5] Agents");
+    const int activityCol = on.colOf(stripRow, "[6] Activity");
+    check(agentsCol >= 0 && activityCol >= 0, "premise: both tab labels are on the strip row");
+    const std::string dotGlyph(ui::icon(ui::Icon::Unread, ui::GlyphSet::Glyphs));
+    check(on.rowOf(dotGlyph) == stripRow, "the dot glyph is on the strip row while a lane is live");
+    check(on.colOf(stripRow, dotGlyph) > agentsCol && on.colOf(stripRow, dotGlyph) < activityCol,
+          "and it sits between the two labels");
+    tui::TuiState quiet;
+    quiet.ui.prefs = prefs;
+    g_w = 100;
+    g_h = 30;
+    Grid off = frame([&](const ui::Metrics&) { views::renderShell(quiet, ImVec2(100.0f, 30.0f)); });
+    check(off.rowOf(dotGlyph) < 0, "without a live lane the strip draws no dot");
+}
 void checkReservedPress() {
     tui::TuiState state;
     state.ui.prefs.inspectorOpen = 0;
@@ -1364,6 +1470,7 @@ int main(int argc, char** argv) {
     checkPaintOrder();
     checkReservedPress();
     checkTabKeys();
+    checkAgentsDot();
     checkBounded();
     checkPersistence();
     checkGoldens(update);

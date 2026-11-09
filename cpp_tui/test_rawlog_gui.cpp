@@ -207,6 +207,8 @@ int g_probeLevel = 0;
 int g_probeLocWarn = 0;
 int g_probeLocPlain = 0;
 int g_probeLocCut = 0;
+int g_probeLocWhole = 0;
+int g_probeLocCutWhole = 0;
 int g_probeOpened = 0;
 
 /// The probe runs, measured in their own frame: two columns of 33, with 24
@@ -244,6 +246,13 @@ void buildProbes(const model::RawLogRecord& plain, const model::RawLogRecord& wa
     g_probes.push_back(views::rawLogLocationText(plain, 36));
     g_probeLocCut = static_cast<int>(g_probes.size());
     g_probes.push_back(views::rawLogLocationText(longFunction, 36));
+    // The wide mode draws whole locations, so the comparison strings are the
+    // whole forms (a cell budget far past both full lengths returns them
+    // uncut).
+    g_probeLocWhole = static_cast<int>(g_probes.size());
+    g_probes.push_back(views::rawLogLocationText(plain, 80));
+    g_probeLocCutWhole = static_cast<int>(g_probes.size());
+    g_probes.push_back(views::rawLogLocationText(longFunction, 80));
     g_probeOpened = static_cast<int>(g_probes.size());
     g_probes.push_back(plain.message);
 }
@@ -277,9 +286,14 @@ void measureProbes(const ImVec2& white) {
     for (std::size_t i = 0; i < g_probes.size(); ++i) {
         const float px = g_probeX + kProbeStrideX * static_cast<float>(i / kProbeRowsPerColumn);
         const float py = g_probeY + kProbeStrideY * static_cast<float>(i % kProbeRowsPerColumn);
-        // The full 80-x probe is wider than a column: give it the display's
-        // whole width so its measurement is not clipped by the column window.
-        const float x1 = static_cast<int>(i) == g_probeFull ? 1270.0f : px + 440.0f;
+        // The full 80-x probe and the whole-location probes are wider than a
+        // column: give them the display's whole width so their measurement is
+        // not clipped by the column window.
+        const float x1 =
+            (static_cast<int>(i) == g_probeFull || static_cast<int>(i) == g_probeLocWhole ||
+             static_cast<int>(i) == g_probeLocCutWhole)
+                ? 1270.0f
+                : px + 440.0f;
         g_probeRuns[i] = runIn(probe, white, py - 2.0f, py + 20.0f, px - 2.0f, x1);
     }
 }
@@ -393,6 +407,31 @@ int main(int argc, char** argv) {
         ImGui::PopStyleVar();
     };
 
+    // The plan the view actually drew: the frame's own decision, read back
+    // from the state the just-drawn frame filled. The fixtures overflow the
+    // narrow message column, so past this point the expected geometry is the
+    // wide plan wherever the view says it engaged.
+    const auto framePlan = [&](const ui::Rect& region) {
+        const float rowW = region.w - 2.0f * m.pad2;
+        const views::RowPlan narrowPlan = views::rawRowPlan(rowW, m);
+        if (!rl.wideMode)
+            return narrowPlan;
+        return views::rawRowPlanWide(rowW, m, rl.maxLocationW,
+                                     std::max(rl.maxMessageW, rl.maxDetailW));
+    };
+    // The body's row width in the profile's unit: what the plan answers to.
+    const auto rowWOf = [&](const ui::Rect& region) { return region.w - 2.0f * m.pad2; };
+    // The body child's window record, whose scroll state outlives the frame.
+    const auto bodyWindow = [] {
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        ImGuiWindow* out = nullptr;
+        for (ImGuiWindow* window : g.Windows)
+            if (window->Active && window->Name != nullptr &&
+                std::strstr(window->Name, "##rawlog_body") != nullptr)
+                out = window;
+        return out;
+    };
+
     buildProbes(plain, warn, longFunction);
 
     const float kTol = 2.0f;
@@ -483,9 +522,11 @@ int main(int argc, char** argv) {
 
     // 3. The widest rung draws the whole ladder
     const ui::Rect region100 = regionFor(100);
-    const views::RowPlan p0 = views::rawRowPlan(region100.w - 2.0f * m.pad2, m);
-    check(p0.rung == 0, "100 cells sits on the widest rung");
-    check(p0.msgW > 0.0f && p0.locW > 0.0f && p0.clockW > 0.0f,
+    // The narrow plan is the premise (the rung ladder the surface sits on);
+    // the drawn plan below is what wide mode turned it into.
+    const views::RowPlan narrow0 = views::rawRowPlan(region100.w - 2.0f * m.pad2, m);
+    check(narrow0.rung == 0, "100 cells sits on the widest rung");
+    check(narrow0.msgW > 0.0f && narrow0.locW > 0.0f && narrow0.clockW > 0.0f,
           "the widest rung reserves every column");
 
     // The clean frame the screenshot is taken from.
@@ -504,6 +545,13 @@ int main(int argc, char** argv) {
     ImDrawList* body = windowList("rawlog_body");
     check(body != nullptr, "the body child is findable");
 
+    // The frame drew the wide plan: the fixtures' 80-x message overflows the
+    // narrow message column, so wide mode engaged (a stretched location
+    // column, whole messages, no tag slack). Everything below measures
+    // against the plan the view actually picked.
+    const views::RowPlan p0 = framePlan(region100);
+    check(rl.wideMode, "the 80-x message engages wide mode at 100 cells");
+
     float firstMsgX = -1.0f;
     if (body != nullptr) {
         const float x = origin.x;
@@ -518,7 +566,8 @@ int main(int argc, char** argv) {
         widthMatches(levelRun, probeRun(g_probeLevel), "the level");
         const Run locRun = windowRun(body, 3, x + p0.locX, x + p0.locX + p0.locW);
         startsAt(locRun, x + p0.locX, "the location");
-        widthMatches(locRun, probeRun(g_probeLocWarn), "the location");
+        widthMatches(locRun, probeRun(g_probeLocWhole),
+                     "the location draws whole in the wide column");
         const Run msgRun = windowRun(body, 3, x + p0.msgX, x + p0.msgX + p0.msgW);
         startsAt(msgRun, x + p0.msgX, "the message");
         widthMatches(msgRun, probeRun(g_probeWarnMsg), "the message");
@@ -539,39 +588,21 @@ int main(int argc, char** argv) {
         const Run markerRun = windowRun(body, 1, x + p0.markerX, x + p0.markerX + p0.markerW);
         check(!markerRun.empty, "the marker cell carries the openable glyph");
 
-        // The 80-x message cannot fit its column: the drawn row must match one
-        // head+ellipsis candidate, and never the whole message.
+        // The 80-x message cannot fit the narrow column, so wide mode drew it
+        // whole: the row starts at the wide message column and runs into the
+        // body's right edge, where the window - not an ellipsis - cuts it. An
+        // ellipsized draw would stop an ellipsis room short of the edge.
         const Run cutRun = windowRun(body, 4, x + p0.msgX, x + p0.msgX + p0.msgW);
-        startsAt(cutRun, x + p0.msgX, "the truncated message");
-        if (!cutRun.empty) {
-            int matched = -1;
-            int matchesCount = 0;
-            for (int k = 0; k < 56; ++k) {
-                const Run candidate = probeRun(k);
-                if (candidate.empty)
-                    continue;
-                if (std::fabs(widthOf(cutRun) - widthOf(candidate)) <= kTol) {
-                    ++matchesCount;
-                    if (matched < 0)
-                        matched = k;
-                }
-            }
-            check(matchesCount == 1,
-                  "the truncated message matches exactly one head+ellipsis candidate (found " +
-                      std::to_string(matchesCount) + ")");
-            check(matched >= 0 && matched < 56,
-                  "the truncation keeps a head beside the ASCII ellipsis (kept " +
-                      std::to_string(matched) + " of 80)");
-            const Run fullRun = probeRun(g_probeFull);
-            check(!fullRun.empty && std::fabs(widthOf(cutRun) - widthOf(fullRun)) > kTol,
-                  "the message is really cut (the whole message is wider)");
-        }
+        startsAt(cutRun, x + p0.msgX, "the wide message");
+        check(!cutRun.empty && cutRun.maxX >= x + rowWOf(region100) - 18.0f,
+              "the wide message runs to the body's edge, uncut (no ellipsis room)");
 
-        // The long function name cannot fit the location column: the drawn run
-        // is the mid-ellipsized form, and it starts with the ASCII marker.
+        // The long function name fits the wide location column: the drawn run
+        // is the whole form, not the mid-ellipsized one.
         const Run locCutRun = windowRun(body, 5, x + p0.locX, x + p0.locX + p0.locW);
-        startsAt(locCutRun, x + p0.locX, "the truncated location");
-        widthMatches(locCutRun, probeRun(g_probeLocCut), "the truncated location");
+        startsAt(locCutRun, x + p0.locX, "the wide location");
+        widthMatches(locCutRun, probeRun(g_probeLocCutWhole),
+                     "the long location draws whole in the wide column");
         check(g_probes[static_cast<std::size_t>(g_probeLocCut)].compare(0, 3, "...") == 0,
               "the location's mid-ellipsis is the ASCII form");
     }
@@ -601,14 +632,19 @@ int main(int argc, char** argv) {
     state.backend->newFrame();
     drawSurface(region72);
     body = windowList("rawlog_body");
+    // The drawn plan: wide mode engaged (the fixtures overflow the narrow
+    // column at 72 cells too), so the location column is the stretched one.
+    const views::RowPlan draw2 = framePlan(region72);
     if (body != nullptr) {
         const float x = origin.x;
-        const Run loc72 =
-            windowRun(body, 0, x + p2.locX, std::min(x + p2.locX + p2.locW, x + p2.msgX - 4.0f));
-        check(!loc72.empty && loc72.minX >= x + p2.locX - 1.0f && loc72.minX <= x + p2.locX + 3.0f,
+        const Run loc72 = windowRun(body, 0, x + draw2.locX,
+                                    std::min(x + draw2.locX + draw2.locW, x + draw2.msgX - 4.0f));
+        check(!loc72.empty && loc72.minX >= x + draw2.locX - 1.0f &&
+                  loc72.minX <= x + draw2.locX + 3.0f,
               "the second rung still draws the location at its column");
-        widthMatches(loc72, probeRun(g_probeLocPlain), "the second rung's location");
-        const Run clock72 = windowRun(body, 0, x + p2.clockX, x + p2.clockX + p2.clockW);
+        widthMatches(loc72, probeRun(g_probeLocWhole),
+                     "the second rung's location draws whole in the wide column");
+        const Run clock72 = windowRun(body, 0, x + draw2.clockX, x + draw2.clockX + draw2.clockW);
         widthMatches(clock72, probeRun(g_probeClock8), "the second rung's clock");
     }
     state.backend->renderFrame();
@@ -622,19 +658,248 @@ int main(int argc, char** argv) {
     state.backend->newFrame();
     drawSurface(region60);
     body = windowList("rawlog_body");
+    // The drawn plan: wide mode engaged, but the third rung has no location
+    // column to stretch - the wide plan keeps the rung's message column and
+    // only widens the message to the content's own width.
+    const views::RowPlan draw3 = framePlan(region60);
     if (body != nullptr) {
         const float x = origin.x;
-        const Run msg60 = windowRun(body, 0, x + p3.msgX, x + p3.msgX + p3.msgW);
-        check(!msg60.empty && msg60.minX >= x + p3.msgX - 1.0f && msg60.minX <= x + p3.msgX + 3.0f,
+        const Run msg60 = windowRun(body, 0, x + draw3.msgX, x + draw3.msgX + draw3.msgW);
+        check(!msg60.empty && msg60.minX >= x + draw3.msgX - 1.0f &&
+                  msg60.minX <= x + draw3.msgX + 3.0f,
               "the third rung's message starts at its column");
         widthMatches(msg60, probeRun(g_probeOpened), "the third rung's message");
-        const Run right =
-            windowRun(body, 0, x + p3.msgX + (msg60.empty ? 0.0f : widthOf(msg60)) + 2.0f, FLT_MAX);
+        const Run right = windowRun(
+            body, 0, x + draw3.msgX + (msg60.empty ? 0.0f : widthOf(msg60)) + 2.0f, FLT_MAX);
         check(right.empty, "the third rung's row leaves the location's cells blank");
-        const Run clock60 = windowRun(body, 0, x + p3.clockX, x + p3.clockX + p3.clockW);
+        const Run clock60 = windowRun(body, 0, x + draw3.clockX, x + draw3.clockX + draw3.clockW);
         check(!clock60.empty, "the third rung still draws the short clock");
     }
     state.backend->renderFrame();
+
+    // 5. The wide mode's own behaviors
+    // The tag row joins the fixtures - a short message with an action and a
+    // payload, appended last so every body line the sections above pinned
+    // keeps its index - and the tag's string joins the probe block, which is
+    // re-measured whole so the earlier probes keep their ink.
+    model::RawLogRecord tagged = record(model::kRawLogLevelInfo, "retry", 5);
+    tagged.action = TuiLogAction_Retry;
+    tagged.actionPayload = "turn-7";
+    records.push_back(tagged);
+    ring.arrivals = records.size();
+    g_probes.push_back("action 1 turn-7");
+    const int probeTag = static_cast<int>(g_probes.size()) - 1;
+    state.backend->newFrame();
+    drawProbes();
+    measureProbes(whiteOf());
+    state.backend->renderFrame();
+
+    // 120 cells: wide mode is engaged (the 80-x message overflows the narrow
+    // column's 56 cells), the content is wider than the body so the horizontal
+    // scrollbar is live, and the wide plan reserves no tag slack - the tag's
+    // cells stay blank.
+    const ui::Rect region120 = regionFor(120);
+    const views::RowPlan narrow120 = views::rawRowPlan(region120.w - 2.0f * m.pad2, m);
+    check(narrow120.rung == 0, "120 cells sits on the widest rung");
+    state.backend->newFrame();
+    drawSurface(region120); // a first frame lays the wide content out
+    state.backend->newFrame();
+    drawSurface(region120);
+    body = windowList("rawlog_body");
+    {
+        ImGuiWindow* bodyWin = bodyWindow();
+        const float x = origin.x;
+        const float rowW = rowWOf(region120);
+        check(rl.wideMode, "the 80-x message engages wide mode at 120 cells");
+        check(rl.contentW > rowW, "the wide content overflows the body");
+        check(bodyWin != nullptr && bodyWin->ScrollMax.x > 0.0f,
+              "the wide content engages the horizontal scrollbar");
+        const Run tagRun = windowRun(body, 6, x + rowW - 15.0f * gu, x + rowW);
+        check(tagRun.empty, "wide mode leaves the action tag's cells blank");
+    }
+    state.backend->renderFrame();
+
+    // 150 cells: the message column fits the content again, so the exact narrow
+    // layout is back - no wide mode, no horizontal scrollbar, and the
+    // tag draws at the row's right edge, payload riding along.
+    const ui::Rect region150 = regionFor(150);
+    state.backend->newFrame();
+    drawSurface(region150); // a first frame lays the narrow content out
+    state.backend->newFrame();
+    drawSurface(region150);
+    body = windowList("rawlog_body");
+    {
+        ImGuiWindow* bodyWin = bodyWindow();
+        const float x = origin.x;
+        const float rowW = region150.w - 2.0f * m.pad2;
+        check(!rl.wideMode, "the wide window keeps narrow mode");
+        check(bodyWin != nullptr && bodyWin->ScrollMax.x <= 0.0f,
+              "the narrow layout has no horizontal scrollbar");
+        const Run tagRun = windowRun(body, 6, x + rowW - 20.0f * gu, x + rowW);
+        widthMatches(tagRun, probeRun(probeTag),
+                     "narrow mode draws the action tag at the row's right edge");
+    }
+    state.backend->renderFrame();
+
+    // 6. The follower in a wide, overflowing body: the pin keeps the bottom
+    // fold while content appends, a horizontal wheel notch leaves follow
+    // alone, a vertical one takes it, and so does a press on the scrollbar's
+    // corner square. A second surface keeps the first's geometry assertions
+    // untouched.
+    std::deque<model::RawLogRecord> records2;
+    for (int i = 0; i < 40; ++i)
+        records2.push_back(record(model::kRawLogLevelInfo, std::string(90, 'y'), i));
+    model::RawLogRing ring2;
+    ring2.records = &records2;
+    ring2.arrivals = records2.size();
+    views::RawLogState rl2;
+    rl2.open = true;
+    rl2.overlayShape = true;
+    rl2.minLevel = model::kRawLogLevelTrace;
+    const auto drawSurface2 = [&](const ui::Rect& region) {
+        ImGui::SetNextWindowPos(ImVec2(region.x, region.y));
+        ImGui::SetNextWindowSize(ImVec2(region.w, region.h));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("rawlog-frame2", nullptr, kSurfaceFlags);
+        views::renderRawLog(rl2, region, m, ring2);
+        ImGui::End();
+        ImGui::PopStyleVar();
+    };
+
+    const ui::Rect region60b = regionFor(60);
+    for (int f = 0; f < 4; ++f) {
+        state.backend->newFrame();
+        drawSurface2(region60b);
+        state.backend->renderFrame();
+    }
+    state.backend->newFrame();
+    drawSurface2(region60b);
+    {
+        ImGuiWindow* bodyWin2 = bodyWindow();
+        check(rl2.follow && !rl2.followCleared, "premise: the second surface follows");
+        check(bodyWin2 != nullptr && std::fabs(bodyWin2->Scroll.y - bodyWin2->ScrollMax.y) <= 0.5f,
+              "the follower pins to the bottom fold (scroll " +
+                  std::to_string(bodyWin2 ? bodyWin2->Scroll.y : -1.0f) + " of " +
+                  std::to_string(bodyWin2 ? bodyWin2->ScrollMax.y : -1.0f) + ")");
+        check(rl2.followPins >= 1 && rl2.followPins <= 3,
+              "the pin throttles to a handful of jumps (did " + std::to_string(rl2.followPins) +
+                  ")");
+    }
+    state.backend->renderFrame();
+
+    ImGuiIO& io = ImGui::GetIO();
+    // A horizontal wheel notch scrolls the content sideways and leaves the
+    // follow flag alone; a vertical one is the user taking the view.
+    rl2.followCleared = false;
+    io.AddMousePosEvent(origin.x + 8.0f, origin.y + 8.0f);
+    io.AddMouseWheelEvent(6.0f, 0.0f);
+    state.backend->newFrame();
+    drawSurface2(region60b);
+    check(!rl2.followCleared, "a horizontal wheel notch does not clear follow");
+    state.backend->renderFrame();
+
+    io.AddMouseWheelEvent(0.0f, 1.0f);
+    state.backend->newFrame();
+    drawSurface2(region60b);
+    check(rl2.followCleared, "a vertical wheel notch clears follow");
+    state.backend->renderFrame();
+
+    // The scrollbar's corner square: the press lands in the last
+    // ScrollbarSize columns of the body, which is the strip the surface calls
+    // the scrollbar.
+    rl2.follow = true;
+    rl2.followCleared = false;
+    {
+        ImGuiWindow* bodyWin2 = bodyWindow();
+        check(bodyWin2 != nullptr, "the second body is findable for the press");
+        if (bodyWin2 != nullptr) {
+            io.AddMousePosEvent(bodyWin2->Pos.x + bodyWin2->Size.x - 3.0f,
+                                bodyWin2->Pos.y + bodyWin2->Size.y - 3.0f);
+            io.AddMouseButtonEvent(0, true);
+            state.backend->newFrame();
+            drawSurface2(region60b);
+            check(rl2.followCleared, "a press on the scrollbar's corner square clears follow");
+            state.backend->renderFrame();
+            io.AddMouseButtonEvent(0, false);
+        }
+    }
+
+    // The ultra-narrow guard answers to the narrow plan even in wide mode:
+    // below the leading segments' floor no record row draws at all.
+    const ui::Rect region9 = regionFor(9);
+    const views::RowPlan narrow9 = views::rawRowPlan(rowWOf(region9), m);
+    check(narrow9.msgX > rowWOf(region9), "premise: the floor rung's segments exceed the body");
+    state.backend->newFrame();
+    drawSurface2(region9);
+    check(rl2.drawnRows == 0, "the ultra-narrow body draws no record rows");
+    state.backend->renderFrame();
+
+    // The copy spans only the rows the user can see. Wide mode's horizontal
+    // scrollbar occupies the body's last row, so the viewport a copy covers is
+    // one row shorter than the body: the clipboard must not carry a top line
+    // scrolled off the view, nor a bottom line hidden under the scrollbar.
+    std::deque<model::RawLogRecord> records3;
+    for (int i = 0; i < 40; ++i)
+        records3.push_back(
+            record(model::kRawLogLevelInfo, std::to_string(i) + std::string(80, 'x'), i));
+    model::RawLogRing ring3;
+    ring3.records = &records3;
+    ring3.arrivals = records3.size();
+    views::RawLogState rl3;
+    rl3.open = true;
+    rl3.overlayShape = true;
+    rl3.minLevel = model::kRawLogLevelTrace;
+    const auto drawSurface3 = [&](const ui::Rect& region) {
+        ImGui::SetNextWindowPos(ImVec2(region.x, region.y));
+        ImGui::SetNextWindowSize(ImVec2(region.w, region.h));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("rawlog-frame3", nullptr, kSurfaceFlags);
+        views::renderRawLog(rl3, region, m, ring3);
+        ImGui::End();
+        ImGui::PopStyleVar();
+    };
+
+    const ui::Rect region60c = regionFor(60);
+    float bodyH = -1.0f;
+    bool pinned = false;
+    for (int f = 0; f < 4; ++f) {
+        state.backend->newFrame();
+        drawSurface3(region60c);
+        if (f == 3) {
+            ImGuiWindow* bodyWin3 = bodyWindow();
+            if (bodyWin3 != nullptr) {
+                bodyH = bodyWin3->Size.y;
+                pinned = std::fabs(bodyWin3->Scroll.y - bodyWin3->ScrollMax.y) <= 0.5f;
+            }
+        }
+        state.backend->renderFrame();
+    }
+    check(rl3.wideMode, "premise: the copy scene runs wide");
+    check(pinned, "premise: the copy scene is pinned to the bottom fold");
+    check(bodyH > 0.0f, "premise: the copy scene's body is measurable");
+    const std::size_t fullRows = static_cast<std::size_t>(std::ceil(bodyH / row));
+    const std::size_t visibleRows =
+        static_cast<std::size_t>(std::ceil(std::max(0.0f, bodyH - row) / row));
+    rl3.copiedNow = true;
+    state.backend->newFrame();
+    drawSurface3(region60c);
+    state.backend->renderFrame();
+    check(rl3.windowRows == visibleRows && visibleRows + 1 == fullRows,
+          "the wide copy's viewport is one scrollbar row short of the body (" +
+              std::to_string(rl3.windowRows) + " of " + std::to_string(fullRows) + ")");
+    const std::size_t copiedLines =
+        static_cast<std::size_t>(std::count(rl3.copiedRows.begin(), rl3.copiedRows.end(), '\n'));
+    check(copiedLines == visibleRows, "the clipboard carries exactly the visible rows (carried " +
+                                          std::to_string(copiedLines) + ", visible " +
+                                          std::to_string(visibleRows) + ")");
+    // Each record copies as one line whose message ends in the record's own
+    // number, so the first carried line names the bottom-most record a whole
+    // viewport still shows.
+    const std::size_t firstKept = records3.size() - visibleRows;
+    const std::string firstMessage = std::to_string(firstKept) + std::string(80, 'x');
+    check(!rl3.copiedRows.empty() && rl3.copiedRows.find(firstMessage) != std::string::npos,
+          "the clipboard's top line is the first record still visible (wanted " +
+              std::to_string(firstKept) + ")");
 
     state.backend->shutdown();
     ImGui::DestroyContext();
