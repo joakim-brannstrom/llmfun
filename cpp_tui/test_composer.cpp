@@ -34,8 +34,14 @@
 //  10. the shell. `renderShell()` derives the composer's inputs from the aggregate,
 //      applies a send through the shipped handshake, feeds the grown height back into the
 //      layout, and consumes a starter action's hand-off into the draft;
-//  11. the goldens. Empty/draft/busy at 100x30 and 40x15, each pinning the glyphs and the
-//      painted fills of the composer's cells.
+//  11. the chip row. A dropped path is a Pending chip on the meta row with a
+//      real x per chip: the label is the processing text, then the workarea
+//      path D reports (Done/FailedRaw) or the reason (Failed), an `x` click
+//      removes the chip and queues the id for D's cancel poll, a label wider
+//      than its room is cut with the ellipsis, and a chip that cannot sit
+//      whole is not drawn at all;
+//  12. the goldens. Empty/draft/busy at 100x30 and 40x15, each pinning the glyphs and the
+//      painted fills of the composer's cells, plus the chip row at both sizes.
 //
 // Exit codes: 0 = every check passed; 1 = a check failed; 2 = usage error.
 //
@@ -50,6 +56,7 @@
 
 #include "tui.h"
 
+#include "model/drop_chip.h"
 #include "model/status_chips.h"
 #include "ui/icons.h"
 #include "ui/layout.h"
@@ -307,6 +314,7 @@ struct Fixture {
     int historyPos = -1;
     views::ComposerState state;
     views::ComposerInput input;
+    model::DropChipRow dropRow;
 
     Fixture() {
         input.buffer = &buffer;
@@ -314,6 +322,7 @@ struct Fixture {
         input.historyPos = &historyPos;
         input.draft = &draft;
         input.handoff = &handoff;
+        input.drop = &dropRow;
         input.state = &state;
         input.nowMs = 1000;
     }
@@ -761,12 +770,14 @@ struct Scene {
     bool busy;
     bool offline;
     bool draft;
+    int chips = 0; ///< dropped paths seeded into the chip row (0 = none)
 };
 
 std::vector<Scene> scenes() {
-    return {{"empty", 100, 30, false, false, false}, {"draft", 100, 30, false, false, true},
-            {"busy", 100, 30, true, false, true},    {"empty", 40, 15, false, false, false},
-            {"draft", 40, 15, false, false, true},   {"busy", 40, 15, true, false, true}};
+    return {{"empty", 100, 30, false, false, false},    {"draft", 100, 30, false, false, true},
+            {"busy", 100, 30, true, false, true},       {"empty", 40, 15, false, false, false},
+            {"draft", 40, 15, false, false, true},      {"busy", 40, 15, true, false, true},
+            {"chips", 100, 30, false, false, false, 2}, {"chips", 40, 15, false, false, false, 3}};
 }
 
 /// Fill a fresh composer scene into `fixture`.
@@ -782,6 +793,7 @@ void sceneFixture(const Scene& scene, Fixture& fixture) {
     fixture.history.clear();
     fixture.historyPos = -1;
     fixture.state = views::ComposerState{};
+    fixture.dropRow = model::DropChipRow{};
     fixture.resetInput();
     fixture.input.nowMs = 1000;
     if (scene.draft)
@@ -789,6 +801,20 @@ void sceneFixture(const Scene& scene, Fixture& fixture) {
     if (scene.busy)
         fixture.input.busy = true;
     fixture.input.offline = scene.offline;
+    // The seeded row is what D's pipeline would have left there: drops queued,
+    // one reported back attached, one reported back failed.
+    if (scene.chips >= 1)
+        model::appendDroppedPath(fixture.dropRow, "/tmp/a.md");
+    if (scene.chips >= 2) {
+        const std::int64_t id = model::appendDroppedPath(fixture.dropRow, "/tmp/deep/nested/b.md");
+        model::setChipStatus(fixture.dropRow, id, model::DropChipState::Done, "dropped/b.md",
+                             "dropped/b.md");
+    }
+    if (scene.chips >= 3) {
+        const std::int64_t id = model::appendDroppedPath(fixture.dropRow, "/tmp/c.md");
+        model::setChipStatus(fixture.dropRow, id, model::DropChipState::Failed, "could not copy",
+                             "");
+    }
 }
 
 void checkView() {
@@ -1780,7 +1806,123 @@ void checkClipboardPaste() {
     io.SetClipboardTextFn = nullptr;
 }
 
-// 11. The goldens
+// 11. The chip row
+
+void checkChips() {
+    const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
+    // The x affordance's unicode glyph (LLMFUN_ASCII=0 pins the unicode set): the
+    // composer draws no other mark like it, so the grid can find it by text.
+    const char* xMark = "\xE2\x9C\x95";
+    const char* cut = "\xE2\x80\xA6"; // the ellipsis the cut label ends with
+
+    // No drops, no row: the meta row is exactly the no-attachments frame.
+    {
+        g_w = 100;
+        g_h = 30;
+        Fixture fixture;
+        ui::Rect rect = composerRect(g_w, g_h, m);
+        const auto body = bodyFor(fixture, rect);
+        frame(body);
+        rect = composerRect(g_w, g_h, m, fixture.state.height);
+        const Grid grid = frame(body);
+        check(grid.findText(xMark).first < 0, "no drops, no x affordance");
+        check(!grid.hasText("processing"), "no drops, no chip");
+    }
+
+    // A pending chip: the processing label, a real x, and no row state changed
+    // by being drawn.
+    {
+        g_w = 100;
+        g_h = 30;
+        Fixture fixture;
+        model::appendDroppedPath(fixture.dropRow, "/tmp/a.md");
+        ui::Rect rect = composerRect(g_w, g_h, m);
+        const auto body = bodyFor(fixture, rect);
+        frame(body);
+        rect = composerRect(g_w, g_h, m, fixture.state.height);
+        const Grid grid = frame(body);
+        check(grid.hasText("processing a.md..."), "a pending chip shows its processing label");
+        check(grid.findText(xMark).first >= 0, "the chip carries an x affordance");
+        check(model::chipCount(fixture.dropRow) == 1, "drawing a chip changes no row state");
+    }
+
+    // The states' labels: the workarea path once D reports one, the reason when
+    // nothing attached, and never the full drop path (that is the Log tab's).
+    {
+        g_w = 100;
+        g_h = 30;
+        Fixture fixture;
+        model::appendDroppedPath(fixture.dropRow, "/tmp/a.md");
+        const std::int64_t doneId =
+            model::appendDroppedPath(fixture.dropRow, "/tmp/deep/nested/b.md");
+        model::setChipStatus(fixture.dropRow, doneId, model::DropChipState::Done, "dropped/b.md",
+                             "dropped/b.md");
+        const std::int64_t failedId = model::appendDroppedPath(fixture.dropRow, "/tmp/c.md");
+        model::setChipStatus(fixture.dropRow, failedId, model::DropChipState::Failed,
+                             "could not copy", "");
+        ui::Rect rect = composerRect(g_w, g_h, m);
+        const auto body = bodyFor(fixture, rect);
+        frame(body);
+        rect = composerRect(g_w, g_h, m, fixture.state.height);
+        const Grid grid = frame(body);
+        check(grid.hasText("dropped/b.md"), "a done chip shows the workarea path");
+        check(grid.hasText("could not copy"), "a failed chip shows the short reason");
+        check(!grid.hasText("/tmp/deep/nested/b.md") && !grid.hasText("/tmp/c.md"),
+              "no chip shows the full drop path");
+    }
+
+    // An x click removes its chip at once and queues the id for D's cancel poll.
+    {
+        g_w = 100;
+        g_h = 30;
+        Fixture fixture;
+        const std::int64_t first = model::appendDroppedPath(fixture.dropRow, "/tmp/a.md");
+        const std::int64_t second = model::appendDroppedPath(fixture.dropRow, "/tmp/b.md");
+        ui::Rect rect = composerRect(g_w, g_h, m);
+        const auto body = bodyFor(fixture, rect);
+        frame(body);
+        rect = composerRect(g_w, g_h, m, fixture.state.height);
+        const Grid pre = frame(body);
+        const auto markAt = pre.findText(xMark);
+        check(markAt.first >= 0, "two chips carry two x affordances");
+        ClickAnswers answers;
+        clickAt(static_cast<float>(markAt.first + 1), static_cast<float>(markAt.second),
+                observing(fixture.state, answers, body));
+        check(model::chipCount(fixture.dropRow) == 1, "the x click removes its chip at once");
+        const model::DropChip* kept = model::chipAt(fixture.dropRow, 0);
+        check(kept != nullptr && kept->id == second,
+              "the removal takes the clicked chip, its neighbour stays");
+        check(model::popChipCancel(fixture.dropRow) == first,
+              "the removed id queues for D's cancel poll");
+        check(model::popChipCancel(fixture.dropRow) == 0, "one click queues one cancel");
+        check(!answers.submit, "an x click is not a send");
+    }
+
+    // A narrow composer: the label is cut with the ellipsis, and a chip that
+    // cannot sit whole is not drawn at all - the row loses its tail, it never
+    // paints half of one.
+    {
+        g_w = 40;
+        g_h = 15;
+        Fixture fixture;
+        model::appendDroppedPath(fixture.dropRow, "/tmp/a-very-long-drop-path.md");
+        model::appendDroppedPath(fixture.dropRow, "/tmp/b.md");
+        model::appendDroppedPath(fixture.dropRow, "/tmp/c.md");
+        ui::Rect rect = composerRect(g_w, g_h, m);
+        const auto body = bodyFor(fixture, rect);
+        frame(body);
+        rect = composerRect(g_w, g_h, m, fixture.state.height);
+        const Grid grid = frame(body);
+        check(grid.hasText("processing"), "the first chip draws in creation order");
+        check(grid.hasText(cut), "a wide label is cut with the ellipsis");
+        check(!grid.hasText("processing a-very-long-drop-path.md"),
+              "the cut label is not the whole label");
+        check(grid.hasText("Send"), "the chip row never eats the action");
+        check(model::chipCount(fixture.dropRow) == 3, "an undrawn chip is not a removed chip");
+    }
+}
+
+// 12. The goldens
 
 std::string goldenText(const Scene& scene) {
     const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
@@ -1932,6 +2074,7 @@ int main(int argc, char** argv) {
     checkInteraction();
     checkShell();
     checkClipboardPaste();
+    checkChips();
     checkGoldens(update);
 
     ImTui_ImplText_Shutdown();

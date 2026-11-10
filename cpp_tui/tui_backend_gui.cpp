@@ -1,6 +1,7 @@
 /// GUI backend behind the Backend seam: GLFW window + OpenGL3 renderer.
 /// ImTui is bypassed entirely in GUI mode: stock Dear ImGui renders through
 /// the vendored GLFW platform backend and OpenGL3 renderer backend.
+#include "model/drop_chip.h"
 #include "tui_backend.h"
 #include "tui_chrome.h"
 #include "ui/tokens.h"
@@ -68,6 +69,38 @@ GLFWwindow* g_titleWindow = nullptr;
 void applyWindowTitle(const std::string& title) {
     if (g_titleWindow != nullptr)
         glfwSetWindowTitle(g_titleWindow, title.c_str());
+}
+
+/// The chip row the drop callback appends to: the state the row's owner
+/// published for this backend's window (`setDropRowTarget()`), cleared at
+/// teardown so no drop can land in a row that is going away. The callback runs
+/// on the frame thread, inside the event pump, which is also the only writer
+/// the row has, so the pointer needs no lock.
+model::DropChipRow* g_dropRow = nullptr;
+
+} // namespace
+
+void setDropRowTarget(model::DropChipRow* row) { g_dropRow = row; }
+
+void handleDropEvent(int count, const char** paths) {
+    if (g_dropRow == nullptr || count <= 0 || paths == nullptr)
+        return;
+    std::vector<std::string> copied;
+    copied.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        if (paths[i] != nullptr) {
+            copied.emplace_back(paths[i]);
+        }
+    }
+    for (const std::string& path : copied)
+        model::appendDroppedPath(*g_dropRow, path);
+}
+
+namespace {
+
+void dropCallbackTrampoline(GLFWwindow* window, int count, const char** paths) {
+    (void)window;
+    handleDropEvent(count, paths);
 }
 
 // Window geometry (defaults and the resize floor) lives in tui_chrome.h, shared
@@ -401,6 +434,7 @@ public:
         // points at a destroyed window.
         g_titleWindow = window;
         setWindowTitleSink(&applyWindowTitle);
+        glfwSetDropCallback(window, dropCallbackTrampoline);
 
         return true;
     }
@@ -451,10 +485,10 @@ public:
         }
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
-        // The sink must not outlive the window: a title arriving after the destroy would
-        // write through a dangling pointer.
         setWindowTitleSink(nullptr);
         g_titleWindow = nullptr;
+        glfwSetDropCallback(window, nullptr);
+        g_dropRow = nullptr;
         glfwDestroyWindow(window);
         window = nullptr;
         glfwTerminate();

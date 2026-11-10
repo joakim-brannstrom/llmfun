@@ -284,6 +284,12 @@ int tuiInit(TuiState* state, TuiBackendMode mode) {
     state->inner->backend = std::move(backend);
     attachedState = state;
 
+    // GUI only: the window's drop callback appends to the state's chip row.
+    // Guard on the attached kind, not the requested mode: Auto can fall back
+    // to the ncurses backend, which has no window to receive drops.
+    if (state->inner->backend->kind() == ::llmfun::tui::BackendKind::Gui)
+        ::llmfun::tui::setDropRowTarget(&state->inner->ui.drop);
+
     // Theme AFTER the backend inits: ImTui_ImplText_Init() resets several
     // style colors (notably Colors[ImGuiCol_NavHighlight] = (0,0,0,0), which
     // aliases ImGuiCol_NavCursor in ImGui 1.91.4+), so applying the theme
@@ -863,6 +869,21 @@ static_assert(::llmfun::tui::kSessionFlagRunning == TuiSessionFlag_Running,
 static_assert(::llmfun::tui::kSessionFlagPinned == TuiSessionFlag_Pinned,
               "C/C++ session row flag mismatch (Pinned)");
 
+/* The chip statuses: the same append-only pair of lists as the session
+ * actions, and the same reason the two must stay in sync (the static_cast
+ * in tuiSetChipStatus would silently mis-map a renumbered value).
+ */
+static_assert(static_cast<int>(::llmfun::tui::model::DropChipState::Pending) ==
+                  TuiChipStatus_Pending,
+              "C/C++ chip status enum mismatch (Pending)");
+static_assert(static_cast<int>(::llmfun::tui::model::DropChipState::Done) == TuiChipStatus_Done,
+              "C/C++ chip status enum mismatch (Done)");
+static_assert(static_cast<int>(::llmfun::tui::model::DropChipState::FailedRaw) ==
+                  TuiChipStatus_FailedRaw,
+              "C/C++ chip status enum mismatch (FailedRaw)");
+static_assert(static_cast<int>(::llmfun::tui::model::DropChipState::Failed) == TuiChipStatus_Failed,
+              "C/C++ chip status enum mismatch (Failed)");
+
 /* Session sidebar */
 
 void tuiSetSessionList(TuiState* state, const SessionItem* items, size_t count) {
@@ -921,6 +942,55 @@ SessionAction tuiGetSessionAction(TuiState* state) {
     if (!a.title.empty())
         out.title = String_NewBuf(a.title.data(), a.title.size());
     return out;
+}
+
+TuiDroppedPath tuiGetDroppedPath(TuiState* state) {
+    if (!state || !state->inner)
+        return {0, {nullptr, 0}};
+    std::int64_t chipId = 0;
+    std::string path;
+    if (!::llmfun::tui::tuiPopDroppedPath(*state->inner, chipId, path))
+        return {0, {nullptr, 0}};
+    return {chipId, String_NewBuf(path.data(), path.size())};
+}
+
+void tuiSetChipStatus(TuiState* state, int64_t chipId, int32_t status, String label) {
+    if (!state || !state->inner)
+        return;
+    const std::string text(label.data ? label.data : "", label.data ? label.len : 0);
+    ::llmfun::tui::tuiSetChipStatus(*state->inner, chipId, status, text);
+}
+
+size_t tuiGetChipCount(TuiState* state) {
+    if (!state || !state->inner)
+        return 0;
+    return ::llmfun::tui::tuiGetChipCount(*state->inner);
+}
+
+TuiChipParam tuiGetChipAt(TuiState* state, size_t index) {
+    if (!state || !state->inner)
+        return {0, TuiChipStatus_Pending, {nullptr, 0}};
+    const ::llmfun::tui::model::DropChip* chip = ::llmfun::tui::tuiGetChipAt(*state->inner, index);
+    if (chip == nullptr)
+        return {0, TuiChipStatus_Pending, {nullptr, 0}};
+    TuiChipParam out{};
+    out.chipId = chip->id;
+    out.status = static_cast<int32_t>(chip->state);
+    if (!chip->workareaPath.empty())
+        out.path = String_NewBuf(chip->workareaPath.data(), chip->workareaPath.size());
+    return out;
+}
+
+void tuiClearChipRow(TuiState* state) {
+    if (!state || !state->inner)
+        return;
+    ::llmfun::tui::tuiClearChipRow(*state->inner);
+}
+
+int64_t tuiGetChipCancel(TuiState* state) {
+    if (!state || !state->inner)
+        return 0;
+    return ::llmfun::tui::tuiPopChipCancel(*state->inner);
 }
 
 #ifdef __cplusplus

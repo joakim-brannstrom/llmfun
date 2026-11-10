@@ -193,8 +193,8 @@ int main(int argc, char** argv) {
             // TODAY / YESTERDAY / PREVIOUS 7 DAYS / OLDER boundaries. One clock read
             // for the whole fixture, so the spacing is exactly five hours.
             const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::system_clock::now().time_since_epoch())
-                                        .count();
+                                           std::chrono::system_clock::now().time_since_epoch())
+                                           .count();
             for (int i = 0; i < seedSessions; ++i) {
                 const auto k = static_cast<std::size_t>(i);
                 wide.push_back(SessionItem{makeStr(ids[k].c_str()), makeStr(titles[k].c_str()),

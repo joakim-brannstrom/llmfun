@@ -50,6 +50,7 @@
 // header resolving its own neighbours - the same reason `../store/thread_store.h`
 // names `../model/block.h`). A `"../"` include is resolved relative to *this* file
 // first, so it works with and without that path.
+#include "../model/drop_chip.h"
 #include "../model/settings.h"
 
 // Forward declarations, not includes (the palette header's rule): this header
@@ -397,6 +398,9 @@ struct ComposerInput {
     /// a direct write would land in the buffer the active field is about to overwrite
     /// with its own edit state.
     std::string* handoff = nullptr;
+
+    /// The chip row the meta row draws: one chip per dropped path
+    model::DropChipRow* drop = nullptr;
 
     // the run
     /// A run is active: the action reads `Stop`.

@@ -803,4 +803,38 @@ void tuiResetSubmit(TuiState& state);
 /// tuiGetSubmitQuery() returns the last submitted query (read-only snapshot).
 std::string tuiGetSubmitQuery(const TuiState& state);
 
+/// The drop-chip seams the C API wraps, over `ui.drop` (the composer's chip row
+/// and the two queues D drains). Frame-thread only by the model's convention -
+/// the drop callback and the row's X clicks are the other writers.
+///
+/// The pop is the paired form: the path rides with the chip id its Pending chip
+/// took, which is the id D reports back through tuiSetChipStatus.
+bool tuiPopDroppedPath(TuiState& state, std::int64_t& chipId, std::string& path);
+
+/// Report one chip's outcome by id. `status` is an ABI ordinal: one outside
+/// the four DropChipState values - or an unknown/removed id - is a silent
+/// no-op (the model's bool does not cross the seam; a bad ordinal cannot
+/// name a state); the label is copied as-is. The workarea path is derived
+/// here, from the state: on Done and FailedRaw the label *is* the
+/// workarea-relative path, on Pending and Failed there is none - D never
+/// echoes the raw paths back except as these labels.
+void tuiSetChipStatus(TuiState& state, std::int64_t chipId, std::int32_t status,
+                      const std::string& label);
+void tuiSetChipStatus(TuiState& state, std::int64_t chipId, std::int32_t status,
+                      const std::string& label);
+
+/// How many chips the row shows.
+std::size_t tuiGetChipCount(const TuiState& state);
+
+/// The chip at `index`, nullptr past the end. The pointer is into the row's
+/// vector: any append, removal or update invalidates it, so a snapshot has to
+/// be drained through by-value answers (the wrapper copies the fields).
+const model::DropChip* tuiGetChipAt(const TuiState& state, std::size_t index);
+
+/// Empty the chip row (the Send handshake's clear). The queues keep draining.
+void tuiClearChipRow(TuiState& state);
+
+/// Pop one queued cancel-click id, 0 when the queue is empty.
+std::int64_t tuiPopChipCancel(TuiState& state);
+
 } // namespace llmfun::tui

@@ -216,6 +216,16 @@ nudges:
     intervalSecs: 900  # seconds between feedback warnings
     minToolCalls: 50   # tool calls between feedback warnings
 
+dragDrop:
+  destination: dropped
+  # Backstop only: a converter killed after this long
+  conversionTimeout: "10 minutes"
+  converters:
+    - extensions: [".docx", ".doc"]
+      command: ["pandoc", "-f", "docx", "-t", "gfm", "@{llmfun_src}", "-o", "@{llmfun_dst}"]
+    - extensions: [".pdf"]
+      command: ["pdftotext", "@{llmfun_src}", "@{llmfun_dst}"]
+
 # Per-model override (inside a codeModels: entry) REPLACES the whole policy
 # for that model (wholesale): restate every field the model should differ
 # in — fields not restated fall back to struct defaults, NOT to the global

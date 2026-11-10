@@ -452,6 +452,7 @@ views::ComposerInput composerInputFor(TuiState& state, std::int64_t nowMs) {
     in.historyPos = &state.userQuery.historyPos;
     in.draft = &state.userQuery.draftBuf;
     in.handoff = &state.userQuery.newInputBufString;
+    in.drop = &state.ui.drop;
     in.busy = !state.readyStatus;
     in.stopping = state.cancelRequested;
     in.offline = state.offline;

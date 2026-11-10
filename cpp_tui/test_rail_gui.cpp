@@ -229,8 +229,8 @@ int main(int argc, char** argv) {
     llmfun::tui::TuiState state;
     state.readyStatus = true;
     const std::int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::system_clock::now().time_since_epoch())
-                                .count();
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
     seedSessions(state, nowMs);
 
     // The profile the workbench loads in `tuiInit`; this harness stands in
