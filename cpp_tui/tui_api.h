@@ -41,7 +41,7 @@ extern "C" {
 /* TUI_API_VERSION - API generation marker. Documentation only: no runtime
  * behavior depends on it.
  */
-#define TUI_API_VERSION 9
+#define TUI_API_VERSION 10
 
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
@@ -262,6 +262,49 @@ typedef struct SessionAction {
  * whole state is torn down via tuiDestroyState().
  */
 typedef struct TuiState TuiState;
+
+/* TuiChipStatus - Life of one dropped attachment (ordinals are ABI: the
+ * D-side worker switches on them). Append-only: existing values must never be
+ * renumbered or reused.
+ */
+typedef enum TuiChipStatus {
+    TuiChipStatus_Pending = 0, /* dropped, D has not reported back yet */
+    TuiChipStatus_Done = 1, /* the workarea copy exists; the label is its workarea-relative path */
+    TuiChipStatus_FailedRaw = 2, /* conversion failed, the raw copy was attached; the label is its
+                                    workarea-relative path */
+    TuiChipStatus_Failed = 3     /* nothing was attached; the label is the short reason */
+} TuiChipStatus;
+
+/* TuiDroppedPath - One queued drop, consumed by tuiGetDroppedPath.
+ *
+ * Ownership: `path` is owned (malloc'd) and MUST be freed with String_Free()
+ * when no longer needed. An empty path is returned as {NULL, 0}.
+ *
+ * Fields:
+ *   chipId - the id of the chip the drop created (0 = none, never a real id);
+ *            report the chip back through tuiSetChipStatus with this id.
+ *   path   - the raw OS path, verbatim. Never echoed into a message as-is.
+ */
+typedef struct TuiDroppedPath {
+    int64_t chipId;
+    String path;
+} TuiDroppedPath;
+
+/* TuiChipParam - One chip of the row snapshot, returned by tuiGetChipAt.
+ *
+ * Ownership: `path` is owned (malloc'd) and MUST be freed with String_Free()
+ * when no longer needed. An empty path is returned as {NULL, 0}.
+ *
+ * Fields:
+ *   chipId - the chip's id (report or cancel by it; 0 = none).
+ *   status - a TuiChipStatus value.
+ *   path   - the workarea-relative path on Done/FailedRaw; empty otherwise.
+ */
+typedef struct TuiChipParam {
+    int64_t chipId;
+    int32_t status; /* TuiChipStatus value */
+    String path;
+} TuiChipParam;
 
 /* Retrieve the last error message as an owned String.
  * The error is consumed (cleared) on the first call — this is intentional
@@ -847,6 +890,82 @@ int tuiIsSessionActionReady(TuiState* state);
  * state is NULL.
  */
 SessionAction tuiGetSessionAction(TuiState* state);
+
+/* Drop chips: the attachments a window drop queued and the row the composer
+ * draws. One pop-one getter per queue and one by-id setter, all frame-thread
+ * only (the composer's own click handling is the only other writer).
+ *
+ * The chip ids: append-only, monotonic, never reused; 0 is "none" and never a
+ * real id. A report for an unknown or removed id is a silent no-op, so a late
+ * reply can never resurrect a chip the user cancelled.
+ */
+
+/* Pop one queued dropped path.
+ *
+ * Consume-on-read: each call returns exactly one drop, or the {0, {NULL, 0}}
+ * sentinel when the queue is empty. A multi-path drop arrives as several
+ * consecutive pops, one per frame poll, never batched.
+ *
+ * `chipId` is the id of the Pending chip the drop created: report the chip
+ * back through tuiSetChipStatus with this id.
+ *
+ * Ownership: `path` is owned (malloc'd) and MUST be freed with String_Free().
+ * An empty queue answers {0, {NULL, 0}}.
+ *
+ * Null-safe: returns the sentinel if state is NULL.
+ */
+TuiDroppedPath tuiGetDroppedPath(TuiState* state);
+
+/* Report one chip's outcome by id.
+ *
+ * `label` is copied during the call (inbound non-owning, the
+ * tuiSetSessionList precedent), so the caller's buffer may be freed or
+ * reused immediately after this call returns.
+ *
+ * The label carries the state's text: the workarea-relative path on
+ * Done and FailedRaw, the short reason on Failed. An unknown or removed
+ * chipId is a silent no-op; a NULL-safe no-op if state is NULL.
+ *
+ * Null-safe: no-op if state is NULL.
+ */
+void tuiSetChipStatus(TuiState* state, int64_t chipId, int32_t status, String label);
+
+/* How many chips the row currently shows (the Send-time snapshot's count).
+ *
+ * Null-safe: returns 0 if state is NULL.
+ */
+size_t tuiGetChipCount(TuiState* state);
+
+/* The chip at `index` of the row snapshot (creation order).
+ *
+ * An index past the end answers the {0, TuiChipStatus_Pending, {NULL, 0}}
+ * sentinel. The path is the chip's workarea-relative path on Done and
+ * FailedRaw; {NULL, 0} otherwise.
+ *
+ * Ownership: `path` is owned (malloc'd) and MUST be freed with String_Free().
+ *
+ * Null-safe: returns the sentinel if state is NULL.
+ */
+TuiChipParam tuiGetChipAt(TuiState* state, size_t index);
+
+/* Empty the chip row: the Send handshake's clear, after the snapshot.
+ *
+ * The queues are untouched: a drop or a cancel that arrived between the
+ * snapshot and this clear still drains afterwards.
+ *
+ * Null-safe: no-op if state is NULL.
+ */
+void tuiClearChipRow(TuiState* state);
+
+/* Pop one queued cancel click (a chip the user X-removed).
+ *
+ * Consume-on-read: each call returns exactly one id, oldest first, or 0 when
+ * the queue is empty. Forward it to the worker as stop(chipId); an unknown id
+ * is a no-op on the D side.
+ *
+ * Null-safe: returns 0 if state is NULL.
+ */
+int64_t tuiGetChipCancel(TuiState* state);
 
 /* Run cancellation.
  *

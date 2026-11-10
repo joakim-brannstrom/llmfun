@@ -20,6 +20,7 @@ import llm.app_config : UserConfig, userToLlmConfig, createRag;
 import llm.chat;
 import llm.config : RagConfig;
 import llm.config;
+import llm.dragdrop : DropOwner, DropReport, DropWorker, makeDropWorkerConfig;
 import llm.metric.monitor : MetricMonitor;
 import llm.query;
 import llm.rag.dialogue_index : DialogueIndex;
@@ -677,6 +678,19 @@ struct AgentApp {
         uiMsg.sessionList(items);
     }
 
+    /** Relay one drop-chip report to the UI thread.
+     *
+     * The DropWorker sends these from its own actor thread; the relay goes
+     * through the same UiMessenger channel as every other agent -> UI
+     * message. Guarded by `uiMsg.isActive()` so one-shot mode (-p) never
+     * sends (no worker exists there either way).
+     */
+    package void onDropReport(DropReport r) {
+        if (!uiMsg.isActive())
+            return;
+        uiMsg.dropChipReport(UiDropReport(r.chipId, r.state, r.finalPath, r.output));
+    }
+
     /** Sidebar select handler (TUIListener.sessionSelect): clear pending
      * delete, validate the untrusted UI id, then switch. Store failures
      * degrade to a chat message - the actor keeps processing.
@@ -1051,7 +1065,7 @@ package size_t displayableCount(Chat.MessageT[] msgs, LlmConfig conf) {
     return n;
 }
 
-class AppAgentActor {
+class AppAgentActor : DropOwner {
     import my.actor;
     import llm.tui;
 
@@ -1084,6 +1098,12 @@ class AppAgentActor {
 
     void onSpawn(ActorRef self) {
         self_ = self;
+    }
+
+    // DropWorker -> owner edge: the chip's outcome is relayed to the UI
+    // thread through the messenger (the worker never touches the sink).
+    void onDropReport(DropReport r) {
+        app.onDropReport(r);
     }
 
     void start() {
@@ -1156,13 +1176,17 @@ class AppAgentActor {
 
         sys.spawn!MemoryTierActor(app.llmConf, app.rag);
 
+        auto dropWorker = sys.spawn!DropWorker(makeDropWorkerConfig(app.llmConf.workArea.AbsolutePath,
+                app.llmConf.dragDrop), TypedAddress!DropOwner(self_.address().lock()));
+
         // threads, like this supervisor, may block on a full mailbox.
         // Config.detached: the TUI actor must own one FIXED thread. Its GLFW
         // window/GL context are thread-affine. The backend mode (where to draw) is the only
         // choice left: the workbench is the one renderer (task 41).
         tui_ = sys.spawnBounded!(Config.detached, TextUserInterfaceActor)(1000,
                 TypedAddress!TUIListener(self_.address().lock()), app.llmConf.uiInitFile, app.llmConf.tui.maxWidth,
-                resolveTuiBackendMode(app.conf_), app.conf_.debugUi, app.llmConf.tui.idleParkMs);
+                resolveTuiBackendMode(app.conf_), app.conf_.debugUi,
+                app.llmConf.tui.idleParkMs, dropWorker);
         app.uiMsg = new UiMessenger(new TuiChannelSink(tui_));
         monitor(self_.address(), tui_);
         app.uiMsg.initHistory(app.agent_.getUserQueries.map!(a => a.content).array.idup);

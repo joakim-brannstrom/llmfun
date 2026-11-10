@@ -699,6 +699,59 @@ void tuiResetSubmit(TuiState& state) {
 
 std::string tuiGetSubmitQuery(const TuiState& state) { return state.userQuery.submitQuery; }
 
+// The drop-chip seams (the composer's row and D's two queues). All of them run
+// on the frame thread, which is the model's whole locking story: the drop
+// callback and the row's X clicks are the only other writers.
+
+bool tuiPopDroppedPath(TuiState& state, std::int64_t& chipId, std::string& path) {
+    model::PendingDrop popped;
+    if (!model::popDroppedPath(state.ui.drop, popped))
+        return false;
+    chipId = popped.chipId;
+    path = std::move(popped.path);
+    return true;
+}
+
+void tuiSetChipStatus(TuiState& state, std::int64_t chipId, std::int32_t status,
+                      const std::string& label) {
+    // An ordinal outside the vocabulary is not a state, so the update answers
+    // false and touches nothing: the ABI's four values are the only ones that
+    // can name a chip.
+    model::DropChipState stateValue;
+    switch (status) {
+    case 0:
+        stateValue = model::DropChipState::Pending;
+        break;
+    case 1:
+        stateValue = model::DropChipState::Done;
+        break;
+    case 2:
+        stateValue = model::DropChipState::FailedRaw;
+        break;
+    case 3:
+        stateValue = model::DropChipState::Failed;
+        break;
+    default:
+        return;
+    }
+    // The label is the path D reports on Done and FailedRaw (the workarea-
+    // relative path rides as the label), and only a reason on the rest.
+    const bool attached =
+        stateValue == model::DropChipState::Done || stateValue == model::DropChipState::FailedRaw;
+    model::setChipStatus(state.ui.drop, chipId, stateValue, label,
+                         attached ? label : std::string());
+}
+
+std::size_t tuiGetChipCount(const TuiState& state) { return model::chipCount(state.ui.drop); }
+
+const model::DropChip* tuiGetChipAt(const TuiState& state, std::size_t index) {
+    return model::chipAt(state.ui.drop, index);
+}
+
+void tuiClearChipRow(TuiState& state) { model::clearChipRow(state.ui.drop); }
+
+std::int64_t tuiPopChipCancel(TuiState& state) { return model::popChipCancel(state.ui.drop); }
+
 void applyGuiChromeMetrics() {
     // Sizes only: the colours stay applyUiTheme()'s (it runs after the backend
     // init and never touches a metric, so the two do not fight).
