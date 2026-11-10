@@ -21,7 +21,7 @@
 //
 // Also checks that the C-API clear functions are no-ops on a NULL state,
 // that outputLineNextId is NOT reset (monotonic per-message id, uniqueness
-// only), TUI_API_VERSION is pinned at the current generation (9), and the
+// only), TUI_API_VERSION is pinned at the current generation (10), and the
 // auto-scroll flag is unaffected by the clear.
 //
 // Exit codes: 0 = all scenarios pass; 1 = first assertion failure.
@@ -159,8 +159,8 @@ void scenario4_scrollAndApiVersion() {
     expect(state.autoScroll == true, "auto-scroll on stays on across a clear");
 
     // Documentation-only marker: the clear contract must not bump it.
-    // 9 is the current generation (the Raw Log floor getter).
-    static_assert(TUI_API_VERSION == 9, "TUI_API_VERSION must stay at the current v9 generation");
+    // 10 is the current generation (the drop-chip seams).
+    static_assert(TUI_API_VERSION == 10, "TUI_API_VERSION must stay at the current v10 generation");
 }
 
 // Scenario 5: C-API null-safety preserved.

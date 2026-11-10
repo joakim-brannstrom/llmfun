@@ -1218,6 +1218,9 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
         const ui::ButtonSpec nextSpec{"Next", true, false, false};
         bool prevPressed = false;
         bool nextPressed = false;
+        // The history cluster's left edge (the action's left edge when the
+        // history is not drawn): the boundary the chip row stops at.
+        float historyLeft = actionX;
         if (m.textGrid && !in.history->empty() && hasMeta) {
             const float prevW = ui::measureButton(m, prevSpec).w;
             const float nextW = ui::measureButton(m, nextSpec).w;
@@ -1226,6 +1229,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
             // Only when the row can hold them beside the action: a history button that
             // eats the action would trade a control for a hint.
             if (prevX >= metaRow.x + m.pad1) {
+                historyLeft = prevX;
                 ui::Rect prevRect{prevX, metaRow.y, prevW, metaRow.h, m.textGrid};
                 ui::Rect nextRect{nextX, metaRow.y, nextW, metaRow.h, m.textGrid};
                 ui::button(prevSpec, m, prevRect);
@@ -1233,6 +1237,74 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
                 ui::button(nextSpec, m, nextRect);
                 nextPressed = ui::buttonPressed(nextSpec, m, nextRect);
             }
+        }
+
+        // The dropped attachments, left of the history cluster and the action:
+        // one label chip plus one real `x` per dropped path, in creation order,
+        // growing right from the row's left edge. The workarea path is the label
+        // once D reports one - the full drop path shows on the Log tab, not
+        // here - and the ink is the state: amber while the job runs, green when
+        // it attached, quiet when the raw copy landed instead, red when nothing
+        // did. A label wider than its room is cut with the profile's ellipsis
+        // (chip's own rule), and a chip that cannot hold the marker whole is
+        // not drawn at all: the row loses its tail rather than painting half
+        // of one (the activity filter's rule).
+        if (in.drop != nullptr && model::chipCount(*in.drop) > 0) {
+            const char* xMark = ui::icon(ui::Icon::Error, glyphSetFor(m));
+            const ui::ButtonSpec xSpec{xMark, true, false, false};
+            const float xW = ui::measureButton(m, xSpec).w;
+            const float minLabelW =
+                ui::measureChip(m, ui::icon(ui::Icon::Ellipsis, glyphSetFor(m))).w;
+            const float chipsRight = historyLeft - m.pad1;
+            std::vector<std::int64_t> cancels;
+            float chipX = metaRow.x + m.pad1;
+            for (std::size_t i = 0; i < model::chipCount(*in.drop); ++i) {
+                const model::DropChip* dropped = model::chipAt(*in.drop, i);
+                if (dropped == nullptr)
+                    break;
+                const std::string& label =
+                    dropped->workareaPath.empty() ? dropped->label : dropped->workareaPath;
+                const float cap = chipsRight - chipX - xW;
+                if (cap < minLabelW)
+                    break; // in creation order, so nothing after this fits either
+                const float labelW = std::min(ui::measureChip(m, label).w, cap);
+                ColorToken ink = ColorToken::stateWarn;
+                if (dropped->state == model::DropChipState::Done)
+                    ink = ColorToken::stateOk;
+                else if (dropped->state == model::DropChipState::FailedRaw)
+                    ink = ColorToken::textMid;
+                else if (dropped->state == model::DropChipState::Failed)
+                    ink = ColorToken::stateDanger;
+                ui::chip(m, ui::Rect{chipX, metaRow.y, labelW, metaRow.h, m.textGrid}, label, ink,
+                         ColorToken::raised);
+                const ui::Rect xRect{chipX + labelW, metaRow.y, xW, metaRow.h, m.textGrid};
+                ui::button(xSpec, m, xRect);
+                if (ui::buttonPressed(xSpec, m, xRect))
+                    cancels.push_back(dropped->id);
+                // The full drop path on hover: the label is the workarea path
+                // once D reports one, and the original path is what tells the
+                // user which file the chip carries. The hit box rides the label
+                // and is submitted after the x, whose item would otherwise own
+                // the hover; on the grid the Log tab carries the paths, so the
+                // box is a pixel-profile affordance only. The hit box is not a
+                // press affordance: a click on it blurs the draft field like any
+                // click outside the field (InputTextEx releases focus on any
+                // click while active), accepted behavior.
+                if (!m.textGrid && ImGui::GetCurrentContext() != nullptr) {
+                    const ImVec2 extent = ImGui::GetCurrentWindow()->DC.CursorMaxPos;
+                    ImGui::SetCursorScreenPos(ImVec2(chipX, metaRow.y));
+                    ImGui::InvisibleButton(("##drop_chip_" + std::to_string(dropped->id)).c_str(),
+                                           ImVec2(labelW, metaRow.h));
+                    ui::tooltip(dropped->fullPath);
+                    ImGui::GetCurrentWindow()->DC.CursorMaxPos = extent;
+                }
+                chipX += labelW + xW;
+            }
+            // The removals run after the row walk: a removal shifts the chips
+            // left, and removing under the walk would hand the next chip a
+            // moved rect and skip its neighbour.
+            for (const std::int64_t id : cancels)
+                model::removeChip(*in.drop, id);
         }
 
         // A button press is the user's whole gesture, so it does not need the caret gate

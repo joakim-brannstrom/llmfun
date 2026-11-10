@@ -22,6 +22,7 @@
 
 #include "activity.h"
 #include "block.h"
+#include "drop_chip.h"
 #include "session_rows.h"
 #include "settings.h"
 #include "status_chips.h"
@@ -493,6 +494,9 @@ struct UiState {
     /// `buildRailRows()` from the snapshot; this struct keeps only the state a
     /// user can change.
     RailState rail;
+
+    /// The dropped attachments: one chip per path a drop put on the window
+    DropChipRow drop;
 
     /// The UI-local unread set: `updatedAt` advanced while a session
     /// was not active, cleared on select, never persisted - a fact about this

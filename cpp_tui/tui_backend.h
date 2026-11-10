@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 
+#include "model/drop_chip.h"
 #include "model/settings.h"
 
 namespace llmfun::tui {
@@ -131,6 +132,9 @@ unsigned windowTitleChangeCount();
 /// The last title the seam forwarded; "" before the first change. Harness seam, same reason:
 /// a headless run has no window to read the title back from.
 const std::string& lastWindowTitle();
+
+/// The chip row a GUI window's file drops append to (`nullptr` = none).
+void setDropRowTarget(model::DropChipRow* row);
 
 std::unique_ptr<Backend> makeNcursesBackend();
 std::unique_ptr<Backend> makeNullBackend();

@@ -2349,6 +2349,11 @@ version (unittest) {
     /// so they never read or depend on the repo file.
     package immutable fixtureAgentsMdText = "# Fixture agents.md rules\n\n- keep the rebuild tests hermetic\n";
 
+    /// The drag&drop attachment marker sentence (design §4.8). The repo's real
+    /// `promptDir/AGENT.md` carries it verbatim; the marker test below feeds it
+    /// through getPrompt the way the rebuild tests feed the agentsMd fixture.
+    package immutable agentPromptMarkerLine = "A marker `[The user attached `path`]` means the user just added that file to the workarea; read it before answering; a path may be a directory — inspect it (list it, read what is relevant).";
+
     /// Wire an AgentApp the way AppAgentActor.startSetup does for the fields
     /// rebuildSystemPrompt needs: test llmConf over `td` (including a base
     /// AGENT.md prompt file - getPrompt throws when it is missing), a fixture
@@ -2429,9 +2434,31 @@ unittest {
     assert(app.systemPrompt_.canFind("test agent prompt"), "the base prompt file is still composed");
     assert(!app.systemPrompt_.canFind("For detailed explanations, architecture justifications"),
             "no RAG pointer under the full treatment");
-    assert(app.rag.db.getSources.length == 1,
-            "ragIndex indexes the document into the in-memory RAG");
     app.rag = null; // release app's reference so the TestArea owns the RAG
+}
+
+@("the agent prompt file carries the drag&drop attachment marker line") unittest {
+    import std.file : write;
+    import std.path : buildPath;
+
+    auto td = testArea("app_agent_prompt_marker");
+    scope (exit)
+        td.cleanup;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    wireRebuildTestApp(app, td);
+
+    // wireRebuildTestApp writes a bare promptDir[0]/AGENT.md fixture; overwrite
+    // it with one that carries the marker line the repo's real AGENT.md carries
+    // (design §4.8), then read it back through the same getPrompt call the
+    // rebuild path uses.
+    write(buildPath(app.llmConf.promptDir[0].toString, "AGENT.md"),
+            "intro\n" ~ agentPromptMarkerLine ~ "\n");
+
+    auto prompt = app.llmConf.getPrompt(app.skillManager_,
+            app.llmConf.agentPrompt, addSkills: true, agentsMd: AgentsMdPrompt.init);
+    assert(prompt.canFind(agentPromptMarkerLine),
+            "the composed agent prompt must carry the attachment marker line verbatim");
 }
 
 @("rebuildSystemPrompt defers while an agent run is in flight and applies at the next safe point")

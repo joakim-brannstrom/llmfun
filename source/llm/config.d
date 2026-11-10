@@ -232,6 +232,17 @@ struct TelemetryConfig {
     SyslogTelemetryConfig syslog;
 }
 
+struct DragDropConverter {
+    string[] extensions;
+    string[] command;
+}
+
+struct DragDropConfig {
+    string destination = "dropped";
+    string conversionTimeout = "10 minutes";
+    DragDropConverter[] converters;
+}
+
 struct LlmConfig {
     Path dataDir = ProgramName ~ "/data";
 
@@ -372,6 +383,9 @@ struct LlmConfig {
 
     /// Opt-in, off by default.
     TelemetryConfig telemetry;
+
+    /// Drag & drop attachments
+    DragDropConfig dragDrop;
 
     /// Agent prompt filename searched for in promptDir.
     string agentPrompt = "AGENT.md";
@@ -1493,6 +1507,9 @@ auto applyConfig(ConfigT)(ConfigT conf, JSONValue json,
                         } else static if (is(Type == CodeModelConfig[])) {
                             __traits(getMember, conf, llmMemberName) = json[yamlKey].array.map!(
                                     a => applyConfig(CodeModelConfig.init, a, warn)).array;
+                        } else static if (is(Type == DragDropConverter[])) {
+                            __traits(getMember, conf, llmMemberName) = json[yamlKey].array.map!(
+                                    a => applyConfig(DragDropConverter.init, a, warn)).array;
                         } else static if (is(Type : string)) {
                             __traits(getMember, conf, llmMemberName) = json[yamlKey].str;
                         } else static if (is(Type : bool)) {
@@ -1829,6 +1846,8 @@ void validateConfig(LlmConfig conf) {
                 logger.warningf("%s", w);
     foreach (w; checkApiKeyWarnings(conf))
         logger.warningf("%s", w);
+    foreach (w; validateDragDropConfig(conf.dragDrop))
+        logger.warningf("%s", w);
 }
 
 private string[] validateFilesystemCategory(string category, FilesystemLimits.CategoryFilter cat) {
@@ -1862,6 +1881,53 @@ private string[] validateFilesystemCategory(string category, FilesystemLimits.Ca
         compileCheck(category ~ ".exclude", p);
 
     ReFilter(cat.include, cat.exclude); // full construction, discarded
+    return warnings;
+}
+
+// The `dragDrop` table's rules.
+// Throws on a destination that is not a workarea-relative path, on a
+// conversionTimeout that my.parseDuration would reject, and on a converter
+// rule without extensions or without a command.
+private string[] validateDragDropConfig(DragDropConfig dd) {
+    import std.algorithm.searching : canFind;
+    import std.array : split;
+
+    string[] warnings;
+
+    if (dd.destination.empty)
+        throw new Exception("dragDrop.destination must not be empty");
+    if (dd.destination.startsWith("/"))
+        throw new Exception(i"dragDrop.destination must be a workarea-relative path, got '$(
+                dd.destination)'".text);
+    foreach (seg; dd.destination.split("/"))
+        if (seg == "..")
+            throw new Exception(i"dragDrop.destination must not contain a '..' segment, got '$(
+                    dd.destination)'".text);
+
+    if (dd.conversionTimeout.empty)
+        throw new Exception("dragDrop.conversionTimeout must not be empty");
+
+    try {
+        import my.parse : parseDuration;
+
+        parseDuration(dd.conversionTimeout);
+    } catch (Exception e) {
+        throw new Exception(i"dragDrop.conversionTimeout: $(e.msg)".text);
+    }
+
+    foreach (i, rule; dd.converters) {
+        if (rule.extensions.empty)
+            throw new Exception(i"dragDrop.converters[$(i)].extensions must not be empty".text);
+        if (rule.command.empty)
+            throw new Exception(i"dragDrop.converters[$(i)].command must not be empty".text);
+    }
+
+    foreach (i, rule; dd.converters)
+        foreach (ext; rule.extensions)
+            foreach (j, later; dd.converters[i + 1 .. $])
+                if (later.extensions.canFind(ext))
+                    warnings ~= format!"dragDrop.converters: extension '%s' is listed by both converters[%s] and converters[%s]; the first match wins"(
+                            ext, i, i + 1 + j);
     return warnings;
 }
 
@@ -2079,6 +2145,35 @@ string[][string] replaceContainerMagicWords(string[][string] options, AbsolutePa
     return result;
 }
 
+/// Expand magic words llmfun, llmfun_workarea, llmfun_src, llmfun_dst.
+string[] replaceConverterMagicWords(string[] command, AbsolutePath src,
+        AbsolutePath dst, AbsolutePath workArea) @safe nothrow {
+    import std.algorithm : canFind;
+    import std.string : replace;
+
+    immutable SrcMagic = "@{llmfun_src}";
+    immutable DstMagic = "@{llmfun_dst}";
+
+    string[] result;
+    try {
+        bool srcReferenced;
+        bool dstReferenced;
+        foreach (element; command) {
+            srcReferenced = srcReferenced || element.canFind(SrcMagic);
+            dstReferenced = dstReferenced || element.canFind(DstMagic);
+            result ~= element.replace(SrcMagic, src.toString).replace(DstMagic,
+                    dst.toString).replaceMagicWord(workArea);
+        }
+        if (!srcReferenced)
+            result ~= src.toString;
+        if (!dstReferenced)
+            result ~= dst.toString;
+    } catch (Exception e) {
+        // fix for ldc-1.40. Remove when min compiler is updated
+    }
+    return result;
+}
+
 @("@{llmfun_workarea} in a value expands to the workarea path") unittest {
     auto result = replaceMagicWord!string("@{llmfun_workarea}/file.txt",
             AbsolutePath("/my/workarea"));
@@ -2122,6 +2217,55 @@ string[][string] replaceContainerMagicWords(string[][string] options, AbsolutePa
     assert(result["mounts"][0] == "-v");
     assert(result["mounts"][1] == "/work:/w");
     assert(result["mounts"][2] == i"$(thisExePath.dirName)/data:/d".text);
+}
+
+@("converter invocation: all four magic words substitute in one command") unittest {
+    string[] command = [
+        "wrap", "@{llmfun_workarea}", "@{llmfun}", "@{llmfun_dst}",
+        "@{llmfun_src}"
+    ];
+    auto result = replaceConverterMagicWords(command, AbsolutePath("/drop/in.md"),
+            AbsolutePath("/wa/out.md"), AbsolutePath("/wa"));
+    assert(result == [
+        "wrap", "/wa", i"$(thisExePath.dirName)".text, "/wa/out.md", "/drop/in.md"
+    ], result.to!string);
+}
+
+@("converter invocation: unreferenced src/dst are appended as trailing args") unittest {
+    string[] command = ["tool", "-f", "@{llmfun_src}"];
+    auto result = replaceConverterMagicWords(command, AbsolutePath("/drop/in.md"),
+            AbsolutePath("/wa/out.md"), AbsolutePath("/wa"));
+    assert(result == ["tool", "-f", "/drop/in.md", "/wa/out.md"], result.to!string);
+}
+
+@("a plain [tool] converter command still gets src/dst appended") unittest {
+    auto result = replaceConverterMagicWords(["tool"], AbsolutePath("/drop/in.md"),
+            AbsolutePath("/wa/out.md"), AbsolutePath("/wa"));
+    assert(result == ["tool", "/drop/in.md", "/wa/out.md"], result.to!string);
+}
+
+@("job-word expansion is order-safe against @{llmfun}") unittest {
+    import std.algorithm : canFind;
+
+    // The job words contain a closing brace, so @{llmfun} never matches
+    // inside them; expanding @{llmfun} first must not corrupt them.
+    assert("@{llmfun_src}".canFind("@{llmfun}") == false,
+            "@{llmfun} must not be a substring of @{llmfun_src}");
+    auto result = replaceConverterMagicWords([
+        "t", "@{llmfun}/bin", "@{llmfun_src}"
+    ], AbsolutePath("/drop/in.md"), AbsolutePath("/wa/out.md"), AbsolutePath("/wa"));
+    assert(result == [
+        "t", i"$(thisExePath.dirName)/bin".text, "/drop/in.md", "/wa/out.md"
+    ], result.to!string);
+}
+
+@("the parse-time pass does NOT expand the job words (D3)") unittest {
+    // The parse-time pass is replaceMagicWord: a non-converter config
+    // value carrying a job word must stay unexpanded.
+    auto result = replaceMagicWord!string("@{llmfun_src}/out.md", AbsolutePath("/my/workarea"));
+    assert(result == "@{llmfun_src}/out.md", result);
+    auto result2 = replaceMagicWord!string("-o @{llmfun_dst}", AbsolutePath("/my/workarea"));
+    assert(result2 == "-o @{llmfun_dst}", result2);
 }
 
 @("a string[][string] options block loads into the options field") unittest {
@@ -2237,6 +2381,8 @@ codeModels:
 @("the shipped config/example.yaml loads with its defaultOptions map intact") unittest {
     // Parse guard: the shipped file must load, and every defaultOptions item
     // must be a string (the merger's .str access would throw otherwise).
+    import std.algorithm : canFind;
+
     auto json = loadYamlValue(Path("config/example.yaml"));
     foreach (key, val; json["sandboxConfig"]["defaultOptions"].object) {
         foreach (item; val.array) {
@@ -2294,6 +2440,19 @@ codeModels:
     assert(resolved.groups["pipeline"].tools == ["pipelineOutput"],
             "groups the model does not name inherit the global entry");
     assert(resolved.groups["rag"].description == "RAG tools: search/add/remove/list");
+
+    // The dragDrop table: parsed and validated as shipped (destination, backstop
+    // timeout, the pandoc docx converter).
+    assert(conf.dragDrop.destination == "dropped",
+            "shipped example dragDrop.destination: " ~ conf.dragDrop.destination);
+    assert(conf.dragDrop.conversionTimeout == "10 minutes",
+            "shipped example dragDrop.conversionTimeout: " ~ conf.dragDrop.conversionTimeout);
+    assert(conf.dragDrop.converters.length == 1,
+            "shipped example dragDrop rules: " ~ conf.dragDrop.converters.length.to!string);
+    assert(conf.dragDrop.converters[0].extensions == [".docx", ".doc"],
+            "shipped example extensions");
+    assert(conf.dragDrop.converters[0].command.canFind("@{llmfun_src}"),
+            "shipped example command placeholders");
     assert(resolved.alwaysOn == ["taskDone", "listToolTags"]);
 
     // Silent-valid rule: zero warnings for the global block and the model's
@@ -4516,4 +4675,202 @@ version (unittest) {
     assert(instruction == "For detailed explanations, architecture justifications, or lengthy code examples, "
             ~ "query your RAG knowledge base for topic `agent_md_0a1b2c3d`; however, you must obey the "
             ~ "summarized rules listed above at all times.");
+}
+
+@("composeAgentMdRagPointer embeds the topic name in the pointer wording") unittest {
+    const instruction = composeAgentMdRagPointer("agent_md_0a1b2c3d");
+    assert(instruction == "For detailed explanations, architecture justifications, or lengthy code examples, "
+            ~ "query your RAG knowledge base for topic `agent_md_0a1b2c3d`; however, you must obey the "
+            ~ "summarized rules listed above at all times.");
+}
+
+private string dragDropTestYaml(string table) {
+    return "codeModels:\n  - modelName: test\n    display: test42\n    server:\n      url: http://localhost:8080\n"
+        ~ table;
+}
+
+@("absent dragDrop key keeps the defaults") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("dragdrop_absent");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    File(tmpFile, "w").write(dragDropTestYaml(""));
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.dragDrop.destination == "dropped",
+            "expected default 'dropped', got " ~ conf.dragDrop.destination);
+    assert(conf.dragDrop.conversionTimeout == "10 minutes",
+            "expected default '10 minutes', got " ~ conf.dragDrop.conversionTimeout);
+    assert(conf.dragDrop.converters.empty, "expected no converters by default");
+    validateConfig(conf); // the defaults validate
+}
+
+@("the dragDrop table parses with the converter order preserved") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("dragdrop_parse");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    File(tmpFile, "w").write(dragDropTestYaml(`dragDrop:
+  destination: dropped/inbox
+  conversionTimeout: "2 minutes"
+  converters:
+    - extensions: [".docx", ".doc"]
+      command: ["pandoc", "-f", "docx", "-t", "gfm", "@{llmfun_src}", "-o", "@{llmfun_dst}"]
+    - extensions: [".odt"]
+      command: ["pandoc", "@{llmfun_src}", "-o", "@{llmfun_dst}"]
+`));
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.dragDrop.destination == "dropped/inbox",
+            "expected 'dropped/inbox', got " ~ conf.dragDrop.destination);
+    assert(conf.dragDrop.conversionTimeout == "2 minutes",
+            "expected '2 minutes', got " ~ conf.dragDrop.conversionTimeout);
+    assert(conf.dragDrop.converters.length == 2,
+            "expected 2 rules, got " ~ conf.dragDrop.converters.length.to!string);
+    assert(conf.dragDrop.converters[0].extensions == [".docx", ".doc"], "order must be preserved");
+    assert(conf.dragDrop.converters[0].command.canFind("@{llmfun_dst}"),
+            "command must carry the placeholders");
+    assert(conf.dragDrop.converters[1].extensions == [".odt"], "the second rule must be its own");
+    validateConfig(conf); // and the parsed table validates
+}
+
+@("validateConfig rejects an absolute dragDrop.destination and a '..' segment") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    foreach (destination; ["/tmp/dropped", "dropped/../escape"]) {
+        auto tmpDir = testArea("dragdrop_destination");
+        scope (exit)
+            tmpDir.cleanup;
+        auto tmpFile = buildPath(tmpDir, "test.yaml");
+        File(tmpFile, "w").write(dragDropTestYaml("dragDrop:\n  destination: " ~ destination ~ "\n"));
+        auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+        assert(conf.dragDrop.destination == destination,
+                "parse must accept it, got " ~ conf.dragDrop.destination);
+        bool threw;
+        string msg;
+        try {
+            validateConfig(conf);
+        } catch (Exception e) {
+            threw = true;
+            msg = e.msg;
+        }
+        assert(threw, "validateConfig must reject destination '" ~ destination ~ "'");
+        assert(msg.canFind("dragDrop.destination"), "unexpected error message: " ~ msg);
+    }
+}
+
+@("validateConfig rejects an unparseable dragDrop.conversionTimeout and accepts durations") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    foreach (timeout; ["35 km", "soon", ""]) {
+        auto tmpDir = testArea("dragdrop_timeout_bad");
+        scope (exit)
+            tmpDir.cleanup;
+        auto tmpFile = buildPath(tmpDir, "test.yaml");
+        File(tmpFile, "w").write(
+                dragDropTestYaml("dragDrop:\n  conversionTimeout: \"" ~ timeout ~ "\"\n"));
+        auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+        bool threw;
+        string msg;
+        try {
+            validateConfig(conf);
+        } catch (Exception e) {
+            threw = true;
+            msg = e.msg;
+        }
+        assert(threw, "validateConfig must reject conversionTimeout '" ~ timeout ~ "'");
+        assert(msg.canFind("dragDrop.conversionTimeout"), "unexpected error message: " ~ msg);
+    }
+
+    foreach (timeout; ["10 minutes", "2 minutes 30 seconds", "1 hours"]) {
+        auto tmpDir = testArea("dragdrop_timeout_ok");
+        scope (exit)
+            tmpDir.cleanup;
+        auto tmpFile = buildPath(tmpDir, "test.yaml");
+        File(tmpFile, "w").write(
+                dragDropTestYaml("dragDrop:\n  conversionTimeout: \"" ~ timeout ~ "\"\n"));
+        auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+        assert(conf.dragDrop.conversionTimeout == timeout,
+                "parse must carry the raw string, got " ~ conf.dragDrop.conversionTimeout);
+        validateConfig(conf); // my.parseDuration accepts it: no throw
+    }
+}
+
+@("validateConfig rejects a converter rule without extensions or command") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    foreach (key; ["extensions", "command"]) {
+        auto tmpDir = testArea("dragdrop_rule_" ~ key);
+        scope (exit)
+            tmpDir.cleanup;
+        auto tmpFile = buildPath(tmpDir, "test.yaml");
+        string yaml;
+        if (key == "extensions")
+            yaml = dragDropTestYaml(
+                    "dragDrop:\n  converters:\n    - extensions: []\n      command: [\"pandoc\"]\n");
+        else
+            yaml = dragDropTestYaml(
+                    "dragDrop:\n  converters:\n    - extensions: [\".docx\"]\n      command: []\n");
+        File(tmpFile, "w").write(yaml);
+        auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+        bool threw;
+        string msg;
+        try {
+            validateConfig(conf);
+        } catch (Exception e) {
+            threw = true;
+            msg = e.msg;
+        }
+        assert(threw, "validateConfig must reject an empty converters." ~ key);
+        assert(msg.canFind("dragDrop.converters[0]." ~ key), "unexpected error message: " ~ msg);
+    }
+}
+
+@("a duplicate extension across converter rules is warned, not rejected") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("dragdrop_duplicate_extension");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    File(tmpFile, "w").write(dragDropTestYaml(`dragDrop:
+  converters:
+    - extensions: [".docx", ".doc"]
+      command: ["pandoc", "-f", "docx", "-t", "gfm", "@{llmfun_src}", "-o", "@{llmfun_dst}"]
+    - extensions: [".docx"]
+      command: ["libreoffice", "--headless", "--convert-to", "txt", "@{llmfun_src}"]
+`));
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    // The warning is data: rendered by validateConfig, collected by the helper.
+    const warnings = validateDragDropConfig(conf.dragDrop);
+    assert(warnings.length == 1,
+            "expected one duplicate-extension warning, got " ~ warnings.length.to!string);
+    assert(warnings[0].canFind("'.docx'") && warnings[0].canFind("converters[0]")
+            && warnings[0].canFind("converters[1]"), "unexpected warning: " ~ warnings[0]);
+    validateConfig(conf); // must not throw
 }

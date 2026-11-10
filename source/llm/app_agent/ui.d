@@ -45,6 +45,7 @@ interface TuiSink {
     void pipelineToolResult(string agentId, string name, int ok, string text);
     void sessionList(const(UiSessionItem)[] items);
     void initHistory(immutable(string)[] history);
+    void dropChipReport(UiDropReport report);
 }
 
 /// Production sink: each call is one checked message on the TUI actor's
@@ -139,6 +140,10 @@ class TuiChannelSink : TuiSink {
     override void initHistory(immutable(string)[] history) {
         ch.uiMsg(UiInitHistory(history));
     }
+
+    override void dropChipReport(UiDropReport report) {
+        ch.uiMsg(report);
+    }
 }
 
 /// Blocked (one-shot) sink. Streaming and status messages are dropped (one-shot mode only emits final output).
@@ -209,6 +214,9 @@ class TuiBlockedSink : TuiSink {
     }
 
     override void initHistory(immutable(string)[] history) {
+    }
+
+    override void dropChipReport(UiDropReport report) {
     }
 }
 
@@ -383,6 +391,11 @@ class TuiRecordingSink : TuiSink {
     override void initHistory(immutable(string)[] history) {
         record("initHistory", "n=" ~ history.length.text);
     }
+
+    override void dropChipReport(UiDropReport report) {
+        record("dropChipReport", report.chipId.text ~ " state " ~ report.state.text ~ " " ~ (
+                report.finalPath.empty ? report.output : report.finalPath));
+    }
 }
 
 /// Message bridge between the agent and the TUI: a thin wrapper over a
@@ -492,6 +505,10 @@ class UiMessenger {
 
     void initHistory(immutable(string)[] history) {
         sink.initHistory(history);
+    }
+
+    void dropChipReport(UiDropReport report) {
+        sink.dropChipReport(report);
     }
 }
 

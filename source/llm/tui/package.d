@@ -8,12 +8,13 @@ import std.conv : text;
 import std.logger;
 import std.sumtype : match;
 
-import my.path : Path;
+import my.path : AbsolutePath, Path;
 import my.actor;
 import my.time : prettyDuration;
 
 import llm.session : SessionId;
 import llm.chat : MessageTime, NoProcessingTime;
+import llm.dragdrop : DropChipSnapshot, DropWorker, composeQueryWithMarkers;
 import llmfun_tui;
 
 // Convert a D string to an inbound API `String` (no allocation)
@@ -534,6 +535,32 @@ struct TextUserInterface {
         String_Free(action.title);
     }
 
+    // Chip status line (worker -> UI): one label per chip. The label is the
+    // final workarea-relative path once the chip settles, the progress note
+    // while it runs; an unknown or removed chip id is a silent no-op in C.
+    void setDropChipStatus(long chipId, int state, string finalPath, string output) {
+        tuiSetChipStatus(tuiState, chipId, state, toTuiString(finalPath.empty ? output : finalPath));
+    }
+
+    // Pops at most one dropped-file path from the C++ queue. chipId 0 +
+    // an empty path mean "nothing queued"; the popped string is owned here
+    // and copied out before the free.
+    void pollDroppedPath(out long chipId, out string path) {
+        chipId = 0;
+        path = null;
+        auto dropped = tuiGetDroppedPath(tuiState);
+        if (dropped.chipId == 0)
+            return;
+        chipId = dropped.chipId;
+        path = toString(dropped.path);
+        String_Free(dropped.path);
+    }
+
+    // Pops at most one chip-cancel request (the chip id, 0 = none).
+    long pollChipCancel() {
+        return tuiGetChipCancel(tuiState);
+    }
+
     bool hasUserTerminated() @safe {
         return userTerminated_;
     }
@@ -556,6 +583,15 @@ struct TextUserInterface {
             query_ = toString(userQuery);
             String_Free(userQuery);
             tuiResetSubmit(tuiState);
+
+            DropChipSnapshot[] chips;
+            foreach (i; 0 .. tuiGetChipCount(tuiState)) {
+                auto chip = tuiGetChipAt(tuiState, i);
+                chips ~= DropChipSnapshot(chip.chipId, chip.status, toString(chip.path));
+                String_Free(chip.path);
+            }
+            query_ = composeQueryWithMarkers(query_, chips);
+            tuiClearChipRow(tuiState);
         }
 
         tuiLogToTui(logSwap, tuiState);
@@ -594,6 +630,7 @@ interface TUICommands {
     void uiMsg(UiPipelineStreamDone m);
     void uiMsg(UiPipelineToolCall m);
     void uiMsg(UiPipelineToolResult m);
+    void uiMsg(UiDropReport m);
     void uiStreamChatDone();
     void uiPipelineClear();
     void uiClearChat();
@@ -692,6 +729,8 @@ class TextUserInterfaceActor : TUICommands {
 
         string pendingActionId;
         string pendingActionTitle;
+
+        TypedAddress!DropWorker dropWorkerAddress;
     }
 
     // Production path: create the C state now (no backend); the backend
@@ -704,11 +743,13 @@ class TextUserInterfaceActor : TUICommands {
     // from onSpawn. On success the active backend and any fallback note are
     // logged; the note also seeds the status line. The ui field takes the
     // state on every path so its dtor tears it down once.
-    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth,
-            TuiBackendMode mode, bool debugUi = false, long idleParkMs = 0) {
+    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth, TuiBackendMode mode,
+            bool debugUi = false, long idleParkMs = 0,
+            TypedAddress!DropWorker dropWorker = TypedAddress!DropWorker.init) {
         assert(maxWidth >= 0 && maxWidth <= 10_000,
                 "maxWidth out of int-safe range: " ~ maxWidth.to!string);
         this.listenerAddress = listener;
+        this.dropWorkerAddress = dropWorker;
         this.debugUi = debugUi;
         pendingMode = mode;
         initPending = true;
@@ -724,11 +765,12 @@ class TextUserInterfaceActor : TUICommands {
     // copy's dtor runs at ctor exit, then the field's dtor runs again in
     // onExit). Ownership transfers on successful return only; a throw
     // (assert) leaves the state with the caller.
-    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth,
-            TuiState* state, long idleParkMs = 0) {
+    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth, TuiState* state,
+            long idleParkMs = 0, TypedAddress!DropWorker dropWorker = TypedAddress!DropWorker.init) {
         assert(maxWidth >= 0 && maxWidth <= 10_000,
                 "maxWidth out of int-safe range: " ~ maxWidth.to!string);
         this.listenerAddress = listener;
+        this.dropWorkerAddress = dropWorker;
         this.state = state;
         ui = TextUserInterface(state);
         ui.setMaxWidth(cast(int) maxWidth);
@@ -891,6 +933,29 @@ class TextUserInterfaceActor : TUICommands {
         if (pendingAction == TuiSessionAction_None) {
             ui.pollSessionAction(pendingAction, pendingActionId, pendingActionTitle);
         }
+
+        import std.exception : collectException;
+
+        if (!dropWorkerAddress.empty) {
+            long chipId;
+            string dropPath;
+            ui.pollDroppedPath(chipId, dropPath);
+            if (chipId != 0)
+                try {
+                    Channel!DropWorker(dropWorkerAddress, null).drop(chipId, dropPath.AbsolutePath);
+                } catch (Throwable t) {
+                    logger.warningf("dropped file hand-off failed (chip %s): %s",
+                            chipId, t.msg).collectException;
+                }
+            const cancelChip = ui.pollChipCancel();
+            if (cancelChip != 0)
+                try {
+                    Channel!DropWorker(dropWorkerAddress, null).stop(cancelChip);
+                } catch (Throwable t) {
+                    logger.warningf("chip cancel hand-off failed (chip %s): %s",
+                            cancelChip, t.msg).collectException;
+                }
+        }
     }
 
     void uiTick() {
@@ -925,6 +990,10 @@ class TextUserInterfaceActor : TUICommands {
 
     void uiMsg(UiSessionList m) {
         ui.setSessionList(m.items);
+    }
+
+    void uiMsg(UiDropReport m) {
+        ui.setDropChipStatus(m.chipId, m.state, m.finalPath, m.output);
     }
 
     void uiMsg(UiStreamChatMessage m) {
@@ -1127,4 +1196,12 @@ struct UiSessionItem {
 
 struct UiSessionList {
     const(UiSessionItem)[] items;
+}
+
+// One dropped-attachment chip outcome (agent -> UI), the DropReport relay.
+struct UiDropReport {
+    long chipId;
+    int state; // TuiChipStatus_*
+    string finalPath; // workarea-relative path once settled, empty while running
+    string output; // progress note / failure reason
 }

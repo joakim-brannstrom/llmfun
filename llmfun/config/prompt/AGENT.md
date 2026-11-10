@@ -36,6 +36,9 @@ You have access to tools for file operations, code execution, and persistent mem
 # Execution Context
 - **Working Directory**: All commands executed via `executeImage` run in the `./` directory.
 
+# File Attachments
+A marker `[The user attached `path`]` means the user just added that file to the workarea; read it before answering; a path may be a directory — inspect it (list it, read what is relevant).
+
 # Memory Management
 
 ## Retrieval (MANDATORY first step)

@@ -19,7 +19,8 @@ This document describes the threat model for the sandbox container configuration
 - Configuration files (`example.yaml`, `.llmfun.yaml`, execution environment files)
 - Container runtime CLI arguments
 - Mount points and volume mappings
-- Magic word substitution (`@{llmfun_workarea}`, `@{llmfun}`)
+- Magic word substitution (`@{llmfun_workarea}`, `@{llmfun}`, and the
+  converter job words `@{llmfun_src}`, `@{llmfun_dst}`)
 
 ## Attack Vectors
 
@@ -55,7 +56,11 @@ defaultOptions:
 
 **Mitigation**:
 - **User responsibility**: Users must review mount paths in configuration.
-- Magic word substitution only resolves `@{llmfun_workarea}` and `@{llmfun}` — no arbitrary path expansion.
+- Magic word substitution only resolves `@{llmfun_workarea}` and `@{llmfun}` —
+  no arbitrary path expansion. The converter job words `@{llmfun_src}` /
+  `@{llmfun_dst}` resolve only at invocation time, inside the converter
+  command at the moment the converter is spawned; the parse-time pass never
+  expands them.
 
 ### 3. Network Escape
 
@@ -94,6 +99,9 @@ defaultOptions:
 **Analysis**:
 - `@{llmfun_workarea}` → resolved to workarea absolute path (controlled by user)
 - `@{llmfun}` → resolved to binary directory (controlled by system)
+- `@{llmfun_src}` / `@{llmfun_dst}` → resolved only at converter invocation
+  time, to the absolute drop path / absolute destination for that job; never
+  expanded by the parse-time pass
 - Substitution only applies to **values**, not **keys**
 - No recursive substitution or variable expansion
 
@@ -155,7 +163,7 @@ layer, so every entry point (direct calls, MCP stdio, AgentPool) is covered.
 | `timeoutSeconds` | Subprocess execution timeout | Denial of service |
 | `maxOutputBytes` | Output stream byte limit | Resource exhaustion |
 | `toolLimits.filesystem` | Regex filter on workarea file-tool paths (see `doc/tool_broker.md`) | Accidental reads/writes outside the intended workarea scope |
-| Magic word scoping | Only two magic words, values only | Option injection |
+| Magic word scoping | Fixed magic-word set, values only; job words (`@{llmfun_src}`/`@{llmfun_dst}`) resolve only at converter invocation time | Option injection |
 
 ## User Responsibilities
 

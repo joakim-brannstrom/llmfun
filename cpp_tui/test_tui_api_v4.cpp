@@ -19,6 +19,11 @@
 //     pinned, the numbers, the tool name, and the rate round-trip into the
 //     lane the Agents tab draws, and `0/0` (no reading) is told apart from
 //     `0/8192` (a real zero);
+//   - the drop-chip seams: the two pop-one queues carry each drop's chip id,
+//     the by-id setter no-ops for an unknown id or ordinal, the snapshot
+//     reads the row in creation order with the workarea paths, the clear
+//     leaves the queues draining, and every out-string is owned and freed
+//     by the caller;
 //   - tuiDestroyState(NULL) and destroy-without-init are safe no-ops, and an
 //     ImGui context created by a test harness itself survives a state
 //     destroy;
@@ -1021,7 +1026,7 @@ void casePipelineLaneFields() {
     static_assert(sizeof(PipelineChatMessage::contextUsed) == 8 &&
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
-    static_assert(TUI_API_VERSION == 9,
+    static_assert(TUI_API_VERSION == 10,
                   "the lane contract changed; bump one version per ABI event");
     static_assert(sizeof(SessionItem) == 80, "SessionItem is unaffected by the lane fields");
 
@@ -1533,6 +1538,143 @@ void caseLogArchiveRetry() {
     std::remove(kLog);
 }
 
+// The drop-chip seams: D's per-frame polls over the composer's chip row. The
+// pops are consume-on-read and carry the id each drop's chip took, the by-id
+// setter is a no-op for anything that cannot name a live chip, and the
+// Send-time snapshot reads the row it clears.
+void caseDropChips() {
+    g_where = "case: drop-chip seams (v10)";
+
+    // Null-safe: every entry point answers its sentinel and touches nothing.
+    const TuiDroppedPath nullDrop = tuiGetDroppedPath(nullptr);
+    expect(nullDrop.chipId == 0 && nullDrop.path.data == nullptr && nullDrop.path.len == 0,
+           "tuiGetDroppedPath on NULL answers the empty sentinel");
+    tuiSetChipStatus(nullptr, 1, TuiChipStatus_Done, makeStr("dropped/x"));
+    expect(tuiGetChipCount(nullptr) == 0, "tuiGetChipCount on NULL answers 0");
+    const TuiChipParam nullChip = tuiGetChipAt(nullptr, 0);
+    expect(nullChip.chipId == 0 && nullChip.status == TuiChipStatus_Pending &&
+               nullChip.path.data == nullptr && nullChip.path.len == 0,
+           "tuiGetChipAt on NULL answers the empty sentinel");
+    tuiClearChipRow(nullptr);
+    expect(tuiGetChipCancel(nullptr) == 0, "tuiGetChipCancel on NULL answers 0");
+
+    TuiState* state = tuiCreateState();
+    expect(state != nullptr, "tuiCreateState succeeds");
+    expect(state->inner->ui.drop.chips.empty(), "a fresh row has chips");
+
+    // Empty row: the pop-one getters answer their empty sentinels, and a
+    // snapshot of nothing is nothing.
+    const TuiDroppedPath emptyDrop = tuiGetDroppedPath(state);
+    expect(emptyDrop.chipId == 0 && emptyDrop.path.data == nullptr,
+           "an empty drop queue answers {0, {NULL, 0}}");
+    expect(tuiGetChipCount(state) == 0, "an empty row counts 0");
+    const TuiChipParam emptyChip = tuiGetChipAt(state, 0);
+    expect(emptyChip.chipId == 0 && emptyChip.status == TuiChipStatus_Pending &&
+               emptyChip.path.data == nullptr && emptyChip.path.len == 0,
+           "an empty row answers the past-the-end sentinel");
+    expect(tuiGetChipCancel(state) == 0, "an empty cancel queue answers 0");
+
+    // Three pops drain three drops, no batching, and each pop carries the
+    // chip id the drop created - the pairing D reports back through. The
+    // duplicate path is the pin: two chips, two ids, one path.
+    using llmfun::tui::model::DropChipState;
+    const std::int64_t first =
+        llmfun::tui::model::appendDroppedPath(state->inner->ui.drop, "/tmp/a.md");
+    const std::int64_t second =
+        llmfun::tui::model::appendDroppedPath(state->inner->ui.drop, "/tmp/b.md");
+    const std::int64_t third =
+        llmfun::tui::model::appendDroppedPath(state->inner->ui.drop, "/tmp/a.md");
+    expect(first != 0 && second == first + 1 && third == second + 1,
+           "the seeded drops did not take the monotonic ids");
+    expect(tuiGetChipCount(state) == 3, "the row disagrees with the seeds");
+
+    TuiDroppedPath drop = tuiGetDroppedPath(state);
+    expect(drop.chipId == first && toStd(drop.path) == "/tmp/a.md",
+           "the first pop is not the first drop's pairing");
+    expect(freeOwnedStringChecked(drop.path), "the popped path is not an owned string");
+
+    drop = tuiGetDroppedPath(state);
+    expect(drop.chipId == second && toStd(drop.path) == "/tmp/b.md",
+           "the second pop is not the second drop's pairing");
+    expect(freeOwnedStringChecked(drop.path), "the second popped path is not an owned string");
+
+    drop = tuiGetDroppedPath(state);
+    expect(drop.chipId == third && toStd(drop.path) == "/tmp/a.md",
+           "the duplicate path did not pop with its own chip id");
+    expect(freeOwnedStringChecked(drop.path), "the third popped path is not an owned string");
+
+    drop = tuiGetDroppedPath(state);
+    expect(drop.chipId == 0 && drop.path.data == nullptr, "the drained queue answered a drop");
+    expect(freeOwnedStringChecked(drop.path), "the sentinel path is not freeable");
+
+    // The by-id setter: an unknown id is a silent no-op, an ordinal outside
+    // the vocabulary is one too, and a real Done report lands on the drop's
+    // own chip with the label as the workarea path.
+    tuiSetChipStatus(state, 4242, TuiChipStatus_Done, makeStr("dropped/ghost"));
+    expect(state->inner->ui.drop.chips.size() == 3, "an unknown id's report changed the row");
+    tuiSetChipStatus(state, first, 99, makeStr("not a state"));
+    expect(state->inner->ui.drop.chips.front().state == DropChipState::Pending,
+           "an unknown ordinal flipped the chip");
+    tuiSetChipStatus(state, first, TuiChipStatus_Done, makeStr("dropped/a.md"));
+    const llmfun::tui::model::DropChip& reported = state->inner->ui.drop.chips.front();
+    expect(reported.id == first && reported.state == DropChipState::Done &&
+               reported.label == "dropped/a.md" && reported.workareaPath == "dropped/a.md",
+           "the Done report did not land on the drop's own chip");
+    expect(reported.fullPath == "/tmp/a.md", "the report lost the drop's raw path");
+
+    // The snapshot: the row reads in creation order, the path is the
+    // workarea-relative one, the Pending chip answers an empty path, and an
+    // index past the end answers the sentinel. Every path is an owned string.
+    const TuiChipParam snapshotDone = tuiGetChipAt(state, 0);
+    expect(snapshotDone.chipId == first && snapshotDone.status == TuiChipStatus_Done &&
+               toStd(snapshotDone.path) == "dropped/a.md",
+           "the Done chip did not snapshot its workarea path");
+    expect(freeOwnedStringChecked(snapshotDone.path), "the snapshot path is not an owned string");
+
+    const TuiChipParam snapshotPending = tuiGetChipAt(state, 1);
+    expect(snapshotPending.chipId == second && snapshotPending.status == TuiChipStatus_Pending &&
+               snapshotPending.path.data == nullptr,
+           "a Pending chip's snapshot carried a path");
+    expect(freeOwnedStringChecked(snapshotPending.path), "the empty snapshot path is not freeable");
+
+    const TuiChipParam snapshotFailed = tuiGetChipAt(state, 2);
+    expect(snapshotFailed.chipId == third && snapshotFailed.status == TuiChipStatus_Pending,
+           "the snapshot order is not creation order");
+    expect(freeOwnedStringChecked(snapshotFailed.path), "the failed snapshot path is not freeable");
+    const TuiChipParam snapshotEnd = tuiGetChipAt(state, 3);
+    expect(snapshotEnd.chipId == 0 && snapshotEnd.status == TuiChipStatus_Pending &&
+               snapshotEnd.path.data == nullptr,
+           "an index past the end answered a chip");
+
+    // A Failed report labels the reason and carries no path.
+    tuiSetChipStatus(state, third, TuiChipStatus_Failed, makeStr("disk full"));
+    const TuiChipParam snapshotReason = tuiGetChipAt(state, 2);
+    expect(snapshotReason.chipId == third && snapshotReason.status == TuiChipStatus_Failed &&
+               snapshotReason.path.data == nullptr,
+           "a Failed chip's snapshot carried a workarea path");
+    expect(freeOwnedStringChecked(snapshotReason.path),
+           "the failed chip's empty path is not freeable");
+
+    // The cancel: the X click queues the id, the pop takes it once, and the
+    // queue keeps draining after the row clears.
+    expect(llmfun::tui::model::removeChip(state->inner->ui.drop, second),
+           "the X click did not remove the chip");
+    expect(tuiGetChipCancel(state) == second, "the cancel pop is not the removed chip's id");
+    expect(tuiGetChipCancel(state) == 0, "the cancel pop is not consume-on-read");
+
+    llmfun::tui::model::appendDroppedPath(state->inner->ui.drop, "/tmp/late.md");
+    tuiClearChipRow(state);
+    tuiClearChipRow(state); // the Send handshake's clear, twice in one frame
+    expect(tuiGetChipCount(state) == 0, "the clear left a chip behind");
+    const TuiDroppedPath lateDrop = tuiGetDroppedPath(state);
+    expect(lateDrop.chipId != 0 && toStd(lateDrop.path) == "/tmp/late.md",
+           "the clear drained a drop that arrived after the snapshot");
+    expect(freeOwnedStringChecked(lateDrop.path), "the late path is not an owned string");
+
+    tuiDestroyState(state);
+    expect(true, "destroy with queued chips does not crash");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1552,7 +1694,8 @@ int main(int argc, char** argv) {
             (void)std::remove("llmfun_ui_log.txt");
     });
 
-    static_assert(TUI_API_VERSION == 9, "this contract test pins the current API generation (v9)");
+    static_assert(TUI_API_VERSION == 10,
+                  "this contract test pins the current API generation (v10)");
 
     caseNoneStateInert();
     caseLogRecords();
@@ -1565,6 +1708,7 @@ int main(int argc, char** argv) {
     caseRuntimeStatus();
     caseDestroyBasics();
     caseFailedGuiInit();
+    caseDropChips();         // drop-chip seams: the pops, the by-id setter, the snapshot + clear
     caseAutoTtyMatrix();     // Auto-mode stdio fallback matrix
     caseNonBlockingRender(); // tuiRenderBlocking, non-blocking on a live backend
 

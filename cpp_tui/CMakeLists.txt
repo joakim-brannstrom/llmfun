@@ -95,6 +95,7 @@ add_library(llmfun_tui_lib STATIC
     ui/markdown.cpp
     ui/table.cpp
     model/status_chips.cpp
+    model/drop_chip.cpp
     model/activity.cpp
     model/toast.cpp
     model/rawlog_data.cpp
@@ -412,6 +413,25 @@ add_executable(test_status_chips
 add_executable(test_thread_view
     test_thread_view.cpp
     model/thread_view.cpp
+)
+
+# Headless unit test for the drop chip model: monotonic never-reused ids, the
+# pending label's basename grammar, the two FIFO queues with their pop-one
+# sentinels, the by-id setter's silent no-op on an unknown id and the
+# chips-only clear. Invoke from the build dir: ./test_drop_chip
+add_executable(test_drop_chip
+    test_drop_chip.cpp
+)
+add_dependencies(test_drop_chip llmfun_tui_all_lib)
+# The archive carries model/drop_chip.cpp (and the GUI backend the drop
+# intake scenario drives); imtui/ImGui include requirements come from the
+# interface targets, exactly like the other lib-linking tests.
+target_link_libraries(test_drop_chip PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
 )
 
 # GUI golden screens for the three thread states (task 8): drives the real GUI
@@ -1092,6 +1112,23 @@ target_compile_definitions(test_composer PRIVATE
     TEST_COMPOSER_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test/golden"
 )
 target_link_libraries(test_composer PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
+)
+# The composer's chip row in the pixel profile (FR-10): the same row the text
+# grid draws, through the real GLFW/OpenGL3 backend at the design's 1280x820
+# window - the row's pixels on the meta row only, the full drop path on hover,
+# and an x click that removes its chip and queues the cancel for D. Needs a
+# display: xvfb-run -s "-screen 0 1280x820x24" ./test_composer_gui [--out DIR]
+add_executable(test_composer_gui
+    test_composer_gui.cpp
+)
+add_dependencies(test_composer_gui llmfun_tui_all_lib)
+target_include_directories(test_composer_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_composer_gui PRIVATE
     llmfun_tui_all_lib
     imtui-ncurses
     ncursesw

@@ -169,6 +169,26 @@ unittest {
             "Reasoning rule must state that results are past thoughts, not ground truth");
 }
 
+@("the composed AGENT.md prompt keeps the File Attachments marker line")
+unittest {
+    // The attachment marker line also lives in prompt data, not code, so in-tree
+    // removal of the section would silently drop the only hint that tells the main
+    // agent how to interpret `[The user attached `path`]` markers. Same guard shape
+    // as the two tests above: load the real llmfun/config/prompt/AGENT.md through
+    // the production getPrompt path and assert the section heading and a
+    // distinctive fragment of the marker sentence are present.
+    const agentPromptFile = "llmfun/config/prompt/AGENT.md";
+    assert(agentPromptFile.exists, "in-tree AGENT.md missing; getBasePrompt would throw at startup");
+    auto llmConf = makeAgentTestConfig("llmfun/config/prompt");
+    auto prompt = llmConf.getPrompt(null, "AGENT.md");
+    assert(prompt.canFind("# File Attachments"),
+            "attachment-marker section missing from the composed main-agent prompt");
+    assert(prompt.canFind("The user attached"),
+            "the attachment marker sentence must stay in the agent prompt");
+    assert(prompt.canFind("a path may be a directory"),
+            "the marker sentence must keep the directory-path instruction");
+}
+
 // The five shipped nudge templates are prompt data, not code, so in-tree
 // removal (of a file, or of the harness marker / tool name it must carry)
 // would silently strip the nudge ladder of its functional traffic or let a
