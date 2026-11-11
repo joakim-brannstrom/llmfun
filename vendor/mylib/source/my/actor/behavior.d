@@ -34,6 +34,24 @@ struct ActorRef {
         kernel_ = kernel;
     }
 
+    /** Clean shutdown of the actor
+     *
+     * Stopping incoming messages from triggering new behavior and finish all
+     * awaited responses.
+     */
+    void shutdown() @safe nothrow {
+        kernel_.shutdown();
+    }
+
+    /** Force an immediate shutdown.
+     *
+     * Stopping incoming messages from triggering new behavior and discard all
+     * awaited responses.
+     */
+    void forceShutdown() @safe nothrow {
+        kernel_.forceShutdown();
+    }
+
     /// The system this actor belongs to (null for ActorRef.init)
     System* homeSystem() @safe nothrow {
         return kernel_ !is null ? &kernel.homeSystem() : null;
