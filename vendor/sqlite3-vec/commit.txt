@@ -1,0 +1,35 @@
+Upstream source of the vendored sqlite-vec files in this directory.
+
+Project:        sqlite-vec (community fork of asg017/sqlite-vec)
+Upstream repo:  https://github.com/vlasky/sqlite-vec
+Remote URL:     git@github.com:vlasky/sqlite-vec.git (origin)
+
+Commit:         7705949a22ca581b03dbace03f63d89392842aaf
+Commit subject: Bump version to v0.2.9-alpha
+Author:         Vlad Lasky <vlasky@users.noreply.github.com>
+Commit date:    Mon, 9 Nov 2026 11:11:42 +1100
+Tag/version:    v0.2.9-alpha
+Upstream tree:  clean at this commit (no local modifications)
+
+Files vendored (verbatim, unmodified):
+- sqlite-vec.c  (the extension; built by llmfun/sqlite3.mak into build/sqlite-vec.o
+                 with -DSQLITE_CORE -DSQLITE_VEC_STATIC -Ivendor/sqlite3)
+- sqlite-vec.h  (generated header; SQLITE_VEC_SOURCE in it is
+                 a66f28f97a9863c17e69e2611af80ddc7fedc2c4, a full commit sha
+                 of the same commit's source state)
+- README.md     (upstream readme, kept here for provenance and usage docs)
+
+Not vendored (upstream-only, not needed for llmfun's single-file static build):
+Makefile, bindings/, tests/, site/, examples/, benchmarks/, scripts/, .github/,
+and the packaging files (setup.py, package.json, sqlite-dist.toml, gemspec, ...).
+
+History note:
+This directory previously held a different sqlite-vec lineage, v0.1.10-alpha.4
+(source id 04d28bd, dated 2026-05-22), which carried four extra experimental
+modules (sqlite-vec-diskann.c, sqlite-vec-ivf.c, sqlite-vec-ivf-kmeans.c,
+sqlite-vec-rescore.c) #include'd into sqlite-vec.c. Those files did not exist in
+the vlasky fork's history and were removed in the update to v0.2.9-alpha.
+The fork itself is based on asg017/sqlite-vec v0.1.7-alpha.2; see its
+CHANGELOG.md in the upstream repository for everything since.
+
+Update performed: 2026-11-12.
