@@ -498,7 +498,7 @@ struct TextUserInterface {
         return tmp;
     }
 
-    void setHistory(immutable(string)[] history) {
+    void setHistory(string[] history) {
         if (history.empty) // on purpose do NOT clear the history. By not clearing it is easy
             // to "repeat" previous questions with a cleared chat.
             return;
@@ -509,7 +509,7 @@ struct TextUserInterface {
         tuiInitQueryHistory(tuiState, app[].ptr, app[].length);
     }
 
-    void setSessionList(const(UiSessionItem)[] items) {
+    void setSessionList(UiSessionItem[] items) {
         if (items.length == 0) {
             tuiSetSessionList(tuiState, null, 0);
             return;
@@ -535,11 +535,13 @@ struct TextUserInterface {
         String_Free(action.title);
     }
 
-    // Chip status line (worker -> UI): one label per chip. The label is the
-    // final workarea-relative path once the chip settles, the progress note
-    // while it runs; an unknown or removed chip id is a silent no-op in C.
-    void setDropChipStatus(long chipId, int state, string finalPath, string output) {
-        tuiSetChipStatus(tuiState, chipId, state, toTuiString(finalPath.empty ? output : finalPath));
+    // Chip status line (worker -> UI).
+    //
+    // Params:
+    //   `path` is the workarea-relative path D reports on Done and FailedRaw (the functional data D reads back at Send time)
+    //   `display` is the chip text D authors
+    void setDropChipStatus(long chipId, int state, string path, string display) {
+        tuiSetChipStatus(tuiState, chipId, state, toTuiString(path), toTuiString(display));
     }
 
     // Pops at most one dropped-file path from the C++ queue. chipId 0 +
@@ -993,7 +995,7 @@ class TextUserInterfaceActor : TUICommands {
     }
 
     void uiMsg(UiDropReport m) {
-        ui.setDropChipStatus(m.chipId, m.state, m.finalPath, m.output);
+        ui.setDropChipStatus(m.chipId, m.state, m.finalPath, m.display);
     }
 
     void uiMsg(UiStreamChatMessage m) {
@@ -1060,7 +1062,7 @@ class TextUserInterfaceActor : TUICommands {
 }
 
 struct UiInitHistory {
-    immutable(string)[] queries;
+    string[] queries;
 }
 
 struct UiChatMessage {
@@ -1195,13 +1197,13 @@ struct UiSessionItem {
 }
 
 struct UiSessionList {
-    const(UiSessionItem)[] items;
+    UiSessionItem[] items;
 }
 
-// One dropped-attachment chip outcome (agent -> UI), the DropReport relay.
+// One dropped-attachment chip outcome (agent -> UI)
 struct UiDropReport {
     long chipId;
     int state; // TuiChipStatus_*
-    string finalPath; // workarea-relative path once settled, empty while running
-    string output; // progress note / failure reason
+    Path finalPath;
+    string display;
 }

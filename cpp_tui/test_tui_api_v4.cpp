@@ -1026,7 +1026,7 @@ void casePipelineLaneFields() {
     static_assert(sizeof(PipelineChatMessage::contextUsed) == 8 &&
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
-    static_assert(TUI_API_VERSION == 10,
+    static_assert(TUI_API_VERSION == 11,
                   "the lane contract changed; bump one version per ABI event");
     static_assert(sizeof(SessionItem) == 80, "SessionItem is unaffected by the lane fields");
 
@@ -1543,13 +1543,13 @@ void caseLogArchiveRetry() {
 // setter is a no-op for anything that cannot name a live chip, and the
 // Send-time snapshot reads the row it clears.
 void caseDropChips() {
-    g_where = "case: drop-chip seams (v10)";
+    g_where = "case: drop-chip seams (v11)";
 
     // Null-safe: every entry point answers its sentinel and touches nothing.
     const TuiDroppedPath nullDrop = tuiGetDroppedPath(nullptr);
     expect(nullDrop.chipId == 0 && nullDrop.path.data == nullptr && nullDrop.path.len == 0,
            "tuiGetDroppedPath on NULL answers the empty sentinel");
-    tuiSetChipStatus(nullptr, 1, TuiChipStatus_Done, makeStr("dropped/x"));
+    tuiSetChipStatus(nullptr, 1, TuiChipStatus_Done, makeStr("dropped/x"), makeStr("x"));
     expect(tuiGetChipCount(nullptr) == 0, "tuiGetChipCount on NULL answers 0");
     const TuiChipParam nullChip = tuiGetChipAt(nullptr, 0);
     expect(nullChip.chipId == 0 && nullChip.status == TuiChipStatus_Pending &&
@@ -1609,16 +1609,17 @@ void caseDropChips() {
 
     // The by-id setter: an unknown id is a silent no-op, an ordinal outside
     // the vocabulary is one too, and a real Done report lands on the drop's
-    // own chip with the label as the workarea path.
-    tuiSetChipStatus(state, 4242, TuiChipStatus_Done, makeStr("dropped/ghost"));
+    // own chip with the path as the workarea data and D's display as the
+    // chip text.
+    tuiSetChipStatus(state, 4242, TuiChipStatus_Done, makeStr("dropped/ghost"), makeStr("ghost"));
     expect(state->inner->ui.drop.chips.size() == 3, "an unknown id's report changed the row");
-    tuiSetChipStatus(state, first, 99, makeStr("not a state"));
+    tuiSetChipStatus(state, first, 99, makeStr("not a state"), makeStr(""));
     expect(state->inner->ui.drop.chips.front().state == DropChipState::Pending,
            "an unknown ordinal flipped the chip");
-    tuiSetChipStatus(state, first, TuiChipStatus_Done, makeStr("dropped/a.md"));
+    tuiSetChipStatus(state, first, TuiChipStatus_Done, makeStr("dropped/a.md"), makeStr("a.md"));
     const llmfun::tui::model::DropChip& reported = state->inner->ui.drop.chips.front();
     expect(reported.id == first && reported.state == DropChipState::Done &&
-               reported.label == "dropped/a.md" && reported.workareaPath == "dropped/a.md",
+               reported.workareaPath == "dropped/a.md" && reported.display == "a.md",
            "the Done report did not land on the drop's own chip");
     expect(reported.fullPath == "/tmp/a.md", "the report lost the drop's raw path");
 
@@ -1646,8 +1647,8 @@ void caseDropChips() {
                snapshotEnd.path.data == nullptr,
            "an index past the end answered a chip");
 
-    // A Failed report labels the reason and carries no path.
-    tuiSetChipStatus(state, third, TuiChipStatus_Failed, makeStr("disk full"));
+    // A Failed report carries the reason as the display and no path.
+    tuiSetChipStatus(state, third, TuiChipStatus_Failed, makeStr(""), makeStr("disk full"));
     const TuiChipParam snapshotReason = tuiGetChipAt(state, 2);
     expect(snapshotReason.chipId == third && snapshotReason.status == TuiChipStatus_Failed &&
                snapshotReason.path.data == nullptr,
@@ -1694,8 +1695,8 @@ int main(int argc, char** argv) {
             (void)std::remove("llmfun_ui_log.txt");
     });
 
-    static_assert(TUI_API_VERSION == 10,
-                  "this contract test pins the current API generation (v10)");
+    static_assert(TUI_API_VERSION == 11,
+                  "this contract test pins the current API generation (v11)");
 
     caseNoneStateInert();
     caseLogRecords();

@@ -25,10 +25,10 @@ namespace llmfun::tui::model {
 /// than by a layout pin.
 enum class DropChipState : std::int32_t {
     Pending = 0,   ///< dropped, D has not reported back yet
-    Done = 1,      ///< the workarea copy exists, the label is its workarea-relative path
-    FailedRaw = 2, ///< the conversion failed, the raw copy was attached instead, the label is its
-                   ///< workarea-relative path
-    Failed = 3,    ///< nothing was attached, the label is the short reason
+    Done = 1,      ///< the workarea copy exists, the display is D's capped basename
+    FailedRaw = 2, ///< the conversion failed, the raw copy was attached instead, the display is
+                   ///< D's capped basename
+    Failed = 3,    ///< nothing was attached, the display is the short reason
 };
 
 /// One dropped attachment as the chip row and the Log tab read it.
@@ -36,11 +36,9 @@ struct DropChip {
     std::int64_t id =
         0; ///< monotonic, nonzero, never reused. 0 is the ABI's "none", never a real chip id.
     DropChipState state = DropChipState::Pending;
-    /// Pending: "processing <basename>...". Done and FailedRaw: the
-    /// workarea-relative path. Failed: the short reason.
-    std::string label;
-    /// The original drop path, for the hover and the Log tab. The outgoing
-    /// message never carries it.
+    /// The chips user facing display string.
+    std::string display;
+    /// The original drop path, for the hover and the Log tab
     std::string fullPath;
     /// The workarea path D reports on Done and FailedRaw. Empty otherwise.
     std::string workareaPath;
@@ -67,10 +65,7 @@ struct DropChipRow {
 
 /// Appends one Pending chip for `rawPath` and queues the path for D. The chip
 /// takes `nextChipId` (and the counter advances), so a path dropped twice
-/// becomes two chips with two ids. The label is "processing <basename>..." with
-/// the basename taken verbatim as the text after the last '/' or '\': C++ never
-/// sanitizes it, D sanitizes before anything is composed into a message.
-/// Returns the new chip's id.
+/// becomes two chips with two ids.
 std::int64_t appendDroppedPath(DropChipRow& row, const std::string& rawPath);
 
 /// Removes the chip `id` from the row immediately and queues the id for D's
@@ -78,11 +73,13 @@ std::int64_t appendDroppedPath(DropChipRow& row, const std::string& rawPath);
 /// nothing.
 bool removeChip(DropChipRow& row, std::int64_t id);
 
-/// Flips the chip `id` to `state` with the label and workarea path D reports.
-/// An unknown or removed id is a silent no-op that answers false: a late report
+/// Flips the chip `id` to `state` with the workarea path and the display D
+/// reports. `path` is the workarea-relative path on Done and FailedRaw and
+/// empty otherwise; `display` is the chip text D authors for any state. An
+/// unknown or removed id is a silent no-op that answers false: a late report
 /// for a chip the user cancelled must not resurrect it.
-bool setChipStatus(DropChipRow& row, std::int64_t id, DropChipState state, const std::string& label,
-                   const std::string& workareaPath);
+bool setChipStatus(DropChipRow& row, std::int64_t id, DropChipState state, const std::string& path,
+                   const std::string& display);
 
 /// How many chips the row shows.
 size_t chipCount(const DropChipRow& row);

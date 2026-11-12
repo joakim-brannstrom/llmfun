@@ -7,26 +7,13 @@
 #include <utility>
 
 namespace llmfun::tui::model {
-namespace {
-
-/// The text after the last '/' or '\', verbatim. A path ending in a separator
-/// answers "", so the label reads "processing ..." and D still sees the raw
-/// path through the queue.
-std::string basenameOf(const std::string& path) {
-    const std::size_t lastSeparator = path.find_last_of("/\\");
-    if (lastSeparator == std::string::npos)
-        return path;
-    return path.substr(lastSeparator + 1);
-}
-
-} // namespace
 
 std::int64_t appendDroppedPath(DropChipRow& row, const std::string& rawPath) {
     const std::int64_t id = row.nextChipId++;
     DropChip chip;
     chip.id = id;
     chip.state = DropChipState::Pending;
-    chip.label = "processing " + basenameOf(rawPath) + "...";
+    chip.display = "processing...";
     chip.fullPath = rawPath;
     row.chips.push_back(std::move(chip));
     PendingDrop queued;
@@ -47,13 +34,13 @@ bool removeChip(DropChipRow& row, std::int64_t id) {
     return false;
 }
 
-bool setChipStatus(DropChipRow& row, std::int64_t id, DropChipState state, const std::string& label,
-                   const std::string& workareaPath) {
+bool setChipStatus(DropChipRow& row, std::int64_t id, DropChipState state, const std::string& path,
+                   const std::string& display) {
     for (DropChip& chip : row.chips) {
         if (chip.id == id) {
             chip.state = state;
-            chip.label = label;
-            chip.workareaPath = workareaPath;
+            chip.workareaPath = path;
+            chip.display = display;
             return true;
         }
     }

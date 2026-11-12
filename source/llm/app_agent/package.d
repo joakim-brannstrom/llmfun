@@ -422,7 +422,7 @@ struct AgentApp {
         }
 
         if (uiMsg.isActive()) {
-            uiMsg.initHistory(agent_.getUserQueries.map!(a => a.content).array.idup);
+            uiMsg.initHistory(agent_.getUserQueries.map!(a => a.content).array);
         }
 
         activeSession = sf.meta;
@@ -688,7 +688,7 @@ struct AgentApp {
     package void onDropReport(DropReport r) {
         if (!uiMsg.isActive())
             return;
-        uiMsg.dropChipReport(UiDropReport(r.chipId, r.state, r.finalPath, r.output));
+        uiMsg.dropChipReport(UiDropReport(r.chipId, r.state, r.finalPath, r.display));
     }
 
     /** Sidebar select handler (TUIListener.sessionSelect): clear pending
@@ -1189,7 +1189,7 @@ class AppAgentActor : DropOwner {
                 app.llmConf.tui.idleParkMs, dropWorker);
         app.uiMsg = new UiMessenger(new TuiChannelSink(tui_));
         monitor(self_.address(), tui_);
-        app.uiMsg.initHistory(app.agent_.getUserQueries.map!(a => a.content).array.idup);
+        app.uiMsg.initHistory(app.agent_.getUserQueries.map!(a => a.content).array);
         app.agent_.setStreamUpdate(app.makeStreamCallback);
 
         // TODO: this same code is copy/pasted. Refactor it into a function

@@ -43,8 +43,8 @@ interface TuiSink {
     void pipelineClear();
     void pipelineToolCall(string agentId, string name, string arguments, string id);
     void pipelineToolResult(string agentId, string name, int ok, string text);
-    void sessionList(const(UiSessionItem)[] items);
-    void initHistory(immutable(string)[] history);
+    void sessionList(UiSessionItem[] items);
+    void initHistory(string[] history);
     void dropChipReport(UiDropReport report);
 }
 
@@ -133,11 +133,11 @@ class TuiChannelSink : TuiSink {
         ch.uiPipelineClear();
     }
 
-    override void sessionList(const(UiSessionItem)[] items) {
+    override void sessionList(UiSessionItem[] items) {
         ch.uiMsg(UiSessionList(items));
     }
 
-    override void initHistory(immutable(string)[] history) {
+    override void initHistory(string[] history) {
         ch.uiMsg(UiInitHistory(history));
     }
 
@@ -210,10 +210,10 @@ class TuiBlockedSink : TuiSink {
     override void pipelineClear() {
     }
 
-    override void sessionList(const(UiSessionItem)[] items) {
+    override void sessionList(UiSessionItem[] items) {
     }
 
-    override void initHistory(immutable(string)[] history) {
+    override void initHistory(string[] history) {
     }
 
     override void dropChipReport(UiDropReport report) {
@@ -380,7 +380,7 @@ class TuiRecordingSink : TuiSink {
         record("pipelineClear");
     }
 
-    override void sessionList(const(UiSessionItem)[] items) {
+    override void sessionList(UiSessionItem[] items) {
         auto copy = new UiSessionItem[items.length];
         foreach (i, ref const it; items)
             copy[i] = it;
@@ -388,13 +388,13 @@ class TuiRecordingSink : TuiSink {
         record("sessionList", "n=" ~ items.length.text);
     }
 
-    override void initHistory(immutable(string)[] history) {
+    override void initHistory(string[] history) {
         record("initHistory", "n=" ~ history.length.text);
     }
 
     override void dropChipReport(UiDropReport report) {
-        record("dropChipReport", report.chipId.text ~ " state " ~ report.state.text ~ " " ~ (
-                report.finalPath.empty ? report.output : report.finalPath));
+        record("dropChipReport",
+                report.chipId.text ~ " state " ~ report.state.text ~ " " ~ report.display);
     }
 }
 
@@ -499,11 +499,11 @@ class UiMessenger {
         sink.pipelineClear();
     }
 
-    void sessionList(const(UiSessionItem)[] items) {
+    void sessionList(UiSessionItem[] items) {
         sink.sessionList(items);
     }
 
-    void initHistory(immutable(string)[] history) {
+    void initHistory(string[] history) {
         sink.initHistory(history);
     }
 

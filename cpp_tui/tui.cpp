@@ -713,7 +713,7 @@ bool tuiPopDroppedPath(TuiState& state, std::int64_t& chipId, std::string& path)
 }
 
 void tuiSetChipStatus(TuiState& state, std::int64_t chipId, std::int32_t status,
-                      const std::string& label) {
+                      const std::string& path, const std::string& display) {
     // An ordinal outside the vocabulary is not a state, so the update answers
     // false and touches nothing: the ABI's four values are the only ones that
     // can name a chip.
@@ -734,12 +734,12 @@ void tuiSetChipStatus(TuiState& state, std::int64_t chipId, std::int32_t status,
     default:
         return;
     }
-    // The label is the path D reports on Done and FailedRaw (the workarea-
-    // relative path rides as the label), and only a reason on the rest.
+    // The path is the workarea-relative path D reports on Done and FailedRaw ,
+    // empty on the rest; the display is the chip text D authors for any state.
     const bool attached =
         stateValue == model::DropChipState::Done || stateValue == model::DropChipState::FailedRaw;
-    model::setChipStatus(state.ui.drop, chipId, stateValue, label,
-                         attached ? label : std::string());
+    model::setChipStatus(state.ui.drop, chipId, stateValue, attached ? path : std::string(),
+                         display);
 }
 
 std::size_t tuiGetChipCount(const TuiState& state) { return model::chipCount(state.ui.drop); }

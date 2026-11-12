@@ -808,12 +808,12 @@ void sceneFixture(const Scene& scene, Fixture& fixture) {
     if (scene.chips >= 2) {
         const std::int64_t id = model::appendDroppedPath(fixture.dropRow, "/tmp/deep/nested/b.md");
         model::setChipStatus(fixture.dropRow, id, model::DropChipState::Done, "dropped/b.md",
-                             "dropped/b.md");
+                             "b.md");
     }
     if (scene.chips >= 3) {
         const std::int64_t id = model::appendDroppedPath(fixture.dropRow, "/tmp/c.md");
-        model::setChipStatus(fixture.dropRow, id, model::DropChipState::Failed, "could not copy",
-                             "");
+        model::setChipStatus(fixture.dropRow, id, model::DropChipState::Failed, "",
+                             "could not copy");
     }
 }
 
@@ -1841,13 +1841,14 @@ void checkChips() {
         frame(body);
         rect = composerRect(g_w, g_h, m, fixture.state.height);
         const Grid grid = frame(body);
-        check(grid.hasText("processing a.md..."), "a pending chip shows its processing label");
+        check(grid.hasText("processing..."), "a pending chip shows its processing label");
         check(grid.findText(xMark).first >= 0, "the chip carries an x affordance");
         check(model::chipCount(fixture.dropRow) == 1, "drawing a chip changes no row state");
     }
 
-    // The states' labels: the workarea path once D reports one, the reason when
-    // nothing attached, and never the full drop path (that is the Log tab's).
+    // The states' labels: the display D reports (the capped basename when
+    // something attached, the reason when nothing did), and never the full
+    // drop path (that is the Log tab's).
     {
         g_w = 100;
         g_h = 30;
@@ -1856,16 +1857,17 @@ void checkChips() {
         const std::int64_t doneId =
             model::appendDroppedPath(fixture.dropRow, "/tmp/deep/nested/b.md");
         model::setChipStatus(fixture.dropRow, doneId, model::DropChipState::Done, "dropped/b.md",
-                             "dropped/b.md");
+                             "b.md");
         const std::int64_t failedId = model::appendDroppedPath(fixture.dropRow, "/tmp/c.md");
-        model::setChipStatus(fixture.dropRow, failedId, model::DropChipState::Failed,
-                             "could not copy", "");
+        model::setChipStatus(fixture.dropRow, failedId, model::DropChipState::Failed, "",
+                             "could not copy");
         ui::Rect rect = composerRect(g_w, g_h, m);
         const auto body = bodyFor(fixture, rect);
         frame(body);
         rect = composerRect(g_w, g_h, m, fixture.state.height);
         const Grid grid = frame(body);
-        check(grid.hasText("dropped/b.md"), "a done chip shows the workarea path");
+        check(grid.hasText("b.md"), "a done chip shows D's display");
+        check(!grid.hasText("dropped/b.md"), "a done chip no longer shows the workarea path");
         check(grid.hasText("could not copy"), "a failed chip shows the short reason");
         check(!grid.hasText("/tmp/deep/nested/b.md") && !grid.hasText("/tmp/c.md"),
               "no chip shows the full drop path");
@@ -1898,27 +1900,34 @@ void checkChips() {
         check(!answers.submit, "an x click is not a send");
     }
 
-    // A narrow composer: the label is cut with the ellipsis, and a chip that
+    // A narrow composer: the pending chips all carry C's short fixed constant,
+    // so the room-based cut bites a settled chip's D-authored display: a
+    // display wider than its room is cut with the ellipsis, and a chip that
     // cannot sit whole is not drawn at all - the row loses its tail, it never
-    // paints half of one.
+    // paints half of one. (The wide display is test-authored: D caps its own
+    // displays at 24, and this pins the view's last resort, not the cap.)
     {
         g_w = 40;
         g_h = 15;
         Fixture fixture;
-        model::appendDroppedPath(fixture.dropRow, "/tmp/a-very-long-drop-path.md");
+        const std::int64_t settled =
+            model::appendDroppedPath(fixture.dropRow, "/tmp/a-very-long-drop-path.md");
+        model::setChipStatus(fixture.dropRow, settled, model::DropChipState::Done,
+                             "dropped/a-very-long-drop-path.md",
+                             "a-very-long-drop-path-with-a-long-name.md");
         model::appendDroppedPath(fixture.dropRow, "/tmp/b.md");
-        model::appendDroppedPath(fixture.dropRow, "/tmp/c.md");
         ui::Rect rect = composerRect(g_w, g_h, m);
         const auto body = bodyFor(fixture, rect);
         frame(body);
         rect = composerRect(g_w, g_h, m, fixture.state.height);
         const Grid grid = frame(body);
-        check(grid.hasText("processing"), "the first chip draws in creation order");
-        check(grid.hasText(cut), "a wide label is cut with the ellipsis");
-        check(!grid.hasText("processing a-very-long-drop-path.md"),
-              "the cut label is not the whole label");
+        check(grid.hasText(cut), "a wide display is cut with the ellipsis");
+        check(!grid.hasText("a-very-long-drop-path-with-a-long-name.md"),
+              "the cut display is not the whole display");
+        check(!grid.hasText("processing"),
+              "a pending chip that cannot sit whole is not drawn at all");
         check(grid.hasText("Send"), "the chip row never eats the action");
-        check(model::chipCount(fixture.dropRow) == 3, "an undrawn chip is not a removed chip");
+        check(model::chipCount(fixture.dropRow) == 2, "an undrawn chip is not a removed chip");
     }
 }
 

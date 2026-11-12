@@ -2447,12 +2447,16 @@ codeModels:
             "shipped example dragDrop.destination: " ~ conf.dragDrop.destination);
     assert(conf.dragDrop.conversionTimeout == "10 minutes",
             "shipped example dragDrop.conversionTimeout: " ~ conf.dragDrop.conversionTimeout);
-    assert(conf.dragDrop.converters.length == 1,
+    assert(conf.dragDrop.converters.length == 2,
             "shipped example dragDrop rules: " ~ conf.dragDrop.converters.length.to!string);
     assert(conf.dragDrop.converters[0].extensions == [".docx", ".doc"],
             "shipped example extensions");
     assert(conf.dragDrop.converters[0].command.canFind("@{llmfun_src}"),
             "shipped example command placeholders");
+    assert(conf.dragDrop.converters[1].extensions == [".pdf"],
+            "shipped example pdf rule extensions");
+    assert(conf.dragDrop.converters[1].command.canFind("@{llmfun_dst}"),
+            "shipped example pdf rule command placeholders");
     assert(resolved.alwaysOn == ["taskDone", "listToolTags"]);
 
     // Silent-valid rule: zero warnings for the global block and the model's

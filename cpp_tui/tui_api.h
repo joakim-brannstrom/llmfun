@@ -41,7 +41,7 @@ extern "C" {
 /* TUI_API_VERSION - API generation marker. Documentation only: no runtime
  * behavior depends on it.
  */
-#define TUI_API_VERSION 10
+#define TUI_API_VERSION 11
 
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
@@ -918,17 +918,9 @@ TuiDroppedPath tuiGetDroppedPath(TuiState* state);
 
 /* Report one chip's outcome by id.
  *
- * `label` is copied during the call (inbound non-owning, the
- * tuiSetSessionList precedent), so the caller's buffer may be freed or
- * reused immediately after this call returns.
- *
- * The label carries the state's text: the workarea-relative path on
- * Done and FailedRaw, the short reason on Failed. An unknown or removed
- * chipId is a silent no-op; a NULL-safe no-op if state is NULL.
- *
  * Null-safe: no-op if state is NULL.
  */
-void tuiSetChipStatus(TuiState* state, int64_t chipId, int32_t status, String label);
+void tuiSetChipStatus(TuiState* state, int64_t chipId, int32_t status, String path, String display);
 
 /* How many chips the row currently shows (the Send-time snapshot's count).
  *
