@@ -599,7 +599,7 @@ class DropWorker {
                 const root = uniqueDestination(AbsolutePath(buildPath(snap_.workArea,
                         snap_.destination)), base);
                 chips_[job.chipId] = CopyChip(job.chipId, base,
-                        (snap_.destination ~ root).Path, true);
+                        buildPath(snap_.destination, root.value).Path, true);
 
                 mkdirRecurse(snap_.workArea ~ snap_.destination ~ root);
 
@@ -698,7 +698,7 @@ class DropWorker {
 
     // A finished copy: count it, log the audit line, progress-report a
     // directory chip per file and settle the chip when its last item lands.
-    private void settleCopy(CopyItem item, Path finalRel) {
+    protected void settleCopy(CopyItem item, Path finalRel) {
         auto c = item.chipId in chips_;
         if (c is null)
             return;
@@ -954,27 +954,36 @@ unittest {
 
 @("an injected handler error fails the in-flight chip")
 unittest {
-    auto sys = makeSystem;
-    scope (exit)
-        sys.shutdown();
+    import llm.test_util : testArea;
 
+    auto area = testArea("handler_error");
+    scope (exit)
+        area.cleanup();
+
+    const srcFile = AbsolutePath(area.createFile("a.docx", "hello docx").toString);
+
+    // Settle-time seam: the throw lands inside copyOne's guarded section, so
+    // the Exception is caught per step and fails the chip (an Error would
+    // escape the worker uncaught and wedge the suite).
     static class ThrowingWorker : DropWorker {
         this(DropWorkerConfig snap, TypedAddress!DropOwner owner) {
             super(snap, owner);
         }
 
-        long inFlightChip_;
-        override void pumpCopies() {
-            inFlightChip_ = 42;
-            throw new Error("conversion exploded");
+        override void settleCopy(CopyItem item, Path finalRel) {
+            throw new Exception("conversion exploded");
         }
     }
 
+    auto sys = makeSystem;
+    scope (exit)
+        sys.shutdown();
     auto owner = scopedActor;
-    auto addr = sys.spawn!ThrowingWorker(makeDropWorkerConfig(AbsolutePath("/tmp/workarea"),
+
+    auto addr = sys.spawn!ThrowingWorker(makeDropWorkerConfig(area.workArea,
             DragDropConfig.init), TypedAddress!DropOwner(owner.address().lock()));
     auto ch = Channel!DropWorker(addr, null);
-    ch.drop(42L, AbsolutePath("/tmp/incoming/a.docx"));
+    ch.drop(42L, srcFile);
 
     DropReport got;
     assert(owner.receiveTimeout(3.dur!"seconds", (DropReport r) { got = r; }),
@@ -983,11 +992,14 @@ unittest {
     assert(got.state == TuiChipStatus_Failed);
     assert(got.display == "attachment processing failed: conversion exploded");
 
-    // the tick survives the handler error and reports again on the next beat
+    // the worker survives the per-step failure and serves the next drop
+    ch.drop(43L, srcFile);
     DropReport again;
     assert(owner.receiveTimeout(3.dur!"seconds", (DropReport r) { again = r; }),
-            "the tick must keep firing after a handler error");
-    assert(again.chipId == 42);
+            "the tick must keep serving drops after a handler error");
+    assert(again.chipId == 43);
+    assert(again.state == TuiChipStatus_Failed);
+    assert(again.display == "attachment processing failed: conversion exploded");
 }
 
 @("sanitizeBaseName strips separators, control characters and backticks")
