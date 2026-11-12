@@ -1241,14 +1241,7 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
 
         // The dropped attachments, left of the history cluster and the action:
         // one label chip plus one real `x` per dropped path, in creation order,
-        // growing right from the row's left edge. The workarea path is the label
-        // once D reports one - the full drop path shows on the Log tab, not
-        // here - and the ink is the state: amber while the job runs, green when
-        // it attached, quiet when the raw copy landed instead, red when nothing
-        // did. A label wider than its room is cut with the profile's ellipsis
-        // (chip's own rule), and a chip that cannot hold the marker whole is
-        // not drawn at all: the row loses its tail rather than painting half
-        // of one (the activity filter's rule).
+        // growing right from the row's left edge.
         if (in.drop != nullptr && model::chipCount(*in.drop) > 0) {
             const char* xMark = ui::icon(ui::Icon::Error, glyphSetFor(m));
             const ui::ButtonSpec xSpec{xMark, true, false, false};
@@ -1262,12 +1255,11 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
                 const model::DropChip* dropped = model::chipAt(*in.drop, i);
                 if (dropped == nullptr)
                     break;
-                const std::string& label =
-                    dropped->workareaPath.empty() ? dropped->label : dropped->workareaPath;
+                const std::string& display = dropped->display;
                 const float cap = chipsRight - chipX - xW;
                 if (cap < minLabelW)
                     break; // in creation order, so nothing after this fits either
-                const float labelW = std::min(ui::measureChip(m, label).w, cap);
+                const float labelW = std::min(ui::measureChip(m, display).w, cap);
                 ColorToken ink = ColorToken::stateWarn;
                 if (dropped->state == model::DropChipState::Done)
                     ink = ColorToken::stateOk;
@@ -1275,21 +1267,13 @@ void renderComposer(const ComposerInput& in, const ui::Rect& region, const ui::M
                     ink = ColorToken::textMid;
                 else if (dropped->state == model::DropChipState::Failed)
                     ink = ColorToken::stateDanger;
-                ui::chip(m, ui::Rect{chipX, metaRow.y, labelW, metaRow.h, m.textGrid}, label, ink,
+                ui::chip(m, ui::Rect{chipX, metaRow.y, labelW, metaRow.h, m.textGrid}, display, ink,
                          ColorToken::raised);
                 const ui::Rect xRect{chipX + labelW, metaRow.y, xW, metaRow.h, m.textGrid};
                 ui::button(xSpec, m, xRect);
                 if (ui::buttonPressed(xSpec, m, xRect))
                     cancels.push_back(dropped->id);
-                // The full drop path on hover: the label is the workarea path
-                // once D reports one, and the original path is what tells the
-                // user which file the chip carries. The hit box rides the label
-                // and is submitted after the x, whose item would otherwise own
-                // the hover; on the grid the Log tab carries the paths, so the
-                // box is a pixel-profile affordance only. The hit box is not a
-                // press affordance: a click on it blurs the draft field like any
-                // click outside the field (InputTextEx releases focus on any
-                // click while active), accepted behavior.
+                // The full drop path on hover
                 if (!m.textGrid && ImGui::GetCurrentContext() != nullptr) {
                     const ImVec2 extent = ImGui::GetCurrentWindow()->DC.CursorMaxPos;
                     ImGui::SetCursorScreenPos(ImVec2(chipX, metaRow.y));

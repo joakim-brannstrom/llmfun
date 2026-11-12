@@ -30,7 +30,7 @@ text:
 
 
    Ask anything...  / commands
-    processing a.md...   ✕   dropped/b.md   ✕                                             Send
+    processing...   ✕   b.md   ✕                                                          Send
 
 
 fills:

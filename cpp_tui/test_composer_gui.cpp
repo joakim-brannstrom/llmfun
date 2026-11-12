@@ -252,23 +252,22 @@ int main(int argc, char** argv) {
     check(readPpm(noChipsShot, noChips), "the no-chips frame was captured");
 
     // The two chips, seeded the way task 4's grid test seeds them: one waiting
-    // on D and one attached, whose label is the workarea path D reported.
+    // on D and one attached, whose display is the chip text D reported.
     check(llmfun::tui::model::chipCount(state.ui.drop) == 0, "premise: the row starts empty");
     const std::int64_t firstId = llmfun::tui::model::appendDroppedPath(state.ui.drop, "/tmp/a.md");
     const std::int64_t secondId =
         llmfun::tui::model::appendDroppedPath(state.ui.drop, "/tmp/deep/nested/b.md");
-    llmfun::tui::model::setChipStatus(state.ui.drop, secondId,
-                                      llmfun::tui::model::DropChipState::Done, "dropped/b.md",
-                                      "dropped/b.md");
+    llmfun::tui::model::setChipStatus(
+        state.ui.drop, secondId, llmfun::tui::model::DropChipState::Done, "dropped/b.md", "b.md");
     const llmfun::tui::model::DropChip* waiting = llmfun::tui::model::chipAt(state.ui.drop, 0);
     const llmfun::tui::model::DropChip* attached = llmfun::tui::model::chipAt(state.ui.drop, 1);
     check(waiting != nullptr && attached != nullptr, "premise: two chips seeded");
     check(waiting != nullptr && waiting->state == llmfun::tui::model::DropChipState::Pending &&
-              waiting->label == "processing a.md..." && waiting->fullPath == "/tmp/a.md",
-          "the waiting chip's label is the processing text, the hover's answer is the full path");
-    check(attached != nullptr && attached->label == "dropped/b.md" &&
+              waiting->display == "processing..." && waiting->fullPath == "/tmp/a.md",
+          "the waiting chip's display is the processing text, the hover's answer is the full path");
+    check(attached != nullptr && attached->display == "b.md" &&
               attached->fullPath == "/tmp/deep/nested/b.md",
-          "the attached chip's label is the workarea path, the hover's answer is the full path");
+          "the attached chip's display is D's chip text, the hover's answer is the full path");
 
     // The row's geometry, derived the way the view derives it: the empty draft's
     // one text row puts the meta row above the bottom border, the chips grow
@@ -291,9 +290,9 @@ int main(int argc, char** argv) {
 
     float chipX = innerX + settled.pad1;
     const float cap1 = chipsRight - chipX - xW;
-    const float labelW1 = ui::measureChip(settled, "processing a.md...").w;
+    const float labelW1 = ui::measureChip(settled, "processing...").w;
     const float cap2 = chipsRight - (chipX + labelW1 + xW) - xW;
-    const float labelW2 = ui::measureChip(settled, "dropped/b.md").w;
+    const float labelW2 = ui::measureChip(settled, "b.md").w;
     check(cap1 > labelW1 && cap2 > labelW2,
           "premise: the row holds both chips whole (no truncation in the frame)");
     const ui::Rect label1Rect{chipX, metaY, labelW1, metaH, false};
@@ -352,7 +351,7 @@ int main(int argc, char** argv) {
               "...carrying the full drop path (w=" + trimNum(tip ? tip->Size.x : -1.0f) +
                   ", path=" + trimNum(expect) + ")");
         const float labelW =
-            ImGui::CalcTextSize("processing a.md...").x + 2.0f * ImGui::GetStyle().WindowPadding.x;
+            ImGui::CalcTextSize("processing...").x + 2.0f * ImGui::GetStyle().WindowPadding.x;
         check(tip != nullptr && std::fabs(tip->Size.x - labelW) > 2.0f,
               "...and not the label the row already shows (label=" + trimNum(labelW) + ")");
 

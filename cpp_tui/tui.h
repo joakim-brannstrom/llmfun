@@ -32,9 +32,9 @@
 #include "views/settings.h"
 #include "views/topbar.h"
 
-// Forward declaration (keeps the rich_md headers out of this header): the
-// markdown context of a TuiState, created/destroyed by the tuiInit/tuiDestroy
-// State lifecycle (tui_api.cpp, implemented in tui.cpp).
+// Forward declaration: keeps the rich_md headers out of this header.
+// A TuiState's markdown context is created and destroyed by the
+// tuiInit/tuiDestroyState lifecycle.
 namespace RichMd {
 struct Context;
 }
@@ -56,14 +56,12 @@ enum class ChatMessageType : uint8_t {
 // Role colours for the message headers: exactly one foreground per role.
 //
 // A role header is a rule plus a label in this colour on the neutral thread
-// surface, and nothing else: no per-role row fill, no hover/active variant and
-// no derived black-on-bright text colour. Those fills turned the thread into a
-// stack of bright bars whose labels could not be read.
+// surface, and nothing else: no per-role row fill, no hover/active variant,
+// no derived black-on-bright text colour.
 //
-// These six values are the v4 store's per-type colours. The restyled thread
-// (tasks 25/26) draws ui::color(roleYou/roleAgent/roleTool/roleSystem) with a
-// state glyph instead, so nothing on screen reads them; test_theme_contrast
-// still measures the six, which is the only thing keeping the struct here.
+// No view reads these colours; the thread draws ui::color(role...) with a
+// state glyph instead. test_theme_contrast measures the six, which is what
+// keeps the struct here.
 struct ChatMessageStyle {
     // User & Vision: Sky Blue
     ImVec4 userFg = ImVec4(0.45f, 0.70f, 0.90f, 1.00f);
@@ -103,19 +101,19 @@ struct LogMessage {
     std::string text;
 };
 
-/// The archive's handle (`tuiSetLogging` -> `llmfun_ui_log.txt`), as a small owner.
+/// The archive's handle (`tuiSetLogging` -> `llmfun_ui_log.txt`).
 ///
-/// One handle for the whole run, so a record that arrives between two frames pays no `fopen`:
-/// the state owns it and its destructor closes it, so a state that enabled logging and went out
-/// of scope cannot leak the descriptor. It is *copyable and starts empty* when copied: a
-/// `TuiState` copy is a fresh state (the tests copy the aggregate), and two states sharing one
+/// One handle for the whole run, so a record that arrives between frames pays
+/// no `fopen`; the destructor closes it, so a state that enabled logging and
+/// went out of scope cannot leak the descriptor. Copyable and starts empty when
+/// copied: a `TuiState` copy is a fresh state, and two states sharing one
 /// `FILE*` would close it twice.
 struct LogArchive {
     FILE* file = nullptr;
-    /// The archive could not be opened *or* a write to it failed (a read-only working
-    /// directory, a full disk): no further attempt is made until the next
-    /// `tuiSetLogging(true)`, so a session that cannot archive costs one attempt per request,
-    /// not one per record.
+    /// The archive could not be opened or a write to it failed (a read-only
+    /// working directory, a full disk): no further attempt is made until the
+    /// next `tuiSetLogging(true)`, so a session that cannot archive costs one
+    /// attempt per request, not one per record.
     bool unavailable = false;
 
     LogArchive() = default;
@@ -127,15 +125,15 @@ struct LogArchive {
     }
 };
 
-/// One log record with owned strings: the C ABI's `TuiLogRecord` copied at the call
-/// boundary (D may free its buffers the moment `tuiAddLogRecord` returns - C-02).
+/// One log record with owned strings: the caller's record copied at the call
+/// boundary, so the caller may free its buffers the moment `tuiAddLogRecord`
+/// returns.
 ///
-/// This is the *raw* record and the ring's element type; it keeps the developer fields (module,
-/// function, file, line) because the Raw Log shows them. Activity's element type is
-/// `model::LogRecord`, which has none of those fields by construction -
-/// `model::projectForActivity()` is the one place that turns one into the other. The two names
-/// are deliberate: same record, two audiences, and the smaller one cannot leak the bigger one's
-/// fields.
+/// The raw record and the ring's element type; it keeps the developer fields
+/// (module, function, file, line) because the Raw Log shows them. Activity's
+/// element type is `model::LogRecord`, which has none of those fields;
+/// `model::projectForActivity()` is the one place that turns one into the
+/// other.
 using LogRecord = model::RawLogRecord;
 
 struct UserQueryState {
@@ -158,8 +156,8 @@ struct UserQueryState {
     /// that Escape-releases a focused text field has already cleared the active
     /// id inside NewFrame by the time the composer's block runs, so without this
     /// latch the press that should act on the composer would look like nobody's
-    /// (the same reason `ChatTabSessionPanel::renameHadFocus` exists). Read by
-    /// the D-ESC chain (`tui.cpp`), written once per frame by the field.
+    /// (the same reason `ChatTabSessionPanel::renameHadFocus` exists).
+    /// Written once per frame by the field.
     bool focusedLastFrame = false;
 };
 
@@ -171,9 +169,9 @@ struct RenderGroup {
     GroupKind kind;
 };
 
-// Internal C++ mirror of the C TuiSessionActionType (tui_api.h).
-// Append-only ordering: existing values must never be renumbered or
-// reused, so future actions can be added without breaking the D mapping.
+// Internal C++ mirror of the C TuiSessionActionType. Append-only ordering:
+// existing values must never be renumbered or reused, so new actions can be
+// added without breaking the D-side mapping.
 enum class SessionActionType : int {
     None = 0,
     Select = 1,
@@ -184,8 +182,8 @@ enum class SessionActionType : int {
     Clone = 6,
 };
 
-// One queued sidebar action (UI -> D). Mirrors the C SessionAction
-// (tui_api.h); the C API layer converts between the two.
+// One queued sidebar action (UI -> D). Mirrors the C SessionAction; the
+// C API layer converts between the two.
 struct SessionAction {
     SessionActionType type = SessionActionType::None;
     std::string sessionId; // empty for New
@@ -352,11 +350,11 @@ struct TuiState {
     /// find this out.
     bool offline{false};
 
-    /// The unknown phase ordinal `tuiSetRuntimeStatus` last complained about, whether it has
+    /// The unknown phase value `tuiSetRuntimeStatus` last complained about, whether it has
     /// complained at all, and how many lines it has written. Per state, not per process: the
     /// dedup belongs to this UI's log, so a fresh state (a test, a re-init) starts clean.
-    /// `-1` is a valid ordinal from a newer sender and cannot double as "nothing yet" - the bool
-    /// is the absence marker. Frame-thread only, like the fields around it.
+    /// `-1` is a valid phase value from a newer sender and cannot double as "nothing yet" - the
+    /// bool is the absence marker. Frame-thread only, like the fields around it.
     std::int32_t lastUnknownPhase{-1};
     bool warnedUnknownPhase{false};
     /// One per line actually written; the contract test asserts this instead of capturing stderr.
@@ -811,17 +809,13 @@ std::string tuiGetSubmitQuery(const TuiState& state);
 /// took, which is the id D reports back through tuiSetChipStatus.
 bool tuiPopDroppedPath(TuiState& state, std::int64_t& chipId, std::string& path);
 
-/// Report one chip's outcome by id. `status` is an ABI ordinal: one outside
-/// the four DropChipState values - or an unknown/removed id - is a silent
-/// no-op (the model's bool does not cross the seam; a bad ordinal cannot
-/// name a state); the label is copied as-is. The workarea path is derived
-/// here, from the state: on Done and FailedRaw the label *is* the
-/// workarea-relative path, on Pending and Failed there is none - D never
-/// echoes the raw paths back except as these labels.
+/// Report one chip's outcome by id (the id tuiPopDroppedPath handed out).
+/// `status` is one of the four TuiChipStatus values. `path` is the
+/// workarea-relative attachment path on Done and FailedRaw and empty on the
+/// rest. `display` is the text the chip shows. An unknown or removed id, or
+/// a status outside the four values, is a silent no-op. Frame thread only.
 void tuiSetChipStatus(TuiState& state, std::int64_t chipId, std::int32_t status,
-                      const std::string& label);
-void tuiSetChipStatus(TuiState& state, std::int64_t chipId, std::int32_t status,
-                      const std::string& label);
+                      const std::string& path, const std::string& display);
 
 /// How many chips the row shows.
 std::size_t tuiGetChipCount(const TuiState& state);

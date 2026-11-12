@@ -1,17 +1,18 @@
 // test_drop_chip.cpp
 //
 // Headless unit tests for the drop chip model: the id assignment, the pending
-// label, the two FIFO queues D drains, the by-id setter and the clear.
+// display, the two FIFO queues D drains, the by-id setter and the clear.
 //
 // What is pinned here, case by case:
 //   - ids are monotonic, nonzero and never reused, across appends and clears
 //     alike (0 is the ABI's "none" and can never name a chip);
 //   - dropping the same path twice produces two chips, and every drop queues
 //     its raw path FIFO;
-//   - the pending label is "processing <basename>..." with the basename taken
-//     verbatim as the text after the last '/' or '\' (no sanitizing here);
-//   - the by-id setter flips state, label and workarea path, and answers false
-//     without touching anything for an unknown or removed id;
+//   - the pending display is C's drop-frame fixed constant "processing...":
+//     no filename, no cap, no text logic C-side - D authors every later
+//     display, and every path rides the queues verbatim (no sanitizing here);
+//   - the by-id setter flips state, workarea path and display, and answers
+//     false without touching anything for an unknown or removed id;
 //   - removeChip removes immediately, queues the cancel id FIFO, and an
 //     unknown id queues nothing;
 //   - both queues pop one item per call with their empty sentinels (false /
@@ -74,15 +75,15 @@ const model::DropChip& chip(const model::DropChipRow& row, std::int64_t id, cons
     std::exit(1); // not reached, fail() exits
 }
 
-/// The pending chip appendDroppedPath() produces: the label, the full path and
+/// The pending chip appendDroppedPath() produces: the display, the full path and
 /// nothing in the workarea yet.
-void expectPending(const model::DropChip& dropped, const std::string& label,
+void expectPending(const model::DropChip& dropped, const std::string& display,
                    const std::string& fullPath, const char* where) {
     const std::string what = std::string(where) + " (id " + std::to_string(dropped.id) + ")";
     if (dropped.state != model::DropChipState::Pending)
         fail(what + ": state is not Pending");
-    if (dropped.label != label)
-        fail(what + ": label " + quoted(dropped.label) + " != " + quoted(label));
+    if (dropped.display != display)
+        fail(what + ": display " + quoted(dropped.display) + " != " + quoted(display));
     if (dropped.fullPath != fullPath)
         fail(what + ": fullPath " + quoted(dropped.fullPath) + " != " + quoted(fullPath));
     if (!dropped.workareaPath.empty())
@@ -130,34 +131,42 @@ void scenario2_doubleDrop() {
     expect(!model::popDroppedPath(row, path), "an empty queue answered true");
 }
 
-// The pending label names the drop's basename, taken verbatim after the last
-// separator of either flavour. C++ never sanitizes it: D does, before anything
-// is composed into a message.
+// The drop-frame pending display is C's fixed constant "processing...": the
+// same text for every drop shape, because C carries no basename, cap, or text
+// logic at all. C++ never sanitizes paths: D does, before anything is composed
+// into a message.
 void scenario3_pendingLabel() {
     g_scenario = 3;
-    phase("pending label");
+    phase("pending display");
 
     model::DropChipRow row;
     const std::int64_t unixy = model::appendDroppedPath(row, "/home/user/reports/q3.md");
-    expectPending(chip(row, unixy, "unix path"), "processing q3.md...", "/home/user/reports/q3.md",
+    expectPending(chip(row, unixy, "unix path"), "processing...", "/home/user/reports/q3.md",
                   "unix path");
 
     const std::int64_t windows = model::appendDroppedPath(row, "C:\\data\\notes.txt");
-    expectPending(chip(row, windows, "windows path"), "processing notes.txt...",
-                  "C:\\data\\notes.txt", "windows path");
+    expectPending(chip(row, windows, "windows path"), "processing...", "C:\\data\\notes.txt",
+                  "windows path");
 
     const std::int64_t bare = model::appendDroppedPath(row, "readme");
-    expectPending(chip(row, bare, "bare name"), "processing readme...", "readme", "bare name");
+    expectPending(chip(row, bare, "bare name"), "processing...", "readme", "bare name");
 
     const std::int64_t mixed = model::appendDroppedPath(row, "/data\\mixed.name");
-    expectPending(chip(row, mixed, "mixed separators"), "processing mixed.name...",
-                  "/data\\mixed.name", "mixed separators");
+    expectPending(chip(row, mixed, "mixed separators"), "processing...", "/data\\mixed.name",
+                  "mixed separators");
 
     const std::int64_t trailing = model::appendDroppedPath(row, "/data/dir/");
-    expectPending(chip(row, trailing, "trailing separator"), "processing ...", "/data/dir/",
+    expectPending(chip(row, trailing, "trailing separator"), "processing...", "/data/dir/",
                   "trailing separator");
 
-    expect(model::chipCount(row) == 5, "the label scenarios did not leave five chips");
+    // A long basename changes nothing: the display is the same constant, and
+    // the file's identity for this frame rides the tooltip and the Log tab.
+    const std::string longName = "quarterly-report-final-version.md";
+    const std::int64_t longOne = model::appendDroppedPath(row, "/home/user/reports/" + longName);
+    expectPending(chip(row, longOne, "long basename"), "processing...",
+                  "/home/user/reports/" + longName, "long basename");
+
+    expect(model::chipCount(row) == 6, "the display scenarios did not leave six chips");
 }
 
 // D's report flips one chip by id, and an unknown or already-removed id is a
@@ -170,22 +179,21 @@ void scenario4_setStatus() {
     const std::int64_t id = model::appendDroppedPath(row, "/tmp/a.md");
     model::appendDroppedPath(row, "/tmp/b.md");
 
-    expect(
-        model::setChipStatus(row, id, model::DropChipState::Done, "dropped/a.md", "dropped/a.md"),
-        "the setter refused a live id");
+    expect(model::setChipStatus(row, id, model::DropChipState::Done, "dropped/a.md", "a.md"),
+           "the setter refused a live id");
     const model::DropChip& done = chip(row, id, "after Done");
     expect(done.state == model::DropChipState::Done, "the state did not flip to Done");
-    expect(done.label == "dropped/a.md", "the Done label did not land");
+    expect(done.display == "a.md", "the Done display did not land");
     expect(done.workareaPath == "dropped/a.md", "the workarea path did not land");
     expect(model::chipCount(row) == 2, "the setter changed the row's size");
 
-    expect(!model::setChipStatus(row, 4242, model::DropChipState::Failed, "nope", ""),
+    expect(!model::setChipStatus(row, 4242, model::DropChipState::Failed, "", "nope"),
            "the setter accepted an unknown id");
-    expect(!model::setChipStatus(row, 0, model::DropChipState::Failed, "nope", ""),
+    expect(!model::setChipStatus(row, 0, model::DropChipState::Failed, "", "nope"),
            "the setter accepted the ABI's none id");
 
     model::removeChip(row, id);
-    expect(!model::setChipStatus(row, id, model::DropChipState::FailedRaw, "nope", ""),
+    expect(!model::setChipStatus(row, id, model::DropChipState::FailedRaw, "", "nope"),
            "the setter accepted a removed id");
     expect(model::chipCount(row) == 1, "a no-op report resurrected a removed chip");
     for (const model::DropChip& leftover : row.chips)
@@ -249,7 +257,7 @@ void scenario7_clear() {
     model::DropChipRow row;
     const std::int64_t a = model::appendDroppedPath(row, "/tmp/a");
     const std::int64_t b = model::appendDroppedPath(row, "/tmp/b");
-    model::setChipStatus(row, a, model::DropChipState::Done, "dropped/a", "dropped/a");
+    model::setChipStatus(row, a, model::DropChipState::Done, "dropped/a", "a");
     model::removeChip(row, b);
 
     model::clearChipRow(row);
@@ -311,8 +319,8 @@ void scenario9_dropIntake() {
     expect(first->state == model::DropChipState::Pending &&
                second->state == model::DropChipState::Pending,
            "an intake chip did not start Pending");
-    expect(first->label == "processing a.md..." && second->label == "processing a.md...",
-           "the intake labels are not the pending basename form");
+    expect(first->display == "processing..." && second->display == "processing...",
+           "the intake displays are not the fixed drop-frame constant");
     expect(first->fullPath == "/tmp/a.md" && second->fullPath == "/tmp/a.md",
            "the intake did not keep the raw paths");
 

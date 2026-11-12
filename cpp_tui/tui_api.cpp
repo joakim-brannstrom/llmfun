@@ -954,11 +954,13 @@ TuiDroppedPath tuiGetDroppedPath(TuiState* state) {
     return {chipId, String_NewBuf(path.data(), path.size())};
 }
 
-void tuiSetChipStatus(TuiState* state, int64_t chipId, int32_t status, String label) {
+void tuiSetChipStatus(TuiState* state, int64_t chipId, int32_t status, String path,
+                      String display) {
     if (!state || !state->inner)
         return;
-    const std::string text(label.data ? label.data : "", label.data ? label.len : 0);
-    ::llmfun::tui::tuiSetChipStatus(*state->inner, chipId, status, text);
+    const std::string pathText(path.data ? path.data : "", path.data ? path.len : 0);
+    const std::string displayText(display.data ? display.data : "", display.data ? display.len : 0);
+    ::llmfun::tui::tuiSetChipStatus(*state->inner, chipId, status, pathText, displayText);
 }
 
 size_t tuiGetChipCount(TuiState* state) {

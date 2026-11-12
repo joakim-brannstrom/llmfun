@@ -15,7 +15,7 @@ text:
 
 
    Ask...
-    processing a.m…   ✕       Send
+    processing...   ✕         Send
 
 
 fills:

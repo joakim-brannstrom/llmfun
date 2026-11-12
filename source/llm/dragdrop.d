@@ -80,8 +80,11 @@ struct ConvTrack {
 struct DropReport {
     long chipId;
     int state;
-    string finalPath;
-    string output;
+    /// The workarea-relative path on Done and FailedRaw, empty otherwise: the
+    /// functional data D reads back at Send time.
+    Path finalPath;
+    /// The chip display D authors, capped at maxDisplayChars
+    string display;
 }
 
 /// The worker's configuration: one immutable snapshot taken at spawn.
@@ -114,7 +117,7 @@ private string oneLine(string s) nothrow {
 private struct CopyChip {
     long chipId;
     string labelName;
-    string finalPath;
+    Path finalPath;
     bool isDir;
     long copied;
     long queued;
@@ -149,7 +152,7 @@ Path sanitizeBaseName(Path name) @safe nothrow {
 
 /// The first free name in `dir`: `name` itself if unused, else
 /// `stem-2.<ext>`, `stem-3.<ext>`,...
-string uniqueDestination(AbsolutePath dir, string name) @safe {
+Path uniqueDestination(AbsolutePath dir, Path name) @safe {
     if (!buildPath(dir, name).exists)
         return name;
     const stem = name.stripExtension;
@@ -157,7 +160,7 @@ string uniqueDestination(AbsolutePath dir, string name) @safe {
     for (size_t n = 2;; n++) {
         const candidate = stem ~ "-" ~ n.to!string ~ ext;
         if (!buildPath(dir, candidate).exists)
-            return candidate;
+            return candidate.Path;
     }
 }
 
@@ -187,6 +190,49 @@ string outputTail(string s, size_t limit = 2048) @safe pure {
     while (start < s.length && (s[start] & 0xC0) == 0x80)
         ++start;
     return s[start .. $];
+}
+
+enum maxDisplayChars = 24;
+
+/// The display name one chip shows
+///
+/// The input's basename capped at `maxDisplayChars` characters with a tail
+/// `...`
+string chipDisplayLabel(string name) @safe pure nothrow {
+    import std.algorithm : count;
+    import std.conv : text;
+    import std.path : baseName;
+    import std.range : take;
+    import std.uni : byGrapheme, byCodePoint;
+
+    if (name.empty)
+        return null;
+    name = name.baseName;
+
+    try {
+        if (name.byGrapheme.count <= maxDisplayChars)
+            return name;
+        return name.byGrapheme.take(maxDisplayChars - 3).byCodePoint.text ~ "...";
+    } catch (Exception e) {
+    }
+    return name;
+}
+
+@("the chip display cap keeps the basename whole or cuts it plain") unittest {
+    import std.array : join;
+    import std.range : repeat;
+
+    assert(chipDisplayLabel("a.md") == "a.md");
+    assert(chipDisplayLabel("dropped/note.md") == "note.md");
+    assert(chipDisplayLabel("a/b/c.md") == "c.md");
+    assert(chipDisplayLabel("") == "");
+    // exactly at the cap: 24 characters
+    assert(chipDisplayLabel("a".repeat(24).join) == "a".repeat(24).join);
+    // one over: 21 kept + the tail
+    assert(chipDisplayLabel("a".repeat(25).join) == "a".repeat(21).join ~ "...");
+    // a multi-byte name cuts at the code-point boundary, never mid-sequence
+    assert(chipDisplayLabel("\xE4\xB8\xAD".repeat(30).join) == "\xE4\xB8\xAD".repeat(21)
+            .join ~ "...");
 }
 
 @("the audit-line helpers carry the exact Log-tab formats") unittest {
@@ -387,7 +433,8 @@ class DropWorker {
                     t.chipId, t.finalRel).collectException;
             auto c = t.chipId in chips_;
             c.settled = true;
-            report(DropReport(t.chipId, TuiChipStatus_Done, t.finalRel, ""));
+            report(DropReport(t.chipId, TuiChipStatus_Done, t.finalRel,
+                    chipDisplayLabel(t.finalRel)));
             purgeChip(t.chipId);
             return;
         }
@@ -436,11 +483,12 @@ class DropWorker {
             const name = uniqueDestination(destDir, sanitizeBaseName(src.baseName));
             copy(src, buildPath(destDir, name));
 
-            const finalRel = buildPath(snap_.destination, name);
+            auto finalRel = buildPath(snap_.destination, name).Path;
 
             logger.infof("DropWorker: %s", copyAuditLine(src, finalRel)).collectException;
 
-            report(DropReport(chipId, TuiChipStatus_FailedRaw, finalRel, reason));
+            report(DropReport(chipId, TuiChipStatus_FailedRaw, finalRel,
+                    chipDisplayLabel(finalRel)));
 
             purgeChip(chipId);
         } catch (Exception e) {
@@ -544,16 +592,16 @@ class DropWorker {
         // Register the chip before any IO: a failure anywhere below (a
         // nonexistent source, an unwritable destination) must still settle
         // the chip, and only a registered chip is reported by failChip.
-        chips_[job.chipId] = CopyChip(job.chipId, base, "", false);
+        chips_[job.chipId] = CopyChip(job.chipId, base, Path.init, false);
 
         try {
             if (job.srcPath.isDir) {
                 const root = uniqueDestination(AbsolutePath(buildPath(snap_.workArea,
                         snap_.destination)), base);
                 chips_[job.chipId] = CopyChip(job.chipId, base,
-                        buildPath(snap_.destination, root), true);
+                        (snap_.destination ~ root).Path, true);
 
-                mkdirRecurse(buildPath(snap_.workArea, snap_.destination, root));
+                mkdirRecurse(snap_.workArea ~ snap_.destination ~ root);
 
                 long files;
                 if (walkDrop(job.srcPath, job.chipId, root, files))
@@ -563,7 +611,8 @@ class DropWorker {
                 auto c = job.chipId in chips_;
                 if (c.queued == 0) {
                     c.settled = true;
-                    report(DropReport(job.chipId, TuiChipStatus_Done, c.finalPath, ""));
+                    report(DropReport(job.chipId, TuiChipStatus_Done,
+                            c.finalPath, chipDisplayLabel(c.finalPath)));
                     purgeChip(job.chipId);
                 }
             } else {
@@ -637,8 +686,8 @@ class DropWorker {
             const finalName = uniqueDestination(destDir, name);
             copy(item.src, buildPath(destDir, finalName));
 
-            const finalRel = relDir.length == 0 ? buildPath(snap_.destination,
-                    finalName) : buildPath(snap_.destination, relDir, finalName);
+            auto finalRel = relDir.empty ? buildPath(snap_.destination, finalName)
+                .Path : buildPath(snap_.destination, relDir, finalName).Path;
             settleCopy(item, finalRel);
         } catch (Exception e) {
             logger.errorf("DropWorker: copy failed for chip %s (%s): %s",
@@ -649,7 +698,7 @@ class DropWorker {
 
     // A finished copy: count it, log the audit line, progress-report a
     // directory chip per file and settle the chip when its last item lands.
-    private void settleCopy(CopyItem item, string finalRel) {
+    private void settleCopy(CopyItem item, Path finalRel) {
         auto c = item.chipId in chips_;
         if (c is null)
             return;
@@ -659,20 +708,23 @@ class DropWorker {
 
         if (!c.isDir) {
             c.settled = true;
-            report(DropReport(item.chipId, TuiChipStatus_Done, finalRel, ""));
+            report(DropReport(item.chipId, TuiChipStatus_Done, finalRel,
+                    chipDisplayLabel(finalRel)));
             purgeChip(item.chipId);
             return;
         }
 
         c.queued--;
         if (c.queued > 0) {
-            report(DropReport(item.chipId, TuiChipStatus_Pending, "",
-                    "processing " ~ c.labelName ~ "... (" ~ c.copied.to!string ~ ")"));
+            report(DropReport(item.chipId, TuiChipStatus_Pending, Path.init,
+                    "processing " ~ chipDisplayLabel(
+                    c.labelName.Path) ~ "... (" ~ c.copied.to!string ~ ")"));
             return;
         }
 
         c.settled = true;
-        report(DropReport(item.chipId, TuiChipStatus_Done, c.finalPath, ""));
+        report(DropReport(item.chipId, TuiChipStatus_Done, c.finalPath,
+                chipDisplayLabel(c.finalPath)));
         purgeChip(item.chipId);
     }
 
@@ -682,7 +734,7 @@ class DropWorker {
                 return;
             c.settled = true;
         }
-        report(DropReport(chipId, TuiChipStatus_Failed, "", reason));
+        report(DropReport(chipId, TuiChipStatus_Failed, Path.init, reason));
         purgeChip(chipId);
     }
 
@@ -805,7 +857,7 @@ unittest {
         // markers reach the test through the owner mailbox in order, so no
         // assertion keys on a shared counter read across threads.
         override void pumpCopies() {
-            report(DropReport(dropQueue_.length ? dropQueue_[0].chipId : 0L, 0, "", ""));
+            report(DropReport(dropQueue_.length ? dropQueue_[0].chipId : 0L, 0, "".Path, ""));
             if (dropQueue_.length)
                 dropQueue_ = dropQueue_[1 .. $];
         }
@@ -862,7 +914,7 @@ unittest {
         // The same beat-marker pump as the enqueue test: the serve order
         // reaches the test through the owner mailbox in order.
         override void pumpCopies() {
-            report(DropReport(dropQueue_.length ? dropQueue_[0].chipId : 0L, 0, "", ""));
+            report(DropReport(dropQueue_.length ? dropQueue_[0].chipId : 0L, 0, "".Path, ""));
             if (dropQueue_.length)
                 dropQueue_ = dropQueue_[1 .. $];
         }
@@ -929,7 +981,7 @@ unittest {
             "the failed chip must be reported to the owner");
     assert(got.chipId == 42);
     assert(got.state == TuiChipStatus_Failed);
-    assert(got.output == "attachment processing failed: conversion exploded");
+    assert(got.display == "attachment processing failed: conversion exploded");
 
     // the tick survives the handler error and reports again on the next beat
     DropReport again;
@@ -993,16 +1045,16 @@ unittest {
     const dir = AbsolutePath(area.workArea.buildPath("sub"));
     mkdirRecurse(dir);
 
-    assert(uniqueDestination(dir, "report.md") == "report.md");
+    assert(uniqueDestination(dir, "report.md".Path) == "report.md".Path);
     write(buildPath(dir, "report.md"), "x");
-    assert(uniqueDestination(dir, "report.md") == "report-2.md");
+    assert(uniqueDestination(dir, "report.md".Path) == "report-2.md".Path);
     write(buildPath(dir, "report-2.md"), "x");
-    assert(uniqueDestination(dir, "report.md") == "report-3.md");
+    assert(uniqueDestination(dir, "report.md".Path) == "report-3.md".Path);
 
     // a name without an extension suffixes the same way
-    assert(uniqueDestination(dir, "README") == "README");
+    assert(uniqueDestination(dir, "README".Path) == "README".Path);
     write(buildPath(dir, "README"), "x");
-    assert(uniqueDestination(dir, "README") == "README-2");
+    assert(uniqueDestination(dir, "README".Path) == "README-2".Path);
 }
 
 @("the pump copies a dropped file and mirrors a dropped directory, collisions suffixed")
@@ -1052,6 +1104,13 @@ unittest {
             done[r.chipId] = r;
     }
     assert(done.length == 4, "all four chips must settle");
+
+    // D authors every settled chip's display: the basename of the final path,
+    // capped (none of these names reach the cap)
+    assert(done[1].display == "note.md", done[1].display);
+    assert(done[3].display == "note-2.md", done[3].display);
+    assert(done[2].display == "docs", done[2].display);
+    assert(done[4].display == "docs-2", done[4].display);
 
     assert(done[1].finalPath == buildPath("dropped", "note.md"), done[1].finalPath);
     assert(exists(buildPath(area.workArea.toString, "dropped", "note.md")));
@@ -1138,7 +1197,7 @@ unittest {
     assert(got.chipId == 1);
     assert(got.state == TuiChipStatus_Failed);
     assert(got.finalPath.length == 0, "nothing is attached on a dir-creation failure");
-    assert(got.output.length != 0);
+    assert(got.display.length != 0);
 }
 
 @("a copy error fails the chip with nothing attached")
@@ -1190,7 +1249,7 @@ unittest {
             "the chip must be reported as failed");
     assert(got.chipId == 1);
     assert(got.state == TuiChipStatus_Failed);
-    assert(got.output == "attachment has no usable name after sanitization");
+    assert(got.display == "attachment has no usable name after sanitization");
 }
 
 @("the copy pump yields on its time slice and the next tick resumes")
@@ -1233,6 +1292,7 @@ unittest {
     // so the directory finishes over several ticks: the progress reports are
     // spread apart (yield) and all five files still land (resume)
     SysTime firstProgress, lastProgress;
+    string firstProgressDisplay;
     bool doneSeen;
     const deadline = Clock.currTime + 5.dur!"seconds";
     while (!doneSeen && Clock.currTime < deadline) {
@@ -1242,8 +1302,10 @@ unittest {
         if (r.chipId != 1)
             continue;
         if (r.state == TuiChipStatus_Pending) {
-            if (firstProgress == SysTime.init)
+            if (firstProgress == SysTime.init) {
                 firstProgress = Clock.currTime;
+                firstProgressDisplay = r.display;
+            }
             lastProgress = Clock.currTime;
         } else if (r.state == TuiChipStatus_Done) {
             doneSeen = true;
@@ -1252,6 +1314,8 @@ unittest {
 
     assert(doneSeen, "the dropped directory must finish copying");
     assert(firstProgress != SysTime.init, "a directory drop must report progress");
+    // the progress display D authors: the capped basename plus the copy count
+    assert(firstProgressDisplay == "processing slow... (1)", firstProgressDisplay);
     assert(lastProgress - firstProgress >= 150.msecs,
             "the pump must yield between slices, not copy everything in one pump");
     foreach (i; 0 .. 5)
@@ -1301,7 +1365,8 @@ unittest {
     assert(owner.receiveTimeout(5.dur!"seconds", (DropReport r) { got = r; }),
             "the converted chip must settle");
     assert(got.chipId == 1);
-    assert(got.state == TuiChipStatus_Done, got.output);
+    assert(got.state == TuiChipStatus_Done, got.display);
+    assert(got.display == "note.md", got.display);
     assert(got.finalPath == buildPath("dropped", "note.md"), got.finalPath);
     assert(exists(buildPath(area.workArea.toString, "dropped", "note.md")));
     assert(readText(buildPath(area.workArea.toString, "dropped", "note.md")) == "hello docx");
@@ -1380,7 +1445,7 @@ unittest {
     DropReport got;
     assert(owner.receiveTimeout(5.dur!"seconds", (DropReport r) { got = r; }),
             "the converted chip must settle");
-    assert(got.state == TuiChipStatus_Done, got.output);
+    assert(got.state == TuiChipStatus_Done, got.display);
     assert(got.finalPath == buildPath("dropped", "note.md"), got.finalPath);
     assert(readText(buildPath(area.workArea.toString, "dropped", "note.md")) == "hello docx");
 }
@@ -1414,7 +1479,7 @@ unittest {
     assert(owner.receiveTimeout(5.dur!"seconds", (DropReport r) { got = r; }),
             "the failed conversion must settle");
     assert(got.chipId == 1);
-    assert(got.state == TuiChipStatus_FailedRaw, got.output);
+    assert(got.state == TuiChipStatus_FailedRaw, got.display);
     assert(got.finalPath == buildPath("dropped", "note.docx"), got.finalPath);
     assert(exists(buildPath(area.workArea.toString, "dropped", "note.docx")),
             "the raw-copy fallback must land in the destination");
@@ -1450,8 +1515,8 @@ unittest {
     assert(owner.receiveTimeout(5.dur!"seconds", (DropReport r) { got = r; }),
             "the chip must settle");
     assert(got.chipId == 1);
-    assert(got.state == TuiChipStatus_FailedRaw, got.output);
-    assert(got.output == "conversion produced no destination", got.output);
+    assert(got.state == TuiChipStatus_FailedRaw, got.display);
+    assert(got.display == "note.docx", got.display);
     assert(got.finalPath == buildPath("dropped", "note.docx"), got.finalPath);
     assert(exists(buildPath(area.workArea.toString, "dropped", "note.docx")));
 }
@@ -1488,7 +1553,7 @@ unittest {
         owner.receiveTimeout(1.dur!"seconds", (DropReport r) { got = r; });
     }
     assert(got.state == TuiChipStatus_FailedRaw, "the backstop must settle the chip");
-    assert(got.output == "conversion timed out", got.output);
+    assert(got.display == "note.docx", got.display);
     assert(got.finalPath == buildPath("dropped", "note.docx"), got.finalPath);
     assert(exists(buildPath(area.workArea.toString, "dropped", "note.docx")));
 }
@@ -1504,7 +1569,7 @@ unittest {
 
         // one report per spawn: the mailbox order pins which chips got a slot
         override void spawnConverter(ConvJob job) {
-            report(DropReport(job.chipId, TuiChipStatus_Pending, "", "spawned"));
+            report(DropReport(job.chipId, TuiChipStatus_Pending, "".Path, "spawned"));
             super.spawnConverter(job);
         }
     }
@@ -1539,7 +1604,7 @@ unittest {
         DropReport r;
         if (!owner.receiveTimeout(1.dur!"seconds", (DropReport g) { r = g; }))
             continue;
-        if (r.output == "spawned")
+        if (r.display == "spawned")
             spawned[r.chipId] = 1;
     }
     assert(spawned.length == 4, spawned.keys.to!string);
@@ -1583,7 +1648,7 @@ unittest {
     DropReport got;
     assert(owner.receiveTimeout(5.dur!"seconds", (DropReport r) { got = r; }),
             "the converted chip must settle");
-    assert(got.state == TuiChipStatus_Done, got.output);
+    assert(got.state == TuiChipStatus_Done, got.display);
 
     const argvPath = buildPath(area.workArea.toString, "argv.txt");
     const argv = readText(argvPath).splitLines;
@@ -1623,9 +1688,9 @@ unittest {
     assert(owner.receiveTimeout(5.dur!"seconds", (DropReport r) { got = r; }),
             "the chip must settle");
     assert(got.chipId == 1);
-    assert(got.state == TuiChipStatus_Failed, got.output);
+    assert(got.state == TuiChipStatus_Failed, got.display);
     assert(got.finalPath.length == 0, "nothing is attached when the fallback fails too");
-    assert(got.output.length != 0);
+    assert(got.display.length != 0);
 }
 
 @("composeQueryWithMarkers appends one F1 marker per composing chip, in row order, at the end")
