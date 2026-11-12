@@ -1,19 +1,42 @@
 module llm.telemetry;
 
-import llm.config : SyslogFacility, SyslogTelemetryConfig;
-import llm.telemetry.c_syslog : closelog, openlog, SyslogFacilityCode,
-    SyslogOption, SyslogPriority, syslogStr;
-import llm.telemetry.identity : hostIp, identityMessage, userName;
+import std.array : empty;
 import std.string : toStringz;
 
-/// The syslog telemetry sink: opens the log with the configured ident,
-/// sends the one-shot identity record at LOG_NOTICE and closes the log
-/// when the instance goes out of scope. Usage is a stack instance on the
-/// agent main thread, so the destructor runs deterministically.
-struct SyslogTelemetry {
-    /// A copy would run a second destructor and close the log early.
-    @disable this(this);
+import my.actor : System;
 
+import llm.config : SyslogFacility, SyslogTelemetryConfig;
+import llm.telemetry.c_syslog : SyslogPriority, SyslogFacilityCode,
+    SyslogOption, closelog, openlog, syslogStr;
+import llm.telemetry.identity : hostIp, hostName, startupMessage, userName;
+import llm.telemetry.remote_syslog : RemoteSyslogActor;
+import llm.telemetry.types : ipTarget;
+
+/// The one-shot ship of the startup record: synchronously through the
+/// local libc syslog, fire-and-forget through the actor pool when a
+/// remote collector is configured.
+void sendSyslog(System* sys, in SyslogTelemetryConfig cfg) {
+    if (cfg.address.empty) {
+        auto sink = new LocalSyslog(cfg);
+        sink.record(SyslogPriority.notice, startupPayload());
+        sink.close();
+        return;
+    }
+
+    sys.spawn!RemoteSyslogActor(ipTarget(cfg.address, cfg.port),
+            cast(int) cfg.facility | SyslogPriority.notice, startupPayload());
+}
+
+private string startupPayload() @safe {
+    import std.datetime : Clock;
+
+    return startupMessage(Clock.currTime.toUTC.toISOExtString(0), hostName(),
+            hostIp(), userName());
+}
+
+/// The local libc syslog sink: opens the log with the configured ident at
+/// construction, ships every record to it and releases the log on close.
+final class LocalSyslog {
     /// Keeps the ident buffer alive for every message (libc stores the
     /// ident pointer as-is).
     private string ident;
@@ -25,20 +48,22 @@ struct SyslogTelemetry {
         // rule.
         openlog(ident.toStringz, SyslogOption.pid | SyslogOption.ndelay, cast(int) cfg.facility);
         isOpen = true;
-        syslogStr(SyslogPriority.notice, identityMessage(hostIp(), userName()));
     }
 
-    ~this() @safe {
+    void record(SyslogPriority priority, string msg) @safe {
+        if (isOpen)
+            syslogStr(priority, msg);
+    }
+
+    void close() @safe {
         if (isOpen) {
             closelog();
             isOpen = false;
         }
     }
 
-    void record(SyslogPriority priority, string msg) @safe {
-        if (!isOpen)
-            return;
-        syslogStr(priority, msg);
+    ~this() @safe {
+        close(); // safety net for GC collected instances
     }
 }
 

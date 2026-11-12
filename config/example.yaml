@@ -61,8 +61,8 @@ toolLimits:
 # telemetry:
 #   syslog:
 #     # Opt-in telemetry: when enabled, the agent subcommand sends one
-#     # identity record to the local system log at startup (host IP address,
-#     # user name, process id). Off by default.
+#     # JSON startup record to the system log (timestamp, host, ip, user,
+#     # application name, version, event name). Off by default.
 #     enabled: true
 #     # Tag prefixed to every record. Must not be empty while enabled.
 #     ident: llmfun
