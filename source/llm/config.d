@@ -26,6 +26,9 @@ public import llm.common.config;
 
 immutable ProgramName = "llmfun";
 
+/// The application version reported in telemetry payloads
+enum appVersion = "1.0.0";
+
 /// AGENTS.md prompt payload handed to the composer. payload empty (or
 /// whitespace-only) = no AGENTS.md treatment (no injection, no instruction).
 /// ragTopic empty = no pointer instruction (ragIndex=false, or full-text
@@ -226,6 +229,11 @@ struct SyslogTelemetryConfig {
     /// unattributable).
     string ident = "llmfun";
     SyslogFacility facility = SyslogFacility.user;
+    /// Remote syslog collector address, e.g. "192.168.1.22" or "::1".
+    /// Empty selects the local libc syslog.
+    string address;
+    /// Remote collector port, only meaningful with a non-empty address.
+    long port = 514;
 }
 
 struct TelemetryConfig {
@@ -4023,9 +4031,12 @@ codeModels:
             "expected the default ident llmfun, got " ~ conf.telemetry.syslog.ident);
     assert(conf.telemetry.syslog.facility == SyslogFacility.user,
             "expected the default facility user");
+    assert(conf.telemetry.syslog.address.empty, "the remote collector must be empty by default");
+    assert(conf.telemetry.syslog.port == 514,
+            "expected the default syslog port 514, got " ~ conf.telemetry.syslog.port.to!string);
 }
 
-@("telemetry.syslog parses enabled, ident and facility") unittest {
+@("telemetry.syslog parses enabled, ident, facility and the remote target") unittest {
     import std.path : buildPath;
     import std.stdio : File;
 
@@ -4040,6 +4051,8 @@ codeModels:
     enabled: true
     ident: mytag
     facility: LOCAL3
+    address: 192.168.1.22
+    port: 5514
 `;
     File(tmpFile, "w").write(yaml);
     auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
@@ -4049,6 +4062,10 @@ codeModels:
     assert(conf.telemetry.syslog.facility == SyslogFacility.local3,
             "facility spelling is case-insensitive, got "
             ~ conf.telemetry.syslog.facility.to!string);
+    assert(conf.telemetry.syslog.address == "192.168.1.22",
+            "expected remote address 192.168.1.22, got " ~ conf.telemetry.syslog.address);
+    assert(conf.telemetry.syslog.port == 5514,
+            "expected remote port 5514, got " ~ conf.telemetry.syslog.port.to!string);
 }
 
 @("unknown facility name is rejected naming the path and valid values") unittest {

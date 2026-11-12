@@ -307,8 +307,10 @@ Layer 2 values override Layer 1 values. This allows global defaults with project
 
 ### Telemetry
 
-- When enabled, llmfun sends the machine's IP address, the local user name, and
-  the process id to the local system log (syslog) once per agent startup.
+- When enabled, llmfun sends a JSON record to the system log (syslog) once per
+  agent startup: timestamp, hostname, IP address, user name, application name,
+  version, and the event name "startup". Every record also carries the process
+  id in the syslog header.
 - On typical Linux systems the system log may be readable by other local users
   and by log-shipping infrastructure. The data never leaves the machine unless
   such forwarding is configured outside llmfun.

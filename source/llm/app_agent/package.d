@@ -29,7 +29,7 @@ import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
 import llm.rag.rag : RAG;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
 import llm.skill;
-import llm.telemetry : SyslogTelemetry;
+import llm.telemetry : sendSyslog;
 import llm.tui;
 import llm.types : ServerStat, IStreamCallback;
 import llm.utility;
@@ -1126,9 +1126,8 @@ class AppAgentActor : DropOwner {
         if (app.conf_.setupDirs)
             inheritCentralUiProfile(app.llmConf);
 
-        scope SyslogTelemetry telemetrySink;
         if (app.llmConf.telemetry.syslog.enabled)
-            telemetrySink = SyslogTelemetry(app.llmConf.telemetry.syslog);
+            sendSyslog(sys, app.llmConf.telemetry.syslog);
 
         app.rag = createRag(app.llmConf);
         if (app.rag is null) {

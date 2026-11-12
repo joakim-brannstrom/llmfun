@@ -4,6 +4,11 @@ import logger = std.logger;
 import std.array : empty;
 import std.exception : collectException;
 
+import llm.config : ProgramName, appVersion;
+
+/// The event name of the startup record.
+enum startupEventName = "startup";
+
 /// One interface address candidate from getifaddrs. A candidate carries
 /// at most one address (hasV4 xor hasV6; entries without an address are
 /// dropped, never stored).
@@ -87,9 +92,20 @@ private bool isBetter(int cls, int idx, string name, int bestCls, int bestIdx, s
     return name < bestName;
 }
 
-/// The identity record payload: "host=<ip> user=<name>".
-string identityMessage(const(char)[] host, const(char)[] user) pure @safe nothrow {
-    return ("host=" ~ host ~ " user=" ~ user).idup;
+/// The startup record payload: a single-line JSON object (newlines in
+/// the identity data come out escaped, so the syslog MSG is never split).
+string startupMessage(string timestamp, string host, string ip, string user) @safe {
+    import std.json : JSONValue, toJSON;
+
+    JSONValue j;
+    j["timestamp"] = timestamp;
+    j["host"] = host;
+    j["ip"] = ip;
+    j["userId"] = user;
+    j["applicationName"] = ProgramName;
+    j["version"] = appVersion;
+    j["eventName"] = startupEventName;
+    return toJSON(j);
 }
 
 /// getifaddrs -> filter -> selectHostIp. Any failure (getifaddrs error,
@@ -107,6 +123,18 @@ string hostIp() @safe {
             .collectException;
     }
     return ip;
+}
+
+/// gethostname -> host name; "unknown" on failure, logged at trace level
+/// only.
+string hostName() @safe {
+    auto name = posixHostName();
+    if (!name.empty)
+        return name;
+
+    logger.tracef("telemetry identity: gethostname returned no name, reporting host=unknown")
+        .collectException;
+    return "unknown";
 }
 
 /// getpwuid(getuid()) -> pw_name; USER, then LOGNAME, environment fallback
@@ -146,6 +174,22 @@ private @trusted string passwdUserName() nothrow {
     if (pw is null || pw.pw_name is null)
         return null;
     return pw.pw_name.fromStringz.idup;
+}
+
+/// @trusted bridge over gethostname
+/// Returns: Empty when the call fails
+private @trusted string posixHostName() nothrow {
+    import core.sys.posix.unistd : gethostname;
+    import std.string : fromStringz;
+
+    // 256 bytes: POSIX requires at least 255, and the last byte is forced to
+    // NUL so a libc that truncates without terminating can never send
+    // fromStringz past the buffer.
+    char[256] buf;
+    buf[$ - 1] = 0;
+    if (gethostname(buf.ptr, buf.length) != 0)
+        return null;
+    return buf.ptr.fromStringz.idup;
 }
 
 private struct CollectedAddresses {
@@ -377,12 +421,47 @@ private char hexDigit(size_t nibble) pure @safe @nogc nothrow {
     assert(selectHostIp([]) == "unknown");
 }
 
-@("identityMessage assembles the exact record payload") unittest {
-    assert(identityMessage("192.168.1.10", "joe") == "host=192.168.1.10 user=joe");
-    assert(identityMessage("unknown", "unknown") == "host=unknown user=unknown");
+@("startupMessage assembles the exact record payload") unittest {
+    import std.algorithm.searching : canFind;
+    import std.json : parseJSON;
+
+    auto payload = startupMessage("2026-11-12T18:11:21Z", "box", "192.168.1.10", "joe");
+    assert(!payload.canFind('\n'), "the syslog MSG cannot carry a newline");
+
+    auto j = parseJSON(payload);
+    assert(j["timestamp"].str == "2026-11-12T18:11:21Z");
+    assert(j["host"].str == "box");
+    assert(j["ip"].str == "192.168.1.10");
+    assert(j["userId"].str == "joe");
+    assert(j["applicationName"].str == ProgramName);
+    assert(j["version"].str == appVersion);
+    assert(j["eventName"].str == startupEventName);
+    // A release bump must consciously update the pin in llm.config.
+    assert(appVersion == "1.0.0");
 }
 
-@("hostIp and userName never throw and never return an empty string") unittest {
+@("startupMessage stays single-line when the identity data carries newlines") unittest {
+    import std.algorithm.searching : canFind;
+    import std.json : parseJSON;
+
+    auto payload = startupMessage("t", "a\nb", "1.2.3.4", "u\nv");
+    assert(!payload.canFind('\n'), "the syslog MSG cannot carry a newline");
+
+    auto j = parseJSON(payload);
+    assert(j["host"].str == "a\nb");
+    assert(j["userId"].str == "u\nv");
+}
+
+@("startupMessage escapes JSON metacharacters in the identity data") unittest {
+    import std.json : parseJSON;
+
+    auto j = parseJSON(startupMessage("t", "bo\"x", "1.2.3.4", "jo\\e"));
+    assert(j["host"].str == "bo\"x");
+    assert(j["userId"].str == "jo\\e");
+}
+
+@("hostIp, hostName and userName never throw and never return an empty string") unittest {
     assert(!hostIp().empty);
+    assert(!hostName().empty);
     assert(!userName().empty);
 }
