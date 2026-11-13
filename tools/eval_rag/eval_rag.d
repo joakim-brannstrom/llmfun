@@ -26,15 +26,16 @@
  */
 module rag_eval;
 
-import std.algorithm : canFind, endsWith, map, sort;
-import std.array : appender, array, join;
+import std.algorithm : canFind, endsWith, map, sort, startsWith;
+import std.array : appender, array, join, split;
 import std.conv : to;
+import std.datetime.stopwatch : AutoStart, StopWatch;
 import std.file : SpanMode, dirEntries, exists, isFile, mkdirRecurse, readText, remove;
 import std.format : format;
 import std.math : sqrt;
-import std.path : baseName, buildPath, dirName;
+import std.path : baseName, buildPath, dirName, extension, relativePath;
 import std.stdio : File, writefln, writeln;
-import std.string : replace, strip;
+import std.string : replace, splitLines, strip;
 import std.sumtype : match;
 
 import my.optional;
@@ -409,6 +410,331 @@ int runCmd(string[] args) {
     return 0;
 }
 
+// ---- int8 A/B command ------------------------------------------------------
+
+enum abTable = "EvalInt8";
+
+/// Result of one query case in the float32 vs int8 comparison.
+struct AbCaseResult {
+    string id;
+    string expected;
+    long[] idsFloat; // ranked chunk ids, float32 KNN
+    long[] idsInt8; // ranked chunk ids, int8 KNN
+    long rankFloat = -1; // rank of the first chunk of the expected source
+    long rankInt8 = -1;
+    double msFloat;
+    double msInt8;
+}
+
+/// KNN over one vec0 table. quantize wraps the bound float32 blob in
+/// vec_quantize_int8(?, 'unit') on the query side. KNN rows come back
+/// distance-sorted, no ORDER BY.
+long[] knnIds(RAG rag, string table, float[] embed, long k, bool quantize, out double ms) {
+    immutable matchSql = quantize ? "vec_quantize_int8(:embedding, 'unit')" : ":embedding";
+    immutable sql = "SELECT id FROM " ~ table ~ " WHERE embedding MATCH " ~ matchSql ~ " AND k = :k";
+    auto stmt = rag.db.prepare(sql);
+    stmt.get.bind(":embedding", embed);
+    stmt.get.bind(":k", k);
+    auto sw = StopWatch(AutoStart.yes);
+    long[] ids;
+    foreach (ref r; stmt.get.execute)
+        ids ~= r.peek!long(0);
+    ms = sw.peek.total!"usecs" / 1000.0;
+    return ids;
+}
+
+/// Creates abTable as an int8 mirror of the float embeddings in
+/// EmbeddingsTbl and fills it. The quantizer keeps the per-vector scale
+/// ('unit' mode), so no side data is needed.
+void buildInt8Mirror(RAG rag, Embedder emb) {
+    size_t dims;
+    emb.embedQuery("dimension probe").match!((float[] v) { dims = v.length; }, (EmbedError e) {
+        throw new Exception("embedding probe failed: " ~ e.errorMsg);
+    });
+
+    rag.db.run("DROP TABLE IF EXISTS " ~ abTable);
+    rag.db.run("CREATE VIRTUAL TABLE " ~ abTable
+            ~ " USING vec0(id INTEGER PRIMARY KEY, sourceId INTEGER NOT NULL, embedding int8["
+            ~ dims.to!string ~ "])");
+    rag.db.run("INSERT INTO " ~ abTable
+            ~ "(id, sourceId, embedding) SELECT id, sourceId, vec_quantize_int8(embedding, 'unit') FROM EmbeddingsTbl");
+
+    auto stmt = rag.db.prepare("SELECT count(*) FROM " ~ abTable);
+    foreach (ref r; stmt.get.execute)
+        writefln("  int8 mirror: %d rows", r.peek!long(0));
+}
+
+/// Indexes every file under sourcesDir (recursive) whose extension is in
+/// extsCsv, keeping the path relative to sourcesDir as the origin.
+void indexSources(RAG rag, string sourcesDir, string extsCsv, RagConfig cfg) {
+    writeln("== indexing sources (", sourcesDir, ") =");
+    const exts = extsCsv.split(",").map!(e => "." ~ e.strip).array;
+    size_t files, chunks;
+    auto entries = dirEntries(sourcesDir, SpanMode.depth).array;
+    entries.sort!((a, b) => a.name < b.name);
+    foreach (entry; entries) {
+        if (!entry.isFile)
+            continue;
+        if (!canFind(exts, extension(entry.name)))
+            continue;
+        const rel = relativePath(entry.name, sourcesDir).to!string;
+        auto res = add(rag, Document(origin: Origin(Path(rel)), data: readText(entry.name)), cfg);
+        ++files;
+        chunks += res.chunks;
+    }
+    rag.db.fts5Rebuild;
+    writefln("  -> %d files, %d chunks", files, chunks);
+}
+
+/// Generates deterministic query cases from source files: the module ddoc
+/// header's first line for .d files, the first prose line for markdown.
+/// Cases are taken at an even stride so a large tree yields n spread cases.
+QueryCase[] autoCases(string sourcesDir, string extsCsv, size_t n) {
+    const exts = extsCsv.split(",").map!(e => "." ~ e.strip).array;
+    string[] files;
+    foreach (entry; dirEntries(sourcesDir, SpanMode.depth)) {
+        if (!entry.isFile)
+            continue;
+        if (!canFind(exts, extension(entry.name)))
+            continue;
+        files ~= entry.name;
+    }
+    files.sort;
+
+    // even stride over the usable files; files with no usable query line
+    // are filtered first so the stride covers the surviving set
+    string[] usable;
+    foreach (f; files) {
+        const text = readText(f);
+        auto line = queryLine(text, f.endsWith(".md"));
+        if (line.length)
+            usable ~= f;
+    }
+    immutable stride = usable.length > n ? usable.length / n : 1;
+    QueryCase[] cases;
+    for (size_t u = 0; u < usable.length && cases.length < n; u += stride) {
+        const rel = relativePath(usable[u], sourcesDir).to!string;
+        cases ~= QueryCase("a" ~ cases.length.to!string, "auto from " ~ rel,
+                queryLine(readText(usable[u]), usable[u].endsWith(".md")), "", rel, "sb");
+    }
+    return cases;
+}
+
+/// First usable query line of a source file: ddoc module header first line
+/// for D code, first non-heading prose line for markdown.
+string queryLine(string text, bool markdown) {
+    foreach (ln; text.splitLines) {
+        auto s = ln.strip;
+        if (markdown) {
+            if (s.length == 0 || s.startsWith("#"))
+                continue;
+            return s;
+        }
+        if (s.startsWith("/**") && s.length > 3) {
+            s = s[3 .. $].strip;
+            if (s.length)
+                return s;
+            continue;
+        }
+        if (s.startsWith("*")) {
+            s = s[1 .. $].strip;
+            if (s.length)
+                return s;
+        }
+    }
+    return "";
+}
+
+int abCmd(string[] args) {
+    string argValue(string name, string def) {
+        foreach (i, a; args) {
+            if (a == name && i + 1 < args.length)
+                return args[i + 1];
+        }
+        return def;
+    }
+
+    auto corpusDir = argValue("--corpus", "");
+    auto sourcesDir = argValue("--sources", "");
+    auto exts = argValue("--ext", "d,md");
+    auto autoN = argValue("--auto-queries", "0").to!size_t;
+    auto dbPath = argValue("--db", "");
+    auto configPath = argValue("--config", "/workarea/.llmfun.yaml");
+    auto topK = argValue("--topK", "10").to!long;
+    auto outPath = argValue("--out", "");
+    if (corpusDir.length == 0 || dbPath.length == 0) {
+        writeln("error: --corpus and --db are required");
+        return 1;
+    }
+
+    mkdirRecurse(dirName(dbPath));
+    if (!hasFlag(args, "--keep-db") && exists(dbPath))
+        remove(dbPath);
+
+    auto conf = readConfig(configPath.Path, silent: true, noCwdConfig: true, trustedConfig: true);
+    auto emb = createEmbedder(conf.embedConfig);
+    if (emb is null) {
+        writeln("error: unable to create embedder from config ", configPath);
+        return 1;
+    }
+    scope (exit)
+        emb.destroy;
+
+    auto rag = new RAG(emb, RagDatabaseConfig(dbPath.Path, "eval"), null);
+    scope (exit)
+        rag.destroy;
+
+    auto cases = EvalCases.dup;
+    indexCorpus(rag, corpusDir, conf.ragConfig);
+    if (sourcesDir.length) {
+        indexSources(rag, sourcesDir, exts, conf.ragConfig);
+        if (autoN)
+            cases ~= autoCases(sourcesDir, exts, autoN);
+    }
+
+    buildInt8Mirror(rag, emb);
+
+    // chunk id -> sourceId, and sourceId -> path (filled lazily)
+    long[long] idSource;
+    {
+        auto stmt = rag.db.prepare("SELECT id, sourceId FROM EmbeddingsTbl");
+        foreach (ref r; stmt.get.execute)
+            idSource[r.peek!long(0)] = r.peek!long(1);
+    }
+    string[long] pathCache;
+    string pathOf(long chunkId) {
+        if (auto sid = chunkId in idSource) {
+            if (auto p = *sid in pathCache)
+                return *p;
+            string path;
+            rag.db.getSource((*sid).SourceId).match!((Source s) {
+                path = sourcePath(s);
+            }, (None _) {});
+            pathCache[*sid] = path;
+            return path;
+        }
+        return "";
+    }
+
+    // -- run both KNNs per case -----------------------------------------------
+    writeln("\n== int8 A/B (topK=", topK, ", ", cases.length, " cases) ==");
+    AbCaseResult[] results;
+    foreach (c; cases) {
+        auto r = emb.embedQuery(c.vectorQuery);
+        float[] embed;
+        r.match!((float[] v) { embed = v; }, (EmbedError e) {
+            writefln("  %s: embed failed: %s", c.id, e.errorMsg);
+        });
+        if (embed.length == 0)
+            continue;
+
+        double msF, msI;
+        auto idsF = knnIds(rag, "EmbeddingsTbl", embed, topK, false, msF);
+        auto idsI = knnIds(rag, abTable, embed, topK, true, msI);
+
+        long rankF = -1, rankI = -1;
+        foreach (j, id; idsF)
+            if (pathOf(id).endsWith(c.expected)) {
+                rankF = j + 1;
+                break;
+            }
+        foreach (j, id; idsI)
+            if (pathOf(id).endsWith(c.expected)) {
+                rankI = j + 1;
+                break;
+            }
+
+        results ~= AbCaseResult(c.id, c.expected, idsF, idsI, rankF, rankI, msF, msI);
+        writefln("  %-4s rank float=%-4s int8=%-4s  recall@K=%.2f  %5.1f / %5.1f ms", c.id, rankF < 0
+                ? "miss" : rankF.to!string, rankI < 0 ? "miss" : rankI.to!string,
+                recallAt(idsF, idsI), msF, msI);
+    }
+
+    // -- summary ---------------------------------------------------------------
+    writeln("\n== int8 A/B summary (topK=", topK, ") ==");
+    writeln("recall: mean overlap of the top-k id sets, int8 against float32");
+    foreach (k; [1L, 3, 5, topK]) {
+        double sum = 0.0;
+        size_t runs;
+        foreach (res; results) {
+            if (res.idsFloat.length < cast(size_t) k)
+                continue;
+            sum += recallAt(res.idsFloat[0 .. k], res.idsInt8[0 .. k]);
+            ++runs;
+        }
+        if (runs)
+            writefln("  recall@%-2d  %.3f  (%d cases)", k, sum / runs, runs);
+    }
+
+    foreach (label, getRank; [
+        "float": (AbCaseResult r) => r.rankFloat,
+        "int8": (AbCaseResult r) => r.rankInt8
+    ]) {
+        size_t hit1, hit3, hitTop;
+        double mrr = 0.0;
+        foreach (res; results) {
+            const rank = getRank(res);
+            if (rank == 1)
+                ++hit1;
+            if (rank >= 1 && rank <= 3)
+                ++hit3;
+            if (rank >= 1 && rank <= topK)
+                ++hitTop;
+            if (rank >= 1)
+                mrr += 1.0 / rank;
+        }
+        writefln("  %s: hit@1=%d/%d hit@3=%d hit@K=%d MRR=%.3f", label, hit1,
+                results.length, hit3, hitTop, mrr / (results.length ? results.length : 1));
+    }
+
+    size_t regressed;
+    foreach (res; results)
+        if (res.rankFloat >= 1 && res.rankInt8 < 1)
+            ++regressed;
+    writefln("  float-hit but int8-miss: %d of %d cases", regressed, results.length);
+
+    double sumF = 0.0, sumI = 0.0;
+    foreach (res; results) {
+        sumF += res.msFloat;
+        sumI += res.msInt8;
+    }
+    writefln("  mean knn ms: float %.2f, int8 %.2f", sumF / results.length, sumI / results.length);
+
+    // -- JSON report -----------------------------------------------------------
+    if (outPath.length) {
+        auto f = File(outPath, "w");
+        f.write("{\n");
+        f.writefln("  \"topK\": %d,", topK);
+        f.write("  \"cases\": [\n");
+        foreach (i, res; results) {
+            f.write("    {");
+            f.writefln("\"id\": \"%s\", \"expected\": \"%s\", \"rankFloat\": %d, \"rankInt8\": %d,",
+                    jsonEscape(res.id), jsonEscape(res.expected), res.rankFloat, res.rankInt8);
+            f.writefln("     \"idsFloat\": [%s], \"idsInt8\": [%s], \"msFloat\": %.2f, \"msInt8\": %.2f}",
+                    res.idsFloat.map!(id => id.to!string).array.join(", "),
+                    res.idsInt8.map!(id => id.to!string).array.join(", "), res.msFloat, res.msInt8);
+            f.write(i + 1 < results.length ? ",\n" : "\n");
+        }
+        f.write("  ]\n}\n");
+        writeln("\nwrote ", outPath);
+    }
+
+    return 0;
+}
+
+/// Overlap fraction of two id lists (duplicates cannot occur: ids are unique).
+double recallAt(long[] a, long[] b) {
+    size_t hit;
+    foreach (id; a)
+        if (b.canFind(id))
+            ++hit;
+    return a.length ? cast(double) hit / a.length : 0.0;
+}
+
+bool hasFlag(string[] args, string name) {
+    return args.canFind(name);
+}
+
 int main(string[] args) {
     initLlmfunLocalModel();
     scope (exit)
@@ -422,6 +748,8 @@ int main(string[] args) {
     switch (args[1]) {
     case "run":
         return runCmd(args);
+    case "ab":
+        return abCmd(args);
     default:
         writeln("unknown command: ", args[1]);
         return 1;

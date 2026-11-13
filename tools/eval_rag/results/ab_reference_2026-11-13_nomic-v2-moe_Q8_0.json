@@ -1,0 +1,53 @@
+{
+  "topK": 10,
+  "cases": [
+    {"id": "f1", "expected": "auth_token_spec.md", "rankFloat": 3, "rankInt8": 3,
+     "idsFloat": [2, 3, 4, 1, 5, 9, 14, 13, 8, 11], "idsInt8": [2, 3, 4, 1, 5, 9, 14, 13, 11, 8], "msFloat": 2.90, "msInt8": 0.29}
+,
+    {"id": "f2", "expected": "auth_token_spec.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [4, 3, 2, 5, 1, 9, 8, 14, 11, 13], "idsInt8": [4, 3, 2, 1, 5, 9, 8, 14, 11, 13], "msFloat": 1.50, "msInt8": 0.27}
+,
+    {"id": "f3", "expected": "auth_token_spec.md", "rankFloat": 2, "rankInt8": 2,
+     "idsFloat": [3, 4, 2, 5, 1, 9, 8, 11, 13, 14], "idsInt8": [3, 4, 2, 5, 1, 9, 8, 11, 13, 14], "msFloat": 0.97, "msInt8": 0.28}
+,
+    {"id": "f4", "expected": "deploy_runbook.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [9, 13, 11, 14, 2, 12, 7, 5, 8, 1], "idsInt8": [9, 13, 11, 14, 2, 5, 12, 7, 8, 1], "msFloat": 1.22, "msInt8": 0.29}
+,
+    {"id": "f5", "expected": "db_schema.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [8, 7, 9, 14, 3, 13, 6, 4, 5, 11], "idsInt8": [8, 7, 9, 14, 3, 6, 13, 4, 5, 11], "msFloat": 0.94, "msInt8": 0.27}
+,
+    {"id": "f6", "expected": "onboarding.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [13, 14, 1, 7, 8, 9, 12, 2, 6, 5], "idsInt8": [13, 14, 1, 7, 8, 9, 12, 2, 6, 5], "msFloat": 0.89, "msInt8": 0.28}
+,
+    {"id": "c1", "expected": "auth_token_spec.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [4, 3, 9, 2, 10, 11, 5, 8, 1, 14], "idsInt8": [4, 3, 2, 9, 10, 8, 1, 5, 11, 14], "msFloat": 1.06, "msInt8": 0.29}
+,
+    {"id": "c2", "expected": "auth_token_spec.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [4, 3, 9, 13, 1, 12, 11, 5, 2, 8], "idsInt8": [4, 3, 9, 13, 1, 12, 11, 5, 2, 8], "msFloat": 0.88, "msInt8": 0.29}
+,
+    {"id": "c3", "expected": "deploy_runbook.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [9, 11, 2, 3, 10, 14, 4, 8, 12, 5], "idsInt8": [9, 11, 2, 3, 10, 14, 4, 8, 12, 5], "msFloat": 0.95, "msInt8": 0.33}
+,
+    {"id": "c4", "expected": "onboarding.md", "rankFloat": 1, "rankInt8": 2,
+     "idsFloat": [13, 8, 14, 12, 7, 6, 9, 3, 4, 11], "idsInt8": [8, 13, 14, 7, 12, 6, 9, 3, 4, 11], "msFloat": 0.89, "msInt8": 0.25}
+,
+    {"id": "c5", "expected": "incident_postmortem.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [11, 4, 3, 1, 9, 5, 14, 12, 2, 8], "idsInt8": [11, 4, 3, 1, 9, 5, 14, 12, 8, 2], "msFloat": 0.92, "msInt8": 0.25}
+,
+    {"id": "c6", "expected": "storage_engine_design.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [14, 4, 7, 11, 3, 1, 12, 5, 13, 9], "idsInt8": [14, 4, 7, 1, 11, 13, 3, 12, 5, 9], "msFloat": 0.88, "msInt8": 0.25}
+,
+    {"id": "x1", "expected": "auth_token_spec.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [4, 10, 5, 2, 3, 1, 9, 11, 14, 8], "idsInt8": [4, 10, 5, 2, 3, 1, 9, 14, 11, 8], "msFloat": 0.88, "msInt8": 0.26}
+,
+    {"id": "x2", "expected": "auth_token_spec.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [4, 3, 10, 2, 9, 8, 11, 5, 1, 14], "idsInt8": [4, 3, 10, 2, 9, 8, 11, 1, 5, 6], "msFloat": 0.85, "msInt8": 0.24}
+,
+    {"id": "x3", "expected": "auth_migration_plan.md", "rankFloat": 2, "rankInt8": 2,
+     "idsFloat": [3, 2, 13, 14, 1, 4, 8, 6, 9, 5], "idsInt8": [3, 2, 13, 14, 1, 4, 8, 6, 9, 5], "msFloat": 0.86, "msInt8": 0.28}
+,
+    {"id": "x4", "expected": "deploy_runbook.md", "rankFloat": 1, "rankInt8": 1,
+     "idsFloat": [9, 2, 11, 3, 14, 10, 4, 5, 8, 13], "idsInt8": [9, 2, 11, 3, 14, 4, 10, 5, 8, 13], "msFloat": 0.94, "msInt8": 0.25}
+
+  ]
+}
