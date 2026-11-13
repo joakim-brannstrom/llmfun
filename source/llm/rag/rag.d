@@ -35,6 +35,7 @@ public import my.path : Path;
 import llm.common.embedder;
 import llm.config : RagDatabaseConfig, RagConfig;
 import llm.rag.database : SourceMatch, Database;
+import llm.rag.optimize_counter : incrementOptimizeCounter, readOptimizeCounter;
 
 struct Topic {
     string name;
@@ -169,21 +170,24 @@ class RAG {
 
     alias db this;
 
-    this(Embedder embedder, RagDatabaseConfig primary, RagDatabaseConfig[] secondary)
+    this(Embedder embedder, RagDatabaseConfig primary,
+            RagDatabaseConfig[] secondary, RagConfig ragConfig = RagConfig.init)
     in (embedder !is null) {
         import my.optional;
         import llm.rag.database : openDatabase;
 
         this.embedder = embedder;
 
-        openDatabase(primary.path.AbsolutePath, embedder.modelName,
-                embedder.dimensions, readOnly: false).match!((Database db) {
+        openDatabase(primary.path.AbsolutePath, embedder.modelName, embedder.dimensions, readOnly: false,
+                busyTimeout: ragConfig.busyTimeout, mmrLambda: ragConfig.mmrLambda).match!(
+                (Database db) {
             this.dbs.insertBack(db);
             this.databases ~= DatabaseInfo(primary.path,
                 primary.path.baseName.stripExtension, primary.description);
         }, (None _) {
-            openDatabase(primary.path.AbsolutePath, embedder.modelName,
-                embedder.dimensions, readOnly: false, inMemory: true).match!((Database db) {
+            openDatabase(primary.path.AbsolutePath, embedder.modelName, embedder.dimensions, readOnly: false,
+                inMemory: true, busyTimeout: ragConfig.busyTimeout,
+                mmrLambda: ragConfig.mmrLambda).match!((Database db) {
                 this.dbs.insertBack(db);
                 this.databases ~= DatabaseInfo(":memory:".Path,
                 primary.path.baseName.stripExtension, primary.description);
@@ -193,8 +197,9 @@ class RAG {
         });
 
         foreach (cfg; secondary) {
-            openDatabase(cfg.path.AbsolutePath, embedder.modelName,
-                    embedder.dimensions, readOnly: true, inMemory: false).match!((Database db) {
+            openDatabase(cfg.path.AbsolutePath, embedder.modelName, embedder.dimensions, readOnly: true,
+                    inMemory: false, busyTimeout: ragConfig.busyTimeout,
+                    mmrLambda: ragConfig.mmrLambda).match!((Database db) {
                 this.dbs.insertBack(db);
                 this.databases ~= DatabaseInfo(cfg.path,
                     cfg.path.baseName.stripExtension, cfg.description);
@@ -212,6 +217,14 @@ class RAG {
 
     bool isPrimaryInMemory() {
         return databases[0].path.toString == ":memory:";
+    }
+
+    /// Remove the source and log it to the optimize counter.
+    long removeSource(Origin origin) {
+        auto removed = dbs[0].removeSource(origin);
+        if (removed != 0)
+            incrementOptimizeCounter(dbs[0].db);
+        return removed;
     }
 
     size_t[] resolveDatabaseIndices(string databaseName) {
@@ -720,6 +733,11 @@ RagAddResult addToDatabase(ref Database db, Embedder embedder, Document doc,
             throw e;
         }
     });
+
+    // Bump the optimize counter after the successful commit; a top-level add counts 1.
+    // The update path is the removeSource-then-addSource inside the transaction above, so this single increment covers it.
+    // Separate statement on purpose: a crash before it loses a count, which only delays an optimize run.
+    incrementOptimizeCounter(db.db);
 
     return RagAddResult(doc.data.length, chunks);
 }
@@ -1372,4 +1390,393 @@ unittest {
     assert(res2.chunks == 0, "re-add of unchanged source must be a no-op");
     assert(db.getSources().length == 1);
     db.destroy;
+}
+
+// Auto-optimize write counter: a top-level add counts 1, the update path (remove + add inside one transaction) counts 1 total, and a deduped no-op re-add counts nothing.
+@(
+        "the auto-optimize counter counts an add and an update as one write each and a no-op re-add as none")
+unittest {
+    import std.conv : to;
+    import llm.rag.database : openDatabase;
+    import llm.rag.optimize_counter : readOptimizeCounter;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TestEmbedder(50);
+    auto dbOpt = openDatabase((dir ~ "c.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        db.destroy;
+
+    const origin = Origin(Topic("c1"));
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+
+    size_t nBatch1 = 0;
+    addToDatabase(db, emb, Document(origin: origin, data: sampleText()), cfg, nBatch1);
+    assert(readOptimizeCounter(db.db) == 1,
+            "one top-level add must count 1, got " ~ readOptimizeCounter(db.db).to!string);
+
+    // deduped re-add of unchanged content is a no-op: no increment
+    size_t nBatch2 = 0;
+    addToDatabase(db, emb, Document(origin: origin, data: sampleText()), cfg, nBatch2);
+    assert(readOptimizeCounter(db.db) == 1,
+            "deduped re-add must not count, got " ~ readOptimizeCounter(db.db).to!string);
+
+    // changed content under the same origin is an update: still one write total
+    size_t nBatch3 = 0;
+    addToDatabase(db, emb, Document(origin: origin, data: sampleText() ~ "more "), cfg, nBatch3);
+    assert(readOptimizeCounter(db.db) == 2,
+            "an update must count 1 (2 total), got " ~ readOptimizeCounter(db.db).to!string);
+}
+
+// The RAG-level removeSource wrapper: a removal that removed something counts 1, a removal of an unknown origin counts nothing.
+@("rag.removeSource counts one write for an actual removal and none for an unknown origin")
+unittest {
+    import std.conv : to;
+    import llm.rag.optimize_counter : readOptimizeCounter;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TestEmbedder(50);
+    auto rag = new RAG(emb, RagDatabaseConfig(dir ~ "r.db", "r"), null);
+    scope (exit)
+        rag.destroy;
+
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+    auto doc = Document(origin: Origin(Topic("r1")), data: sampleText());
+    size_t nBatchCache = 0;
+    add(rag, doc, cfg);
+    auto db = rag.db;
+    assert(readOptimizeCounter(db.db) == 1,
+            "the add must count 1, got " ~ readOptimizeCounter(db.db).to!string);
+
+    auto removed = rag.removeSource(Origin(Topic("r1")));
+    assert(removed != 0, "the source must actually be removed");
+    assert(readOptimizeCounter(db.db) == 2,
+            "an actual removal must count 1 (2 total), got " ~ readOptimizeCounter(db.db)
+                .to!string);
+
+    auto nothing = rag.removeSource(Origin(Topic("never-added")));
+    assert(nothing == 0, "removing an unknown origin must remove nothing");
+    assert(readOptimizeCounter(db.db) == 2,
+            "a no-op removal must not count, got " ~ readOptimizeCounter(db.db).to!string);
+}
+
+// Schema bump migration: a database at the previous schema version is wiped and rebuilt on a read-write open, which recreates the counter table empty.
+@(
+        "a database at the previous schema version wipes and rebuilds on read-write open and the counter starts at 0")
+unittest {
+    import std.conv : to;
+    import llm.rag.database : openDatabase;
+    import llm.rag.optimize_counter : readOptimizeCounter;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto dbOpt = openDatabase((dir ~ "m.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    db.destroy;
+
+    // Simulate a database created by the previous schema version: version 6 without the counter table (a fresh v7 database already has it).
+    {
+        auto oldOpt = openDatabase((dir ~ "m.db").AbsolutePath, "test", 8, readOnly: false);
+        assert(oldOpt.hasValue, "reopen failed");
+        auto oldDb = oldOpt.match!((Database d) => d, (None _) => Database.init);
+        oldDb.run(`UPDATE VersionTbl SET version = 6`);
+        oldDb.run(`DROP TABLE OptimizeCounterTbl`);
+        oldDb.destroy;
+    }
+
+    auto newOpt = openDatabase((dir ~ "m.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(newOpt.hasValue, "migration open failed");
+    auto newDb = newOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        newDb.destroy;
+
+    // Trailing-space SQL keeps this read off the versionData cache entry.
+    // The statement must be held in a local: an inline prepare().get.execute range outlives the wrapper's reference-counted payload and reads garbage.
+    bool found;
+    long ver;
+    {
+        auto stmt = newDb.prepare(`SELECT version FROM VersionTbl `);
+        foreach (ref r; stmt.get.execute) {
+            found = true;
+            ver = r.peek!long(0);
+        }
+    }
+    assert(found, "VersionTbl must have a row after the rebuild");
+    assert(ver == 8, "the rebuilt database must be at version 8, got " ~ ver.to!string);
+
+    assert(readOptimizeCounter(newDb.db) == 0,
+            "the rebuild must recreate the counter at 0, got " ~ readOptimizeCounter(newDb.db)
+                .to!string);
+
+    // the counter table is part of the schema: an increment on the rebuilt database works
+    import llm.rag.optimize_counter : incrementOptimizeCounter;
+
+    incrementOptimizeCounter(newDb.db);
+    assert(readOptimizeCounter(newDb.db) == 1,
+            "the rebuilt database must have a working counter, got " ~ readOptimizeCounter(newDb.db)
+                .to!string);
+}
+
+// The MMR tests need vectors that CLUSTER: the hash-based TestEmbedder avalanches any text difference, so near-identical chunks across origins are impossible with it.
+// This embedder maps the origin prefix in the embedding input ("Topic: r1 | ...") to one of three fixed directions: the three redundant topics share one vector, the diverse topic gets an orthogonal one.
+private static class ClusterEmbedder : Embedder {
+    import std.algorithm : canFind;
+
+    override string modelName() {
+        return "cluster";
+    }
+
+    override long dimensions() {
+        return 8;
+    }
+
+    override bool supportsTokenization() {
+        return false;
+    }
+
+    override int batchSize() {
+        return 512;
+    }
+
+    override void destroy() {
+    }
+
+    private EmbedResult vec(string text) {
+        import std.algorithm : canFind;
+
+        auto v = new float[8];
+        v[] = 0.0f;
+        if (canFind(text, "Topic: r"))
+            v[0] = 1.0f; // redundant cluster (any r-salt origin)
+        else if (canFind(text, "Topic: d1"))
+            v[1] = 1.0f; // diverse cluster, orthogonal to the redundant one
+        else
+            v[2] = 1.0f;
+        return EmbedResult(v);
+    }
+
+    EmbedResult embed(string text) {
+        return vec(text);
+    }
+
+    override EmbedResult embedQuery(string text) {
+        return vec(text);
+    }
+
+    override EmbedResult embedDocument(string text) {
+        return vec(text);
+    }
+
+    override EmbedResult embedQuery(int[] tokens) {
+        assert(false, "token path never used: supportsTokenization is false");
+    }
+
+    override EmbedResult embedDocument(int[] tokens) {
+        assert(false, "token path never used: supportsTokenization is false");
+    }
+
+    override int[] tokenize(string text, bool addSpecial) {
+        assert(false, "token path never used: supportsTokenization is false");
+    }
+
+    override string detokenize(int[] tokens) {
+        assert(false, "token path never used: supportsTokenization is false");
+    }
+}
+
+private string lettersText(long shift) {
+    string text;
+    foreach (i; 0 .. 50)
+        text ~= cast(char)('a' + (i + shift) % 26) ~ " ";
+    return text;
+}
+
+@("mmrLambda 1.0 keeps the KNN ranking; 0.3 diversifies it on a redundant corpus")
+unittest {
+    import std.algorithm : canFind;
+    import std.conv : to;
+    import llm.rag.database : openDatabase, Search;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new ClusterEmbedder();
+    immutable redundant = lettersText(0) ~ " alpha";
+    // must contain an fts token no other doc has
+    immutable diverse = lettersText(13) ~ " zqxword";
+
+    auto dbAOpt = openDatabase((dir ~ "m1.db").AbsolutePath, "cluster", 8,
+            readOnly: false, mmrLambda: 1.0);
+    assert(dbAOpt.hasValue, "openDatabase (lambda 1.0) failed");
+    auto dbA = dbAOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        dbA.destroy;
+
+    auto dbBOpt = openDatabase((dir ~ "m2.db").AbsolutePath, "cluster", 8,
+            readOnly: false, mmrLambda: 0.3);
+    assert(dbBOpt.hasValue, "openDatabase (lambda 0.3) failed");
+    auto dbB = dbBOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        dbB.destroy;
+
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+    foreach (i; 1 .. 7) {
+        size_t nBatchCache = 0;
+        immutable salt = "r" ~ i.to!string;
+        addToDatabase(dbA, emb, Document(origin: Origin(Topic(salt)), data: redundant),
+                cfg, nBatchCache, salt);
+        nBatchCache = 0;
+        addToDatabase(dbB, emb, Document(origin: Origin(Topic(salt)), data: redundant),
+                cfg, nBatchCache, salt);
+    }
+    size_t nBatchCacheD = 0;
+    addToDatabase(dbA, emb, Document(origin: Origin(Topic("d1")), data: diverse),
+            cfg, nBatchCacheD, "d1");
+    addToDatabase(dbB, emb, Document(origin: Origin(Topic("d1")), data: diverse),
+            cfg, nBatchCacheD, "d1");
+
+    assert(dbA.getSources.length == 7, "seven distinct salts must index seven sources");
+
+    // probe = the redundant cluster vector: distance 0 to the six redundant chunks, 1 to the diverse one
+    float[] probe() {
+        auto v = new float[8];
+        v[] = 0.0f;
+        v[0] = 1.0f;
+        return v;
+    }
+
+    // lambda 1.0 = plain KNN: the top-4 are all redundant chunks (distance 0), the diverse chunk (distance 1) is excluded. Ranks are 1-4 by distance.
+    auto ra = dbA.querySemantic(Search(probe()), 4);
+    assert(ra.length == 4, "plain KNN must return four chunks, got " ~ ra.length.to!string);
+    foreach (i, m; ra)
+        assert(m.text == redundant, "plain KNN rank " ~ (i + 1)
+                .to!string ~ " must be a redundant chunk, got " ~ m.text);
+    foreach (i, m; ra)
+        assert(m.rank == i + 1, "plain KNN rank must be " ~ (i + 1)
+                .to!string ~ ", got " ~ m.rank.to!string);
+
+    // lambda 0.3 = MMR over the over-fetched pool (k*5 = 20 candidates, 7 rows exist so the pool covers all).
+    // After the best redundant pick the identical duplicates score 0.3*1 - 0.7*1 < 0 while the diverse chunk scores 0.3*0 - 0.7*0 = 0.
+    // It is therefore selected (position 2 of the MMR order) and part of the returned set even though its distance is the worst.
+    auto rb = dbB.querySemantic(Search(probe()), 4);
+    assert(rb.length == 4, "MMR KNN must return four chunks, got " ~ rb.length.to!string);
+    assert(rb[0].text == redundant, "MMR must keep the best match first, got " ~ rb[0].text);
+    assert(canFind(rb.map!(m => m.text).array, diverse),
+            "MMR must select the diverse chunk into the top-4 set");
+    assert(rb[3].text == diverse,
+            "the diverse chunk must be the last by distance, got " ~ rb[3].text);
+    assert(ra != rb, "MMR must change the KNN result set on the redundant corpus");
+}
+
+@("mmrLambda applies to the vec side of the RRF fusion query")
+unittest {
+    import std.algorithm : canFind, sort;
+    import std.conv : to;
+    import llm.rag.database : openDatabase, Search;
+    import my.optional;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new ClusterEmbedder();
+    immutable redundant = lettersText(0) ~ " alpha";
+    immutable diverse = lettersText(13) ~ " zqxword";
+
+    auto dbAOpt = openDatabase((dir ~ "f1.db").AbsolutePath, "cluster", 8,
+            readOnly: false, mmrLambda: 1.0);
+    assert(dbAOpt.hasValue, "openDatabase (lambda 1.0) failed");
+    auto dbA = dbAOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        dbA.destroy;
+
+    auto dbBOpt = openDatabase((dir ~ "f2.db").AbsolutePath, "cluster", 8,
+            readOnly: false, mmrLambda: 0.3);
+    assert(dbBOpt.hasValue, "openDatabase (lambda 0.3) failed");
+    auto dbB = dbBOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        dbB.destroy;
+
+    // The fusion path over-fetches the vec CTE by RrfPoolMultiplier (10): with
+    // limit 4 the plain pool is k=40, so MMR inside vec0 only engages when the
+    // corpus holds MORE than 40 rows. 40 redundant docs + 1 diverse doc = 41.
+    immutable cfg = RagConfig(windowOverlapPercent: 10);
+    foreach (i; 1 .. 41) {
+        size_t nBatchCache = 0;
+        immutable salt = "r" ~ i.to!string;
+        addToDatabase(dbA, emb, Document(origin: Origin(Topic(salt)), data: redundant),
+                cfg, nBatchCache, salt);
+        nBatchCache = 0;
+        addToDatabase(dbB, emb, Document(origin: Origin(Topic(salt)), data: redundant),
+                cfg, nBatchCache, salt);
+    }
+    size_t nBatchCacheD = 0;
+    addToDatabase(dbA, emb, Document(origin: Origin(Topic("d1")), data: diverse),
+            cfg, nBatchCacheD, "d1");
+    addToDatabase(dbB, emb, Document(origin: Origin(Topic("d1")), data: diverse),
+            cfg, nBatchCacheD, "d1");
+
+    assert(dbA.getSources.length == 41, "41 distinct salts must index 41 sources");
+
+    // The external-content fts5 index is not auto-synced; rebuild it so the fts side of the fusion sees the just-indexed chunks.
+    dbA.fts5Rebuild();
+    dbB.fts5Rebuild();
+
+    // probe = the redundant cluster vector
+    float[] probe() {
+        auto v = new float[8];
+        v[] = 0.0f;
+        v[0] = 1.0f;
+        return v;
+    }
+
+    // lambda 1.0, byte-identical to the plain ranking: the plain vec pool (k=40) holds the 40 redundant chunks (distance 0).
+    // The diverse chunk (distance 1) is excluded from the pool, so its fused score is the fts term only, 1/(10+1) = 1/11.
+    // The rank-1 redundant chunk ties it exactly (1/11), so the diverse chunk sits at fused position 1 or 2 either way and is always inside the top-4; the three redundant chunks complete the set.
+    auto ra = dbA.queryCombineSemanticText(Search(probe()), "zqxword", 4);
+    assert(ra.length == 4, "plain fusion must return four chunks, got " ~ ra.length.to!string);
+    assert(canFind(ra.map!(m => m.text).array, diverse),
+            "the diverse chunk must be in the plain fused top-4 (fts rank 1)");
+    size_t nRedundant;
+    foreach (m; ra)
+        if (m.text == redundant)
+            nRedundant++;
+    assert(nRedundant == 3,
+            "plain fusion top-4 must hold three redundant chunks, got " ~ nRedundant.to!string);
+    // The SQL gives a chunk matching neither engine the coalesce default rank 1000.
+    // The diverse chunk's plain fused score is therefore 1/11 (fts rank 1) plus 1/(10+1000) for the absent vec match, not bare 1/11.
+    immutable plainDiverseScore = 1.0 / 11 + 1.0 / 1010;
+    foreach (m; ra)
+        if (m.text == diverse)
+            assert(m.rank > plainDiverseScore - 1e-9 && m.rank < plainDiverseScore + 1e-9,
+                    "the diverse chunk's plain fused score must be 1/11 + 1/1010, got "
+                    ~ m.rank.to!string);
+
+    // lambda 0.3: MMR engages (41 rows > k=40) and the diverse chunk is selected into the vec pool (position 2 of the MMR order).
+    // It takes the vec rank 40 (worst distance among the selected) on top of its fts rank 1, so its fused score 1/11 + 1/50 strictly beats every redundant chunk's best 1/11.
+    // It ranks first - impossible without the mmr_lambda constraint, which excludes it from the pool entirely at lambda 1.0.
+    auto rb = dbB.queryCombineSemanticText(Search(probe()), "zqxword", 4);
+    assert(rb.length == 4, "MMR fusion must return four chunks, got " ~ rb.length.to!string);
+    assert(rb[0].text == diverse,
+            "MMR must lift the diverse chunk to fused rank 1, got " ~ rb[0].text);
+    foreach (i; 1 .. 4)
+        assert(rb[i].text == redundant, "MMR fused rank " ~ (i + 1)
+                .to!string ~ " must be a redundant chunk, got " ~ rb[i].text);
+    assert(rb[0].rank > 1.0 / 11 + 1.0 / 50 - 1e-9 && rb[0].rank < 1.0 / 11 + 1.0 / 50 + 1e-9,
+            "the diverse chunk's MMR fused score must be 1/11 + 1/50, got " ~ rb[0].rank.to!string);
+    assert(ra != rb, "MMR must change the fused ranking on the redundant corpus");
 }

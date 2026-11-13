@@ -1,6 +1,7 @@
 module llm.rag.database;
 
 import core.thread : Thread;
+import core.time : Duration, msecs;
 import logger = std.experimental.logger;
 import std.algorithm : map, filter, cache;
 import std.array : appender, empty;
@@ -21,7 +22,7 @@ import my.optional;
 public import llm.rag.rag : Topic, Url, Origin, Document, Offset, Line;
 
 immutable timeout = 30.dur!"seconds";
-enum SchemaVersion = 6;
+enum SchemaVersion = 8;
 
 private struct VersionTbl {
     @ColumnName("version")
@@ -70,6 +71,10 @@ private struct TextChunkTbl {
     long lineEnd;
 }
 
+private struct OptimizeCounterTbl {
+    long count;
+}
+
 // FTS5 virtual table with external content mode - reads directly from TextChunkTbl
 private immutable FTSChunksSql = `
 CREATE VIRTUAL TABLE FtsChunksTbl USING fts5(
@@ -94,8 +99,9 @@ private immutable long RrfK = 10;
 private immutable double FtsWeight = 1.0;
 private immutable double VecWeight = 1.0;
 
-Optional!Database openDatabase(AbsolutePath dbFile_, string model,
-        long embedDimensions, bool readOnly = false, bool inMemory = false) nothrow {
+Optional!Database openDatabase(AbsolutePath dbFile_, string model, long embedDimensions,
+        bool readOnly = false, bool inMemory = false,
+        Duration busyTimeout = 500.msecs, double mmrLambda = 1.0) nothrow {
     import std.file : exists;
     import std.path : dirName;
     import llm.rag.sqlite3_vec;
@@ -104,11 +110,12 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
 
     string dbFile = inMemory ? ":memory:" : dbFile_.toString;
 
-    static void setPragmas(ref Miniorm db) {
+    static void setPragmas(ref Miniorm db, Duration busyTimeout) {
         // dfmt off
         auto pragmas = [
             // required for foreign keys with cascade to work
             "PRAGMA foreign_keys=ON;",
+            "PRAGMA busy_timeout=" ~ busyTimeout.total!"msecs".to!string ~ ";",
             // "PRAGMA journal_mode=WAL;",
             // "PRAGMA synchronous=FULL;"
         ];
@@ -145,7 +152,7 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
         try {
             auto db = Miniorm(dbFile, readOnly ? SQLITE_OPEN_READONLY
                     : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE));
-            setPragmas(db);
+            setPragmas(db, busyTimeout);
             sqlite3_vec_init(cast(sqlite3*) db.handle, null, null);
             const versionData = () {
                 auto stmt = db.prepare("SELECT version FROM VersionTbl");
@@ -161,7 +168,8 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
                 return VersionTbl(0);
             }().ifThrown(VersionTbl(0));
 
-            alias Schema = AliasSeq!(VersionTbl, SourceTbl, OriginUrlTbl, TextChunkTbl);
+            alias Schema = AliasSeq!(VersionTbl, SourceTbl, OriginUrlTbl,
+                    TextChunkTbl, OptimizeCounterTbl);
 
             bool mismatch = versionData.version_ < SchemaVersion
                 || versionData.embedDimensions != embedDimensions;
@@ -198,7 +206,7 @@ Optional!Database openDatabase(AbsolutePath dbFile_, string model,
 CREATE VIRTUAL TABLE EmbeddingsTbl USING vec0(
     id INTEGER PRIMARY KEY,
     sourceId INTEGER NOT NULL,
-    embedding FLOAT[$(
+    embedding INT8[$(
                         embedDimensions)]
 );`.text);
                 db.run(FTSChunksSql);
@@ -206,7 +214,7 @@ CREATE VIRTUAL TABLE EmbeddingsTbl USING vec0(
                         embedDimensions, model));
                 trans.commit;
             }
-            return Database(db, embedDimensions).some;
+            return Database(db, embedDimensions, mmrLambda).some;
         } catch (Exception e) {
             logger.trace(e).collectException;
             logger.warningf("Trying to open/create database '%s' (%s): %s",
@@ -268,11 +276,13 @@ struct Database {
 
     private {
         long embedDimensions;
+        double mmrLambda;
     }
 
-    this(Miniorm db, long embedDimensions) {
+    this(Miniorm db, long embedDimensions, double mmrLambda = 1.0) {
         this.db = db;
         this.embedDimensions = embedDimensions;
+        this.mmrLambda = mmrLambda;
     }
 
     void destroy() {
@@ -512,7 +522,7 @@ struct Database {
     }
 
     void addEmbedding(SourceId id, Embedding emb) {
-        static immutable embedSql = "INSERT INTO EmbeddingsTbl (sourceId, embedding) VALUES(:sourceId, :embedding)";
+        static immutable embedSql = "INSERT INTO EmbeddingsTbl (sourceId, embedding) VALUES(:sourceId, vec_quantize_int8(:embedding, 'unit'))";
         static immutable chunkSql = "INSERT INTO TextChunkTbl (embedId, text, charBeginPos, charEndPos, lineBegin, lineEnd) VALUES(:embedId, :text, :charBeginPos, :charEndPos, :lineBegin, :lineEnd)";
 
         {
@@ -548,11 +558,16 @@ struct Database {
     }
 
     SourceMatch[] querySemantic(Search search, long limit) {
-        static immutable embedSql = "SELECT id,sourceId," ~ "row_number() OVER (ORDER BY distance) as rank FROM EmbeddingsTbl WHERE embedding MATCH :embedding AND k = :limit ORDER BY distance";
+        // MMR on the KNN. The vec0 fork accepts mmr_lambda as a hidden column EQ constraint (at/after the k column) and only engages below 1.0.
+        // At the default the statement and bindings are byte-identical to the plain ranking.
+        static immutable embedSql = "SELECT id,sourceId," ~ "row_number() OVER (ORDER BY distance) as rank FROM EmbeddingsTbl WHERE embedding MATCH vec_quantize_int8(vec_f32(:embedding), 'unit') AND k = :limit ORDER BY distance";
+        static immutable embedSqlMmr = "SELECT id,sourceId," ~ "row_number() OVER (ORDER BY distance) as rank FROM EmbeddingsTbl WHERE embedding MATCH vec_quantize_int8(vec_f32(:embedding), 'unit') AND k = :limit AND mmr_lambda = :mmr_lambda ORDER BY distance";
 
-        auto stmt = db.prepare(embedSql);
+        auto stmt = db.prepare(mmrLambda < 1.0 ? embedSqlMmr : embedSql);
         stmt.get.bind(":embedding", fixDimension(search.embed));
         stmt.get.bind(":limit", limit);
+        if (mmrLambda < 1.0)
+            stmt.get.bind(":mmr_lambda", mmrLambda);
         auto ids = appender!(Tuple!(long, "embedId", long, "sourceId", double, "rank")[])();
         foreach (ref r; stmt.get.execute) {
             ids.put(tuple!("embedId", "sourceId", "rank")(r.peek!long(0),
@@ -645,7 +660,7 @@ WITH vec_matches AS (
     id AS rowid,                      -- EmbeddingsTbl.id
     row_number() OVER (ORDER BY distance) AS rank_number
   FROM EmbeddingsTbl
-  WHERE embedding MATCH :embedding
+  WHERE embedding MATCH vec_quantize_int8(vec_f32(:embedding), 'unit')
     AND k = :limit
 ),
 fts_matches AS (
@@ -670,14 +685,24 @@ ORDER BY fusion_score DESC
 LIMIT :limit;
 `;
 
+        // MMR on the vec-side RRF pool (the full limit * multiplier pool, reranked inside vec0).
+        // The hidden-column constraint only engages below 1.0, so at the default the SQL and bindings are byte-identical to the plain fusion query.
+        static immutable mmrFragment = "\n    AND mmr_lambda = :mmr_lambda";
+        import std.array : replace;
+
+        auto sqlWithMmr = mmrLambda < 1.0 ? sql.replace("AND k = :limit",
+                "AND k = :limit" ~ mmrFragment) : sql;
+
         try {
-            auto stmt = db.prepare(sql);
+            auto stmt = db.prepare(sqlWithMmr);
             stmt.get.bind(":embedding", embedding.embed);
             stmt.get.bind(":text_query", query);
             stmt.get.bind(":rrf_k", RrfK);
             stmt.get.bind(":vec_weight", VecWeight);
             stmt.get.bind(":fts_weight", FtsWeight);
             stmt.get.bind(":limit", limit * RrfPoolMultiplier);
+            if (mmrLambda < 1.0)
+                stmt.get.bind(":mmr_lambda", mmrLambda);
 
             auto results = appender!(Tuple!(long, "id", double, "rank")[])();
             foreach (ref r; stmt.get.execute) {
@@ -740,6 +765,11 @@ LIMIT :limit;
     void fts5Rebuild() {
         db.run("INSERT INTO FtsChunksTbl(FtsChunksTbl) VALUES('rebuild')");
     }
+}
+
+/// Compacts the vec0 shadow tables and reclaims freed slots inside non-empty chunks.
+void optimize(Miniorm db) {
+    db.run("INSERT INTO EmbeddingsTbl(EmbeddingsTbl) VALUES('optimize')");
 }
 
 immutable string fts5SimpleHelp = `Full-text query text search. Each word separated by a space is an implicit boolean AND`;
@@ -876,4 +906,169 @@ string cleanFts5(string s) {
 @("test cleanFts5")
 unittest {
     assert(cleanFts5("foo+bar") == "\"foo+bar\"");
+}
+
+@("openDatabase applies the busy_timeout pragma on read-write and read-only connections")
+unittest {
+    import llm.test_util : testArea;
+
+    auto dir = testArea("database_busy_timeout");
+    scope (exit)
+        dir.cleanup();
+
+    long readBusyTimeout(Database db) {
+        auto stmt = db.prepare("PRAGMA busy_timeout");
+        foreach (ref r; stmt.get.execute) {
+            return r.peek!long(0);
+        }
+        return -1;
+    }
+
+    auto dbPath = (dir ~ "p.db").AbsolutePath;
+    auto dbOpt = openDatabase(dbPath, "test", 8, readOnly: false, busyTimeout: 1234.msecs);
+    assert(dbOpt.hasValue, "read-write openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    assert(readBusyTimeout(db) == 1234, "read-write connection must carry the busy_timeout pragma");
+    db.destroy;
+
+    auto roOpt = openDatabase(dbPath, "test", 8, readOnly: true, busyTimeout: 4321.msecs);
+    assert(roOpt.hasValue, "read-only openDatabase failed");
+    auto ro = roOpt.match!((Database d) => d, (None _) => Database.init);
+    assert(readBusyTimeout(ro) == 4321, "read-only connection must carry the busy_timeout pragma");
+    ro.destroy;
+}
+
+@("addEmbedding stores int8 vectors and querySemantic returns the nearest chunk first")
+unittest {
+    import std.conv : to;
+    import std.datetime : Clock;
+    import llm.test_util : testArea;
+
+    auto dir = testArea("database_int8_embeddings");
+    scope (exit)
+        dir.cleanup();
+
+    auto dbOpt = openDatabase((dir ~ "i.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        db.destroy;
+
+    float[] axis(int dim) {
+        auto v = new float[8];
+        v[] = 0.0f; // float.init is NaN
+        v[dim] = 1.0f;
+        return v;
+    }
+
+    foreach (immutable i; 0 .. 3) {
+        auto name = ["alpha", "beta", "gamma"][i];
+        auto srcId = db.addSource(Source(origin: Origin(Topic(name)), checksum: (i + 1).SourceChecksum,
+                added: Clock.currTime));
+        db.addEmbedding(srcId, Embedding(Offset(0, 4), Line(1, 2), "chunk " ~ name, axis(i)));
+    }
+
+    // One byte per dimension: 8 dims must store 8 bytes (float32 would store 32).
+    // The alpha vector is [1, 0, ...] so its first component quantizes to 0x7E, the orthogonal ones to 0x00.
+    {
+        auto stmt = db.prepare(
+                `SELECT length(embedding), hex(substr(embedding, 1, 1)) FROM EmbeddingsTbl ORDER BY id`);
+        long rows;
+        foreach (ref r; stmt.get.execute) {
+            assert(r.peek!long(0) == 8,
+                    "a stored embedding must be 8 bytes (int8), got " ~ r.peek!long(0).to!string);
+            immutable want = rows == 0 ? "7E" : "00";
+            assert(r.peek!string(1) == want,
+                    "a stored embedding must be quantized int8, first byte " ~ r.peek!string(
+                        1) ~ ", expected " ~ want);
+            rows++;
+        }
+        assert(rows == 3, "three embeddings must be stored, got " ~ rows.to!string);
+    }
+
+    // Recall smoke: exact quantization must rank every query's own chunk first (recall@1 1.0 against the float32 ranking on this corpus).
+    foreach (immutable i; 0 .. 3) {
+        auto name = ["alpha", "beta", "gamma"][i];
+        auto hits = db.querySemantic(Search(axis(i)), 1);
+        assert(hits.length == 1, "querySemantic must return 1 hit, got " ~ hits.length.to!string);
+        assert(hits[0].origin.match!((Topic t) => t.name == name, (_) => false),
+                "the nearest chunk for axis " ~ i.to!string ~ " must come from " ~ name);
+    }
+}
+
+// Schema bump migration: a database from the previous schema version (version 7 row, float32 embedding column) is wiped and rebuilt with the int8 layout on a read-write open.
+@(
+        "a previous-version database with a float32 embedding column wipes and rebuilds at version 8 with an int8 column")
+unittest {
+    import std.conv : to;
+    import std.datetime : Clock;
+    import llm.test_util : testArea;
+
+    auto dir = testArea("database_int8_migration");
+    scope (exit)
+        dir.cleanup();
+
+    auto dbOpt = openDatabase((dir ~ "m.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    db.destroy;
+
+    // Simulate the previous schema version: version row 7 and a float32 embedding column.
+    // The column holds one vector ([1, 0, 0, 0, 0, 0, 0, 0] as a little-endian float32 blob).
+    {
+        auto oldOpt = openDatabase((dir ~ "m.db").AbsolutePath, "test", 8, readOnly: false);
+        assert(oldOpt.hasValue, "reopen failed");
+        auto oldDb = oldOpt.match!((Database d) => d, (None _) => Database.init);
+        oldDb.run(`UPDATE VersionTbl SET version = 7`);
+        oldDb.run(`DROP TABLE EmbeddingsTbl`);
+        oldDb.run(`CREATE VIRTUAL TABLE EmbeddingsTbl USING vec0(
+    id INTEGER PRIMARY KEY,
+    sourceId INTEGER NOT NULL,
+    embedding FLOAT[8])`);
+        oldDb.run(`INSERT INTO EmbeddingsTbl (id, sourceId, embedding)
+VALUES(1, 0, x'0000803F00000000000000000000000000000000000000000000000000000000')`);
+        oldDb.destroy;
+    }
+
+    auto newOpt = openDatabase((dir ~ "m.db").AbsolutePath, "test", 8, readOnly: false);
+    assert(newOpt.hasValue, "migration open failed");
+    auto newDb = newOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        newDb.destroy;
+
+    // Trailing-space SQL keeps this read off the versionData cache entry.
+    // The statement must be held in a local: an inline prepare().get.execute range outlives the wrapper's reference-counted payload and reads garbage.
+    bool found;
+    long ver;
+    {
+        auto stmt = newDb.prepare(`SELECT version FROM VersionTbl `);
+        foreach (ref r; stmt.get.execute) {
+            found = true;
+            ver = r.peek!long(0);
+        }
+    }
+    assert(found, "VersionTbl must have a row after the rebuild");
+    assert(ver == 8, "the rebuilt database must be at version 8, got " ~ ver.to!string);
+
+    // The wipe dropped the float32 rows and the rebuilt column stores int8: re-add one embedding and read it back.
+    auto srcId = newDb.addSource(Source(origin: Origin(Topic("t")), checksum: 1.SourceChecksum,
+            added: Clock.currTime));
+    float[] axis0 = new float[8];
+    axis0[] = 0.0f; // float.init is NaN
+    axis0[0] = 1.0f;
+    newDb.addEmbedding(srcId, Embedding(Offset(0, 1), Line(1, 1), "chunk", axis0));
+
+    {
+        auto stmt = newDb.prepare(
+                `SELECT count(*), max(length(embedding)), hex(substr(embedding, 1, 1)) FROM EmbeddingsTbl`);
+        foreach (ref r; stmt.get.execute) {
+            assert(r.peek!long(0) == 1,
+                    "the rebuild must wipe the old float32 rows, got " ~ r.peek!long(0).to!string);
+            assert(r.peek!long(1) == 8,
+                    "the rebuilt embedding column must store int8 (8 bytes), got " ~ r.peek!long(1)
+                        .to!string);
+            assert(r.peek!string(2) == "7E",
+                    "the rebuilt embedding column must quantize, first byte " ~ r.peek!string(2));
+        }
+    }
 }
