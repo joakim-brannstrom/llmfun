@@ -2,7 +2,7 @@
 ///
 /// The thread draws *blocks* rather than a role row per message: the adapter describes
 /// one block at a time (`store::ThreadStoreAdapter::blockAt`), this module draws its
-/// chrome - the role rule and label, the disclosure mark, the state glyph, the two-line tool
+/// chrome - the role rule and label, the disclosure mark, the two-line tool
 /// row, the focus ring and the copy control - and the adapter draws its body
 /// (`renderBlockBody`), so rich text, tables and code keep the renderer that already
 /// knows how to draw them.
@@ -15,15 +15,16 @@
 ///
 ///   User / Answer / Assistant   [rule][LABEL][ · 1.2 s][  preview], body below
 ///   WorkGroup                   disclosure mark + "WORK · 4 steps", body rows below
-///   ToolCall / ToolResult       two lines: [glyph][TOOL][ · 1.2 s] / [summary]
+///   ToolCall / ToolResult       two lines: [TOOL][ · 1.2 s] / [summary]
 ///   Thinking                    disclosure mark + "Thinking · 3.2 s", dim body below
 ///   System                      [rule][SYSTEM][ · time][  preview], neutral text
 ///   Code                        the Answer/Assistant shape; the body is one fenced
 ///                               code block and the copy path copies its *code*
 ///
-/// Rules the drawing follows, all from D-BLOCK: no background fill (role is a
-/// foreground plus a rule), state is a glyph *and* a word, every colour and distance
-/// is a token, and the row is interactive over its whole width (ImGui's
+/// Rules the drawing follows: no background fill (role is a foreground plus a
+/// rule), the state paints no glyph (a failure renders
+/// the red FAIL word on the card's header), every colour and distance is a
+/// token, and the row is interactive over its whole width (ImGui's
 /// `InvisibleButton` gives it the mouse and Space/Enter while it holds the nav
 /// focus).
 ///
@@ -122,28 +123,26 @@ const char* defaultBlockLabel(BlockKind kind);
 /// The role's foreground (D-BLOCK: role via foreground + rule, never a fill).
 ui::ColorToken blockInk(BlockKind kind);
 
-/// The state mark for `state`, or `Icon::Count` when the block carries none - the
-/// caller draws no glyph then, rather than a mark that means nothing.
-ui::Icon blockStateGlyph(BlockState state);
-
 /// True for the two-line compact rows (a tool call and its result).
 bool blockIsCompactRow(BlockKind kind);
 
-/// True for the kinds whose header is a *disclosure* (a mark that toggles) rather
-/// than a role rule: the work group and the thinking body.
-bool blockHasDisclosure(BlockKind kind);
+/// True for the rows whose header is a *disclosure* (a mark that toggles) rather
+/// than a role rule: the work group, the thinking body, and a batch's owner row
+/// - the disclosure is a property of the row, not of its kind, so the owner
+/// (a `BlockKind::Assistant` row) folds too.
+bool blockHasDisclosure(const BlockView& block);
 
 /// A duration as the header writes it: nothing at zero, `320 ms` under a second,
 /// `3.2 s` under a minute, then `1m 5s` / `1h 2m`. One decimal is the resolution
 /// the store has (`prettyDuration`), so the row never claims more.
 std::string blockTimingLabel(double seconds);
 
-/// The header line: label, duration, step count, and - while the block is closed -
-/// the one-line preview. `draw` is the same frame state `renderBlock()` is handed,
-/// so the preview cannot disagree with the height and the disclosure mark; `textGrid`
-/// picks the ASCII separator (` - `) over the middle dot, which a `LC_ALL=C` terminal
-/// would draw as a replacement character.
-std::string blockHeaderText(const BlockView& block, const BlockDraw& draw, bool textGrid);
+/// The row's header text, fitted to `availUnits` in the profile's own unit
+/// (`ui::textUnits`). Order: label -> duration -> chips. A folded batch owner drops the
+/// role word. Chips drop one token at a time from the right before the duration
+/// does; the label never drops.
+std::string blockHeaderText(const BlockView& block, const BlockDraw& draw, const ui::Metrics& m,
+                            float availUnits);
 
 /// The compact row's second line: the summary, and nothing else.
 std::string blockRowText(const BlockView& block);

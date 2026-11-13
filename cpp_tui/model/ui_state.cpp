@@ -34,7 +34,6 @@ void resetForSessionSwitch(UiState& ui) {
     // the address of the old one must not survive the switch (task 26). The thinking
     // disclosures go with it for the same reason.
     ui.thread.focus = {};
-    ui.thread.thinkingOpen.clear();
     // The block menu's owner goes with them (task 44): a recycled `BlockId` must not
     // re-own an open popup, and a popup that is no longer submitted is closed one frame
     // later (`views/blocks.cpp` has the measured detail).

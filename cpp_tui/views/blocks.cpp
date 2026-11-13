@@ -4,9 +4,9 @@
 ///
 ///  * the role is a *rule* plus a foreground, never a fill (D-BLOCK), so a block
 ///    paints no background at all - the body behind it is the region surface;
-///  * the state is a glyph *and* a word: `blockStateGlyph()` supplies the mark and
-///    the label supplies the meaning, so a 16-colour or ASCII surface loses the
-///    mark and keeps the row (NFR-16);
+///  * the state paints a word, never a glyph: a failed tool card renders
+///    the red FAIL on its header, folded or open, and the live states drive the
+///    thread view's chips line;
 ///  * every length comes from the metrics and every colour from a token - the file
 ///    has no colour literal and never asks which profile is up (`tools/gate_ratchet.txt`
 ///    holds it to that);
@@ -30,8 +30,13 @@
 #include "imgui/imgui.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace llmfun::tui::views {
 namespace {
@@ -40,7 +45,60 @@ namespace {
 /// ASCII: its chrome must not depend on the terminal's locale (`LC_ALL=C` turns
 /// U+00B7 into a replacement character), while the pixel profile can afford the
 /// middle dot.
-const char* separator(bool textGrid) { return textGrid ? " - " : " \xC2\xB7 "; }
+const char* separator(const ui::Metrics& m) { return m.textGrid ? " - " : " \xC2\xB7 "; }
+
+/// `text`'s width in the profile's own unit: cells on the grid (a wide glyph counts
+/// two) and pixels in the pixel profile (the atlas). The same measure every view
+/// carries a copy of: the pixel half needs `ImGui::CalcTextSize`, which `ui/text.h`
+/// deliberately does not reach for, so the per-view copy is what that layering costs.
+float textUnits(const ui::Metrics& m, std::string_view text) {
+    if (text.empty())
+        return 0.0f;
+    if (m.textGrid)
+        return static_cast<float>(ui::displayWidth(text));
+    // A context without a font (a measure before the first frame) contributes
+    // nothing rather than crashing in `CalcTextSize`.
+    if (ImGui::GetCurrentContext() == nullptr || ImGui::GetFont() == nullptr)
+        return 0.0f;
+    return ImGui::CalcTextSize(text.data(), text.data() + text.size()).x;
+}
+
+/// The batch's rendered chips: the stored `"[bash] [grep] [read_file] +N"` string
+/// split back into the shown tokens and the already-dropped count, so the composer
+/// can drop one more chip at a time while it fits. A token that is not a
+/// `+<digits>` count stays a shown chip, so a chip may be named `+x` without
+/// being eaten as the dropped count. It is our own rendering being
+/// re-read, never a wire format: the store is the one place that composes it, and
+/// the view is the one place that fits it.
+struct Chips {
+    std::vector<std::string> shown;
+    int dropped = 0;
+};
+
+Chips splitChips(const std::string& chips) {
+    Chips out;
+    std::size_t begin = 0;
+    while (begin <= chips.size()) {
+        const std::size_t end = chips.find(' ', begin);
+        const std::string token =
+            chips.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        if (token.empty()) {
+            if (end == std::string::npos)
+                break;
+            begin = end + 1;
+            continue;
+        }
+        if (token.size() > 1 && token[0] == '+' &&
+            std::isdigit(static_cast<unsigned char>(token[1])))
+            out.dropped = std::atoi(token.c_str() + 1);
+        else
+            out.shown.push_back(token);
+        if (end == std::string::npos)
+            break;
+        begin = end + 1;
+    }
+    return out;
+}
 
 /// The copy control's label. Its identity is the label *and* its rect, both inside
 /// the block's id scope, so two rows' chips are two items. The block menu's item uses
@@ -100,6 +158,154 @@ void textAt(const ui::Metrics& m, const ui::Rect& clip, float x, float y, const 
     ImGui::SetCursorScreenPos(flow);
 }
 
+/// The composer's answer, split where the renderer splits its inks: the
+/// chips run is the batch's data, not the role's word, so it draws in the
+/// quiet `textMid` beside the role ink. `text` is what `blockHeaderText()`
+/// returns; `chipsBegin`/`chipsEnd` are the chips run's byte offsets in it
+/// (equal when the row carries no chips; the text outside them is the role's).
+struct HeaderRuns {
+    std::string text;
+    std::size_t chipsBegin = 0;
+    std::size_t chipsEnd = 0;
+};
+
+HeaderRuns composeBlockHeader(const BlockView& block, const BlockDraw& draw, const ui::Metrics& m,
+                              float availUnits) {
+    const char* label = block.label.empty() ? defaultBlockLabel(block.kind) : block.label.c_str();
+    // Thinking carries neither a duration nor a count of its own: the cost
+    // is the owner's, so the disclosure says the bare word. Every other row keeps
+    // the store's duration.
+    const std::string timing =
+        block.kind == BlockKind::Thinking ? std::string() : blockTimingLabel(block.timingS);
+    if (block.kind == BlockKind::ToolStep) {
+        // The tool card's header: `TOOL <name>` while the card streams,
+        // `TOOL <name> · <duration>` once the result lands (exactly when
+        // durationMs != 0 - never a placeholder). The header carries no token
+        // counts - the wire fields stay, this render consumes none of them. A
+        // failure paints its red FAIL word in `renderBlock`, never in the text
+        // this returns - the caller draws it with its own ink. Cards hold no
+        // chips, so there is nothing here to fit.
+        std::string text = label;
+        if (!block.summary.empty()) {
+            text += "  ";
+            text += block.summary;
+        }
+        if (!timing.empty())
+            text += separator(m) + timing;
+        return HeaderRuns{text, 0, 0};
+    }
+
+    // The composer: the parts join with the profile's
+    // separator, and the row is fitted to `availUnits` by dropping from the right
+    // - chips one token at a time, then the duration, never the label.
+    Chips chips = splitChips(block.chips);
+    std::vector<std::string> parts;
+    // A folded batch owner drops the role word: the duration and the
+    // chips already say what the row is, and the mark + the fold say which batch.
+    if (!block.ownsBatch || draw.expanded)
+        parts.push_back(label);
+    std::size_t timingIndex = 0;
+    if (!timing.empty()) {
+        timingIndex = parts.size();
+        parts.push_back(timing);
+    }
+    std::size_t chipsIndex = 0;
+    bool hasChips = false;
+    const auto chipsText = [&chips] {
+        std::string text;
+        for (const std::string& chip : chips.shown) {
+            if (!text.empty())
+                text += ' ';
+            text += chip;
+        }
+        if (chips.dropped > 0)
+            text += " +" + std::to_string(chips.dropped);
+        return text;
+    };
+    // A run is composed only when the chips say something: a chips string of
+    // only whitespace parses to nothing, and pushing an empty part would hang
+    // a separator with nothing on either side of it.
+    if (!chips.shown.empty() || chips.dropped > 0) {
+        chipsIndex = parts.size();
+        hasChips = true;
+        parts.push_back(chipsText());
+    }
+    // The live answer's header: the phase word the model's vocabulary gives the
+    // row - `AGENT · writing`, `AGENT · cancelled`. The phase is event-driven,
+    // so the header changes only when the phase does, and the run's clock lives
+    // in the top bar and the now bar. The phase is the descriptor's, so a row
+    // that is not streaming draws label and timing only.
+    if (block.streaming && !block.phase.empty())
+        parts.push_back(block.phase);
+    if (block.kind == BlockKind::WorkGroup) {
+        // The group says how many steps it holds - the one number that tells a
+        // collapsed group from a single message.
+        parts.push_back(std::to_string(block.steps) + (block.steps == 1 ? " step" : " steps"));
+    }
+
+    const auto join = [&m](const std::vector<std::string>& in) {
+        std::string text;
+        for (const std::string& part : in) {
+            if (!text.empty())
+                text += separator(m);
+            text += part;
+        }
+        return text;
+    };
+    std::string text = join(parts);
+    while (textUnits(m, text) > availUnits && chips.shown.size() > 1) {
+        chips.shown.pop_back();
+        ++chips.dropped;
+        parts[chipsIndex] = chipsText();
+        text = join(parts);
+    }
+    if (textUnits(m, text) > availUnits && !timing.empty()) {
+        parts.erase(parts.begin() + static_cast<std::ptrdiff_t>(timingIndex));
+        text = join(parts);
+        // The timing sat before the chips, so the chips part moved down with it.
+        if (hasChips)
+            --chipsIndex;
+    }
+
+    // The chips run's place in the fitted text: the renderer splits its inks
+    // at this boundary, so the draw needs the byte offsets, not a re-parse.
+    HeaderRuns runs;
+    runs.text = text;
+    if (hasChips) {
+        std::string before;
+        for (std::size_t i = 0; i < chipsIndex; ++i) {
+            if (!before.empty())
+                before += separator(m);
+            before += parts[i];
+        }
+        std::string after;
+        for (std::size_t i = chipsIndex + 1; i < parts.size(); ++i) {
+            if (!after.empty())
+                after += separator(m);
+            after += parts[i];
+        }
+        // `before` joins the parts ahead of the run, so the separator that
+        // joins them to the run comes now; and what follows the run keeps
+        // the separator's join.
+        const std::string pre = before.empty() ? std::string() : std::string(separator(m));
+        runs.chipsBegin = before.size() + pre.size();
+        runs.chipsEnd = runs.chipsBegin + parts[chipsIndex].size();
+        runs.text = before + pre + parts[chipsIndex] +
+                    (after.empty() ? std::string() : std::string(separator(m)) + after);
+    }
+
+    // The tool card's name
+    if (!block.summary.empty() && !draw.expanded && !block.streaming &&
+        !blockIsCompactRow(block.kind)) {
+        // The closed preview keeps its two-space join and is pinned, not fitted:
+        // it is the one thing the row says about a body that is hidden, and a
+        // truncating composer would take the row's whole meaning with it.
+        runs.text += "  ";
+        runs.text += block.summary;
+    }
+    return runs;
+}
+
 } // namespace
 
 const char* defaultBlockLabel(BlockKind kind) {
@@ -114,6 +320,7 @@ const char* defaultBlockLabel(BlockKind kind) {
         return "AGENT";
     case BlockKind::ToolCall:
     case BlockKind::ToolResult:
+    case BlockKind::ToolStep:
         return "TOOL";
     case BlockKind::Thinking:
         return "Thinking";
@@ -145,32 +352,24 @@ ui::ColorToken blockInk(BlockKind kind) {
     case BlockKind::Thinking:
     case BlockKind::Code:
         return ui::ColorToken::roleAgent;
+    case BlockKind::ToolStep:
+        // The merged card draws neutral ink: the call and its result are one
+        // transcript, and neither side carries a role of its own.
+        return ui::ColorToken::roleSystem;
     }
     return ui::ColorToken::roleSystem;
-}
-
-ui::Icon blockStateGlyph(BlockState state) {
-    switch (state) {
-    case BlockState::None:
-        return ui::Icon::Count; // no mark: the row's word carries the meaning
-    case BlockState::Pending:
-        return ui::Icon::Pending;
-    case BlockState::Running:
-        return ui::Icon::Running;
-    case BlockState::Ok:
-        return ui::Icon::Ok;
-    case BlockState::Failed:
-        return ui::Icon::Error;
-    }
-    return ui::Icon::Count;
 }
 
 bool blockIsCompactRow(BlockKind kind) {
     return kind == BlockKind::ToolCall || kind == BlockKind::ToolResult;
 }
 
-bool blockHasDisclosure(BlockKind kind) {
-    return kind == BlockKind::WorkGroup || kind == BlockKind::Thinking;
+bool blockHasDisclosure(const BlockView& block) {
+    // The disclosure is a property of the row, not of its kind: a batch's
+    // owner row is a `BlockKind::Assistant` row and still folds -
+    // the AGENT word's row is the batch's own disclosure.
+    return block.kind == BlockKind::WorkGroup || block.kind == BlockKind::Thinking ||
+           block.kind == BlockKind::ToolStep || block.ownsBatch;
 }
 
 std::string blockTimingLabel(double seconds) {
@@ -194,36 +393,9 @@ std::string blockTimingLabel(double seconds) {
     return buffer;
 }
 
-std::string blockHeaderText(const BlockView& block, const BlockDraw& draw, bool textGrid) {
-    const char* label = block.label.empty() ? defaultBlockLabel(block.kind) : block.label.c_str();
-    std::string text = label;
-    const std::string timing = blockTimingLabel(block.timingS);
-    if (!timing.empty())
-        text += separator(textGrid) + timing;
-    // The live answer's header: the phase word the model's vocabulary gives the
-    // row - `AGENT · writing`, `AGENT · cancelled`. The phase is event-driven,
-    // so the header changes only when the phase does, and the run's clock lives
-    // in the top bar and the now bar. The phase is the descriptor's, so a row
-    // that is not streaming draws label and timing only.
-    if (block.streaming && !block.phase.empty()) {
-        text += separator(textGrid);
-        text += block.phase;
-    }
-    if (block.kind == BlockKind::WorkGroup) {
-        // The group says how many steps it holds - the one number that tells a
-        // collapsed group from a single message.
-        text += separator(textGrid);
-        text += std::to_string(block.steps);
-        text += block.steps == 1 ? " step" : " steps";
-    }
-    // A compact row's second line *is* its summary, and the streaming message's body
-    // is being written under it: neither repeats the preview in the header.
-    if (!draw.expanded && !block.streaming && !blockIsCompactRow(block.kind) &&
-        !block.summary.empty()) {
-        text += "  ";
-        text += block.summary;
-    }
-    return text;
+std::string blockHeaderText(const BlockView& block, const BlockDraw& draw, const ui::Metrics& m,
+                            float availUnits) {
+    return composeBlockHeader(block, draw, m, availUnits).text;
 }
 
 std::string blockRowText(const BlockView& block) {
@@ -293,7 +465,7 @@ BlockResult renderBlock(const BlockView& block, const ui::Rect& rect, const ui::
     const ui::ColorToken ink = draw.focused ? ui::ColorToken::accent : roleInk;
     float penX = pos.x;
 
-    if (blockHasDisclosure(block.kind)) {
+    if (blockHasDisclosure(block)) {
         // A mark that toggles, then the label: the same anatomy `ui::disclosure`
         // draws, with the ink the focus state needs (the primitive fixes its own
         // two tokens, and a focused block must read as the active row).
@@ -309,20 +481,34 @@ BlockResult renderBlock(const BlockView& block, const ui::Rect& rect, const ui::
             ui::rule(m, ui::Rect{pos.x, pos.y, ruleW, headH, m.textGrid}, ink);
         penX = pos.x + ruleW + (m.textGrid ? 0.0f : m.pad1);
     }
-    // A state glyph, if the block has a state: the mark, then one unit of air.
-    const ui::Icon stateIcon = blockStateGlyph(block.state);
-    if (stateIcon != ui::Icon::Count) {
-        const ui::Rect slot{penX, pos.y, m.gu, m.row, m.textGrid};
-        const ui::ColorToken stateInk =
-            block.state == BlockState::Failed
-                ? ui::ColorToken::stateDanger
-                : (block.state == BlockState::Ok ? ui::ColorToken::stateOk
-                                                 : ui::ColorToken::textMid);
-        ui::iconMark(m, slot, stateIcon, stateInk);
-        penX += m.gu + m.pad1;
+    // No state glyph: the status is a word on the row's header - a failed card
+    // or a failed batch owner paints red FAIL after its fitted header text,
+    // folded or open, and every other state stays silent (success needs no mark).
+    const float availUnits = std::max(0.0f, header.w - (penX - pos.x));
+    const HeaderRuns runs = composeBlockHeader(block, draw, m, availUnits);
+    // The header's inks split at the chips boundary - the role's word and
+    // the closed preview in the role's ink, the chips run in the quiet textMid
+    // beside it (the chips are the batch's data, not the role's word). Each run
+    // starts where the prefixes before it measure to, all off the same text.
+    const std::string head = runs.text.substr(0, runs.chipsBegin);
+    textAt(m, header, penX, pos.y, head, ink);
+    if (runs.chipsBegin < runs.chipsEnd)
+        textAt(m, header, penX + textUnits(m, head), pos.y,
+               runs.text.substr(runs.chipsBegin, runs.chipsEnd - runs.chipsBegin),
+               ui::ColorToken::textMid);
+    if (runs.chipsEnd < runs.text.size())
+        textAt(m, header, penX + textUnits(m, runs.text.substr(0, runs.chipsEnd)), pos.y,
+               runs.text.substr(runs.chipsEnd), ink);
+    // The failure is a word, not a state glyph: a failed tool card has always
+    // painted red FAIL after its header, folded or open, and a batch owner now
+    // does the same for its failed calls - one spelling of failure, wherever
+    // the row carries it.
+    const bool failed = block.failedCalls > 0 ||
+                        (block.kind == BlockKind::ToolStep && block.state == BlockState::Failed);
+    if (failed) {
+        const float textW = textUnits(m, runs.text);
+        textAt(m, header, penX + textW + m.pad1, pos.y, "FAIL", ui::ColorToken::stateDanger);
     }
-
-    textAt(m, header, penX, pos.y, blockHeaderText(block, draw, m.textGrid), ink);
     if (compact && !draw.expanded) {
         // The compact row's second line: the one-line summary, indented under the label
         // so the glyph column stays a column. It is the row's *rest* state - open, the
@@ -358,10 +544,12 @@ BlockResult renderBlock(const BlockView& block, const ui::Rect& rect, const ui::
     // `kBlockMenuId`): a popup the thread state has stopped naming survives one grace
     // frame and is closed at the next `NewFrame` (ImGui restores focus away from the
     // now-inactive popup window); `menuOpen` is what tells the caller to drop the latch.
-    // `Copy` is disabled for a block with no body (the `WORK` header, a stream row before
-    // its first character): the item must not promise text the block does not have, and
-    // a disabled item copies nothing. The keyboard half stays `y` on the focused block,
-    // so copy never needs the terminal's own `Ctrl+C` (plan/tui_copy_probe.md).
+    //    `Copy` is disabled for a block that copies nothing: the item must not
+    //    promise text the block does not have, and a disabled item copies
+    //    nothing. A batch owner has no body of its own but IS the copy target
+    //    for its batch's content (`copyable`), so the item reads
+    //    the copy target, not the body. The keyboard half stays `y` on the
+    //    focused block, so copy never needs the terminal's own `Ctrl+C`.
     if (out.menuRequested || draw.menuOwner) {
         // No `SetNextWindowPos`: a mouse-opened popup already latches the pointer as its
         // position (`OpenPopupPos`), and setting one here would be left dangling for the
@@ -377,7 +565,7 @@ BlockResult renderBlock(const BlockView& block, const ui::Rect& rect, const ui::
             // already put on `ImGuiCol_TextDisabled`. One fact drives both halves -
             // whether the item may act and whether it looks like it may - so "drawn
             // enabled, acts disabled" cannot happen.
-            const bool canCopy = block.hasBody;
+            const bool canCopy = block.hasBody || block.copyable;
             if (!canCopy)
                 ImGui::PushStyleColor(ImGuiCol_Text,
                                       ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));

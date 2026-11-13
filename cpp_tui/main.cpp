@@ -218,161 +218,92 @@ int main(int argc, char** argv) {
 
     // Seeded demo thread: --seed-messages N (default 300) controls how many
     // messages the fixture adds; the render path reads nothing else from here.
+    // Typed seeding: one Done turn per message - the query cadence a user
+    // Prose block in the turn's query batch, the final-answer cadence an Answer
+    // block, everything else an assistant content block in the turn's batch.
+    const auto addTypedTurn = [&state](std::int64_t turnId, int kind, const std::string& body,
+                                       const std::string& meta, const char* blockId,
+                                       const char* batchSuffix) {
+        const std::string turn = std::to_string(turnId);
+        TuiTurn t{};
+        t.id = turnId;
+        t.state = TuiTurnState_Done;
+        t.messageCount = 1;
+        tuiTurnUpsert(state, &t);
+        TuiBlock b{};
+        b.turnId = turnId;
+        b.id = makeStr(blockId);
+        b.batchId = makeStr(turn + batchSuffix);
+        b.kind = kind;
+        b.status = TuiBlockStatus_None;
+        b.durationMs = 1200;
+        b.meta = makeStr(meta);
+        b.body = makeStr(body);
+        tuiBlockUpsert(state, &b);
+    };
     for (int i = 0; i < seedMessages; ++i) {
-        std::string summary{"hello"};
+        const std::int64_t turnId = i + 1;
         std::string text{u8"**hello**\nthis is *some* much\n# Heading\nlonger text '😜' 'ö' "
                          u8"\n\n'⚠️'\n✅\n\n***\n\n"};
         text.append(std::to_string(i));
 
-        TuiChatMessageType type = TuiChatMessageType_Assistant;
-        if (i % 15 == 0) {
-            type = TuiChatMessageType_FinalAnswer;
-        } else if (i % 10 == 0) {
-            type = TuiChatMessageType_User;
+        if (i % 10 == 0) {
+            addTypedTurn(turnId, TuiBlockKind_Prose, text, "user", "query", "#q");
+        } else if (i % 15 == 0) {
+            addTypedTurn(turnId, TuiBlockKind_Answer, text, "", "answer", "#0");
+        } else {
+            addTypedTurn(turnId, TuiBlockKind_Prose, text, "assistant", "content#0", "#0");
         }
-        tuiAddChatMessage(state, ChatMessageParam{makeStr(summary.c_str()), makeStr(text.c_str()),
-                                                  makeStr("thinking..."), type});
-
-        // if (i == 299) {
-        // tuiAddChatMessage(state, ChatMessageParam{makeStr(summary.c_str()),
-        // makeStr(text.c_str()), makeStr("thinking..."), TuiChatMessageType_FinalAnswer});
-        // }
     }
 
-    tuiAddChatMessage(
-        state,
-        ChatMessageParam{
-            makeStr("a code block"),
-            makeStr("# Heading1\nsmurf\n[a link](to somewhere)\n\n## Heading2\nsmurf\n\n### "
-                    "Heading 3\nsmurf\n\nSome content "
-                    "before.\n**bold**\n*italic*\n\n```json\n{\"key\": \"value\", \"nested\": [1, "
-                    "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n"),
-            makeStr("Some thinking before.\n\n```json\n{\"key\": \"value\", \"nested\": [1, "
-                    "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n"),
-            TuiChatMessageType_Assistant});
+    // The submit fixture's turn counter: the query echoes get ids the seeds
+    // never use (the seeds end at seedMessages + 9).
+    int submitTurnSeq = 0;
 
-    // not using markdown for long line, which should mean it uses automatic line break
-    tuiAddChatMessage(
-        state,
-        ChatMessageParam{
-            makeStr("a long line"),
-            makeStr(
-                "# Heading1\nsmurf\n[a link](to somewhere)\n\n## Heading2\nsmurf\n\n"
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat\n"),
-            makeStr(
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
-                "long cat, long cat\n"),
-            TuiChatMessageType_Assistant});
+    // The code-block fixture: an assistant prose block whose body is markdown
+    // with a fenced json block.
+    addTypedTurn(seedMessages + 1, TuiBlockKind_Prose,
+                 "# Heading1\nsmurf\n[a link](to somewhere)\n\n## Heading2\nsmurf\n\n### "
+                 "Heading 3\nsmurf\n\nSome content "
+                 "before.\n**bold**\n*italic*\n\n```json\n{\"key\": \"value\", \"nested\": [1, "
+                 "2, 3]}\n{\"another\": true}\n```\n\nText after code block.\n",
+                 "assistant", "content#0", "#0");
 
-    // using markdown for long line, which should mean it should not automatically line break
-    tuiAddChatMessage(
-        state,
-        ChatMessageParam{
-            makeStr("a long line"),
-            makeStr(
-                "# Heading1\nsmurf\n[a link](to somewhere)\n\n## Heading2\nsmurf\n\n"
-                "```\nlong cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat\n```\n"),
-            makeStr(
-                "```\nlong cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat, long cat, long cat, long cat, long cat, long cat, long "
-                "cat, long cat, long cat\n```\n"),
-            TuiChatMessageType_Assistant});
+    // Long-line fixtures: a body with no fence (the renderer's automatic line
+    // breaking) and one fenced as a code block (verbatim drawing).
+    std::string longLine;
+    for (int i = 0; i < 31; ++i)
+        longLine += "long cat, long cat, long cat, long cat, long cat, long cat, long cat, "
+                    "long cat, long cat, long cat,\n";
+    longLine += "long cat, long cat\n";
+    addTypedTurn(seedMessages + 2, TuiBlockKind_Prose, longLine, "assistant", "content#0", "#0");
+    addTypedTurn(seedMessages + 3, TuiBlockKind_Prose, "```\n" + longLine + "```\n", "assistant",
+                 "content#0", "#0");
 
     // Test-only fixture for the role headers (task 4): --seed-roles replaces the
-    // demo thread with one message per role, in the order the thread groups them
-    // (answer, user, then a work group of assistant/tool/system), using the
-    // summary decorations the D side emits ("[nr] <preview> [<time>]"). It gives
-    // a capture a screen where every role header is visible. Write-once before
-    // the first frame; the render path never reads the flag.
+    // demo thread with one block per kind, one Done turn each, in the order the
+    // thread groups them. It gives a capture a screen where every block kind is
+    // visible. Write-once before the first frame; the render path never reads
+    // the flag.
     if (seedRoles) {
-        struct RoleSeed {
-            TuiChatMessageType type;
-            const char* summary;
-            const char* text;
-        };
-        static const RoleSeed seeds[] = {
-            {TuiChatMessageType_FinalAnswer, "[1] all five roles [1.2s]", "Answer body."},
-            {TuiChatMessageType_User, "[2] show me the roles", "Ask for the roles."},
-            {TuiChatMessageType_Assistant, "[3] reading the request [500ms]", "Assistant body."},
-            {TuiChatMessageType_ToolCall, "[4] tool call readFile [0ms]", "Tool call body."},
-            {TuiChatMessageType_ToolResponse, "[5] tool result 42 lines [1m 0s]",
-             "Tool result body."},
-            {TuiChatMessageType_System, "[6] system notice", "System body."},
-        };
-        tuiClearChatMessages(state); // replace the demo thread, never augment it
-        for (const auto& seed : seeds) {
-            tuiAddChatMessage(state, ChatMessageParam{makeStr(seed.summary), makeStr(seed.text),
-                                                      makeStr(""), seed.type});
-        }
+        tuiThreadClear(state); // replace the demo thread, never augment it
+        const std::int64_t base = seedMessages + 4;
+        addTypedTurn(base + 0, TuiBlockKind_Answer, "Answer body.", "", "answer", "#0");
+        addTypedTurn(base + 1, TuiBlockKind_Prose, "Ask for the roles.", "user", "query", "#q");
+        addTypedTurn(base + 2, TuiBlockKind_Prose, "Assistant body.", "assistant", "content#0",
+                     "#0");
+        // The tool pair: one call (Pending) and its result (Ok), as separate
+        // turns here so every header shows.
+        addTypedTurn(base + 3, TuiBlockKind_Tool, "Tool call body.", "readFile", "call#0", "#0");
+        addTypedTurn(base + 4, TuiBlockKind_Tool, "Tool result body.", "readFile", "result#0",
+                     "#0");
+        addTypedTurn(base + 5, TuiBlockKind_Notice, "System body.", "", "notice#0", "#0");
     }
 
     // Test-only fixture for the thread states (task 8): an empty thread is what
     // a brand-new session shows, so the capture needs the demo seeding gone.
     if (emptyThreadFlag)
-        tuiClearChatMessages(state);
+        tuiThreadClear(state);
 
     auto addPipelineAgents = [&state]() {
         for (int ii = 0; ii < 40; ++ii) {
@@ -442,10 +373,22 @@ int main(int argc, char** argv) {
                 } else {
                     std::string text = query;
                     std::string summary = text.size() > 30 ? text.substr(0, 30) : text;
-                    tuiAddChatMessage(
-                        state, ChatMessageParam{String{summary.c_str(), summary.size()},
-                                                String{text.c_str(), text.size()},
-                                                makeStr("thinking..."), TuiChatMessageType_User});
+                    // The submitted query echoes into the thread the way the
+                    // live emitter echoes it: a Running turn with a user Prose
+                    // block in the turn's query batch.
+                    submitTurnSeq++;
+                    TuiTurn t{};
+                    t.id = static_cast<std::int64_t>(seedMessages + 100 + submitTurnSeq);
+                    t.state = TuiTurnState_Running;
+                    tuiTurnUpsert(state, &t);
+                    TuiBlock b{};
+                    b.turnId = t.id;
+                    b.id = makeStr("query");
+                    b.batchId = makeStr(std::to_string(t.id) + "#q");
+                    b.kind = TuiBlockKind_Prose;
+                    b.meta = makeStr("user");
+                    b.body = makeStr(text);
+                    tuiBlockUpsert(state, &b);
                     std::string log = std::to_string(text.size());
                     // The stamped path: every production record crosses the ABI with a
                     // sequence number, so the Raw Log can account for what a drop removed.

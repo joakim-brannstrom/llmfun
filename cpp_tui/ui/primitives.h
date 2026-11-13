@@ -47,7 +47,7 @@
 /// and not a licence to overrun the neighbour.
 ///
 /// Layer: `ui/` only - `ui/metrics.h`, `ui/tokens.h`, `ui/text.h`, `ui/icons.h`
-/// and imgui. No `tui.h`, no `ChatMessage`, no view header: a primitive knows
+/// and imgui. A primitive knows
 /// nothing about the app, which is what lets it be tested on its own and lets the
 /// same code serve the shell and the thread's block chrome.
 #pragma once

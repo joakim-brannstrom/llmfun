@@ -22,6 +22,7 @@
 #include "views/thread.h"
 
 #include "store/thread_store.h"
+#include "test/typed_seed.h"
 #include "tui.h"
 #include "views/palette.h"
 
@@ -76,14 +77,11 @@ std::vector<size_t> groupIds(const llmfun::tui::store::ThreadStoreAdapter& threa
     return ids;
 }
 
-/// One message in the store, with the id the D side would assign (monotonic from 1).
-void addMessage(tui::TuiState& state, tui::ChatMessageType type, const std::string& text) {
-    tui::ChatMessage msg;
-    msg.id = state.chat.outputLineNextId++;
-    msg.type = type;
-    msg.summary = text;
-    msg.text = text;
-    tui::tuiAddOutputLine(state, msg);
+/// One user query turn in the typed store: the shape a replayed exchange has.
+/// A `Seeder` per scenario drives the ids; this helper is the one-message case.
+void addUser(tui::TuiState& state, const std::string& text) {
+    typed_seed::Seeder seed{&state, state.chat.typedTurns.turnCount() + 1};
+    seed.add(typed_seed::Seeder::Msg::User, text);
 }
 
 } // namespace
@@ -189,140 +187,155 @@ int main(int argc, char** argv) {
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
         check(thread.bound(), "adapter: a bound adapter reports itself bound");
-        for (int i = 1; i <= 30; ++i) {
-            addMessage(state, tui::ChatMessageType::User, "question " + std::to_string(i));
-            addMessage(state, tui::ChatMessageType::FinalAnswer, "answer " + std::to_string(i));
+        typed_seed::Seeder seed{&state, 1};
+        for (int i = 1; i <= 80; ++i) {
+            seed.add(typed_seed::Seeder::Msg::User, "question " + std::to_string(i));
+            seed.add(typed_seed::Seeder::Msg::FinalAnswer, "answer " + std::to_string(i));
         }
-        check(thread.groupCount() == 60,
-              "adapter: 30 pairs are 60 groups (" + std::to_string(thread.groupCount()) + ")");
-        // The grid's window (40 groups) hides the first 20, so the first answer is
-        // reachable only through `Load earlier`.
+        // One group per stored turn: a turn holds its query and its answer, so
+        // 80 query/answer pairs are 80 groups, and the window of 40 hides the
+        // first half - the oldest turn is reachable only through `Load earlier`.
+        check(thread.groupCount() == 80,
+              "adapter: 80 turns are 80 groups (" + std::to_string(thread.groupCount()) + ")");
         const ThreadWindow closed = threadWindow(thread.groupCount(), 40, 0);
-        checkShape(60, closed, "adapter: default window");
-        check(closed.first == 20,
-              "adapter: the default window hides the first 20 groups (" + windowText(closed) + ")");
+        checkShape(80, closed, "adapter: default window");
+        check(closed.first == 40,
+              "adapter: the default window hides the first 40 groups (" + windowText(closed) + ")");
 
-        const size_t oldestAnswer = thread.groupAt(1).id;
-        check(thread.groupAt(1).kind == tui::store::GroupKind::FinalAnswer,
-              "adapter: group 1 is the first answer");
-        // A final answer is open from birth (the run's result is never hidden), even
-        // though it sits outside the window that draws it.
-        check(thread.expanded(oldestAnswer),
-              "adapter: an answer group is born expanded outside the window");
-        check(state.chat.outputLineOpen.count(state.chat.outputLines[1].id) == 1,
-              "adapter: ...and the one store agrees");
-        check(!thread.expanded(thread.groupAt(0).id),
-              "adapter: an old user query is born collapsed");
+        const size_t oldest = thread.groupAt(0).id;
+        check(thread.groupAt(0).kind == tui::store::GroupKind::AssistantWork,
+              "adapter: every stored turn reports a work group (the typed shape)");
+        check(thread.blockCount(0) == 1, "adapter: a turn with no work rows is its header alone");
+        check(thread.blockAt(0, 0).kind == llmfun::tui::model::BlockKind::WorkGroup,
+              "adapter: the group's one row is its header");
+        check(thread.blockAt(0, tui::store::kQueryRow).kind == llmfun::tui::model::BlockKind::User,
+              "adapter: the query surfaces through the turn-level sentinel");
+        check(thread.blockAt(0, tui::store::kAnswerRow).kind ==
+                  llmfun::tui::model::BlockKind::Answer,
+              "adapter: ...and the answer through its own");
+        // The typed fold is one flag per turn and nothing else: every turn is
+        // born folded, the answer included (the minimal mode's chips line is the
+        // fold's face, never a hidden body).
+        check(!thread.expanded(oldest), "adapter: a stored turn is born folded, answer and all");
+        check(state.chat.groupPins.count(static_cast<std::int64_t>(oldest)) == 0,
+              "adapter: ...and the one store agrees (the fold is the turn id's)");
+        check(!thread.expanded(thread.groupAt(thread.groupCount() - 1).id),
+              "adapter: the newest turn is born folded too");
 
-        // A committed pass plus a page that reveals the group must not change either
+        // A committed pass plus a page that reveals the group must not change the
         // answer - the case the watermark alone could not express.
         thread.commitSeen();
         const ThreadWindow opened = threadWindow(thread.groupCount(), 40, 100);
-        checkShape(60, opened, "adapter: paged past the start");
+        checkShape(80, opened, "adapter: paged past the start");
         check(opened.first == 0,
               "adapter: the page reveals the whole thread (" + windowText(opened) + ")");
-        check(thread.expanded(oldestAnswer),
-              "adapter: a paged-back answer keeps the default it was born with");
-        check(!thread.expanded(thread.groupAt(0).id),
-              "adapter: ...and a paged-back query keeps its collapsed one");
+        check(!thread.expanded(oldest),
+              "adapter: a paged-back turn keeps the fold it was born with");
+        check(state.chat.groupPins.count(static_cast<std::int64_t>(oldest)) == 0,
+              "adapter: ...and the store was never seeded by the paging");
     }
     // The work-group rule: the newest group unfolds, the older ones do not, and the
     // items inside follow the "last five" default even while the group is collapsed.
+    // The work-group rule, typed: a turn's fold is one flag per turn id, the
+    // user owns it once it is clicked, and a click survives the rebuilds that
+    // follow (there is no auto-open to fight: every turn is born folded).
     {
         tui::TuiState state;
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
-        addMessage(state, tui::ChatMessageType::User, "q1");          // 1
-        addMessage(state, tui::ChatMessageType::Assistant, "step 1"); // 2
-        addMessage(state, tui::ChatMessageType::ToolCall, "tool");    // 3
-        addMessage(state, tui::ChatMessageType::FinalAnswer, "a1");   // 4
-        addMessage(state, tui::ChatMessageType::User, "q2");          // 5
-        addMessage(state, tui::ChatMessageType::Assistant, "step 2"); // 6
-        addMessage(state, tui::ChatMessageType::ToolResponse, "out"); // 7
-        check(thread.groupCount() == 5, "adapter: q, answer, q, work is 5 groups (" +
-                                            std::to_string(thread.groupCount()) + ")");
-        check(thread.expanded(thread.groupAt(4).id), "adapter: the newest work group unfolds");
-        check(!thread.expanded(thread.groupAt(1).id),
-              "adapter: an older work group stays collapsed");
-        check(state.chat.openWorkGroups.count(state.chat.outputLines[5].id) == 1,
-              "adapter: the group's key is its first message id");
-        check(state.chat.outputLineOpen.count(state.chat.outputLines[6].id) == 1,
-              "adapter: the newest items of a work group unfold");
-        check(state.chat.outputLineOpen.count(state.chat.outputLines[1].id) == 0,
-              "adapter: ...and the old ones do not");
+        typed_seed::Seeder seed{&state, 1};
+        seed.add(typed_seed::Seeder::Msg::User, "q1"); // turn 1
+        seed.upsertBlock(1, "step#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, "bash ls",
+                         "ls -la", "bash ls", 1100);   // the work step
+        seed.add(typed_seed::Seeder::Msg::User, "q2"); // turn 2
+        const size_t turn1 = 1;
+        check(thread.groupCount() == 2,
+              "adapter: q, work, q is 2 groups (" + std::to_string(thread.groupCount()) + ")");
+        check(!thread.expanded(turn1), "adapter: a work turn is born folded");
+        check(state.chat.groupPins.count(static_cast<std::int64_t>(turn1)) == 0,
+              "adapter: the group's key is its turn id (the typed store's)");
 
-        // A toggle the user made survives the rebuild that follows it: that is the
-        // half `commitSeen()` owns (the render path must not re-seed over the click).
-        thread.setExpanded(thread.groupAt(4).id, false);
+        // A toggle the user made survives the rebuild that follows it: that is
+        // the half `commitSeen()` owns (the render path must not re-seed over
+        // the click).
+        thread.setExpanded(turn1, true);
         thread.commitSeen();
-        addMessage(state, tui::ChatMessageType::User, "q3");
-        check(thread.groupCount() == 6, "adapter: a new message rebuilds the groups");
-        check(!thread.expanded(thread.groupAt(4).id),
-              "adapter: a toggle survives the rebuild and the commit");
+        seed.add(typed_seed::Seeder::Msg::User, "q3"); // turn 3
+        check(thread.groupCount() == 3, "adapter: a new turn rebuilds the groups");
+        check(thread.expanded(turn1), "adapter: a toggle survives the rebuild and the commit");
+        check(!thread.expanded(2), "adapter: ...and the untouched turns stay folded");
     }
     // Live birth: a work group that is newest when it appears is auto-opened; when a
     // newer top-level group (the run's answer, or the next turn's query) is born, the
     // auto-opened group must close so a live session matches a reloaded one. A group
     // the user opened is not in the auto set and stays open.
+    // The user's fold, typed: a turn the user opens stays open through the
+    // rebuilds that follow (there is no auto set to fight - nothing is born
+    // open, so nothing needs closing).
     {
         tui::TuiState state;
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
-        addMessage(state, tui::ChatMessageType::User, "q1");          // 1, group 1
-        addMessage(state, tui::ChatMessageType::Assistant, "step 1"); // 2, group 2 (newest)
-        addMessage(state, tui::ChatMessageType::ToolCall, "tool");    // 3
-        const size_t workId = thread.groupAt(1).id;
-        check(thread.expanded(workId), "adapter: a work group born newest opens");
-        addMessage(state, tui::ChatMessageType::FinalAnswer, "answer"); // 4, group 3
-        check(thread.groupCount() == 3, "adapter: answer appends a top-level group");
-        check(!thread.expanded(workId),
-              "adapter: an auto-opened work group closes when the answer arrives");
-        check(thread.expanded(thread.groupAt(2).id), "adapter: the answer itself is open");
+        typed_seed::Seeder seed{&state, 1};
+        seed.add(typed_seed::Seeder::Msg::User, "q1"); // turn 1
+        seed.upsertBlock(1, "step#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, "bash ls",
+                         "ls -la", "bash ls", 1100);   // the work step
+        seed.add(typed_seed::Seeder::Msg::User, "q2"); // turn 2
+        const size_t turn1 = 1;
+        check(thread.groupCount() == 2,
+              "adapter: q, work, q is 2 groups (" + std::to_string(thread.groupCount()) + ")");
+        check(!thread.expanded(turn1), "adapter: a work turn is born folded");
 
-        // The user now opens the old work group: a later group must not close it.
-        thread.setExpanded(workId, true);
-        addMessage(state, tui::ChatMessageType::User, "q2"); // 5, group 4
-        check(thread.expanded(workId), "adapter: a user-opened work group survives the next group");
+        // The user opens the first turn: a later turn must not close it.
+        thread.setExpanded(turn1, true);
+        seed.add(typed_seed::Seeder::Msg::User, "q3"); // turn 3
+        check(thread.expanded(turn1), "adapter: a user-opened turn survives the next turn");
+        check(!thread.expanded(2), "adapter: ...and the untouched turns stay folded");
     }
     // A live answer is not a stored group, so it must not close the auto-opened work group
     // either (task 38): the stream is drawn *after* the window and the group above it keeps
     // the shape it had when it was born - only the answer's arrival (or the next query)
     // closes it. `storedGroupCount()` is what the window budgets for, and the stream is not
     // part of it.
+    // Live birth, typed: the newest turn still Running *is* the stream (the
+    // window does not budget for it), and no fold state changes when it appears
+    // or when it closes - every turn owns its fold, and nothing seeds one.
     {
         tui::TuiState state;
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
-        addMessage(state, tui::ChatMessageType::User, "q1");          // 1, group 1
-        addMessage(state, tui::ChatMessageType::Assistant, "step 1"); // 2, group 2 (newest)
-        const size_t workId = thread.groupAt(1).id;
-        check(thread.expanded(workId), "stream: a work group born newest opens");
-        check(thread.storedGroupCount() == 2 && !thread.hasStream(),
-              "stream: with no stream the stored count is the group count");
+        typed_seed::Seeder seed{&state, 1};
+        seed.add(typed_seed::Seeder::Msg::User, "q1"); // turn 1
+        seed.upsertBlock(1, "step#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, "bash ls",
+                         "ls -la", "bash ls", 1100); // the work step
+        const size_t turn1 = 1;
+        check(!thread.expanded(turn1), "stream: a work turn is born folded");
+        check(thread.storedGroupCount() == 1 && !thread.hasStream(),
+              "stream: with no run in flight the stored count is the group count");
 
-        state.chat.streamMsg = tui::ChatMessage{};
-        state.chat.streamMsg.type = tui::ChatMessageType::Assistant;
-        state.chat.streamMsg.text = "the answer is arriving";
-        state.chat.hasStreamMsg = true;
-        check(thread.groupCount() == 3, "stream: the live answer is a group of its own");
-        check(thread.storedGroupCount() == 2, "stream: but the window does not budget for it");
+        // The live run opens turn 2: the group exists, it is last, and the
+        // window does not budget for it.
+        seed.runStart("q2");
+        check(thread.groupCount() == 2, "stream: the live turn is a group of its own");
+        check(thread.storedGroupCount() == 1, "stream: but the window does not budget for it");
         check(thread.hasStream(), "stream: and the thread knows it is last");
-        check(thread.expanded(workId),
-              "stream: a live answer does not close the auto-opened work group");
+        check(!thread.expanded(turn1),
+              "stream: the live turn's birth does not touch the older fold");
 
-        // The answer arrives as a stored group: now the auto-opened group closes, exactly as it
-        // does without a stream (the live session matches a reloaded one).
-        state.chat.hasStreamMsg = false;
-        addMessage(state, tui::ChatMessageType::FinalAnswer, "answer"); // 3, group 3
-        check(!thread.expanded(workId),
-              "stream: and the answer's arrival closes it (the stored rule, unchanged)");
+        // The run closes: the group stops being the stream, exactly as a
+        // reloaded one would be drawn (a live session matches a reloaded one).
+        seed.runStop();
+        check(thread.groupCount() == 2, "stream: the closed turn is still a group");
+        check(!thread.hasStream(), "stream: and the thread knows it closed");
+        check(!thread.expanded(turn1),
+              "stream: the older turn keeps its fold through the run's whole life");
     }
     // The unbound adapter. `bound()` has no consumer on the frame path (the frame
     // layer binds unconditionally), so a test is what keeps the guard alive: an
     // adapter must answer empty rather than dereference a state that moved away.
     {
         tui::TuiState state;
-        addMessage(state, tui::ChatMessageType::FinalAnswer, "answer");
+        addUser(state, "answer");
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
         check(thread.bound() && thread.groupCount() == 1,
@@ -365,10 +378,10 @@ int main(int argc, char** argv) {
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
         for (int i = 0; i < 100; ++i)
-            addMessage(state, tui::ChatMessageType::User, "q" + std::to_string(i));
+            addUser(state, "q" + std::to_string(i));
         const size_t groups = thread.groupCount();
         check(groups == 100,
-              "incremental: 100 messages are 100 groups (" + std::to_string(groups) + ")");
+              "incremental: 100 turns are 100 groups (" + std::to_string(groups) + ")");
         const size_t buildsAtStart = thread.groupBuilds();
         const size_t walksAtStart = thread.entryWalks();
 
@@ -393,32 +406,33 @@ int main(int argc, char** argv) {
               "incremental: a miss examines no entry (" +
                   std::to_string(thread.entryWalks() - walksAtStart) + ")");
 
-        addMessage(state, tui::ChatMessageType::User, "one more");
+        addUser(state, "one more");
         check(thread.groupCount() == 101, "incremental: the append is visible");
         check(thread.groupBuilds() == buildsAtStart + 1,
               "incremental: one append is exactly one rebuild (" +
                   std::to_string(thread.groupBuilds() - buildsAtStart) + ")");
     }
 
-    // --- 1200 messages, 200 evicted: nothing moves to another group ------------
-    // The store is a 1000-message FIFO. Every id-keyed piece of state - the expansion
-    // flags and the height hints - has to stay with the group it was recorded for, and
-    // the entries of the evicted groups have to go away with them: a hint that outlived
-    // its group would be applied to a *different* group the moment an id matched, and
-    // an unpruned map would grow for the life of the session.
+    // --- 1200 turns, 200 evicted: nothing moves to another turn ---------------
+    // The store is a 1000-turn FIFO. Every id-keyed piece of state - the expansion
+    // flags and the height hints - has to stay with the turn it was recorded for,
+    // and the entries of the evicted turns have to go away with them: a hint that
+    // outlived its turn would be applied to a *different* turn the moment an id
+    // matched, and an unpruned map would grow for the life of the session.
     {
         tui::TuiState state;
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
+        typed_seed::Seeder seed{&state, 1};
         for (int i = 0; i < 1000; ++i) {
-            addMessage(state, tui::ChatMessageType::User, "q" + std::to_string(i));
-            addMessage(state, tui::ChatMessageType::FinalAnswer, "a" + std::to_string(i));
+            seed.add(typed_seed::Seeder::Msg::User, "q" + std::to_string(i));
+            seed.add(typed_seed::Seeder::Msg::FinalAnswer, "a" + std::to_string(i));
         }
         const std::vector<size_t> before = groupIds(thread);
-        check(before.size() == 1000, "eviction: the store is capped at 1000 groups (" +
+        check(before.size() == 1000, "eviction: the store is capped at 1000 turns (" +
                                          std::to_string(before.size()) + ")");
-        // A hint for the newest group and one for the oldest still live one: the first
-        // must survive the appends, the second must be pruned with its group.
+        // A hint for the newest turn and one for the oldest still live one: the
+        // first must survive the appends, the second must be pruned with its turn.
         const size_t survivor = before.back();
         const size_t doomed = before.front();
         for (size_t id : {survivor, doomed}) {
@@ -429,20 +443,19 @@ int main(int argc, char** argv) {
             hint.h = 7.0f;
             state.ui.thread.hints[id] = hint;
         }
-        // The newest group is a final answer, so it is open from birth; the oldest one
-        // is a user query and is born collapsed.
+        // Every turn is born folded (the typed shape): the fold state is one
+        // flag per turn id, and nothing seeds it.
         const bool survivorOpen = thread.expanded(survivor);
-        check(survivorOpen, "eviction: the newest answer is expanded");
-        check(!thread.expanded(doomed), "eviction: the oldest query is collapsed");
+        check(!survivorOpen, "eviction: the newest turn is folded");
+        check(!thread.expanded(doomed), "eviction: the oldest turn is folded too");
 
         for (int i = 0; i < 200; ++i) {
-            addMessage(state, tui::ChatMessageType::User, "later" + std::to_string(i));
-            addMessage(state, tui::ChatMessageType::FinalAnswer,
-                       "later answer" + std::to_string(i));
+            seed.add(typed_seed::Seeder::Msg::User, "later" + std::to_string(i));
+            seed.add(typed_seed::Seeder::Msg::FinalAnswer, "later answer" + std::to_string(i));
         }
         const std::vector<size_t> after = groupIds(thread);
         check(after.size() == 1000,
-              "eviction: still capped at 1000 groups (" + std::to_string(after.size()) + ")");
+              "eviction: still capped at 1000 turns (" + std::to_string(after.size()) + ")");
         // Ids are monotonic and never reused, so the new window starts *after* the old
         // one's first id (D-GROUPID).
         check(after.front() > before.front(),
@@ -453,18 +466,18 @@ int main(int argc, char** argv) {
             increasing = increasing && after[i] > after[i - 1];
         check(increasing, "eviction: the live ids are strictly increasing (never a reused id)");
         check(state.ui.thread.hints.count(doomed) == 0,
-              "eviction: the evicted group's hint is gone with it");
+              "eviction: the evicted turn's hint is gone with it");
         check(state.ui.thread.hints.count(survivor) == 1,
-              "eviction: the surviving group keeps its own hint");
+              "eviction: the surviving turn keeps its own hint");
         const auto hinted = state.ui.thread.hints.find(survivor);
         check(hinted != state.ui.thread.hints.end() && hinted->second.groupId == survivor,
-              "eviction: a hint still names the group it was measured for");
+              "eviction: a hint still names the turn it was measured for");
         check(thread.expanded(survivor) == survivorOpen,
-              "eviction: a surviving group keeps its expansion state");
+              "eviction: a surviving turn keeps its fold state");
         bool vanished = false;
         for (size_t id : after)
             vanished = vanished || (id <= doomed);
-        check(!vanished, "eviction: no live group reuses an evicted group's id");
+        check(!vanished, "eviction: no live turn reuses an evicted turn's id");
         thread.commitSeen();
     }
 
@@ -506,36 +519,42 @@ int main(int argc, char** argv) {
         check(ui.follow, "switch: a new session owes a catch-up (follow is re-armed)");
     }
 
-    // --- The cost of a frame does not scale with the thread (V4) ----------------
-    // "Incremental" is a cost claim, not a call count: a per-frame walk of the store
-    // would show up as growth when the same window is read from a longer thread. The
-    // fixture builds two threads - 125 and 1000 messages, 1 KB bodies, the design's
-    // fixture size - reads the last 40 groups from each (what `renderThread` asks for
-    // per visible group), and compares. A linear lookup inside `expanded()`/
-    // `measureHint()` multiplies the work by the message count; the map probe keeps it
-    // flat.
+    // --- The cost of a frame does not scale with the thread (typed) ------------
+    // "Incremental" is a cost claim, not a call count: a per-frame walk of the
+    // store would show up as growth when the same window is read from a longer
+    // thread. The fixture builds two threads - 125 and 1000 turns, 1 KB bodies,
+    // the design's fixture size - reads the last 40 groups from each (what
+    // `renderThread` asks for per visible group), and compares. A linear lookup
+    // inside `expanded()`/`measureHint()` multiplies the work by the turn
+    // count; the map probe keeps it flat.
     {
         const auto sampleRun = [](int messages) {
             tui::TuiState state;
             tui::store::ThreadStoreAdapter thread(state);
             thread.bind(state);
             const std::string body(1024, 'x');
+            typed_seed::Seeder seed{&state, 1};
             for (int i = 0; i < messages; ++i) {
-                tui::ChatMessage msg;
-                msg.id = state.chat.outputLineNextId++;
-                msg.type =
-                    (i % 2 == 0) ? tui::ChatMessageType::User : tui::ChatMessageType::FinalAnswer;
-                msg.summary = "m" + std::to_string(i);
-                msg.text = body;
-                tui::tuiAddOutputLine(state, msg);
+                seed.add(typed_seed::Seeder::Msg::User, "m" + std::to_string(i) + "\n" + body);
+                // The turn's response batch: a content row and two tool cards on
+                // "<turnId>#0" - the work rows bucketing and the fold read act on.
+                const std::int64_t id = seed.turnSeq;
+                const std::string batch = std::to_string(id) + "#0";
+                seed.add(typed_seed::Seeder::Msg::Assistant, body);
+                seed.upsertBlock(id, "step#0", batch, TuiBlockKind_Tool, TuiBlockStatus_Ok,
+                                 "bash ls", body, "bash ls", 1100);
+                seed.upsertBlock(id, "step#1", batch, TuiBlockKind_Tool, TuiBlockStatus_Ok,
+                                 "grep -rn", body, "grep -rn", 40);
+                if (i % 2 == 1)
+                    seed.add(typed_seed::Seeder::Msg::FinalAnswer, body);
             }
             const auto t0 = std::chrono::steady_clock::now();
             const size_t groups = thread.groupCount(); // the first call builds the list
             const auto t1 = std::chrono::steady_clock::now();
 
-            // One frame of the window's model work: 40 groups, each asked for its view,
-            // its height hint and its expansion state - the three calls the render loop
-            // makes per visible group.
+            // One frame of the window's model work: 40 groups, each asked for its
+            // view, its height hint, its expansion state, its row count and one
+            // row's fold - the reads the render loop makes per visible group.
             volatile double sink = 0.0;
             const int kFrames = 200;
             const auto t2 = std::chrono::steady_clock::now();
@@ -545,6 +564,10 @@ int main(int argc, char** argv) {
                     const tui::store::GroupView view = thread.groupAt(k);
                     sink = sink + thread.measureHint(view.id);
                     sink = sink + (thread.expanded(view.id) ? 1.0 : 0.0);
+                    const std::size_t blocks = thread.blockCount(k);
+                    sink = sink + static_cast<double>(blocks);
+                    if (blocks > 1)
+                        sink = sink + (thread.blockExpanded(k, 1) ? 1.0 : 0.0);
                 }
             }
             const auto t3 = std::chrono::steady_clock::now();
@@ -587,7 +610,7 @@ int main(int argc, char** argv) {
         // The task's budget for opening the fixture: well under a frame of either
         // profile (150 ms is the documented ceiling).
         check(largeBuild <= 150.0,
-              "cost: a 1000-message thread builds in " + std::to_string(largeBuild) + " ms");
+              "cost: a 1000-turn thread builds in " + std::to_string(largeBuild) + " ms");
         // A frame's model work stays inside the tightest frame budget by two orders of
         // magnitude (16.7 ms at 60 fps), so a regression has to be gross to slip through
         // the absolute check - the ratio below is the sensitive one.
@@ -598,11 +621,12 @@ int main(int argc, char** argv) {
         // microsecond-scale loop carries noise; an O(n) lookup lands far above it
         // (measured ~10-20x when probed).
         const double ratio = smallFrame > 0.0 ? largeFrame / smallFrame : 0.0;
-        check(ratio <= 2.0,
-              "cost: the frame does not scale with the thread (1000 vs 125 messages: " +
-                  std::to_string(ratio) + "x)");
+        check(ratio <= 2.0, "cost: the frame does not scale with the thread (1000 vs 125 turns: " +
+                                std::to_string(ratio) + "x)");
         // 40 groups x 2 id lookups per frame = 80 entries examined per frame, whatever
-        // the thread length: the counter agrees with the timing.
+        // the thread length: the counter agrees with the timing. The row-count and
+        // fold reads the projection added are index probes, not id lookups - they
+        // walk no entries, so the count stays at 80.
         check(largeWalks == 80u * 200u,
               "cost: 80 entries examined per frame (" + std::to_string(largeWalks) + ")");
     }
@@ -616,7 +640,7 @@ int main(int argc, char** argv) {
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
         for (int i = 0; i < 60; ++i)
-            addMessage(state, tui::ChatMessageType::User, "q" + std::to_string(i));
+            addUser(state, "q" + std::to_string(i));
         state.ui.thread.pageGroups = 40;
         std::deque<std::string> idStorage;
         const auto rowEnabled = [&]() {

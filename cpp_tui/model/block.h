@@ -16,10 +16,10 @@
 ///   Answer        the run's result: same shape, the ANSWER role
 ///   WorkGroup     a quiet disclosure header ("WORK · 4 steps") over body rows
 ///   Assistant     one work-group body row (agent prose)
-///   ToolCall      a compact row: state glyph + TOOL label + one-line summary
+///   ToolCall      a compact row: TOOL label + one-line summary
 ///   ToolResult    the same row with the outcome the store's marker carried
 ///   Thinking      a collapsed "Thinking · 3.2 s" disclosure with a dim body
-///   System        label SYSTEM, neutral text, optional action (Retry, task 45)
+///   System        label SYSTEM, neutral text, optional action (Retry)
 ///   Code          a body that is a single fenced code block: drawn by rich_md's
 ///                 own block, copied as *code* by the block's copy path (S-13)
 ///
@@ -45,12 +45,15 @@ enum class BlockKind {
     Thinking,
     System,
     Code,
+    ToolStep,
 };
 
-/// The state a block paints beside its label - mirrored from the store, never
-/// invented by the renderer (D-BLOCK: "state via glyph + word"). `None` means the
-/// block carries no state mark at all (a user query has no outcome; a system
-/// notice's severity is the text's, not the row's).
+/// The state a block carries, mirrored from the store, never invented by the
+/// renderer. The state paints no glyph: on a tool card a
+/// failure renders the red FAIL word on the header and the live states drive
+/// the chips line. `None` means the block carries no state mark at all (a
+/// user query has no outcome; a system notice's severity is the text's, not
+/// the row's).
 ///
 /// Where the store has no state (a tool *call* has no outcome of its own - its
 /// result is the next row) the adapter states what the row is: `Pending`, "the
@@ -61,11 +64,9 @@ enum class BlockState {
     Running,
     Ok,
     Failed,
+    Cancelled,
 };
 
-/// The streaming message's reserved key. The stream is not in the message store;
-/// its blocks live in the stream group, and this is their key within that group.
-inline constexpr std::size_t kStreamMessageId = 0;
 /// The stable identity of one block: the group that owns it, the adapter's key
 /// within that group, and the kind (a message can yield a thinking row and a body
 /// row). Never a position: inserting a row in front of a block or changing the
@@ -119,6 +120,27 @@ struct BlockDesc {
     double timingS = 0.0;
     /// A work group's step count, 0 for every other kind.
     int steps = 0;
+    /// Whether the row is drawn at all, resolved by the store adapter from the
+    /// batch's own state; every descriptor defaults to visible.
+    bool visible = true;
+    /// The batch's content: drawn as the response's body, with no header and
+    /// no hit box of its own. A body segment never has a disclosure.
+    bool bodySegment = false;
+    /// The synthetic AGENT owner row: the batch's header, drawn from the
+    /// batch's facts, not its own.
+    bool ownsBatch = false;
+    /// A child of an owner row: it shares the batch's indent and rail, and
+    /// the owner decides when the batch's body shows.
+    bool batchOwned = false;
+    /// The row's text is reachable through `blockText()`. A row that
+    /// cannot be copied keeps false, so copy affordances skip it.
+    bool copyable = false;
+    /// The owner's tool chips: `[bash] [grep] +2`. Empty when the batch has
+    /// no calls, and set on no other row.
+    std::string chips;
+    /// The batch's failed tool calls; > 0 paints FAIL on the owner row.
+    int failedCalls = 0;
+
     /// Whether the row offers a disclosure, and whether its body is showing now.
     bool expandable = false;
     bool expanded = true;

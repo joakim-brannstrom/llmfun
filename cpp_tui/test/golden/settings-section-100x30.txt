@@ -2,7 +2,7 @@ name: settings-section
 screen: 100x30
 sheet: x=20 y=7 w=60 h=15
 section: BEHAVIOUR search: ''
-rows: built=3 drawn=3 selected=1
+rows: built=4 drawn=4 selected=1
 marks: strip=111 selected=111 row=0
 text:
    llmfun   settings                                           Ctrl+K commands Shift+?   Settings
@@ -13,13 +13,13 @@ text:
     hello                   Summarize this workarea
                             Plan a feature
 
-                     Settings                           BEHAVIOUR  2    Close
+                     Settings                           BEHAVIOUR  3    Close
                       Search
                       ALL    APPEARANCE    BEHAVIOUR    ADVANCED
                        BEHAVIOUR
                      ▌ Send key                                            tab
                        Raw log level                                      info
-
+                       Thread mode                                     minimal
 
 
 

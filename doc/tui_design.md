@@ -129,40 +129,38 @@ The TUI supports seven message types, each with distinct color coding. See `Chat
 
 Messages can contain collapsible **thinking/reasoning** content (the `thinking` field in `ChatMessageParam`), displayed as expandable sections within the message.
 
-### Message header decoration ([NR] + [TIME])
+### Message header decoration ([TIME])
 
-Persistent chat messages render a decorated header: `[NR] <summary>`
-plus a ` [TIME]` suffix when a processing time was measured.
+The thread's rows draw a header of `LABEL · <timing>`: the row's label
+(`YOU`, `AGENT`, `TOOL`, the batch group's word) plus a timing suffix when
+a processing time was measured.
 
-- **NR** is the message's 1-based ordinal among the session's
-  displayed persistent messages. It is **not stored** — it is a pure
-  function of the persisted session file (the displayable predicate
-  over the history) and is derived at send time (live turn, user
-  echo) and at replay time (session switch, startup) on the AppAgent
-  actor thread. `/clear` (session `clear()`) restarts numbering at
-  [1]. Any instance loading the same file replays the same NRs
-  (cross-instance comparable).
+- **No ordinal.** Persistent messages carry no `[NR]`: a display number would have to be
+  recomputed on every send, every replay and on every instance that
+  loads the file, and the typed turn already carries a stable id - the
+  persisted `turnId` (`0` = unstamped), with `messageCount`
+  informational. Nothing on the wire or in the render recomputes a
+  display number.
 - **TIME** is measured only where the work happened: the LLM-call
   `Duration` for assistant/tool-call lines, the per-call tool
   execution `Duration` for tool results. In memory it is
   `MessageTime = SumType!(Duration, NoProcessingTime)`; it persists
   as a millisecond number under `save_data.processMs` (absent key =
   `NoProcessingTime` — never a `0ms` misrepresentation). Unmeasured
-  messages render **no suffix** (there is no unknown-time glyph); a
+  messages render **no timing** (there is no unknown-time glyph); a
   corrupt negative stored value is treated the same (traced, no
-  suffix).
+  timing).
 - Formatting is `my.time.prettyDuration` (mylib,
   `vendor/mylib/source/my/time.d`): `<1s` → `NNNms`, `<60s` → `S.Ds`
-  (one decimal, truncated), `<1h` → `Mm Ss`, else `Hh Mm`.
-- **Display-only lines are undecorated** (nr = 0 → bare summary):
-  help text, compression/session-operation notices, plugin sends
-  through the unchanged public `sendChatMessage` seam.
-- **One-shot CLI is undecorated**: `TuiBlockedSink` accepts but
-  ignores `(nr, time)` — byte-stable output (OQ3).
-- No C/C++ change: `TUI_API_VERSION` stays 4. The C++ header widget
-  ID embeds the monotonic `entry.id`, so it is stable across frames
-  despite the now-decorated summary; Copy copies the raw message
-  text, not the decorated header.
+  (one decimal, truncated), `<1h` → `Mm Ss`, else `Hh Mm`. The C++
+  render consumes the block's `durationMs` (`0` = unknown, never a
+  placeholder) and formats it with `blockTimingLabel`.
+- **Display-only lines carry no timing**: help text,
+  compression/session-operation notices, plugin sends through the
+  unchanged public `sendChatMessage` seam — none of them were measured.
+- **One-shot CLI is undecorated**: `TuiBlockedSink` drops the UI
+  traffic (`isActive` is `false`) and the output is the typed
+  formatter's lines — byte-stable.
 
 ### Markdown Support
 
@@ -654,29 +652,155 @@ above 10000 are clamped to 10000 (mirrors `validateConfig`), and positive
 sub-40 caps are raised to 40 by the C API. (The cap is text-backend only:
 GUI runs ignore it.)
 
-### API Version History
+### Typed Thread Store
 
-`TUI_API_VERSION` is a **documentation marker only** — no runtime behavior
-depends on it (the contract tests pin its current value with `static_assert`
-so a bump stays deliberate); the changelog lives in the `tui_api.h` header
-comment. The generations so far:
+The typed turn/block model the thread draws from
+(`TUI_API_VERSION` 14):
 
-1. original API: `String`, `ChatMessageParam`, `TuiState` + `TuiScreen`,
-   `tuiInit()` + `tuiShutdown(screen)`.
-2. session sidebar: `SessionItem`, `TuiSessionActionType`, `SessionAction`,
-   `tuiSetSessionList`, `tuiIsSessionActionReady`, `tuiGetSessionAction`.
-3. max width: `tuiSetMaxWidth` (cap the rendered width in columns;
-   0 = unlimited).
-4. single handle: `TuiBackendMode`/`TuiBackendKind`, `tuiInit(state, mode)`,
-   per-state frame calls (`tuiBackendNewFrame/Render(state)`), None-safe
-   `tuiRender`, `tuiBackendActive`, `tuiBackendNote`, destroy-tears-down;
-   `TuiScreen` + `tuiShutdown` removed.
-5. workbench MVP (the `--ui=workbench|legacy` shell): `tuiSetUiGeneration`,
-   `tuiRequestCancel`/`tuiTakeCancel`, `SessionItem.updatedAtMs`/`flags`
-   (appended, task 24), `TuiLogRecord` + `tuiAddLogRecord` (task 32),
-   `TuiRuntimeStatus` + `tuiSetRuntimeStatus` (task 39), and
-   `tuiSetRawLogOpen`/`tuiIsRawLogOpen` (task 33). One generation for the whole
-   MVP; a later symbol lands inside v5 without re-bumping.
+- `TuiTurn` is `{int64_t id, int32_t state, int32_t messageCount,
+  int32_t reserved}`: the id is the persisted `turnId` (`0` = unstamped),
+  `state` is `Running|Done|Interrupted`, `messageCount` is informational
+  (the LLM messages the turn covers). No display ordinal (see the
+  no-ordinal note above).
+- `TuiBlock` is keyed by `(turnId, id)`; the id is the tool callId,
+  `answer`, or a batch-scoped id (`content#<n>`); the `batchId` is
+  `<turnId>#<batchIndex>` for per-response groups (`<turnId>#q` for
+  query/vision/notice), recomputed deterministically on replay, stable
+  within the turn's lifetime in one process run, never persisted.
+- **RESULT pair transport** (tool kind): `resultKeys`/`resultValues` are
+  parallel same-length vectors, sorted by key byte-wise ascending;
+  duplicate keys collapse last-wins; values are pre-truncated at 200
+  codepoints (UTF-8-safe) by the sender; at most 100 pairs and
+  `resultMore` counts the pairs past that cap (0 when under).
+  `resultRaw` is the packed fallback when the result is not an
+  unpackable JSON object (array, non-JSON, zero-pair object): the pairs
+  stay empty and the one-line string renders as-is. The pairs ride the
+  block's upsert — the UI merges in place, so a later pair-less re-emit
+  of the same block keeps the pairs it already holds.
+- Functions: `tuiSetTurns` (bulk snapshot for replay and session switch:
+  clears the store, then loads the turns and their blocks),
+  `tuiTurnUpsert`/`tuiBlockUpsert` (the only mutating paths: a first
+  upsert creates the slot, later upserts merge in place), `tuiTurnRemove`
+  (removes the turn AND cascades to the turn's blocks — no per-block
+  remove).
+- The busy edge is real: D clears the ready flag when a run starts
+  (`uiAgentBusy`) and sets it back when the run ends (`uiAgentReady`).
+  Every entry point brackets its run — the main query, a compression,
+  `/plan`, `/code`, the one-shot runs — and a nesting counter keeps the
+  flag across nested brackets, so the at-most-one-run assumption is
+  enforced, not assumed. The composer's `Send`/`Stop`
+  flip is driven by that crossing.
+- Pinned by `test_typed_thread_store` and the parity core loop's
+  batteries (upsert storm, unknown-callId result, busy-edge matrix).
+
+---
+
+## Thread modes: the response-owned fold
+
+The thread view has two modes. Minimal (the factory default,
+`ChatTab::threadMinimalMode`) folds every response into one log line;
+maximal opens every response while its turn runs. Both shapes come from one
+projection: `store/thread_store.cpp` derives, per row, an open state and a
+`visible` bit, and `views/thread.cpp` draws exactly the rows whose `visible`
+is set — the view keeps no exception list of its own. This chapter is the
+behaviour the code implements now; `plan/maximal_investigation.md` stays as
+the record of the fold it replaced.
+
+### Vocabulary
+
+| Term | Meaning |
+|---|---|
+| turn | one user query and everything the agent did for it; one `TuiTurn` (state `Running`/`Done`/`Interrupted`), one group. A turn closes on every run exit — `Done` when the answer landed, `Interrupted` otherwise; `Cancelled` is a call status, never a turn state |
+| response | one model reply inside a turn; its blocks share the batch id `<turnId>#<n>` (query, vision and notice blocks share `<turnId>#q`) |
+| batch | the projection's bucket for one response (`BatchEntry`) |
+| owner row | the synthetic `AGENT` row that represents a response and owns the fold; its pin key is `batch#<batchId>`, it carries the response's duration and tool chips, and it has no body of its own |
+| child | a row an owner owns: the `Thinking` row, the content segment, one card per tool call |
+| body segment | the header-less row that draws the response's streamed content |
+| settled | a batch that holds at least one tool call and none of them still live (`hasAnyCall && allSettled`) |
+| live tail | the newest batch of a turn whose state is `Running` (`isNewest`) |
+| pin | an absolute user expansion choice, stored verbatim, keyed by row/group id |
+| live edge | the chips line / `Thinking` shadow line the minimal fold draws under a group's header |
+
+Two render profiles: the text grid separates with `" - "`, the pixel/GUI
+profile with `" · "` (`views/blocks.cpp`'s `separator()`). Header widths are
+measured in text units against the profile's metrics, never counted as
+characters.
+
+### The fold
+
+The derivation lives in `store/thread_store.cpp`; nothing about the fold is
+stored except the pins.
+
+- `groupOpen(groupId)` — the group pin first (absolute: what a click stored is
+  the answer), otherwise the liveness default: maximal (`!threadMinimalMode`)
+  and the turn live. Maximal at rest folds like minimal; no fabricated
+  `Cancelled` turn state exists.
+- `groupStyleIsMinimal(groupId)` = `threadMinimalMode && !groupOpen(groupId)` —
+  the shape, not the fold: a pinned-open minimal group and a live maximal group
+  both draw maximal-style.
+- `ownerOpen` — the row pin first, else `batchLiveFor`: the turn live, the
+  batch the turn's newest, and the batch unsettled (`!allSettled ||
+  !hasAnyCall`). A child row's default is `childLiveFor` — the same but
+  `!allSettled` only — so a settled batch folds its children with its owner.
+- A settled batch folds to `> <duration> - [chips]` (grid spelling): the
+  header row carries the disclosure mark and the `FAIL` ink around
+  `composeBlockHeader`'s text, which carries the duration and the tool chips
+  `[bash] [grep]` with `+N` for the distinct names past three (one composer,
+  `chipsText`, for the owner header and the live chips line; first occurrence
+  wins, no duplicates) and — folded only — no role word. `Thinking` carries no
+  duration.
+- The `Answer` block's batch contributes no content child: the answer is the
+  response's message, and drawing its streamed preamble beside it would
+  repeat the text.
+
+### Visibility (the one rule)
+
+`resolveVisible` answers one bit per row, and the view draws iff it is set
+(`drawRow` returns before touching any cursor state when it is clear). The
+group's header row and the turn's query/answer rows always draw; the segment
+clause is the content segment only.
+
+```
+ownerVisible   = groupOpen(g)                                # owners never draw under a fold
+plainVisible   = groupOpen(g)                                # a notice/vision row follows its group
+childVisible   = ownerVisible && ownerOpen                   # thinking, cards
+segmentVisible = (ownerVisible && ownerOpen)
+                 or (groupStyleIsMinimal(g) && turnLive && batch.isNewest)   # the content segment
+```
+
+The segment clause is the minimal fold's one mercy: the newest batch of a
+live turn draws its prose under the folded header with no owner row above
+it. A hidden block (`TuiBlockFlag_Hidden = 8`, decided by the sender) weighs
+0 in `stepCount` and draws nothing. (`ownerVisible` / `plainVisible` are the
+projection's own comment names; `ownerOpen` is its local; `childVisible` /
+`segmentVisible` are labels used here for the two clauses that share
+`resolveVisible`'s tail.)
+
+### The live edge
+
+Minimal style, newest group only: the chips line naming the calls in flight
+while one runs, and the folded `Thinking` shadow while reasoning streams with
+no content yet. Neither ever draws in maximal, and neither draws for a group
+that is open.
+
+### Pins
+
+A pin is absolute and session state: stored verbatim even when it equals the
+default, so it survives mode flips and the turn's liveness changes
+(`setExpanded` / `setBlockExpanded`). Group pins live in
+`ChatTab::groupPins`, row pins in `ChatTab::rowPins`; both go with the thread
+on a clear or a session switch, and a removed turn takes its pins with it
+(`tuiTurnRemove`). Pruning the pins of an evicted turn and a "collapse all"
+affordance are future work (`doc/todo.md`).
+
+### Anchors and hints
+
+The group header is the anchor: the view samples its screen position as the
+group draws (`anchorGroupId` / `anchorPending`), so a batch folding or
+opening in place never scrolls the thread. The height hint (`measureHint()`
+over `UiState::thread.hints`) is an estimate from `lineCountEstimate`,
+computed at sync time from header + plain rows + owner rows — it does not
+move with the fold; the drawn height replaces it after the first frame.
 
 ---
 

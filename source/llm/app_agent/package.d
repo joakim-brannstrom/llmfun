@@ -6,7 +6,7 @@ import std.algorithm;
 import std.array : empty, array, appender;
 import std.conv : to, text;
 import std.exception : collectException;
-import std.datetime : Clock, SysTime, DateTime, UTC, dur;
+import std.datetime : Clock, SysTime, DateTime, UTC, Duration, dur;
 import std.format : format;
 import std.json : JSONType, JSONValue;
 import std.string : strip, startsWith, join;
@@ -48,6 +48,150 @@ private immutable(string[]) MonthAbbr = [
     "Dec"
 ];
 
+/// Milliseconds of a message's processing time (0 when none was recorded).
+private long durationMsOf(MessageTime t) {
+    long ms;
+    t.match!((Duration d) { ms = d.total!"msecs"; }, (NoProcessingTime _) {});
+    return ms;
+}
+
+/// One replay walk's output: the turns and their already-merged blocks.
+private struct TypedTurns {
+    UiTurnData[] turns;
+    UiBlockData[] blocks;
+}
+
+// Walk a persisted history once and build the typed turns/blocks. A turn opens at a
+// user query; blocks go to their message's turn; turn order is the history's
+// sequence (turnId's job); batch ids are recomputed
+// deterministically ("<turnId>#<response index>"). Tool calls and their stored
+// responses merge by call id in one pre-pass, so replay never depends on
+// adjacency. An interrupted turn replays its in-flight calls as Cancelled
+// (never a fabricated Ok).
+private TypedTurns buildTypedTurns(Chat.MessageT[] history, ToolFlags flags) {
+    // Pass 1: pair every stored response with its call id (last write wins -
+    // the store's upsert-merge semantics for a duplicate call id).
+    ToolResponse[string] responseByCallId;
+    foreach (ref msg; history) {
+        msg.match!((ToolResponse a) { responseByCallId[a.toolCallId] = a; }, (_) {
+        });
+    }
+
+    // Pass 2: per-turn informational message counts (assistant response +1;
+    // each generated tool call +1; each tool result +1). The C-side stepCount
+    // computed over the blocks (with displayability) is the rendered number.
+    int[long] messageCount;
+    foreach (ref msg; history) {
+        msg.match!((Message a) {
+            if (a.turnId != 0 && a.role != Role.user)
+                messageCount[a.turnId]++;
+        }, (ToolMessage a) {
+            if (a.turnId != 0)
+                messageCount[a.turnId] += a.toolCalls.type == JSONType.array
+                    ? cast(int) a.toolCalls.array.length : 0;
+        }, (ToolResponse a) {
+            if (a.turnId != 0)
+                messageCount[a.turnId]++;
+        }, (VisionMessage a) {});
+    }
+
+    TypedTurns out_;
+    int[long] batchIndex; // per turn
+    int visionSeq; // vision block ids: unique across the rebuilt snapshot
+
+    foreach (ref msg; history) {
+        msg.match!((Message a) {
+            if (a.turnId == 0)
+                return; // the system prompt belongs to no turn
+            if (a.role == Role.user) {
+                if (!a.isUserQuery())
+                    return; // hidden nudge/system-style entries emit nothing
+                out_.turns ~= UiTurnData(a.turnId, TuiTurnState_Done,
+                    messageCount.get(a.turnId, 0));
+                out_.blocks ~= makeBlockData(a.turnId, "query", queryBatchId(a.turnId),
+                    TuiBlockKind_Prose, TuiBlockStatus_None, 0, null, "user", a.content, 0);
+                return;
+            }
+            if (a.role == Role.system)
+                return; // hidden today
+            // A model response: the batch's reasoning + content blocks.
+            const bi = batchIndex[a.turnId]++;
+            const bid = responseBatchId(a.turnId, bi);
+            const durMs = durationMsOf(a.processTime());
+            if (!a.thinking.empty)
+                out_.blocks ~= makeBlockData(a.turnId, reasoningBlockId(bi), bid, TuiBlockKind_Reasoning,
+                    TuiBlockStatus_None, TuiBlockFlag_Collapsible, null, null, a.thinking, durMs);
+            out_.blocks ~= makeBlockData(a.turnId, contentBlockId(bi), bid,
+                TuiBlockKind_Prose, TuiBlockStatus_None, 0, null,
+                a.role.to!string, a.content, durMs);
+        }, (ToolMessage a) {
+            if (a.turnId == 0)
+                return;
+            const bi = batchIndex[a.turnId]++;
+            const bid = responseBatchId(a.turnId, bi);
+            const calls = summarizeToolCallBodies(a.toolCalls, 1000);
+            const durMs = durationMsOf(a.processTime());
+            if (!a.thinking.empty)
+                out_.blocks ~= makeBlockData(a.turnId, reasoningBlockId(bi), bid, TuiBlockKind_Reasoning,
+                    TuiBlockStatus_None, TuiBlockFlag_Collapsible, null, null, a.thinking, durMs);
+            // A tooling response's streamed prose is not persisted in the
+            // ToolMessage, so the block is body-less, and the projection drops
+            // a body-less content child after reading the batch's duration
+            // from it.
+            out_.blocks ~= makeBlockData(a.turnId, contentBlockId(bi), bid,
+                TuiBlockKind_Prose, TuiBlockStatus_None, 0, null, a.role.to!string, null, durMs);
+            const arr = a.toolCalls.type == JSONType.array ? a.toolCalls.array : [
+            ];
+            size_t idx;
+            foreach (call; arr) {
+                const callId = jsonStringAt(call, "id");
+                auto fn = "function" in call;
+                const name = fn !is null ? jsonStringAt(*fn, "name") : null;
+                idx++;
+                if (callId.empty || name.empty)
+                    continue; // same skip rule as the call emitter's entries
+                string meta;
+                int status = TuiBlockStatus_Cancelled;
+                long callDur;
+                ToolResultPairs pairs;
+                if (auto resp = callId in responseByCallId) {
+                    meta = summarizeToolResponse(*resp, 1000);
+                    status = resp.success() ? TuiBlockStatus_Ok : TuiBlockStatus_Failed;
+                    callDur = durationMsOf(resp.processTime());
+                    pairs = unpackToolResultPairs(*resp);
+                }
+                // idx is 1-based over arr, and the body entries align with arr.
+                const body_ = idx <= calls.length ? calls[idx - 1] : null;
+                out_.blocks ~= withResultPairs(makeBlockData(a.turnId, callId, bid,
+                    TuiBlockKind_Tool, status, flags.of(name), name, meta, body_, callDur), pairs);
+            }
+            if (a.isFinalAnswer())
+                out_.blocks ~= makeBlockData(a.turnId, "answer", bid, TuiBlockKind_Answer,
+                    TuiBlockStatus_None, 0, null, null, a.getFinalAnswer(), durMs);
+        }, (ToolResponse a) {
+            // Every response in this history was merged into its call's block
+            // by the pre-pass; a response without a call in the same history
+            // cannot exist here, so nothing is emitted from this arm.
+        }, (VisionMessage a) {
+            if (a.turnId == 0)
+                return;
+            out_.blocks ~= makeBlockData(a.turnId, "vision#" ~ to!string(++visionSeq),
+                queryBatchId(a.turnId), TuiBlockKind_Prose, TuiBlockStatus_None,
+                0, null, "user", a.content ~ " (with image)", 0);
+        });
+    }
+    return out_;
+}
+
+private UiBlockData withResultPairs(UiBlockData block, ToolResultPairs pairs) @safe {
+    block.resultKeys = pairs.keys;
+    block.resultValues = pairs.values;
+    block.resultRaw = pairs.raw;
+    block.resultCount = cast(uint) pairs.keys.length;
+    block.resultMore = pairs.more;
+    return block;
+}
+
 struct AgentApp {
     package {
         LlmConfig llmConf;
@@ -86,8 +230,6 @@ struct AgentApp {
 
         // From LlmConfig so model switch and /refresh-agent-md honor the config
         bool noCwdConfig_;
-        // gates the deferral in rebuildSystemPrompt
-        bool agentRunInFlight_;
         // Injectable AGENTS.md location for rebuildSystemPrompt: empty
         // resolves to the process CWD's AGENTS.md (production); tests point it
         // at a fixture file so they never depend on the repo's real AGENTS.md.
@@ -96,8 +238,42 @@ struct AgentApp {
         // the next safe point after the run completes.
         bool agentMdRebuildPending_;
 
-        // TODO: merge, if possible, agentRunInFlight_ and runInFlight
+        // The app-side half of "a run is in flight", true for the whole bracket of a
+        // turn entry point
         bool runInFlight;
+
+        // nesting depth of open run brackets: the turn-start compression and
+        // the /plan / /code pipelines bracket runs that can sit inside a query
+        // bracket, so the ready edge only crosses at the outermost close.
+        int runBracketDepth_;
+
+        // The busy edge, bracketing one turn entry point's run. The ready flag
+        // clears on the first (outermost) open and sets on the last close; the
+        // crossing carries the messenger's busy/ready message so the composer
+        // follows the real run span. Unwinding closes the bracket (scope-exit),
+        // keeping the flag and the composer consistent on thrown runs.
+        void agentBusy() {
+            if (runBracketDepth_++ == 0) {
+                runInFlight = true;
+                uiMsg.busy();
+            }
+        }
+
+        void agentReady() {
+            if (runBracketDepth_ > 0 && --runBracketDepth_ == 0) {
+                runInFlight = false;
+                uiMsg.ready();
+            }
+        }
+
+        TypedEmitContext typedCtx_;
+        // The live turn context a pipeline turn displaces: /c can hold an
+        // interrupted agent turn across a /plan or /code run, so
+        // openPipelineTurnTyped parks it here and closePipelineTurnTyped
+        // restores it.
+        TypedEmitContext savedTypedCtx_;
+        long[] typedEmittedTurnIds_;
+        long noticeSeq_;
     }
 
     private bool oneShotQuery;
@@ -204,45 +380,16 @@ struct AgentApp {
         return slashCommands_.helpText();
     }
 
-    /// Public plugin seam: send a chat message to the UI.
-    public void sendChatMessage(Args...)(string msg, TuiChatMessageType type, Args args) {
+    public void sendChatMessage(Args...)(string msg, Args args) {
         static if (args.length > 0) {
             msg = format(msg, args);
         }
-        uiMsg.chatMessage(msg, type);
-    }
-
-    private void sendChatThinkMessage(Args...)(string msg, string thinking,
-            TuiChatMessageType type, Args args) {
-        static if (args.length > 0) {
-            msg = format(msg, args);
-        }
-        uiMsg.chatThinkMessage(msg, thinking, type);
-    }
-
-    package void sendPersistedChatMessage(Args...)(string msg,
-            TuiChatMessageType type, size_t nr, MessageTime time, Args args) {
-        static if (args.length > 0) {
-            msg = format(msg, args);
-        }
-        uiMsg.chatMessage(msg, type, nr, time);
-    }
-
-    package void sendPersistedChatThinkMessage(Args...)(string msg, string thinking,
-            TuiChatMessageType type, size_t nr, MessageTime time, Args args) {
-        static if (args.length > 0) {
-            msg = format(msg, args);
-        }
-        uiMsg.chatThinkMessage(msg, thinking, type, nr, time);
-    }
-
-    package void sendPersistedFinalAnswer(string msg, size_t nr, MessageTime time) {
-        uiMsg.finalAnswer(msg, nr, time);
+        emitNoticeTyped(msg);
     }
 
     private void progressCallback(size_t currentChunk, size_t totalChunks, string status) {
-        uiMsg.chatMessage(i"assistant: Compressing... $(currentChunk)/$(totalChunks) : $(status)".text,
-                TuiChatMessageType_Assistant);
+        emitNoticeTyped(i"assistant: Compressing... $(currentChunk)/$(totalChunks) : $(status)"
+                .text);
     }
 
     private void sendRuntimeStatus(bool readyState) {
@@ -260,73 +407,27 @@ struct AgentApp {
         agent_.setCompressionCheckpointSessionId(activeSession.id.get);
         logger.tracef("compression checkpoint session id: %s", activeSession.id.get);
         const ctxUsed = agent_.stat.context;
-        uiMsg.busy;
+        agentBusy();
+        scope (exit)
+            agentReady();
         auto res = agent_.compress(force: force, callback: &this.progressCallback);
         // A compression that actually rewrote history (summarized or purged
         // entries change the message list) makes the chat dirty; a no-op
         // compression leaves the persisted state untouched.
-        if (res.originalLength != res.newLength || res.purgedCount > 0)
+        if (res.originalLength != res.newLength || res.purgedCount > 0) {
             chatDirty = true;
-        uiMsg.chatMessage(compressionResultToString(res.compressed, res.originalLength,
-                res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize),
-                TuiChatMessageType_Assistant);
-        uiMsg.ready;
-    }
-
-    private void processChatMessage(Chat.MessageT m, size_t nr, bool printUser) {
-        m.match!((Message a) {
-            const bool show = isDisplayable(m, llmConf) && (a.role != Role.user || printUser);
-            if (show) {
-                auto msgType = a.role == Role.user ? TuiChatMessageType_User
-                    : TuiChatMessageType_Assistant;
-                this.sendPersistedChatThinkMessage("%s: %s", a.thinking,
-                    msgType, nr, a.processTime(), a.role, a.content);
-            } else {
-                logger.tracef("%s: %s", a.role, a.content);
-            }
-        }, (ToolMessage a) {
-            auto calls = summarizeToolCalls(a.toolCalls, 1000);
-            this.sendPersistedChatThinkMessage("tool call: %(%-s\n%)", a.thinking,
-                TuiChatMessageType_ToolCall, nr, a.processTime(), calls);
-            if (a.isFinalAnswer()) {
-                // Same (nr, time) as the tool-call line above: one number per
-                // persistent message.
-                this.sendPersistedFinalAnswer(a.getFinalAnswer(), nr, a.processTime());
-            }
-        }, (ToolResponse a) {
-            if (isDisplayable(m, llmConf)) {
-                this.sendPersistedChatMessage("tool result %s: %-s %s",
-                    TuiChatMessageType_ToolResponse, nr, a.processTime(),
-                    a.success ? "✅" : "❌", a.toolName, summarizeToolResponse(a, 1000));
-            }
-        }, (VisionMessage a) {
-            this.sendPersistedChatMessage("user: %s (with image)",
-                TuiChatMessageType_Assistant, nr, MessageTime(NoProcessingTime()), a.content);
-        });
+            emitCompressionTyped();
+        }
+        emitNoticeTyped(compressionResultToString(res.compressed, res.originalLength,
+                res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize));
     }
 
     package void processResult(ProcessResult result) {
         logger.trace(result.status != ProcessResult.Status.ok, result);
         lastServerStat = result.stat;
-        // result.chat (Chat.lastResponses) is the contiguous tail
-        // of the history, so the displayable count of the history before the
-        // batch is the ordinal offset. A user query in the batch was already
-        // echoed with exactly its ordinal (runAgent, after the turn-start
-        // doCompress); printUser: false keeps it out of the live display.
-        auto history = agent_.chat.getMessages();
-        const size_t offset = displayableCount(history[0 .. $ - result.chat.length], llmConf);
-        size_t pos = 0;
-        foreach (m; result.chat) {
-            if (isDisplayable(m, llmConf)) {
-                pos++;
-                this.processChatMessage(m, offset + pos, printUser: false);
-            } else {
-                this.processChatMessage(m, 0, printUser: false);
-            }
-        }
-        // Set the flag HERE, not in processChatMessage - that is shared with
-        // the replay loop in activateSession and must keep the freshly loaded
-        // chat clean (a dirty replay would rewrite the just-loaded file).
+        this.emitStepTyped(result);
+        // Set the flag HERE, not in the emitter - the emitter only draws; the
+        // persisted state changed above it in the run loop.
         if (result.chat.length > 0)
             chatDirty = true;
         commitActiveSession();
@@ -383,7 +484,7 @@ struct AgentApp {
         auto sfOpt = sessionStore.load(id);
         if (!hasValue(sfOpt)) {
             this.sendChatMessage("error: Cannot load session '%s' (not found or corrupt). Staying in current session.",
-                    TuiChatMessageType_Assistant, id);
+                    id);
             return; // keep the current session unchanged
             // Note: no sendSessionList() here - the list refresh happens
             // only on the success path to keep exactly one send per
@@ -410,18 +511,12 @@ struct AgentApp {
         // Status bar must reflect the target session, not the previous one
         lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
 
-        uiMsg.clearChat();
+        uiMsg.threadClear();
         uiMsg.pipelineClear();
 
-        size_t pos = 0;
-        foreach (m; agent_.chat.getMessages()) {
-            if (isDisplayable(m, llmConf)) {
-                pos++;
-                this.processChatMessage(m, pos, printUser: true);
-            } else {
-                this.processChatMessage(m, 0, printUser: true);
-            }
-        }
+        // The switch discards the old session's live turn context entirely
+        typedCtx_ = null;
+        this.emitReplayTyped();
 
         if (uiMsg.isActive()) {
             uiMsg.initHistory(agent_.getUserQueries.map!(a => a.content).array);
@@ -496,7 +591,7 @@ struct AgentApp {
         auto sessions = sessionStore.list();
 
         if (sessions.length == 0) {
-            this.sendChatMessage("No sessions found.", TuiChatMessageType_Assistant);
+            this.sendChatMessage("No sessions found.");
             return;
         }
 
@@ -514,7 +609,7 @@ struct AgentApp {
                     i + 1, marker, shortId, s.title, preview, s.messageCount, dateStr));
         }
 
-        this.sendChatMessage(lines[].join("\n"), TuiChatMessageType_Assistant);
+        this.sendChatMessage(lines[].join("\n"));
     }
 
     /** Create a new session and switch to it.
@@ -538,18 +633,17 @@ struct AgentApp {
         if (stripped.empty) {
             // runAgent already rejects empty args; this guards direct callers.
             this.sendChatMessage("error: Rename rejected — empty title, keeping previous title '%s'.",
-                    TuiChatMessageType_Assistant, activeSession.title);
+                    activeSession.title);
             return;
         }
 
         auto result = sessionStore.rename(activeSession.id, stripped);
         if (hasValue(result)) {
             activeSession = orElse(result, SessionMeta());
-            this.sendChatMessage("Session renamed to '%s'.",
-                    TuiChatMessageType_Assistant, activeSession.title);
+            this.sendChatMessage("Session renamed to '%s'.", activeSession.title);
         } else {
             this.sendChatMessage("error: Failed to rename session '%s'.",
-                    TuiChatMessageType_Assistant, shortSessionId(activeSession.id));
+                    shortSessionId(activeSession.id));
         }
         // Mutating callee - the active session's title changed, so the
         // sidebar snapshot is refreshed here (slash /rename is exempt from
@@ -610,11 +704,10 @@ struct AgentApp {
         }
 
         if (wasActive) {
-            this.sendChatMessage("Session deleted: %s. Switched to '%s'%s.", TuiChatMessageType_Assistant,
+            this.sendChatMessage("Session deleted: %s. Switched to '%s'%s.",
                     shortSessionId(id), activeSession.title, createdFresh ? " (new session)" : "");
         } else {
-            this.sendChatMessage("Session deleted: %s",
-                    TuiChatMessageType_Assistant, shortSessionId(id));
+            this.sendChatMessage("Session deleted: %s", shortSessionId(id));
             // No activateSession on this path, so the removed session must
             // leave the sidebar here (the active-delete path refreshes inside
             // activateSession).
@@ -701,14 +794,12 @@ struct AgentApp {
         pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
-                this.sendChatMessage("error: Invalid session id '%s'. Switch rejected.",
-                        TuiChatMessageType_Assistant, id);
+                this.sendChatMessage("error: Invalid session id '%s'. Switch rejected.", id);
                 return;
             }
             switchToSession(id); // sends the refreshed list
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to switch session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to switch session: %s.", e.msg);
         }
     }
 
@@ -720,8 +811,7 @@ struct AgentApp {
         try {
             doCreateSession(); // sends the refreshed list
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to create session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to create session: %s.", e.msg);
         }
     }
 
@@ -735,8 +825,7 @@ struct AgentApp {
         pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
-                this.sendChatMessage("error: Invalid session id '%s'. Rename rejected.",
-                        TuiChatMessageType_Assistant, id);
+                this.sendChatMessage("error: Invalid session id '%s'. Rename rejected.", id);
                 return;
             }
             // Exact mirror of doRenameSession: reject empty/stripped
@@ -744,8 +833,7 @@ struct AgentApp {
             // accepts any non-empty title).
             auto stripped = title.strip;
             if (stripped.length == 0) {
-                this.sendChatMessage("error: Rename rejected — empty title.",
-                        TuiChatMessageType_Assistant);
+                this.sendChatMessage("error: Rename rejected — empty title.");
                 return;
             }
             auto result = sessionStore.rename(id, stripped);
@@ -753,20 +841,16 @@ struct AgentApp {
                 auto newMeta = orElse(result, SessionMeta());
                 if (id == activeSession.id)
                     activeSession = newMeta; // keep the active meta fresh
-                this.sendChatMessage("Session renamed to '%s'.",
-                        TuiChatMessageType_Assistant, newMeta.title);
+                this.sendChatMessage("Session renamed to '%s'.", newMeta.title);
             } else {
-                // Unknown/corrupt id - error message, active meta
-                // unchanged, list still refreshed below.
-                this.sendChatMessage("error: Failed to rename session '%s'.",
-                        TuiChatMessageType_Assistant, shortSessionId(id));
+                // Unknown/corrupt id
+                this.sendChatMessage("error: Failed to rename session '%s'.", shortSessionId(id));
             }
             // The rename goes straight to the store (no sending callee),
             // so this handler sends the refreshed list on both paths.
             sendSessionList();
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to rename session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to rename session: %s.", e.msg);
         }
     }
 
@@ -779,8 +863,7 @@ struct AgentApp {
         pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
-                this.sendChatMessage("error: Invalid session id '%s'. Delete rejected.",
-                        TuiChatMessageType_Assistant, id);
+                this.sendChatMessage("error: Invalid session id '%s'. Delete rejected.", id);
                 return;
             }
             doDeleteSession(id); // sends the refreshed list
@@ -790,8 +873,7 @@ struct AgentApp {
                 savePinsEagerly();
             }
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to delete session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to delete session: %s.", e.msg);
         }
     }
 
@@ -817,26 +899,22 @@ struct AgentApp {
         pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
-                this.sendChatMessage("error: Invalid session id '%s'. Clone rejected.",
-                        TuiChatMessageType_Assistant, id);
+                this.sendChatMessage("error: Invalid session id '%s'. Clone rejected.", id);
                 return;
             }
             auto result = sessionStore.clone(id);
             if (hasValue(result)) {
                 auto cloneMeta = orElse(result, SessionMeta());
                 switchToSession(cloneMeta.id); // sends the refreshed list
-                this.sendChatMessage("Session cloned to '%s'.",
-                        TuiChatMessageType_Assistant, shortSessionId(cloneMeta.id));
+                this.sendChatMessage("Session cloned to '%s'.", shortSessionId(cloneMeta.id));
             } else {
                 // Unknown/corrupt id - error message, active session
                 // unchanged, list still refreshed below.
-                this.sendChatMessage("error: Failed to clone session '%s'.",
-                        TuiChatMessageType_Assistant, shortSessionId(id));
+                this.sendChatMessage("error: Failed to clone session '%s'.", shortSessionId(id));
                 sendSessionList();
             }
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to clone session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to clone session: %s.", e.msg);
         }
     }
 
@@ -854,6 +932,7 @@ struct AgentApp {
             pendingDeleteId = SessionId.init;
 
         bool runAgentLoop;
+        bool resuming;
         AgentStatus rval;
 
         if (slashCommands_.isSlashCommand(query)) {
@@ -866,6 +945,7 @@ struct AgentApp {
                 pendingDeleteId = SessionId.init;
             rval = slashCommands_.execute(this, query);
             query = null; // consume the query so it isn't added to the chat
+            resuming = forceRunAgentLoop;
             runAgentLoop = forceRunAgentLoop;
             logger.trace(forceRunAgentLoop, "agent loop forced to start");
             forceRunAgentLoop = false;
@@ -880,42 +960,41 @@ struct AgentApp {
         }
 
         if (runAgentLoop) {
-            agentRunInFlight_ = true;
-            scope (exit)
-                agentRunInFlight_ = false; // the loop is done: next safe point
+            // `/c`: the interrupted turn re-opens before its next batch streams.
+            if (resuming && typedCtx_ !is null)
+                uiMsg.turnUpsert(UiTurnData(typedCtx_.turnId,
+                        TuiTurnState_Running, typedCtx_.messageCount));
             this.doCompress(false);
             // User-query echo, sent AFTER the turn-start doCompress: the
             // query (if any) is the last entry in the possibly-compressed
-            // history, so its ordinal is the displayable count of that
-            // history - no +1, and a compression that purged displayable
-            // prefix messages cannot misnumber it.
+            // history, so it is the newest turn in the typed store.
             // isActive() keeps one-shot CLI output byte-stable: the
             // startSetup one-shot branch runs with the default TuiBlockedSink
             // and has no chat line for the prompt today.
             if (!query.empty && uiMsg.isActive())
-                this.sendPersistedChatMessage(query, TuiChatMessageType_User,
-                        displayableCount(agent_.chat.getMessages(), llmConf),
-                        MessageTime(NoProcessingTime()));
+                this.emitTurnStartTyped(query);
+            bool stopped;
             auto result = agent_.runToCompletion(&this.processResult,
                     compressCallback: &this.progressCallback, interrupt: () {
-                return isStopAgentTriggered;
+                stopped = isStopAgentTriggered;
+                return stopped;
             });
+            this.emitRunEndedTyped(stopped);
             if (result.status == ProcessResult.Status.agentStuckInLoop) {
-                this.sendChatMessage("harness: Agent forcefully terminated because it got stuck in a loop.\nYou can restart it with /c.\nIf it gets stuck again then the model is stuck in an internal prediction loop. Clear the context (/clear) and run your query again.",
-                        TuiChatMessageType_System);
+                this.sendChatMessage("harness: Agent forcefully terminated because it got stuck in a loop.\nYou can restart it with /c.\nIf it gets stuck again then the model is stuck in an internal prediction loop. Clear the context (/clear) and run your query again.");
             }
         }
 
-        // TODO: considering where agentRunInFlight_ is set I do not think
-        // there is ever a case where it is true in this if-statement.
-        // A rebuild requested while a run was in flight is applied here,
-        // at the next safe point after the run completes (the scope (exit)
-        // above has already cleared the in-flight flag). In production the
-        // pending flag can only be set through the in-flight guard inside
-        // rebuildSystemPrompt - slash commands dispatch exclusively from the
-        // branch above (between runs, one mailbox message at a time), so the
-        // guard is defensive; tests take it by setting the flags directly.
-        if (agentMdRebuildPending_ && !agentRunInFlight_) {
+        // A rebuild requested anywhere inside the userQuery/one-shot bracket
+        // is applied here, at the post-run safe point: the run bracket spans
+        // slash dispatch (userQuery opens it before runAgent), so a /model or
+        // /skills rebuild genuinely defers. The deferral is consumed later in
+        // this same runAgent call - before any next model call could start -
+        // so a command that only rebuilds is safe; a future command that both
+        // rebuilds at dispatch and forces the loop would run the loop on the
+        // stale prompt, which is the hazard to keep an eye on. Tests take the
+        // guard by setting the flags directly.
+        if (agentMdRebuildPending_) {
             agentMdRebuildPending_ = false;
             rebuildSystemPrompt();
         }
@@ -923,14 +1002,280 @@ struct AgentApp {
         return rval;
     }
 
-    package IStreamCallback makeStreamCallback() {
-        return new StreamMessageUpdater(uiMsg, agent_.modelContextSize,
-                llmConf.activeModelDisplayName);
-    }
-
     package IStreamCallback makePipelineStreamCallback() {
         return new PipelineStreamMessageUpdater(uiMsg, agent_.modelContextSize,
                 llmConf.activeModelDisplayName);
+    }
+
+    /// Walk the in-memory history once and send ONE setTurns
+    /// snapshot with already-merged blocks. A live turn still in flight is
+    /// not persisted yet: the switch replay drops its context, so neither its
+    /// turn nor its blocks enter the snapshot.
+    /// The config's displayability, folded into every tool block the typed
+    /// emissions write (ToolFlags.of): hidden tools ride the wire as
+    /// TuiBlockFlag_Hidden so the receiver hides them from the flag alone.
+    private ToolFlags currentToolFlags() {
+        return ToolFlags((in string name) => this.llmConf.isHiddenTool(name));
+    }
+
+    package void emitReplayTyped() {
+        auto built = buildTypedTurns(agent_.chat.getMessages(), currentToolFlags());
+        if (typedCtx_ !is null) {
+            built.turns = built.turns.filter!(t => t.id != typedCtx_.turnId).array;
+            built.blocks = built.blocks.filter!(b => b.turnId != typedCtx_.turnId).array;
+        }
+        uiMsg.setTurns(built.turns, built.blocks);
+        typedEmittedTurnIds_ = built.turns.map!(t => t.id).array;
+        noticeSeq_ = 0;
+        typedCtx_ = null;
+    }
+
+    /// Live turn start: turn upsert (Running) + the query prose block.
+    package void emitTurnStartTyped(string query) {
+        const turnId = agent_.chat.currentTurnId();
+        typedCtx_ = new TypedEmitContext;
+        typedCtx_.turnId = turnId;
+        typedCtx_.toolFlags = currentToolFlags();
+        typedCtx_.messageCount = 0;
+        typedEmittedTurnIds_ ~= turnId;
+        uiMsg.turnUpsert(UiTurnData(turnId, TuiTurnState_Running, 0));
+        uiMsg.blockUpsert(makeBlockData(turnId, "query", queryBatchId(turnId),
+                TuiBlockKind_Prose, TuiBlockStatus_None, 0, null, "user", query, 0));
+    }
+
+    /// Live step completion: the step-completion walk emits the batch's final
+    /// blocks - merged tool blocks (Ok/Failed + result meta + duration), the
+    /// next batch's reasoning/content blocks, and the Answer block when the
+    /// final task_done result arrives, followed by the turn's Done upsert.
+    /// Interrupted turns go through emitStopTyped instead.
+    package void emitStepTyped(ProcessResult result) {
+        if (typedCtx_ is null) {
+            typedCtx_ = new TypedEmitContext;
+            typedCtx_.turnId = agent_.chat.currentTurnId();
+            typedCtx_.toolFlags = currentToolFlags();
+        }
+        auto ctx = typedCtx_;
+
+        // Pair this step's responses with their calls first. Only
+        // responses whose call is also in this step pair up: a response whose
+        // call streamed in an earlier step is an orphan and emits standalone.
+        bool[string] stepCallIds;
+        foreach (ref msg; result.chat) {
+            msg.match!((ToolMessage a) {
+                foreach (call; a.toolCalls.type == JSONType.array ? a.toolCalls.array : [
+                    ])
+                    stepCallIds[jsonStringAt(call, "id")] = true;
+            }, (_) {});
+        }
+        ToolResponse[string] respById;
+        foreach (ref msg; result.chat) {
+            msg.match!((ToolResponse a) {
+                if (a.toolCallId in stepCallIds)
+                    respById[a.toolCallId] = a;
+            }, (_) {});
+        }
+
+        // The final answer's block and the turn's Done close are deferred to
+        // after the walk: later messages (an orphan result) still emit their
+        // blocks first, and the Done upsert carries the walk's complete
+        // messageCount.
+        bool finalAnswerSeen;
+        string finalAnswerBatchId;
+        string finalAnswerBody;
+        long finalAnswerDurMs;
+
+        foreach (ref msg; result.chat) {
+            msg.match!((Message a) {
+                if (a.role != Role.assistant)
+                    return; // the query echo + hidden nudges emit nothing
+                const bi = ctx.batchIndex++;
+                const bid = responseBatchId(ctx.turnId, bi);
+                const durMs = durationMsOf(a.processTime());
+                if (!a.thinking.empty)
+                    uiMsg.blockUpsert(makeBlockData(ctx.turnId, reasoningBlockId(bi),
+                        bid, TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                        TuiBlockFlag_Collapsible, null, null, a.thinking, durMs));
+                uiMsg.blockUpsert(makeBlockData(ctx.turnId, contentBlockId(bi), bid,
+                    TuiBlockKind_Prose, TuiBlockStatus_None, 0, null,
+                    a.role.to!string, a.content, durMs));
+                ctx.messageCount++;
+            }, (ToolMessage a) {
+                const bi = ctx.batchIndex++;
+                const bid = responseBatchId(ctx.turnId, bi);
+                const durMs = durationMsOf(a.processTime());
+                if (!a.thinking.empty)
+                    uiMsg.blockUpsert(makeBlockData(ctx.turnId, reasoningBlockId(bi),
+                        bid, TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                        TuiBlockFlag_Collapsible, null, null, a.thinking, durMs));
+                const calls = summarizeToolCallBodies(a.toolCalls, 1000);
+                const arr = a.toolCalls.type == JSONType.array ? a.toolCalls.array : [
+                ];
+                size_t idx;
+                foreach (call; arr) {
+                    const callId = jsonStringAt(call, "id");
+                    auto fn = "function" in call;
+                    const name = fn !is null ? jsonStringAt(*fn, "name") : null;
+                    idx++;
+                    if (callId.empty || name.empty)
+                        continue;
+                    string meta;
+                    int status = TuiBlockStatus_Cancelled;
+                    long callDur;
+                    ToolResultPairs pairs;
+                    if (auto resp = callId in respById) {
+                        meta = summarizeToolResponse(*resp, 1000);
+                        status = resp.success() ? TuiBlockStatus_Ok : TuiBlockStatus_Failed;
+                        callDur = durationMsOf(resp.processTime());
+                        pairs = unpackToolResultPairs(*resp);
+                    }
+                    // idx is 1-based over arr, and the body entries align with arr.
+                    const body_ = idx <= calls.length ? calls[idx - 1] : null;
+                    uiMsg.blockUpsert(withResultPairs(makeBlockData(a.turnId != 0 ? a.turnId
+                        : ctx.turnId, callId, bid, TuiBlockKind_Tool, status,
+                        ctx.toolFlags.of(name), name, meta, body_, callDur), pairs));
+                    ctx.clearLiveCall(callId); // merged: the stream-done flip list shrinks
+                }
+                ctx.messageCount += cast(int) arr.length;
+                if (a.isFinalAnswer()) {
+                    finalAnswerSeen = true;
+                    finalAnswerBatchId = bid;
+                    finalAnswerBody = a.getFinalAnswer();
+                    finalAnswerDurMs = durationMsOf(a.processTime());
+                }
+            }, (ToolResponse a) {
+                // Already merged into this walk's tool blocks: nothing to emit. A
+                // response whose call streamed in an earlier step (a true orphan)
+                // stays a result-only block below.
+                ctx.messageCount++;
+                if (a.toolCallId in respById)
+                    return;
+                // A true orphan (its call streamed in an earlier step): its own
+                // response-only batch, so the next response batch stays separate.
+                const bi = ctx.batchIndex++;
+                uiMsg.blockUpsert(withResultPairs(makeBlockData(a.turnId != 0
+                    ? a.turnId : ctx.turnId, a.toolCallId, responseBatchId(ctx.turnId, bi),
+                    TuiBlockKind_Tool, a.success() ? TuiBlockStatus_Ok : TuiBlockStatus_Failed,
+                    ctx.toolFlags.of(a.toolName), a.toolName, summarizeToolResponse(a,
+                    1000), null, durationMsOf(a.processTime())), unpackToolResultPairs(a)));
+                ctx.clearLiveCall(a.toolCallId); // a landed live call never stays live
+            }, (VisionMessage a) {
+                uiMsg.blockUpsert(makeBlockData(ctx.turnId, "vision#" ~ to!string(++ctx.visionSeq),
+                    queryBatchId(ctx.turnId), TuiBlockKind_Prose, TuiBlockStatus_None,
+                    0, null, "user", a.content ~ " (with image)", 0));
+            });
+        }
+
+        if (finalAnswerSeen) {
+            uiMsg.blockUpsert(makeBlockData(ctx.turnId, "answer", finalAnswerBatchId, TuiBlockKind_Answer,
+                    TuiBlockStatus_None, 0, null, null, finalAnswerBody, finalAnswerDurMs));
+            ctx.closedByAnswer = true;
+            uiMsg.turnUpsert(UiTurnData(ctx.turnId, TuiTurnState_Done, ctx.messageCount));
+        }
+    }
+
+    /// Stop (interrupt): the interrupted turn's state goes Interrupted and the
+    /// in-flight calls flip to Cancelled (never a fabricated Ok). A partial
+    /// answer stays - its Answer block is already upserted.
+    package void emitStopTyped() {
+        auto ctx = typedCtx_;
+        if (ctx is null)
+            return;
+        foreach (call; ctx.liveCalls)
+            uiMsg.blockUpsert(makeBlockData(call.turnId, call.id, call.batchId,
+                    TuiBlockKind_Tool, TuiBlockStatus_Cancelled,
+                    ctx.toolFlags.of(call.title), call.title, null, call.body, 0));
+        ctx.liveCalls = null;
+        uiMsg.turnUpsert(UiTurnData(ctx.turnId, TuiTurnState_Interrupted, ctx.messageCount));
+    }
+
+    /// One close for every run exit. A stop keeps its honest `Cancelled` flips;
+    /// any other exit leaves the calls' last real status and closes the turn
+    /// `Interrupted` - unless the step walk already closed it `Done` with the
+    /// Answer. The context stays alive: `/c` resumes this turn.
+    package void emitRunEndedTyped(bool stopped) {
+        auto ctx = typedCtx_;
+        if (ctx is null)
+            return;
+        if (stopped) {
+            emitStopTyped();
+            return;
+        }
+        if (ctx.closedByAnswer) {
+            // The turn closed: the context is spent. A later replay rebuilds
+            // the finished turn from the history, so it must not be filtered
+            // out as the live turn.
+            typedCtx_ = null;
+            return;
+        }
+        ctx.liveCalls = null;
+        uiMsg.turnUpsert(UiTurnData(ctx.turnId, TuiTurnState_Interrupted, ctx.messageCount));
+    }
+
+    /// /plan and /code: open a display-only turn in the main store.
+    package void openPipelineTurnTyped(string query) {
+        if (agent_ is null)
+            return; // one-shot CLI has no chat to allocate the turn from
+        savedTypedCtx_ = typedCtx_;
+        typedCtx_ = null;
+        agent_.chat.beginNewTurn();
+        this.emitTurnStartTyped(query);
+    }
+
+    /// /plan and /code: close the display-only turn explicitly. Done for a
+    /// completed run, Interrupted for a stopped one - NOT emitRunEndedTyped,
+    /// which would close a successful pipeline turn Interrupted (no Answer
+    /// block is ever emitted into a pipeline turn, so closedByAnswer is
+    /// always false there). The displaced live context (/c's interrupted
+    /// agent turn) comes back: the pipeline turn is spent either way.
+    package void closePipelineTurnTyped(bool stopped) {
+        auto ctx = typedCtx_;
+        typedCtx_ = savedTypedCtx_;
+        savedTypedCtx_ = null;
+        if (ctx is null)
+            return;
+        ctx.liveCalls = null;
+        uiMsg.turnUpsert(UiTurnData(ctx.turnId, stopped
+                ? TuiTurnState_Interrupted : TuiTurnState_Done, ctx.messageCount));
+    }
+
+    /// A compression progress notice as a Notice block. The body is the exact
+    /// text today's chatMessage line carries (the formatter prints it
+    /// verbatim), so console parity holds.
+    package void emitNoticeTyped(string notice) {
+        const turnId = agent_ !is null ? agent_.chat.currentTurnId() : 0;
+        noticeSeq_++;
+        uiMsg.blockUpsert(makeBlockData(turnId, "notice#" ~ text(noticeSeq_), queryBatchId(turnId),
+                TuiBlockKind_Notice, TuiBlockStatus_None, 0, null, null, notice, 0));
+    }
+    /// Compression re-emission: the typed store is rebuilt from the rewritten
+    /// history with ONE setTurns snapshot - removed turns cascade, no stale
+    /// group survives. Safe at the turn-start compression: the live turn's
+    /// upsert has not happened yet (the query echo is sent after doCompress),
+    /// so a snapshot cannot kill live state.
+    package void emitCompressionTyped() {
+        auto built = buildTypedTurns(agent_.chat.getMessages(), currentToolFlags());
+        uiMsg.setTurns(built.turns, built.blocks);
+        typedEmittedTurnIds_ = built.turns.map!(t => t.id).array;
+        noticeSeq_ = 0;
+        typedCtx_ = null;
+    }
+
+    /// The typed stream updater for the live turn (typed sibling of
+    /// makeStreamCallback). The updater resolves the live context per event:
+    /// one callback serves the whole process (installed at startup, replaced
+    /// only on a model switch), while every turn start installs a new context.
+    package IStreamCallback makeTypedStreamCallback() {
+        TypedEmitContext liveCtx() {
+            if (typedCtx_ is null) {
+                typedCtx_ = new TypedEmitContext;
+                typedCtx_.turnId = agent_.chat.currentTurnId();
+                typedCtx_.toolFlags = currentToolFlags();
+            }
+            return typedCtx_;
+        }
+
+        return new TypedStreamMessageUpdater(uiMsg, agent_.modelContextSize,
+                llmConf.activeModelDisplayName, &liveCtx);
     }
 
     /// Load the active session into the chat. The system prompt is NOT built
@@ -979,17 +1324,17 @@ struct AgentApp {
     /// Rebuild the system prompt for the active model: resolve its effective
     /// AgentsMd config, reprocess AGENTS.md, recompose, re-apply. Safe while an
     /// agent run is in flight: the rebuild is DEFERRED (pending flag), applied
-    /// at the next safe point after the run completes, so setSystemPrompt
-    /// never rewrites history[0] under a running loop.
+    /// at the next safe point after the run completes.
     ///
-    /// Reachability note: in production the guard below is DEFENSIVE ONLY.
-    /// Slash commands dispatch exclusively from runAgent's slash branch, which
-    /// runs between agent runs (the single-threaded AppAgentActor mailbox
-    /// handles one userQuery at a time), so /model can never execute while
-    /// runToCompletion is on the stack. The guard is exercised by tests that
-    /// set agentRunInFlight_ directly.
+    /// Reachability note: the guard below really fires for a rebuild requested
+    /// inside the run bracket - userQuery opens the bracket before runAgent and
+    /// slash dispatch happens inside it, so /model and /skills rebuilds defer to
+    /// runAgent's post-run safe point (consumed in the same runAgent call,
+    /// before any next model call). A rebuild requested outside any bracket
+    /// applies immediately. Tests exercise the guard by setting runInFlight
+    /// directly.
     package void rebuildSystemPrompt(bool forceRefresh = false) {
-        if (agentRunInFlight_) {
+        if (runInFlight) {
             agentMdRebuildPending_ = true;
             return;
         }
@@ -1050,30 +1395,14 @@ struct AgentDone {
     int code;
 }
 
-package bool isDisplayable(Chat.MessageT m, LlmConfig conf) {
-    return m.match!((Message a) {
-        return !a.role.among(Role.user, Role.system) || a.isUserQuery;
-    }, (ToolMessage a) { return true; }, (ToolResponse a) {
-        return !conf.isHiddenTool(a.toolName);
-    }, (VisionMessage a) { return true; });
-}
-
-package size_t displayableCount(Chat.MessageT[] msgs, LlmConfig conf) {
-    size_t n;
-    foreach (ref msg; msgs) {
-        if (isDisplayable(msg, conf))
-            n++;
-    }
-    return n;
-}
-
 class AppAgentActor : DropOwner {
     import my.actor;
     import llm.tui;
 
+    package AgentApp app;
+
     private {
         ActorRef self_;
-        AgentApp app;
         UserConfig uconf;
         System* sys;
         WeakAddress supervisor;
@@ -1167,6 +1496,9 @@ class AppAgentActor : DropOwner {
         app.setupSession();
         app.oneShotQuery = !app.conf_.prompt.empty;
         if (app.oneShotQuery) {
+            app.agentBusy();
+            scope (exit)
+                app.agentReady();
             app.runAgent(app.conf_.prompt);
             // explicit, before AgentDone (startExit -> finishExit)
             startExit(0, ExitReason.userShutdown);
@@ -1201,18 +1533,8 @@ class AppAgentActor : DropOwner {
         app.uiMsg = new UiMessenger(new TuiChannelSink(tui_));
         monitor(self_.address(), tui_);
         app.uiMsg.initHistory(app.agent_.getUserQueries.map!(a => a.content).array);
-        app.agent_.setStreamUpdate(app.makeStreamCallback);
-
-        // TODO: this same code is copy/pasted. Refactor it into a function
-        size_t pos = 0;
-        foreach (m; app.agent_.chat.getMessages()) {
-            if (isDisplayable(m, app.llmConf)) {
-                pos++;
-                app.processChatMessage(m, pos, printUser: true);
-            } else {
-                app.processChatMessage(m, 0, printUser: true);
-            }
-        }
+        app.emitReplayTyped();
+        app.agent_.setStreamUpdate(app.makeTypedStreamCallback);
 
         app.sendSessionList();
         app.sendRuntimeStatus(true);
@@ -1221,34 +1543,22 @@ class AppAgentActor : DropOwner {
     void userQuery(string s) {
         auto query = s.strip;
         if (!query.empty) {
-            app.uiMsg.busy();
-            // The snapshot that carries the running flag (task 24): `runInFlight` is the
-            // actor's own run state, so every send while `runAgent` is on the stack says
-            // "running" and no caller has to remember it. The end-of-run send below clears
-            // it for the same reason - one owner, two boundaries.
-            //
-            // Ordering: this snapshot is taken before `runAgent()` appends the user's
-            // message, so its `messageCount`/`preview` are the previous turn's. The flag is
-            // what it is for; the end-of-run snapshot carries the fresh counts. The
-            // alternative - a send inside `runAgent()` after the append - would be a second
-            // list send on the same path, which the single-send rule above guards.
-            app.runInFlight = true;
-            app.sendSessionList();
-            clearStopAgent();
-            app.sendRuntimeStatus(false);
-            final switch (app.runAgent(query)) {
-            case AgentStatus.active:
-                break;
-            case AgentStatus.terminate:
-                app.uiMsg.terminate();
-                break;
+            {
+                app.agentBusy();
+                scope (exit)
+                    app.agentReady();
+                app.sendSessionList();
+                clearStopAgent();
+                app.sendRuntimeStatus(false);
+                final switch (app.runAgent(query)) {
+                case AgentStatus.active:
+                    break;
+                case AgentStatus.terminate:
+                    app.uiMsg.terminate();
+                    break;
+                }
             }
-            app.uiMsg.ready();
-            app.runInFlight = false;
             app.sendSessionList();
-            // uiAgentReady only clears the busy flag (Thinking indicator,
-            // session-panel gating); without this call the status bar keeps
-            // the last "Busy" text, so set the ready text explicitly.
             app.sendRuntimeStatus(true);
         }
     }

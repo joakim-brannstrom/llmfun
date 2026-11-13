@@ -110,6 +110,11 @@ constexpr const char* kIdCopyAnswer = "actions.copyLastAnswer";
 constexpr const char* kIdStopRun = "actions.stopRun";
 constexpr const char* kIdQuit = "actions.quit";
 constexpr const char* kIdLoadEarlier = "actions.loadEarlier";
+/// The fold's escape hatch. The pins are absolute, so one row is
+/// what forgets them all - and the row is the action's only keyboard path: no
+/// chord, because a new one would collide with the terminal's own bytes
+/// (`doc/ui_keys.md`).
+constexpr const char* kIdCollapseAll = "actions.collapseAll";
 constexpr const char* kIdToggleRail = "actions.toggleRail";
 constexpr const char* kIdToggleInspector = "actions.toggleInspector";
 /// Focus mode (task 43). The grid's only way in: `F11` is a function key no terminal delivers and
@@ -165,6 +170,15 @@ bool groupIs(const PaletteItem& item, const char* group) {
 /// same table `views/blocks.cpp` draws from. So the answer test reads the kind *and* the word -
 /// a code-only answer is an answer, and a tool result that happens to be code is not.
 bool blockIsAnswerRole(const model::BlockDesc& block) {
+    // The batch's owner row is a `BlockKind::Assistant` row but it is not an
+    // answer: it is the response batch's header, and its text is the batch's
+    // content, which the walk reaches through the batch's content child (the
+    // child carries the body; `blockText()` floors the owner's copy to
+    // the same text). The rejection is the semantic ask; today the walk's acceptance
+    // already skips the body-less owner, so this is the semantic floor that
+    // holds if the acceptance ever loosens.
+    if (block.ownsBatch)
+        return false;
     if (block.kind == model::BlockKind::Answer || block.kind == model::BlockKind::Assistant)
         return true;
     return block.label == defaultBlockLabel(model::BlockKind::Answer) ||
@@ -185,13 +199,34 @@ bool blockIsAnswerRole(const model::BlockDesc& block) {
 bool lastAnswerBlock(const TuiState& state, std::size_t& group, std::size_t& block) {
     const std::size_t groups = state.threadAdapter.groupCount();
     for (std::size_t k = groups; k > 0; --k) {
-        const std::size_t blocks = state.threadAdapter.blockCount(k - 1);
-        for (std::size_t b = blocks; b > 0; --b) {
-            const model::BlockDesc desc = state.threadAdapter.blockAt(k - 1, b - 1);
+        // The turn-level rows first: the ANSWER closes the turn (it is the
+        // group's last row), so newest-first scans it before the work rows. The
+        // query sentinel is a User row the role test skips - addressed so the
+        // walk covers every row the view draws, the way the turn owns them.
+        const std::size_t sentinels[] = {store::kAnswerRow, store::kQueryRow};
+        for (const std::size_t sentinel : sentinels) {
+            const model::BlockDesc desc = state.threadAdapter.blockAt(k - 1, sentinel);
             if (!blockIsAnswerRole(desc))
                 continue;
             // A row with no body is not copyable: the streamed row is the exception, because
             // its body is the text being written (an empty stream is an answer still arriving).
+            if (desc.hasBody || desc.streaming) {
+                group = k - 1;
+                block = sentinel;
+                return true;
+            }
+        }
+        const std::size_t blocks = state.threadAdapter.blockCount(k - 1);
+        for (std::size_t b = blocks; b > 0; --b) {
+            const model::BlockDesc desc = state.threadAdapter.blockAt(k - 1, b - 1);
+            // The batch's content is the copy target with no ANSWER row:
+            // the walk finds the batch's surviving content child - the owner
+            // carries no body of its own (the acceptance skips it), and its
+            // copy floors to the same text through `blockText()`. A
+            // calls-only batch leaves no acceptable row, so the row stays
+            // disabled - the owner cannot be talked into being the answer.
+            if (!blockIsAnswerRole(desc))
+                continue;
             if (desc.hasBody || desc.streaming) {
                 group = k - 1;
                 block = b - 1;
@@ -209,19 +244,22 @@ bool hasAnswerToCopy(const TuiState& state) {
     return lastAnswerBlock(state, group, block);
 }
 
-/// A cheap stamp of the thread's *shape*: the group count, the newest group's id and its block
-/// count. `groupAt()` and `blockCount()` are probes (no store walk, no block descriptors), which is
-/// what makes this affordable on the per-frame flag refresh.
+/// A cheap stamp of the thread's *shape*: the group count, the newest group's id, its block
+/// count and whether its Answer row exists. `groupAt()` and `blockCount()` are probes (no store
+/// walk, no block descriptors), which is what makes this affordable on the per-frame flag refresh.
 ///
 /// The id is in the stamp because an ended stream and its answer can leave both counts unchanged
 /// (one group replaces another, one block replaces one), and that transition is exactly when the
-/// answer appears.
+/// answer appears. The Answer flag is in the stamp for the same reason one level down: the
+/// query-first anatomy hangs the answer on the `kAnswerRow` sentinel, which moves no count at
+/// all - the flag is the only thing that moves when the answer arrives on a finished turn.
 std::size_t threadShape(const TuiState& state) {
     const std::size_t groups = state.threadAdapter.groupCount();
     std::size_t stamp = groups;
     if (groups > 0) {
         stamp = stamp * 1000003u + state.threadAdapter.groupAt(groups - 1).id;
         stamp = stamp * 1000003u + state.threadAdapter.blockCount(groups - 1);
+        stamp = stamp * 1000003u + (state.threadAdapter.groupAt(groups - 1).hasAnswer ? 1u : 0u);
     }
     return stamp;
 }
@@ -539,6 +577,14 @@ bool performRow(const PaletteItem& item, PaletteState& p, TuiState& state) {
         // three entry points).
         requestEarlierPage(state.ui);
         return true;
+    case model::Action::CollapseAll:
+        // The fold's escape hatch: the pins are absolute, so one action
+        // forgets them all - the same call the keymap's dispatch makes, through the adapter
+        // that owns the maps. The palette row is the action's only keyboard path (a new
+        // chord would collide with the terminal's own bytes), and clearing is right in every
+        // state: nothing here can disable a fold the user asked to restore.
+        state.threadAdapter.collapseAll();
+        return true;
     case model::Action::ToggleInspector:
         // One rule, one home: the same `model::toggleInspector()` the `Ctrl+O` row performs, with
         // the same *drawn* state as its input (`state.inspector.open`) - so the palette and the
@@ -792,6 +838,15 @@ std::vector<PaletteItem> paletteActions(const TuiState& state, const std::string
     items.push_back({kIdLoadEarlier, kGroupActions, "Load earlier",
                      "Show the groups older than the window (PgUp)", threadHiddenGroups(state) != 0,
                      model::Action::LoadEarlier});
+    // The fold's escape hatch: the pins are absolute, so a user
+    // who pinned twenty rows needs one action that forgets them all. Always
+    // enabled: clearing an empty set of pins is the same no-op the fold asks for,
+    // and there is no state where forgetting pins is wrong. The palette is the
+    // action's keyboard path (`Ctrl+K`, type, Enter) - no chord, because a new
+    // one would collide with the terminal's own bytes (`doc/ui_keys.md`).
+    items.push_back({kIdCollapseAll, kGroupActions, "Collapse all",
+                     "Fold every group back onto its mode's default", true,
+                     model::Action::CollapseAll});
     items.push_back(
         {kIdQuit, kGroupActions, "Quit", "Close the UI (Ctrl+Q)", true, model::Action::Quit});
     // The Raw Log (task 33). Its own group, because the design keeps the developer surface out

@@ -46,6 +46,8 @@
 #include "model/ui_state.h"
 #include "tui.h"
 #include "tui_backend.h"
+
+#include "test/typed_seed.h" // typed turn/block seeding
 #include "ui/layout.h"
 #include "ui/metrics.h"
 #include "views/palette.h"
@@ -64,6 +66,10 @@
 namespace {
 
 using namespace llmfun::tui;
+// The C surface's handle type shares its name with the C++ state: the using-
+// declaration pins the unqualified `TuiState` to the C++ one (a using-directive
+// would leave it ambiguous with the ABI's `::TuiState`).
+using llmfun::tui::TuiState;
 
 int g_failures = 0;
 int g_frames = 0;
@@ -455,20 +461,13 @@ SessionEntry mkSession(const char* id, const char* title, const char* preview, i
 }
 
 void seedThread() {
-    g_state.chat.outputLines.clear();
-    g_state.chat.outputLineOpen.clear();
-    g_state.chat.expansionDefaultThroughId = 0;
-    g_state.chat.outputLineNextId = 1;
-    // A stream from a previous scenario is state too: it is the *newest* answer as far as the
-    // copy row is concerned, so a scenario that starts "with no answer" has to lose it.
-    g_state.chat.hasStreamMsg = false;
-    g_state.chat.streamMsg = ChatMessage{};
-    g_state.chat.outputLines.push_back(ChatMessage{"[1] show me the palette", "show me the palette",
-                                                   "", ChatMessageType::User,
-                                                   g_state.chat.outputLineNextId++});
-    g_state.chat.outputLines.push_back(ChatMessage{"[2] the palette is open", "final answer body",
-                                                   "", ChatMessageType::FinalAnswer,
-                                                   g_state.chat.outputLineNextId++});
+    // The typed store is the thread now: a clear wipes the turns, then one turn
+    // carries the query and the answer the copy row reads. The query row renders
+    // with no number prefix.
+    tuiClearOutput(g_state);
+    typed_seed::Seeder seed{&g_state};
+    seed.add(typed_seed::Seeder::Msg::User, "show me the palette");
+    seed.add(typed_seed::Seeder::Msg::FinalAnswer, "final answer body");
 }
 
 /// Fresh state for one scenario: three sessions, one answer, composer empty.
@@ -521,77 +520,78 @@ std::size_t threadHidden(const TuiState& state) {
         .hidden;
 }
 
-/// Replace the thread with `count` user groups (one group each) and let the frame settle.
+/// Replace the thread with `count` user turns (one turn each) and let the frame settle.
 void seedGroups(int count) {
-    g_state.chat.outputLines.clear();
-    g_state.chat.outputLineOpen.clear();
-    g_state.chat.openWorkGroups.clear();
-    g_state.chat.expansionDefaultThroughId = 0;
-    g_state.chat.outputLineNextId = 1;
-    g_state.chat.hasStreamMsg = false;
-    g_state.chat.streamMsg = ChatMessage{};
+    tuiClearOutput(g_state);
+    typed_seed::Seeder seed{&g_state};
     for (int i = 0; i < count; ++i) {
         const std::string text = "question " + std::to_string(i);
-        tuiAddOutputLine(g_state,
-                         ChatMessage{"[" + std::to_string(i) + "] " + text, text, "",
-                                     ChatMessageType::User, g_state.chat.outputLineNextId++});
+        seed.add(typed_seed::Seeder::Msg::User, text);
     }
     idle(2);
 }
 
-/// A live answer: what a stream looks like to the adapter (the store's flag and the message).
+/// A live answer: what a stream looks like on the typed store - a Running turn
+/// whose content block is the answer being written (the store merges the
+/// per-tick upserts in place, so one call is one live edge).
 void startStream() {
-    g_state.chat.streamMsg =
-        ChatMessage{"", "the answer is arriving", "", ChatMessageType::Assistant, 0};
-    g_state.chat.hasStreamMsg = true;
+    // A turn id no stored turn uses: the live run's turn is a new one, never a
+    // merge into a turn a previous seed made (ids are never reused).
+    typed_seed::Seeder seed{&g_state, 10000};
+    seed.runStart("q");
+    seed.updateStream("the answer is arriving");
     idle(2);
 }
 
-// S17: the `Load earlier` row pages the *stored* groups (task 38, review finding 1).
+// The `Load earlier` row pages the *stored* groups.
 //
 // The thread draws the live answer after the bounded window and budgets for
 // `storedGroupCount()`, so the palette's row has to use the same number. With `groupCount()` a
 // live answer counted as a pageable group: exactly one window of stored groups (nothing hidden)
 // plus a stream made the row enabled and pressing it paged nothing.
 void scenarioLoadEarlierWindow() {
-    g_phase = "S17 load earlier window";
+    g_phase = "load earlier window";
     resetClean();
     // The thread only pages what the layout left out of the window (`threadHiddenGroups()`
     // answers what is hidden, and the palette's row reads the same number).
     idle(2);
     const int window = std::max(1, g_state.ui.thread.pageGroups);
-    check(g_state.threadAdapter.groupCount() == 2, "S17: the seeded thread is two groups");
+    // The typed thread is one turn: the query and the answer are one group.
+    check(g_state.threadAdapter.groupCount() == 1, "the seeded thread is one group");
 
     // Exactly one window of stored groups: nothing older to show.
     seedGroups(window);
     openPalette();
     const views::PaletteItem* row = paletteItem("actions.loadEarlier");
-    check(row != nullptr, "S17: the palette has a `Load earlier` row");
-    check(window == g_state.ui.thread.pageGroups, "S17: the window is stable across the reseed");
-    check(threadHidden(g_state) == 0, "S17: one window of groups hides nothing");
+    check(row != nullptr, "the palette has a `Load earlier` row");
+    check(window == g_state.ui.thread.pageGroups, "the window is stable across the reseed");
+    check(threadHidden(g_state) == 0, "one window of groups hides nothing");
 
     startStream();
     check(g_state.threadAdapter.groupCount() == static_cast<std::size_t>(window) + 1,
-          "S17: the live answer is a group of its own");
+          "the live answer is a group of its own");
+    // The live turn is the stream, and
+    // the window counts only the stored groups - the live answer is never a
+    // pageable group, so streaming can still not enable the row by itself.
     check(g_state.threadAdapter.storedGroupCount() == static_cast<std::size_t>(window),
-          "S17: but it is not a stored group");
-    check(threadHidden(g_state) == 0, "S17: and the thread still hides nothing");
+          "and the window counts only the stored groups");
+    check(threadHidden(g_state) == 0, "so the live answer hides nothing");
     row = paletteItem("actions.loadEarlier");
-    check(row != nullptr && !row->enabled,
-          "S17: so the row is disabled while an answer streams over a full window");
+    check(row != nullptr && !row->enabled, "so the row stays disabled while the answer streams");
 
-    // More than a window of stored groups, still streaming: the number is the stored groups'.
+    // More than a window of stored groups, still streaming: the count is the
+    // stored groups', and the live turn is none of them.
     seedGroups(window + 5);
     startStream();
     const std::size_t stored = g_state.threadAdapter.storedGroupCount();
     const std::size_t hidden = threadHidden(g_state);
     check(stored == static_cast<std::size_t>(window) + 5,
-          "S17: five stored groups more than the window (" + std::to_string(stored) + ")");
-    check(hidden == 5,
-          "S17: the thread hides exactly those five (got " + std::to_string(hidden) + ")");
+          "five stored groups more than the window, the live one aside (" + std::to_string(stored) +
+              ")");
+    check(hidden == 5, "the thread hides exactly those five (got " + std::to_string(hidden) + ")");
     row = paletteItem("actions.loadEarlier");
     check(row != nullptr && row->enabled,
-          "S17: and the row is enabled, matching the thread's own window (stored " +
+          "and the row is enabled, matching the thread's own window (stored " +
               std::to_string(stored) + ", hidden " + std::to_string(hidden) + ", open " +
               std::to_string(g_state.palette.open ? 1 : 0) + ", pageGroups " +
               std::to_string(g_state.ui.thread.pageGroups) + ", enabled " +
@@ -635,41 +635,41 @@ int queuedActions() { return static_cast<int>(g_state.sessionPanel.actions.size(
 // Scenarios
 // ---------------------------------------------------------------------------
 
-// S1: open/close, the overlay's contents, and "it never moves what is under it".
+// open/close, the overlay's contents, and "it never moves what is under it".
 void scenarioOpenClose() {
-    g_phase = "S1 open/close";
+    g_phase = "open/close";
     resetClean();
     const Grid before = grid();
     openPalette();
 
     const Grid open = grid();
-    check(paletteWindow() != nullptr, "S1: the overlay window is on screen");
+    check(paletteWindow() != nullptr, "the overlay window is on screen");
     const CellRect rect = paletteRect();
-    checkGrid(findRowIn(open, "Search", rect) >= 0, "S1: the overlay is titled Search");
+    checkGrid(findRowIn(open, "Search", rect) >= 0, "the overlay is titled Search");
     // The first five rows of the ACTIONS group (the table's confidence order): the viewport shows
     // five at 80x24, and the rows below it are reachable with the selection chords or by typing.
     for (const char* label : {"New session", "Focus composer", "Toggle rail", "Toggle inspector"})
         checkGrid(findRowIn(open, label, rect) >= 0,
-                  std::string("S1: action row '") + label + "' is drawn");
-    checkGrid(findRowIn(open, "ALL 24", rect) >= 0,
-              "S1: the title row counts every row of every section (13 actions + 7 command lines "
+                  std::string("action row '") + label + "' is drawn");
+    checkGrid(findRowIn(open, "ALL 25", rect) >= 0,
+              "the title row counts every row of every section (14 actions + 7 command lines "
               "+ the Raw Log + 3 sessions)");
-    checkGrid(findRowIn(open, "Esc close", rect) >= 0, "S1: the hint row lists the keys");
-    checkGrid(countResultRows(open, rect) == 5, "S1: the viewport shows 5 result rows at 80x24");
+    checkGrid(findRowIn(open, "Esc close", rect) >= 0, "the hint row lists the keys");
+    checkGrid(countResultRows(open, rect) == 5, "the viewport shows 5 result rows at 80x24");
 
-    check(rect.x0 == 8 && rect.x1 == 72, "S1: the overlay is 80% of the 80 columns, centred");
-    checkEqualOutside(before, open, rect, "S1: no cell outside the overlay moved when it opened");
-    check(equalInside(before, open, rect), "S1: the overlay painted over the thread");
+    check(rect.x0 == 8 && rect.x1 == 72, "the overlay is 80% of the 80 columns, centred");
+    checkEqualOutside(before, open, rect, "no cell outside the overlay moved when it opened");
+    check(equalInside(before, open, rect), "the overlay painted over the thread");
 
     pressKey(ImGuiKey_Escape);
     idle(2);
-    check(!g_state.palette.open, "S1: Esc closes the overlay");
-    checkGrid(equalGrids(before, grid()), "S1: closing restores the grid byte for byte");
+    check(!g_state.palette.open, "Esc closes the overlay");
+    checkGrid(equalGrids(before, grid()), "closing restores the grid byte for byte");
 }
 
-// S2: bounded rendering - viewport + one row of overscan, whatever the matches.
+// bounded rendering - viewport + one row of overscan, whatever the matches.
 void scenarioBoundedRows() {
-    g_phase = "S2 bounded rows";
+    g_phase = "bounded rows";
     resetClean();
     std::vector<SessionEntry> many;
     for (int i = 0; i < 13; ++i) {
@@ -683,83 +683,81 @@ void scenarioBoundedRows() {
     openPalette();
 
     const CellRect rect = paletteRect();
-    checkGrid(countResultRows(grid(), rect) == 5, "S2: 25 matches still draw 5 rows at 80x24");
+    checkGrid(countResultRows(grid(), rect) == 5, "25 matches still draw 5 rows at 80x24");
     ImGuiWindow* list = paletteListWindow();
-    check(list != nullptr, "S2: the result list is its own child window");
+    check(list != nullptr, "the result list is its own child window");
     if (list != nullptr) {
         // One cell per row in the grid: 5 visible + the 1-row overscan.
         check(list->ContentSize.y >= 5.0f && list->ContentSize.y <= 6.0f,
-              "S2: the list draws the viewport plus one row of overscan (" +
+              "the list draws the viewport plus one row of overscan (" +
                   std::to_string(list->ContentSize.y) + " rows for 25 matches)");
     }
-    checkGrid(findRowIn(grid(), "New session", rect) >= 0, "S2: the first row is the first action");
-    checkGrid(findRowIn(grid(), "Many session 00", rect) < 0, "S2: the 6th match is not on screen");
+    checkGrid(findRowIn(grid(), "New session", rect) >= 0, "the first row is the first action");
+    checkGrid(findRowIn(grid(), "Many session 00", rect) < 0, "the 6th match is not on screen");
 
     // Walk the selection to a session row that started below the fold. The row is named, not
     // counted: the table's length is not the contract, the window's bound is.
     selectRowById("many00");
-    checkGrid(findRowIn(grid(), "New session", rect) < 0, "S2: the list scrolled - row 0 is gone");
-    checkGrid(findRowIn(grid(), "Many session 00", rect) >= 0,
-              "S2: the selection's row is visible");
-    checkGrid(countResultRows(grid(), rect) == 5, "S2: the window still shows 5 rows");
+    checkGrid(findRowIn(grid(), "New session", rect) < 0, "the list scrolled - row 0 is gone");
+    checkGrid(findRowIn(grid(), "Many session 00", rect) >= 0, "the selection's row is visible");
+    checkGrid(countResultRows(grid(), rect) == 5, "the window still shows 5 rows");
     // The fill must follow the selection, not the drawn slot (review F1: the
     // first revision highlighted `selected - firstVisible`, i.e. the row after
     // the one Enter runs once the list has scrolled - which hid it entirely at
     // the bottom of the window).
-    checkSelectionHighlight(rect, "S2: the highlight follows the selection once scrolled");
+    checkSelectionHighlight(rect, "the highlight follows the selection once scrolled");
     const int sessionRow = g_state.palette.selected;
     pressCtrl(ImGuiKey_P);
-    check(g_state.palette.selected == sessionRow - 1, "S2: Ctrl+P moves the selection back");
-    checkSelectionHighlight(rect, "S2: the highlight follows the selection after Ctrl+P");
+    check(g_state.palette.selected == sessionRow - 1, "Ctrl+P moves the selection back");
+    checkSelectionHighlight(rect, "the highlight follows the selection after Ctrl+P");
     check(g_state.palette.selected >= g_state.palette.firstVisible &&
               g_state.palette.selected < g_state.palette.firstVisible + 5,
-          "S2: the selection always stays inside the visible window");
+          "the selection always stays inside the visible window");
 }
 
-// S3: fuzzy filtering through session_fuzzy.h, with the matched bytes highlighted.
+// fuzzy filtering through session_fuzzy.h, with the matched bytes highlighted.
 void scenarioFilter() {
-    g_phase = "S3 filter";
+    g_phase = "filter";
     resetClean();
     openPalette();
     typeText("a");
-    check(paletteQuery() == "a", "S3: 'a' reaches the palette's query field");
+    check(paletteQuery() == "a", "'a' reaches the palette's query field");
     typeText("l");
-    check(paletteQuery() == "al", "S3: 'l' reaches the palette's query field too");
+    check(paletteQuery() == "al", "'l' reaches the palette's query field too");
     typeText("p");
-    check(paletteQuery() == "alp", "S3: 'p' reaches the palette's query field too");
-    check(input().empty(), "S3: nothing was typed into the composer behind the overlay");
+    check(paletteQuery() == "alp", "'p' reaches the palette's query field too");
+    check(input().empty(), "nothing was typed into the composer behind the overlay");
 
     const Grid g = grid();
     const CellRect rect = paletteRect();
-    checkGrid(findRowIn(g, "Alpha refactor", rect) >= 0,
-              "S3: the session matching 'alp' is listed");
-    checkGrid(findRowIn(g, "Beta deploy", rect) < 0, "S3: a non-matching session is filtered out");
-    checkGrid(findRowIn(g, "New session", rect) < 0, "S3: a non-matching action is filtered out");
-    checkGrid(findRowIn(g, "Send \"alp\"", rect) >= 0, "S3: the free-text row is offered last");
-    checkGrid(countResultRows(g, rect) == 2, "S3: two rows match (the session and the ASK row)");
+    checkGrid(findRowIn(g, "Alpha refactor", rect) >= 0, "the session matching 'alp' is listed");
+    checkGrid(findRowIn(g, "Beta deploy", rect) < 0, "a non-matching session is filtered out");
+    checkGrid(findRowIn(g, "New session", rect) < 0, "a non-matching action is filtered out");
+    checkGrid(findRowIn(g, "Send \"alp\"", rect) >= 0, "the free-text row is offered last");
+    checkGrid(countResultRows(g, rect) == 2, "two rows match (the session and the ASK row)");
 
     // The highlight: the matched word is over-drawn in the filter's match colour,
     // so its cells differ from the same label's cells in a non-matching row.
     const int ySession = findRowIn(g, "Alpha refactor", rect);
     const int yAsk = findRowIn(g, "Send \"alp\"", rect);
-    check(ySession >= 0 && yAsk >= 0, "S3: both rows are drawn");
+    check(ySession >= 0 && yAsk >= 0, "both rows are drawn");
     if (ySession >= 0 && yAsk >= 0) {
         const int xSession = rowText(g, ySession).find("Alpha");
         const int xAsk = rowText(g, yAsk).find("Send");
-        check(xSession >= 0 && xAsk >= 0, "S3: the labels start where the text says");
+        check(xSession >= 0 && xAsk >= 0, "the labels start where the text says");
         if (xSession >= 0 && xAsk >= 0) {
             const unsigned char matched = g_screen.data[ySession * g.nx + xSession].fg;
             const unsigned char plain = g_screen.data[yAsk * g.nx + xAsk].fg;
-            check(matched != plain, "S3: the matched bytes are highlighted (fg differs)");
+            check(matched != plain, "the matched bytes are highlighted (fg differs)");
         }
     }
 
     // Ranking puts the ASK row last whatever its score.
-    check(g_state.palette.visible.size() == 2, "S3: the ranked view holds the two matches");
+    check(g_state.palette.visible.size() == 2, "the ranked view holds the two matches");
     if (g_state.palette.visible.size() == 2) {
         const views::PaletteItem& last =
             g_state.palette.items[static_cast<std::size_t>(g_state.palette.visible[1])];
-        check(std::strcmp(last.id, "ask.freeText") == 0, "S3: the free-text row is ranked last");
+        check(std::strcmp(last.id, "ask.freeText") == 0, "the free-text row is ranked last");
     }
 
     // The same matcher over the command lines, from a fresh open: `/co` narrows to the commands
@@ -768,10 +766,10 @@ void scenarioFilter() {
     idle(1);
     openPalette();
     typeText("/co");
-    check(paletteQuery() == "/co", "S3: the command query reached the field");
+    check(paletteQuery() == "/co", "the command query reached the field");
     check(visibleRowById("commands.continue") >= 0 && visibleRowById("commands.compact") >= 0,
-          "S3: the command lines matched by '/co' are listed");
-    check(visibleRowById("actions.quit") < 0, "S3: a non-matching action is filtered out");
+          "the command lines matched by '/co' are listed");
+    check(visibleRowById("actions.quit") < 0, "a non-matching action is filtered out");
     const int lastRow = static_cast<int>(g_state.palette.visible.size()) - 1;
     check(lastRow >= 0 &&
               std::strcmp(g_state.palette
@@ -779,12 +777,12 @@ void scenarioFilter() {
                                   g_state.palette.visible[static_cast<std::size_t>(lastRow)])]
                               .id,
                           "ask.freeText") == 0,
-          "S3: the free-text row follows the commands (last)");
+          "the free-text row follows the commands (last)");
     pressKey(ImGuiKey_Escape);
     idle(1);
 }
 
-// S11: the registry. Every row has a handler, every state-changing action has a row, and every
+// the registry. Every row has a handler, every state-changing action has a row, and every
 // action of the model's registry has a decided entry point - the three halves of D-PALETTE that a
 // table can be wrong about (a dead entry, a missing entry, an action nobody can reach).
 
@@ -819,14 +817,14 @@ void resetRowEffects() {
 }
 
 void scenarioRegistry() {
-    g_phase = "S11 registry";
+    g_phase = "registry";
     resetClean();
     idle(2);
 
     // 1. One registry row per action, with a name and a decided reach.
     const int actionCount = static_cast<int>(model::Action::Count);
     check(static_cast<int>(model::allActions().count) == actionCount - 1,
-          "S11: the action registry has one row per action (" +
+          "the action registry has one row per action (" +
               std::to_string(model::allActions().count) + " for " +
               std::to_string(actionCount - 1) + ")");
     for (int i = 1; i < actionCount; ++i) {
@@ -834,7 +832,7 @@ void scenarioRegistry() {
         const model::ActionInfo* info = model::actionInfo(action);
         check(info != nullptr && info->action == action && info->name != nullptr &&
                   info->name[0] != '\0',
-              std::string("S11: action '") + model::actionName(action) + "' is in the registry");
+              std::string("action '") + model::actionName(action) + "' is in the registry");
     }
 
     // 2. A "Palette" reach claim is a row; a "Chord" reach claim is a binding; an "Esc step" is
@@ -849,12 +847,12 @@ void scenarioRegistry() {
             bool row = false;
             for (const views::PaletteItem& item : g_state.palette.items)
                 row = row || item.action == info.action;
-            check(row, "S11: the palette lists '" + name + "'");
+            check(row, "the palette lists '" + name + "'");
         } else if (info.reach == model::ActionReach::Chord) {
             bool bound = false;
             for (const model::Binding& binding : model::defaultKeymap())
                 bound = bound || binding.action == info.action;
-            check(bound, "S11: '" + name + "' is a chord the table binds");
+            check(bound, "'" + name + "' is a chord the table binds");
         } else {
             bool step = false;
             for (const bool overlay : {false, true})
@@ -863,7 +861,7 @@ void scenarioRegistry() {
                         for (const bool focus : {false, true})
                             step = step || model::resolveEscape({overlay, run, input, focus}) ==
                                                info.action;
-            check(step, "S11: '" + name + "' is a step of the Esc chain");
+            check(step, "'" + name + "' is a step of the Esc chain");
         }
     }
 
@@ -884,12 +882,12 @@ void scenarioRegistry() {
             const bool ok = views::palettePerformRow(item, g_state.palette, g_state);
             handled += ok ? 1 : 0;
             if (!ok)
-                check(false, std::string("S11: row '") + item.id + "' has no handler");
+                check(false, std::string("row '") + item.id + "' has no handler");
             // Undo what a row did, so the next row starts from the same state.
             resetRowEffects();
         }
         check(enabled > 0 && handled == enabled,
-              "S11: every enabled row answered a handler (" + std::to_string(handled) + "/" +
+              "every enabled row answered a handler (" + std::to_string(handled) + "/" +
                   std::to_string(enabled) + (running ? ", run active)" : ", idle)"));
         g_state.palette = views::PaletteState{};
         g_state.readyStatus = true;
@@ -898,65 +896,65 @@ void scenarioRegistry() {
     idle(2);
 }
 
-// S4: Tab / Shift+Tab cycle the group filter.
+// Tab / Shift+Tab cycle the group filter.
 void scenarioGroups() {
-    g_phase = "S4 groups";
+    g_phase = "groups";
     resetClean();
     openPalette();
     CellRect rect = paletteRect();
-    checkGrid(findRowIn(grid(), "ALL 24", rect) >= 0,
-              "S4: the title row starts on ALL with every row (13 actions + 7 commands + raw log + "
+    checkGrid(findRowIn(grid(), "ALL 25", rect) >= 0,
+              "the title row starts on ALL with every row (14 actions + 7 commands + raw log + "
               "3 sessions)");
 
     pressKey(ImGuiKey_Tab);
-    check(g_state.palette.groupIndex == 1, "S4: Tab moved to the ACTIONS group");
+    check(g_state.palette.groupIndex == 1, "Tab moved to the ACTIONS group");
     rect = paletteRect();
-    checkGrid(findRowIn(grid(), "ACTIONS 13", rect) >= 0, "S4: the title row shows ACTIONS 13");
-    checkGrid(findRowIn(grid(), "Alpha refactor", rect) < 0, "S4: session rows are filtered out");
+    checkGrid(findRowIn(grid(), "ACTIONS 14", rect) >= 0, "the title row shows ACTIONS 14");
+    checkGrid(findRowIn(grid(), "Alpha refactor", rect) < 0, "session rows are filtered out");
 
     pressKey(ImGuiKey_Tab);
-    check(g_state.palette.groupIndex == 2, "S4: Tab moved to the SESSIONS group");
+    check(g_state.palette.groupIndex == 2, "Tab moved to the SESSIONS group");
     rect = paletteRect();
-    checkGrid(findRowIn(grid(), "SESSIONS 3", rect) >= 0, "S4: the title row shows SESSIONS 3");
-    checkGrid(findRowIn(grid(), "New session", rect) < 0, "S4: action rows are filtered out");
-    checkGrid(findRowIn(grid(), "Alpha refactor", rect) >= 0, "S4: the sessions are listed");
+    checkGrid(findRowIn(grid(), "SESSIONS 3", rect) >= 0, "the title row shows SESSIONS 3");
+    checkGrid(findRowIn(grid(), "New session", rect) < 0, "action rows are filtered out");
+    checkGrid(findRowIn(grid(), "Alpha refactor", rect) >= 0, "the sessions are listed");
 
     pressKey(ImGuiKey_Tab);
-    check(g_state.palette.groupIndex == 3, "S4: Tab moved to the COMMANDS group");
+    check(g_state.palette.groupIndex == 3, "Tab moved to the COMMANDS group");
     rect = paletteRect();
-    checkGrid(findRowIn(grid(), "COMMANDS 7", rect) >= 0, "S4: the title row shows COMMANDS 7");
-    checkGrid(findRowIn(grid(), "/continue", rect) >= 0, "S4: the command lines are listed");
-    checkGrid(findRowIn(grid(), "Alpha refactor", rect) < 0, "S4: no session rows here");
+    checkGrid(findRowIn(grid(), "COMMANDS 7", rect) >= 0, "the title row shows COMMANDS 7");
+    checkGrid(findRowIn(grid(), "/continue", rect) >= 0, "the command lines are listed");
+    checkGrid(findRowIn(grid(), "Alpha refactor", rect) < 0, "no session rows here");
 
     pressKey(ImGuiKey_Tab);
-    check(g_state.palette.groupIndex == 4, "S4: Tab moved to the DEVELOPER group");
+    check(g_state.palette.groupIndex == 4, "Tab moved to the DEVELOPER group");
     rect = paletteRect();
-    checkGrid(findRowIn(grid(), "DEVELOPER 1", rect) >= 0, "S4: the title row shows DEVELOPER 1");
+    checkGrid(findRowIn(grid(), "DEVELOPER 1", rect) >= 0, "the title row shows DEVELOPER 1");
     checkGrid(findRowIn(grid(), "Toggle inspector", rect) < 0,
-              "S4: the developer group holds no action rows");
+              "the developer group holds no action rows");
 
     // ASK has no rows without a query, so the cycle wraps from DEVELOPER to ALL.
     pressKey(ImGuiKey_Tab);
-    check(g_state.palette.groupIndex == 0, "S4: the cycle wraps to ALL after the last group");
+    check(g_state.palette.groupIndex == 0, "the cycle wraps to ALL after the last group");
     rect = paletteRect();
-    checkGrid(findRowIn(grid(), "ALL 24", rect) >= 0, "S4: the title row is back on ALL");
+    checkGrid(findRowIn(grid(), "ALL 25", rect) >= 0, "the title row is back on ALL");
 
     pressShiftTab();
-    check(g_state.palette.groupIndex == 4, "S4: Shift+Tab steps back to DEVELOPER");
+    check(g_state.palette.groupIndex == 4, "Shift+Tab steps back to DEVELOPER");
     rect = paletteRect();
-    checkGrid(findRowIn(grid(), "DEVELOPER 1", rect) >= 0, "S4: the title row follows Shift+Tab");
+    checkGrid(findRowIn(grid(), "DEVELOPER 1", rect) >= 0, "the title row follows Shift+Tab");
     pressShiftTab();
-    check(g_state.palette.groupIndex == 3, "S4: and once more to COMMANDS");
+    check(g_state.palette.groupIndex == 3, "and once more to COMMANDS");
     rect = paletteRect();
-    checkGrid(findRowIn(grid(), "COMMANDS 7", rect) >= 0, "S4: the title row follows Shift+Tab");
+    checkGrid(findRowIn(grid(), "COMMANDS 7", rect) >= 0, "the title row follows Shift+Tab");
     pressShiftTab();
-    check(g_state.palette.groupIndex == 2, "S4: and once more to SESSIONS");
+    check(g_state.palette.groupIndex == 2, "and once more to SESSIONS");
 }
 
-// S5: every row does what it says. Quit included - the flag is asserted and then
+// every row does what it says. Quit included - the flag is asserted and then
 // cleared, so the harness itself never stops.
 void scenarioActivate() {
-    g_phase = "S5 activate new session";
+    g_phase = "activate new session";
     resetClean();
     openPalette();
     pressKey(ImGuiKey_Enter);
@@ -966,7 +964,7 @@ void scenarioActivate() {
           "S5a: 'New session' queues one New action");
     g_state.sessionPanel.actions.clear();
 
-    g_phase = "S5 activate focus composer";
+    g_phase = "activate focus composer";
     resetClean();
     openPalette();
     selectRowById("actions.focusComposer");
@@ -976,7 +974,7 @@ void scenarioActivate() {
     check(input() == "q", "S5b: 'Focus composer' returns the keyboard to the composer");
     check(paletteQuery().empty(), "S5b: the palette's own field kept nothing");
 
-    g_phase = "S5 activate copy answer";
+    g_phase = "activate copy answer";
     resetClean();
     openPalette();
     selectRowById("actions.copyLastAnswer");
@@ -984,7 +982,7 @@ void scenarioActivate() {
     check(g_clipboard == "final answer body",
           "S5c: 'Copy last answer' copies the newest answer (got '" + g_clipboard + "')");
 
-    g_phase = "S5 activate stop run";
+    g_phase = "activate stop run";
     resetClean();
     g_state.readyStatus = false; // a run is active
     idle(1);
@@ -995,7 +993,7 @@ void scenarioActivate() {
     check(g_state.cancelRequested, "S5d: the Stopping latch is set for the composer");
     g_state.cancelRequested = false;
 
-    g_phase = "S5 activate session switch";
+    g_phase = "activate session switch";
     resetClean();
     openPalette();
     typeText("beta");
@@ -1007,7 +1005,7 @@ void scenarioActivate() {
     check(selectQueued, "S5e: a SESSIONS row queues Select with that session's id");
     g_state.sessionPanel.actions.clear();
 
-    g_phase = "S5 activate session switch while busy";
+    g_phase = "activate session switch while busy";
     resetClean();
     g_state.readyStatus = false;
     idle(1);
@@ -1018,7 +1016,7 @@ void scenarioActivate() {
           "S5f: while a run is active the switch parks in the rail's one slot (rail rule)");
     g_state.ui.rail.pendingId.clear();
 
-    g_phase = "S5 activate free text";
+    g_phase = "activate free text";
     resetClean();
     openPalette();
     typeText("hello agent");
@@ -1032,7 +1030,7 @@ void scenarioActivate() {
           "S5g: the submitted query joins the composer's history");
     tuiResetSubmit(g_state);
 
-    g_phase = "S5 activate quit";
+    g_phase = "activate quit";
     resetClean();
     openPalette();
     selectRowById("actions.quit");
@@ -1056,13 +1054,13 @@ void scenarioActivate() {
     g_state.quitRequested = false;
     frame([](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Enter, false); });
     idle(1);
-    g_state.chat.outputLines.clear();
+    g_state.chat.typedTurns.threadClear();
 }
 
 // S5i: the palette's Quit row shares the chord's confirmation policy. With a
 // run active the first activation arms and closes the overlay; the second quits.
 void scenarioQuitArmed() {
-    g_phase = "S5 activate quit while running";
+    g_phase = "activate quit while running";
     resetClean();
     g_state.readyStatus = false; // a run is active
     idle(1);
@@ -1087,11 +1085,11 @@ void scenarioQuitArmed() {
     idle(1);
 }
 
-// S9: an overlay owns the keyboard while it is open. The shell's frame-global
+// an overlay owns the keyboard while it is open. The shell's frame-global
 // handlers (the rail's Esc, the End-follow) must stand down, or one key press
 // would act twice - inside the palette and on the region behind it.
 void scenarioKeyboardOwnership() {
-    g_phase = "S9 keyboard ownership";
+    g_phase = "keyboard ownership";
     // The rail's search row is part of the column anatomy: at 80x24 the shell gives the rail the
     // collapsed strip, whose own policy clears a query it cannot show. Widen for the scenario.
     ImGui::GetIO().DisplaySize = ImVec2(120.0f, 36.0f);
@@ -1102,20 +1100,20 @@ void scenarioKeyboardOwnership() {
     // The active session's title is also in the top bar, so the filter's evidence is the
     // rail's own list: one matching row drawn, and it is the matching one.
     checkGrid(g_state.ui.rail.drawnRows == 1 && findRowIn(grid(), "Beta deploy", wholeGrid()) >= 0,
-              "S9: the rail filter is live (only the matching session is listed)");
+              "the rail filter is live (only the matching session is listed)");
 
     g_state.autoScroll = false;
     openPalette();
     pressKey(ImGuiKey_End);
-    check(!g_state.autoScroll, "S9: End inside the palette does not jump the thread behind it");
+    check(!g_state.autoScroll, "End inside the palette does not jump the thread behind it");
 
     pressKey(ImGuiKey_Escape);
     idle(1);
-    check(!g_state.palette.open, "S9: Esc closes the palette");
+    check(!g_state.palette.open, "Esc closes the palette");
     check(std::string(g_state.ui.rail.filterBuf.data()) == "beta",
-          "S9: that Esc did not also clear the rail's search (one step per press)");
+          "that Esc did not also clear the rail's search (one step per press)");
     checkGrid(findRowIn(grid(), "Beta deploy", wholeGrid()) >= 0,
-              "S9: the rail still filters after the overlay closed");
+              "the rail still filters after the overlay closed");
     // Clear the filter again so the next scenario starts from a clean rail.
     g_state.ui.rail.filterBuf.fill('\0');
     idle(1);
@@ -1124,47 +1122,48 @@ void scenarioKeyboardOwnership() {
     idle(1);
 }
 
-// S10: the row flags track the live state, and the free-text row refuses to
+// the row flags track the live state, and the free-text row refuses to
 // submit while a run is active (review F3/F4).
 void scenarioLiveFlags() {
-    g_phase = "S10 live flags";
+    g_phase = "live flags";
     resetClean();
-    // Start without an answer: 'Copy last answer' must be born disabled...
-    g_state.chat.outputLines.pop_back();
+    // Start without an answer: 'Copy last answer' must be born disabled. The
+    // copy row reads the typed store, so the pop is a reseed without
+    // the answer block.
+    tuiClearOutput(g_state);
+    typed_seed::Seeder seed{&g_state};
+    seed.add(typed_seed::Seeder::Msg::User, "show me the palette");
     idle(1);
     openPalette();
     const views::PaletteItem* copy = paletteItem("actions.copyLastAnswer");
     check(copy != nullptr && !copy->enabled,
-          "S10: 'Copy last answer' is disabled while the thread has no answer");
+          "'Copy last answer' is disabled while the thread has no answer");
     // ...and must become usable when one arrives *while the panel stays open*,
     // without reopening it (a snapshot-only table would stay disabled).
-    tuiAddOutputLine(g_state,
-                     ChatMessage{"[3] late", "a late answer", "", ChatMessageType::FinalAnswer,
-                                 g_state.chat.outputLineNextId++});
+    seed.add(typed_seed::Seeder::Msg::FinalAnswer, "a late answer");
     idle(1);
     check(copy != nullptr && copy->enabled,
-          "S10: 'Copy last answer' turns enabled when an answer arrives");
+          "'Copy last answer' turns enabled when an answer arrives");
 
     typeText("hi");
     const views::PaletteItem* ask = paletteItem("ask.freeText");
-    check(ask != nullptr && ask->enabled, "S10: the free-text row is usable while idle");
+    check(ask != nullptr && ask->enabled, "the free-text row is usable while idle");
 
     // A run starts: the row goes disabled, and the activation is refused even if
     // it is reached (the composer's guard, mirrored).
     g_state.readyStatus = false;
     idle(1);
-    check(ask != nullptr && !ask->enabled,
-          "S10: the free-text row is disabled while a run is active");
+    check(ask != nullptr && !ask->enabled, "the free-text row is disabled while a run is active");
     const views::PaletteItem* stop = paletteItem("actions.stopRun");
-    check(stop != nullptr && stop->enabled, "S10: 'Stop run' is enabled while a run is active");
+    check(stop != nullptr && stop->enabled, "'Stop run' is enabled while a run is active");
 
     const int lastRow = static_cast<int>(g_state.palette.visible.size()) - 1;
     while (g_state.palette.selected < lastRow)
         pressCtrl(ImGuiKey_N);
     pressKey(ImGuiKey_Enter);
     check(!g_state.userQuery.submitReady,
-          "S10: Enter on the disabled free-text row submits nothing during a run");
-    check(g_state.palette.open, "S10: the palette stays open on a refused activation");
+          "Enter on the disabled free-text row submits nothing during a run");
+    check(g_state.palette.open, "the palette stays open on a refused activation");
 
     g_state.readyStatus = true;
     g_state.cancelRequested = false;
@@ -1181,28 +1180,28 @@ void scenarioLiveFlags() {
     const views::PaletteItem* activityRow = paletteItem("actions.inspectorActivity");
     check(agentsRow != nullptr && !agentsRow->enabled && activityRow != nullptr &&
               !activityRow->enabled,
-          "S10: the inspector tab rows are disabled while focus mode hides the panel");
+          "the inspector tab rows are disabled while focus mode hides the panel");
     g_state.ui.prefs.tab = model::InspectorTab::Activity;
     check(agentsRow != nullptr && !views::palettePerformRow(*agentsRow, g_state.palette, g_state) &&
               g_state.ui.prefs.tab == model::InspectorTab::Activity,
-          "S10: ...and the row refuses the activation, so the tab is untouched");
+          "...and the row refuses the activation, so the tab is untouched");
     pressKey(ImGuiKey_Escape);
     idle(1);
     g_state.ui.focusMode = false;
     openPalette();
     const views::PaletteItem* agentsBack = paletteItem("actions.inspectorAgents");
     check(agentsBack != nullptr && agentsBack->enabled,
-          "S10: ...and the row is enabled again once the mode is left");
+          "...and the row is enabled again once the mode is left");
     pressKey(ImGuiKey_Escape);
     idle(1);
 }
 
-// S9: there is no v4 panel to flush a pending switch. The palette answers through the
+// there is no v4 panel to flush a pending switch. The palette answers through the
 // rail, and the shell applies the answer on the next frame (the overlay layer is drawn
 // after `applyRailAnswers()`), so the pick both happens and shows: the target row
 // carries the pending mark and the thread shows the loading card.
 void scenarioWorkbenchRail() {
-    g_phase = "S9 workbench select through the rail";
+    g_phase = "workbench select through the rail";
     resetClean();
     idle(2);
 
@@ -1216,7 +1215,7 @@ void scenarioWorkbenchRail() {
           "S9w: the workbench queues the palette's pick through the rail");
     g_state.sessionPanel.actions.clear();
 
-    g_phase = "S9 workbench select while busy";
+    g_phase = "workbench select while busy";
     resetClean();
     g_state.readyStatus = false;
     idle(2);
@@ -1231,12 +1230,12 @@ void scenarioWorkbenchRail() {
     idle(2);
 }
 
-// S8: the 40x15 floor. The palette degrades to fewer rows and a narrower box,
+// the 40x15 floor. The palette degrades to fewer rows and a narrower box,
 // and it still never touches what is outside it.
-// S8: the 40x15 floor. The palette degrades to fewer rows and a narrower box,
+// the 40x15 floor. The palette degrades to fewer rows and a narrower box,
 // and it still never touches what is outside it.
 void scenarioFloor() {
-    g_phase = "S8 40x15 floor";
+    g_phase = "40x15 floor";
     resetClean();
     const ImVec2 harnessSize = ImGui::GetIO().DisplaySize;
     ImGui::GetIO().DisplaySize = ImVec2(40.0f, 15.0f);
@@ -1248,55 +1247,55 @@ void scenarioFloor() {
 
     pressCtrl(ImGuiKey_K);
     idle(1);
-    check(g_state.palette.open, "S8: the palette opens on a 40x15 terminal");
+    check(g_state.palette.open, "the palette opens on a 40x15 terminal");
     const CellRect rect = paletteRect();
     check(rect.x0 >= 0 && rect.y0 >= 0 && rect.x1 <= 40 && rect.y1 <= 15,
-          "S8: the overlay stays inside the 40x15 display (" + std::to_string(rect.x0) + "," +
+          "the overlay stays inside the 40x15 display (" + std::to_string(rect.x0) + "," +
               std::to_string(rect.y0) + " - " + std::to_string(rect.x1) + "," +
               std::to_string(rect.y1) + ")");
-    checkGrid(findRowIn(grid(), "Search", rect) >= 0, "S8: the title row survives at 40x15");
+    checkGrid(findRowIn(grid(), "Search", rect) >= 0, "the title row survives at 40x15");
     const int rows = countResultRows(grid(), rect);
     checkGrid(rows >= 3 && rows <= 4,
-              "S8: the list degrades to the rows that fit (" + std::to_string(rows) + ")");
-    checkEqualOutside(before, grid(), rect, "S8: nothing outside the overlay moved at 40x15");
+              "the list degrades to the rows that fit (" + std::to_string(rows) + ")");
+    checkEqualOutside(before, grid(), rect, "nothing outside the overlay moved at 40x15");
 
     pressKey(ImGuiKey_Escape);
     idle(1);
-    check(!g_state.palette.open, "S8: Esc closes it at 40x15 too");
+    check(!g_state.palette.open, "Esc closes it at 40x15 too");
 
     ImGui::GetIO().DisplaySize = harnessSize;
     idle(2);
 }
 
-// S6: the palette is opt-in - with it closed the composer still gets the keys.
+// the palette is opt-in - with it closed the composer still gets the keys.
 void scenarioNoRegression() {
-    g_phase = "S6 keystroke regression";
+    g_phase = "keystroke regression";
     resetClean();
     typeText("ab");
-    check(input() == "ab", "S6: typing goes to the composer while the palette is closed");
-    check(!g_state.palette.open, "S6: nothing opened the palette by itself");
+    check(input() == "ab", "typing goes to the composer while the palette is closed");
+    check(!g_state.palette.open, "nothing opened the palette by itself");
     g_state.userQuery.inputBuf.clear();
 }
 
-// S7: a click into the composer closes the overlay instead of leaving a palette
+// a click into the composer closes the overlay instead of leaving a palette
 // that no longer owns the keyboard on screen.
 void scenarioClickAway() {
-    g_phase = "S7 click away";
+    g_phase = "click away";
     resetClean();
     openPalette();
-    check(g_state.palette.open, "S7: the overlay is open");
+    check(g_state.palette.open, "the overlay is open");
     // The composer's field sits below the overlay; its row is the status row + 2.
     click(40, 24 - 3);
     idle(2);
-    check(!g_state.palette.open, "S7: clicking outside the overlay closes it");
+    check(!g_state.palette.open, "clicking outside the overlay closes it");
 }
 
-// S12: the `/` entry point. The composer takes the character on an empty line and hands it to the
+// the `/` entry point. The composer takes the character on an empty line and hands it to the
 // palette as a *seed*, so a typed slash command survives: `/` + `continue` + Enter submits
 // `/continue`, not `continue`. This is the regression guard for the character being swallowed
 // (the palette used to open empty, and only a pasted `/continue` could be sent).
 void scenarioSlashSeed() {
-    g_phase = "S12 slash seed";
+    g_phase = "slash seed";
     resetClean();
     // The `/` gate is the composer's character filter (views/composer.cpp), not a registry row,
     // so this scenario drives the real field.
@@ -1304,64 +1303,63 @@ void scenarioSlashSeed() {
 
     typeText("/");
     check(g_state.palette.open,
-          "S12: `/` on an empty composer line opens the palette (input='" + input() +
+          "`/` on an empty composer line opens the palette (input='" + input() +
               "', focused=" + std::to_string(static_cast<int>(g_state.composer.focused)) +
               ", wantText=" + std::to_string(static_cast<int>(ImGui::GetIO().WantTextInput)) + ")");
     check(paletteQuery() == "/",
-          "S12: the slash is carried into the palette's query (got '" + paletteQuery() + "')");
-    check(g_state.palette.groupIndex == 3, "S12: it opens on the COMMANDS section");
-    check(input().empty(), "S12: the composer kept no slash of its own (got '" + input() + "')");
+          "the slash is carried into the palette's query (got '" + paletteQuery() + "')");
+    check(g_state.palette.groupIndex == 3, "it opens on the COMMANDS section");
+    check(input().empty(), "the composer kept no slash of its own (got '" + input() + "')");
     checkGrid(findRowIn(grid(), "/continue", paletteRect()) >= 0,
-              "S12: the command lines are what the section shows");
+              "the command lines are what the section shows");
 
     // The seed is a prefix: typing continues the line instead of replacing it (ImGui selects the
     // whole buffer when a keyboard activation focuses the field - measured).
     typeText("continue");
     check(paletteQuery() == "/continue",
-          "S12: typing after the seed appends (got '" + paletteQuery() + "')");
-    check(visibleRowById("commands.continue") >= 0, "S12: the `/continue` row matches the query");
-    check(paletteItem("ask.freeText") != nullptr, "S12: the free-text fallback is offered as well");
+          "typing after the seed appends (got '" + paletteQuery() + "')");
+    check(visibleRowById("commands.continue") >= 0, "the `/continue` row matches the query");
+    check(paletteItem("ask.freeText") != nullptr, "the free-text fallback is offered as well");
 
     pressKey(ImGuiKey_Enter);
-    check(!g_state.palette.open, "S12: Enter closes the palette");
+    check(!g_state.palette.open, "Enter closes the palette");
     check(g_state.userQuery.submitReady && g_state.userQuery.submitQuery == "/continue",
-          "S12: the submitted line is the command line (got '" + g_state.userQuery.submitQuery +
-              "')");
+          "the submitted line is the command line (got '" + g_state.userQuery.submitQuery + "')");
     tuiResetSubmit(g_state);
 
     // `closePalette()` clears the seed with the rest of the query: the next open is empty again.
-    check(g_state.palette.query[0] == '\0', "S12: closing cleared the query");
-    check(!g_state.palette.seedCaretPending, "S12: and the one-shot caret request");
+    check(g_state.palette.query[0] == '\0', "closing cleared the query");
+    check(!g_state.palette.seedCaretPending, "and the one-shot caret request");
     g_state.userQuery.inputBuf.clear();
     idle(1);
     openPalette();
-    check(paletteQuery().empty(), "S12: `Ctrl+K` still opens with an empty query");
+    check(paletteQuery().empty(), "`Ctrl+K` still opens with an empty query");
     pressKey(ImGuiKey_Escape);
     idle(1);
     idle(2);
 }
 
-// S13: the command rows submit what they show, and the UI's own command stays the UI's own: the
+// the command rows submit what they show, and the UI's own command stays the UI's own: the
 // `/rawlog` row toggles the surface instead of sending the word to the model.
 void scenarioCommandRows() {
-    g_phase = "S13 command rows";
+    g_phase = "command rows";
     resetClean();
     idle(2);
     typeText("/");
-    check(g_state.palette.open, "S13: the palette is open on the COMMANDS section");
+    check(g_state.palette.open, "the palette is open on the COMMANDS section");
 
     for (const int index : g_state.palette.visible) {
         const views::PaletteItem& item = g_state.palette.items[static_cast<std::size_t>(index)];
         if (std::strcmp(item.id, "ask.freeText") == 0)
             continue; // the pinned fallback follows the section
         check(std::strcmp(item.group, "COMMANDS") == 0 && item.label.compare(0, 1, "/") == 0,
-              std::string("S13: the row '") + item.label + "' is a command line");
+              std::string("the row '") + item.label + "' is a command line");
     }
 
     selectRowById("commands.rawlog");
     pressKey(ImGuiKey_Enter);
-    check(g_state.ui.rawLogOpen, "S13: the `/rawlog` row opens the developer log");
-    check(!g_state.userQuery.submitReady, "S13: a UI command is never submitted as a query");
+    check(g_state.ui.rawLogOpen, "the `/rawlog` row opens the developer log");
+    check(!g_state.userQuery.submitReady, "a UI command is never submitted as a query");
     // Put the surface back; the next scenario starts from a closed Raw Log.
     g_state.ui.rawLogOpen = false;
     g_state.rawLog = views::RawLogState{};
@@ -1369,53 +1367,108 @@ void scenarioCommandRows() {
     idle(2);
 }
 
-// S14: "Copy last answer" names a *block*. A code-only answer is one (its kind is rewritten to
+// "Copy last answer" names a *block*. A code-only answer is one (its kind is rewritten to
 // `Code` and its role word still says ANSWER), and the live streamed body is one before the store
 // has the message - the two cases a message-store walk cannot get right.
 void scenarioCopyBlock() {
-    g_phase = "S14 copy last answer";
+    g_phase = "copy last answer";
     resetClean();
-    g_state.chat.outputLines.push_back(ChatMessage{"[3] code", "```\nint x = 1;\n```", "",
-                                                   ChatMessageType::FinalAnswer,
-                                                   g_state.chat.outputLineNextId++});
+    // The seeded answer is replaced, not appended: the merged answer block's id
+    // is stable, so an upsert overwrites it in place.
+    typed_seed::Seeder seed{&g_state};
+    seed.add(typed_seed::Seeder::Msg::FinalAnswer, "```\nint x = 1;\n```");
     idle(2);
     openPalette();
     selectRowById("actions.copyLastAnswer");
     pressKey(ImGuiKey_Enter);
     check(g_clipboard.find("int x = 1;") != std::string::npos,
-          "S14: a code-only answer is copied (got '" + g_clipboard + "')");
+          "a code-only answer is copied (got '" + g_clipboard + "')");
     check(g_clipboard.find("ANSWER") == std::string::npos,
-          "S14: the copy is the body, not the row's header");
+          "the copy is the body, not the row's header");
 
-    g_phase = "S14 copy the streaming body";
+    g_phase = "copy the streaming body";
     resetClean();
     g_state.readyStatus = false;
-    g_state.chat.hasStreamMsg = true;
-    g_state.chat.streamMsg = ChatMessage{"", "partial answer", "", ChatMessageType::Assistant, 0};
+    // The typed stream: a live turn whose content block is the answer being
+    // written (the store merges the per-tick upserts in place). The live turn is
+    // a NEW id - `resetClean` reseeds turn 1 with a stamped answer, and a run
+    // never merges into a turn a previous seed made (ids are never reused;
+    // the same rule `startStream` follows).
+    typed_seed::Seeder stream{&g_state, 10000};
+    stream.runStart("q");
+    stream.updateStream("partial answer");
     idle(2);
     openPalette();
     selectRowById("actions.copyLastAnswer");
     pressKey(ImGuiKey_Enter);
     check(g_clipboard == "partial answer",
-          "S14: the live streamed body is the newest answer (got '" + g_clipboard + "')");
+          "the live streamed body is the newest answer (got '" + g_clipboard + "')");
 
-    g_phase = "S14 no answer";
+    g_phase = "no answer";
     resetClean();
-    g_state.chat.outputLines.pop_back(); // the user query is all that is left
+    // The query-only thread again: no answer block, so the row is disabled.
+    tuiClearOutput(g_state);
+    typed_seed::Seeder noAnswer{&g_state};
+    noAnswer.add(typed_seed::Seeder::Msg::User, "show me the palette");
     idle(2);
     openPalette();
     const views::PaletteItem* copy = paletteItem("actions.copyLastAnswer");
-    check(copy != nullptr && !copy->enabled, "S14: with no answer the row is disabled");
+    check(copy != nullptr && !copy->enabled, "with no answer the row is disabled");
     pressKey(ImGuiKey_Escape);
     idle(1);
-    g_state.chat.hasStreamMsg = false;
 }
 
-// S16: the review's two Important findings and the behaviour changes the Minor ones asked for.
+// A response batch's content is the copy target when the turn carries no
+// ANSWER row - the shape an interrupted-before-answer run leaves behind.
+// The walk reaches the content through the batch's surviving content child (an
+// `Assistant` row with a body); the owner row itself is never the answer - it
+// carries no body, and `blockIsAnswerRole` rejects it, so a calls-only
+// batch leaves the copy row disabled. Both scenarios are regression pins of the
+// walk's shape: the content case predates the owner row (the walk already
+// accepted the child) and must not regress under the owner vocabulary, and the
+// calls-only case pins that the body-less owner cannot be talked into being the
+// answer.
+void scenarioOwnerCopy() {
+    g_phase = "owner copy: content, no answer";
+    resetClean();
+    // A turn id no stored turn uses: a run never merges into a turn a previous
+    // seed made (ids are never reused). The seed's own answer stays:
+    // the live group is the newest, so the walk's answer is the batch's content
+    // child, never the stale ANSWER row.
+    typed_seed::Seeder seed{&g_state, 10000};
+    seed.runStart("run the thing");
+    seed.content("partial work body");
+    seed.tool("bash", "ls -R", TuiBlockStatus_Ok);
+    idle(2);
+    openPalette();
+    selectRowById("actions.copyLastAnswer");
+    pressKey(ImGuiKey_Enter);
+    check(g_clipboard == "partial work body",
+          "the batch's content is the copy target with no ANSWER row (got '" + g_clipboard + "')");
+
+    g_phase = "owner copy: calls only";
+    resetClean();
+    // The thread's own seed carries an answer: wipe it, so the only turn is the
+    // calls-only run - otherwise the stale ANSWER row is the copy target and the
+    // check pins nothing.
+    tuiClearOutput(g_state);
+    typed_seed::Seeder callsOnly{&g_state, 10000};
+    callsOnly.runStart("run the thing");
+    callsOnly.tool("bash", "ls -R", TuiBlockStatus_Ok);
+    idle(2);
+    openPalette();
+    const views::PaletteItem* copy = paletteItem("actions.copyLastAnswer");
+    check(copy != nullptr && !copy->enabled,
+          "a calls-only batch leaves no answer - the copy row stays disabled");
+    pressKey(ImGuiKey_Escape);
+    idle(1);
+}
+
+// the review's two Important findings and the behaviour changes the Minor ones asked for.
 // Each check names the defect it pins: they are all "the palette did more - or less - than the
 // control it points at", which is the divergence D-PALETTE exists to prevent.
 void scenarioRowParity() {
-    g_phase = "S16 submit handshake";
+    g_phase = "submit handshake";
     resetClean();
     idle(1);
     // (a) The history cap and the draft: the palette's line is submitted through the composer's
@@ -1426,19 +1479,19 @@ void scenarioRowParity() {
     for (int i = 0; i < static_cast<int>(UserQueryState::MAX_HISTORY); ++i)
         g_state.userQuery.inputHistory.push_back("old " + std::to_string(i));
     typeText("a draft the user is still writing");
-    check(input() == "a draft the user is still writing", "S16: the draft reached the field");
+    check(input() == "a draft the user is still writing", "the draft reached the field");
     openPalette();
     selectRowById("commands.help");
     pressKey(ImGuiKey_Enter);
     check(static_cast<int>(g_state.userQuery.inputHistory.size()) ==
               static_cast<int>(UserQueryState::MAX_HISTORY),
-          "S16: the palette's submit keeps the history at MAX_HISTORY (" +
+          "the palette's submit keeps the history at MAX_HISTORY (" +
               std::to_string(g_state.userQuery.inputHistory.size()) + ")");
     check(!g_state.userQuery.inputHistory.empty() &&
               g_state.userQuery.inputHistory.back() == "/help",
-          "S16: the submitted command line is the newest history entry");
+          "the submitted command line is the newest history entry");
     check(input() == "a draft the user is still writing",
-          "S16: a palette submit leaves an unsent draft alone (got '" + input() + "')");
+          "a palette submit leaves an unsent draft alone (got '" + input() + "')");
     tuiResetSubmit(g_state);
 
     // (b) The composer's draft is never the palette's to edit - not even when the palette happens
@@ -1452,27 +1505,27 @@ void scenarioRowParity() {
     typeText("hello"); // the same line, this time in the palette
     selectRowById("ask.freeText");
     pressKey(ImGuiKey_Enter);
-    check(g_state.userQuery.submitQuery == "hello", "S16: the ASK row submitted the draft's line");
-    check(input() == "hello", "S16: and the draft is still the user's (got '" + input() + "')");
+    check(g_state.userQuery.submitQuery == "hello", "the ASK row submitted the draft's line");
+    check(input() == "hello", "and the draft is still the user's (got '" + input() + "')");
 
     // (c) `New session` refuses during a run, exactly like the rail's `+` and the panel's `New`
     // (review I2): the row is drawn disabled and the activation is refused.
-    g_phase = "S16 new session while busy";
+    g_phase = "new session while busy";
     resetClean();
     g_state.readyStatus = false;
     idle(1);
     openPalette();
     const views::PaletteItem* newRow = paletteItem("actions.newSession");
-    check(newRow != nullptr && !newRow->enabled, "S16: 'New session' is disabled during a run");
+    check(newRow != nullptr && !newRow->enabled, "'New session' is disabled during a run");
     check(newRow != nullptr && !views::palettePerformRow(*newRow, g_state.palette, g_state),
-          "S16: and the activation is refused, like the panel's own New");
+          "and the activation is refused, like the panel's own New");
     check(g_state.sessionPanel.actions.empty() && !g_state.ui.rail.newRequested,
-          "S16: so nothing was queued mid-run");
+          "so nothing was queued mid-run");
     pressKey(ImGuiKey_Escape);
     idle(1);
 
     // The workbench's answer is the rail's request - one implementation, not a second one.
-    g_phase = "S16 new session through the rail";
+    g_phase = "new session through the rail";
     resetClean();
     idle(2);
     openPalette();
@@ -1480,11 +1533,11 @@ void scenarioRowParity() {
     check(newRowWorkbench != nullptr &&
               views::palettePerformRow(*newRowWorkbench, g_state.palette, g_state) &&
               g_state.ui.rail.newRequested,
-          "S16: the workbench row asks the rail to queue the New action");
+          "the workbench row asks the rail to queue the New action");
     idle(1); // `applyRailAnswers()` runs at the top of the frame
     check(queuedActions() == 1 &&
               g_state.sessionPanel.actions.front().type == SessionActionType::New,
-          "S16: and the shell turns it into one New action");
+          "and the shell turns it into one New action");
     g_state.sessionPanel.actions.clear();
     g_state.ui.rail.newRequested = false;
     g_state.palette = views::PaletteState{};
@@ -1492,7 +1545,7 @@ void scenarioRowParity() {
 
     // (d) `Focus composer` cannot promise the composer while a settings sheet is still under the
     // palette: closing would hand the keyboard back to the sheet (review M6).
-    g_phase = "S16 focus composer under a sheet";
+    g_phase = "focus composer under a sheet";
     resetClean();
     idle(2);
     views::openSettings(g_state.settingsSheet);
@@ -1500,23 +1553,23 @@ void scenarioRowParity() {
     openPalette();
     const views::PaletteItem* focusRow = paletteItem("actions.focusComposer");
     check(focusRow != nullptr && !focusRow->enabled,
-          "S16: 'Focus composer' is disabled while a sheet is under the palette");
+          "'Focus composer' is disabled while a sheet is under the palette");
     check(focusRow != nullptr && !views::palettePerformRow(*focusRow, g_state.palette, g_state),
-          "S16: and it refuses the activation instead of re-arming the sheet");
+          "and it refuses the activation instead of re-arming the sheet");
     pressKey(ImGuiKey_Escape); // the palette is the topmost surface
     idle(1);
     g_state.settingsSheet = views::SettingsState{};
     idle(2);
 
     // (e) A new query is a new list: the selection goes back to its best row (review M2).
-    g_phase = "S16 selection after a query";
+    g_phase = "selection after a query";
     resetClean();
     idle(1);
     openPalette();
     selectRowById("actions.quit");
-    check(g_state.palette.selected > 0, "S16: the selection was walked before the query");
+    check(g_state.palette.selected > 0, "the selection was walked before the query");
     typeText("co");
-    check(g_state.palette.selected == 0, "S16: a new query starts at its best match");
+    check(g_state.palette.selected == 0, "a new query starts at its best match");
 
     // (f) An out-of-range section filter is ALL, not an out-of-bounds read (`groupIndex` is public
     // state, so a harness or a future caller can set anything). A fresh palette, so the query is
@@ -1527,49 +1580,49 @@ void scenarioRowParity() {
     g_state.palette.groupIndex = 99;
     typeText("q");
     check(visibleRowById("actions.quit") >= 0 && visibleRowById("commands.quit") >= 0,
-          "S16: an out-of-range section filter falls back to ALL (rows of two sections listed)");
-    checkGrid(findRowIn(grid(), "ALL ", paletteRect()) >= 0, "S16: and the title row says ALL");
+          "an out-of-range section filter falls back to ALL (rows of two sections listed)");
+    checkGrid(findRowIn(grid(), "ALL ", paletteRect()) >= 0, "and the title row says ALL");
     pressKey(ImGuiKey_Escape);
     idle(1);
 }
 
-// S15: `/` has two owners and they do not fight. The rail reads it for its search field whenever
+// `/` has two owners and they do not fight. The rail reads it for its search field whenever
 // no text field holds the keyboard (task 23, design §4.3 "from anywhere except the composer"), and
 // the composer reads it for the palette. A `/` typed with the rail focused must therefore focus the
 // rail's search and *not* open the palette - which is also why the palette never fires on a key a
 // field consumed.
 void scenarioRailSlash() {
-    g_phase = "S15 rail slash";
+    g_phase = "rail slash";
     resetClean();
     // The rail and its `/` are the workbench shell's. `resetClean()` focuses the composer (the
     // other scenarios type there), so the release is an explicit step here: `/` from anywhere
     // *except* the composer is the design's rule.
     pressKey(ImGuiKey_Escape);
     idle(2);
-    check(!ImGui::GetIO().WantTextInput, "S15: the composer field is not holding the keyboard");
+    check(!ImGui::GetIO().WantTextInput, "the composer field is not holding the keyboard");
     click(3, 4); // somewhere on the rail, away from the search row
     idle(2);
-    check(!ImGui::GetIO().WantTextInput, "S15: the click released the composer field");
+    check(!ImGui::GetIO().WantTextInput, "the click released the composer field");
 
     g_state.ui.rail.filterFocus = false;
     g_state.ui.rail.focusSearch = false;
     // One frame carries the character; the token the rail raises (`filterFocus`) is answered by
     // the frame layer, which widens the collapsed strip so there is a field to focus.
     frame([](ImGuiIO& io) { io.AddInputCharacter(static_cast<unsigned int>('/')); });
-    check(g_state.ui.rail.filterFocus, "S15: the rail's `/` asks for its own search field");
+    check(g_state.ui.rail.filterFocus, "the rail's `/` asks for its own search field");
     idle(2);
-    check(!g_state.palette.open, "S15: the rail's `/` does not open the palette");
+    check(!g_state.palette.open, "the rail's `/` does not open the palette");
     check(g_state.ui.rail.searchWide,
-          "S15: the frame answered the request by widening the rail's search row");
+          "the frame answered the request by widening the rail's search row");
     check(std::string(g_state.ui.rail.filterBuf.data()).empty(),
-          "S15: the search field is focused, not filled with the slash");
+          "the search field is focused, not filled with the slash");
 
     // `Ctrl+K` from the rail is still the palette, with an empty query (no seed to leak in).
     g_state.ui.rail.filterFocus = false;
     g_state.ui.rail.focusSearch = false;
     idle(1);
     openPalette();
-    check(paletteQuery().empty(), "S15: `Ctrl+K` from the rail opens an empty query");
+    check(paletteQuery().empty(), "`Ctrl+K` from the rail opens an empty query");
     pressKey(ImGuiKey_Escape);
     idle(1);
     idle(2);
@@ -1608,9 +1661,9 @@ std::string paletteGoldenText(const PaletteScene& scene) {
         mkSession("s003-2", "Gamma debug", "", 1),
     };
     state.sessionPanel.activeId = "s001-0";
-    state.chat.outputLines.push_back(
-        ChatMessage{"[1] q", "a", "", ChatMessageType::FinalAnswer, 1});
-    state.chat.outputLineNextId = 2;
+    // One answer-only turn: the palette golden pins the palette, not the thread
+    // behind it - the seed only has to give the copy row something to point at.
+    typed_seed::Seeder{&state}.add(typed_seed::Seeder::Msg::FinalAnswer, "a");
     state.threadAdapter.bind(state);
 
     views::PaletteState p;
@@ -1757,6 +1810,7 @@ int runText(bool update) {
     scenarioSlashSeed();
     scenarioCommandRows();
     scenarioCopyBlock();
+    scenarioOwnerCopy();
     scenarioRowParity();
     // S15 leaves the keyboard with the rail, so it runs after the composer-driven scenarios.
     scenarioRailSlash();
@@ -1827,9 +1881,7 @@ int runGui(const std::string& outDir) {
         mkSession("s002-1", "Beta deploy", "deploy the beta build", 5),
     };
     state.sessionPanel.activeId = "s001-0";
-    state.chat.outputLines.push_back(
-        ChatMessage{"[1] q", "a", "", ChatMessageType::FinalAnswer, 1});
-    state.chat.outputLineNextId = 2;
+    typed_seed::Seeder{&state}.add(typed_seed::Seeder::Msg::FinalAnswer, "a");
 
     const std::string iniPath = outDir + "/palette-imgui2.ini";
     std::remove(iniPath.c_str());

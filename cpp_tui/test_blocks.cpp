@@ -1,12 +1,12 @@
 // test_blocks.cpp
 //
-// The block renderer (views/blocks.h, design §4.5 / task 26): one v4 message
-// drawn as a block, in both profiles' vocabulary.
+// The block renderer (views/blocks.h): one typed-store
+// block drawn as a block, in both profiles' vocabulary.
 //
 // What this binary proves, in order:
 //
 //   1. the source. `views/blocks.cpp` writes no colour literal, never asks which
-//      profile is up (`tuiIsTextGrid`), reads no display size and names no v4 type -
+//      profile is up (`tuiIsTextGrid`), reads no display size and names no message type -
 //      the layering every `views/` file is held to (`tools/gate_ratchet.txt`);
 //   2. the vocabulary. Every kind's label, role ink, state glyph and anatomy are
 //      pinned: a tool row is two lines, a work group and a thinking body are
@@ -88,6 +88,9 @@ namespace views = llmfun::tui::views;
 namespace model = llmfun::tui::model;
 namespace store = llmfun::tui::store;
 namespace tui = llmfun::tui;
+
+#include "test/typed_seed.h" // the typed store's seeding shapes (global scope: the
+                             // seeder must name the real `llmfun::tui::TuiState`)
 
 namespace {
 
@@ -257,9 +260,11 @@ model::BlockDesc blockOf(model::BlockKind kind, const char* label, const char* s
 /// The header text for a descriptor whose `expanded` flag is the draw state. The
 /// renderer takes a `BlockDraw` so the preview and the geometry cannot disagree;
 /// the pure tests name the same state explicitly instead of relying on a second
-/// read of the descriptor.
-std::string headerText(const views::BlockView& block, bool textGrid) {
-    return views::blockHeaderText(block, views::BlockDraw{block.expanded, false}, textGrid);
+/// read of the descriptor. The width is a promise the row keeps: wide enough by
+/// default that nothing is ever fitted away.
+std::string headerText(const views::BlockView& block, bool textGrid, float availUnits = 1000.0f) {
+    return views::blockHeaderText(block, views::BlockDraw{block.expanded, false},
+                                  ui::metricsFor(textGrid, 1.0f, 1.0f), availUnits);
 }
 
 ui::Rect cellRect(float x, float y, float w, float h) {
@@ -272,12 +277,28 @@ ui::Rect cellRect(float x, float y, float w, float h) {
     return r;
 }
 
-/// One message of the v4 store. The summary is the D side's own shape
-/// (`"[<nr>] <body> [<time>]"`, `tui_chat.cpp`'s `addChatMessage` + `timeSuffix`), so
-/// the adapter's splitter is exercised on what the app really writes.
-tui::ChatMessage message(size_t id, tui::ChatMessageType type, const std::string& summary,
-                         const std::string& text, const std::string& thinking = {}) {
-    tui::ChatMessage msg;
+/// One seeded message, in the shape the D emitters send (the fixture
+/// translates one into the typed upserts so the call sites keep their shape).
+enum class MsgKind {
+    User,
+    Assistant,
+    ToolCall,
+    ToolResponse,
+    System,
+    FinalAnswer,
+};
+
+struct SeedMsg {
+    std::size_t id = 0;
+    MsgKind type = MsgKind::User;
+    std::string summary;
+    std::string text;
+    std::string thinking;
+};
+
+SeedMsg message(size_t id, MsgKind type, const std::string& summary, const std::string& text,
+                const std::string& thinking = {}) {
+    SeedMsg msg;
     msg.id = id;
     msg.type = type;
     msg.summary = summary;
@@ -287,9 +308,12 @@ tui::ChatMessage message(size_t id, tui::ChatMessageType type, const std::string
 }
 
 /// A `TuiState` with a bound adapter - the state `views::renderThread()` is written
-/// for.
+/// for. The typed store is seeded through a `Seeder`; `add()` translates one
+/// seeded message into the typed upserts so the call sites keep their shape.
 struct ThreadFixture {
     tui::TuiState state;
+    typed_seed::Seeder seed{&state, 1}; ///< the typed store's turns
+    int responseBatch = 0;              ///< the newest turn's next response-batch index
 
     ThreadFixture() {
         state.readyStatus = true;
@@ -297,18 +321,145 @@ struct ThreadFixture {
         state.threadAdapter.bind(state);
     }
 
-    void add(const tui::ChatMessage& msg) {
-        state.chat.outputLines.push_back(msg);
-        state.chat.hasStreamMsg = false;
+    /// The seeded summary's trailing duration (`"[3] done [2.5s]"`, `"[3] done [1m 2s]"`)
+    /// in ms - the typed block's `durationMs`, which is what its row prints.
+    static std::int64_t durationMsOf(const std::string& summary) {
+        const auto open = summary.rfind('[');
+        const auto close = summary.rfind(']');
+        if (open == std::string::npos || close == std::string::npos || close < open)
+            return 0;
+        const std::string token = summary.substr(open + 1, close - open - 1);
+        const auto m = token.find('m');
+        try {
+            if (m != std::string::npos) { // "[1m 2s]"
+                const std::int64_t minutes = std::stol(token.substr(0, m));
+                const std::int64_t seconds = std::stol(token.substr(m + 1));
+                return (minutes * 60 + seconds) * 1000;
+            }
+            if (!token.empty() && token.back() == 's') // "[2.5s]"
+                return static_cast<std::int64_t>(std::stod(token) * 1000.0);
+        } catch (const std::exception&) {
+            return 0;
+        }
+        return 0;
     }
 
-    /// The in-flight message: `chat.streamMsg` plus the flag the adapter's `sync()` reads
-    /// (it is not in the store, so it has no id).
-    void addStream(tui::ChatMessageType type, const std::string& text,
-                   const std::string& thinking) {
-        state.chat.streamMsg = message(0, type, "", text, thinking);
-        state.chat.hasStreamMsg = true;
+    /// The seeded tool row's name: the summary's `"[nr] tool call: NAME [dur]"` /
+    /// `"[nr] tool result ✅ NAME [dur]"` minus the markers - the typed tool
+    /// card's title, which is what its row prints.
+    static std::string toolTitleOf(const SeedMsg& msg) {
+        std::string title = msg.summary;
+        const auto open = title.find('[');
+        if (open != std::string::npos) {
+            const auto close = title.find(']', open);
+            if (close != std::string::npos)
+                title = title.substr(close + 1);
+        }
+        while (!title.empty() && title.front() == ' ')
+            title.erase(title.begin());
+        for (const char* mark : {"tool result \xE2\x9C\x85 ", "tool result \xE2\x9D\x8C ",
+                                 "tool call: ", "tool result: "})
+            if (title.rfind(mark, 0) == 0) {
+                title = title.substr(std::strlen(mark));
+                break;
+            }
+        while (!title.empty() && title.back() == ' ')
+            title.pop_back();
+        return title;
     }
+
+    void add(const SeedMsg& msg) {
+        const std::int64_t durationMs = durationMsOf(msg.summary);
+        if (msg.type == MsgKind::User) {
+            const std::int64_t turn = ++seed.turnSeq;
+            seed.upsertTurn(turn, TuiTurnState_Done, 1);
+            seed.upsertBlock(turn, "query", std::to_string(turn) + "#q", TuiBlockKind_Prose,
+                             TuiBlockStatus_None, "user", msg.text, nullptr, durationMs);
+            responseBatch = 0;
+            return;
+        }
+        if (seed.turnSeq == 0) { // an answer with no turn yet: open one, like a
+            seed.turnSeq = 1;    // replayed answer-only thread has
+            seed.upsertTurn(1, TuiTurnState_Done, 1);
+        }
+        const std::int64_t turn = seed.turnSeq;
+        // One batch per response (the wire's shape): an Assistant message and
+        // a tool message each open the turn's next batch. The exchange's
+        // result and answer ride that batch's ids.
+        int bi = -1;
+        if (msg.type == MsgKind::Assistant || msg.type == MsgKind::ToolCall)
+            bi = responseBatch++;
+        const std::string batch =
+            std::to_string(turn) + "#" + std::to_string(bi >= 0 ? bi : responseBatch);
+        if (!msg.thinking.empty())
+            seed.upsertBlock(turn, "reasoning#" + std::to_string(bi >= 0 ? bi : responseBatch),
+                             batch, TuiBlockKind_Reasoning, TuiBlockStatus_None, nullptr,
+                             msg.thinking, nullptr, durationMs);
+        switch (msg.type) {
+        case MsgKind::FinalAnswer:
+            seed.upsertBlock(
+                turn, "answer", std::to_string(turn) + "#" + std::to_string(responseBatch),
+                TuiBlockKind_Answer, TuiBlockStatus_None, nullptr, msg.text, nullptr, durationMs);
+            break;
+        case MsgKind::Assistant:
+            seed.upsertBlock(turn, "content#" + std::to_string(bi), batch, TuiBlockKind_Prose,
+                             TuiBlockStatus_None, "assistant", msg.text, nullptr, durationMs);
+            break;
+        case MsgKind::ToolCall:
+            // The call and, later, its result are ONE card (the merged tool row):
+            // the same block id, and the title the summary carries.
+            seed.upsertBlock(turn, "tool#0", batch, TuiBlockKind_Tool, TuiBlockStatus_Pending,
+                             nullptr, msg.text, toolTitleOf(msg).c_str(), durationMs);
+            break;
+        case MsgKind::ToolResponse:
+            seed.upsertBlock(turn, "tool#0",
+                             std::to_string(turn) + "#" + std::to_string(responseBatch),
+                             TuiBlockKind_Tool, TuiBlockStatus_Ok, nullptr, msg.text,
+                             toolTitleOf(msg).c_str(), durationMs);
+            break;
+        default:
+            seed.upsertBlock(turn, "notice#" + std::to_string(turn), std::to_string(turn) + "#q",
+                             TuiBlockKind_Notice, TuiBlockStatus_None, nullptr, msg.text, nullptr,
+                             durationMs);
+            break;
+        }
+    }
+
+    /// The in-flight run: a `Running` turn the emitters stream into. The blocks
+    /// land in the emitters' order: the query (the run's start), the content
+    /// block (the stream updater), the reasoning (its own emitter).
+    void addStream(MsgKind type, const std::string& text, const std::string& thinking) {
+        if (seed.liveTurnId == 0)
+            seed.runStart("stream this");
+        if (!text.empty())
+            seed.updateStream(text);
+        if (!thinking.empty())
+            seed.upsertBlock(seed.liveTurnId, "reasoning#" + std::to_string(seed.liveBatch),
+                             seed.batchId(), TuiBlockKind_Reasoning, TuiBlockStatus_None, nullptr,
+                             thinking);
+        (void)type;
+    }
+
+    /// The task-10 pins the fold yields to: a group pinned open draws every
+    /// row it owns again, and a row pinned open keeps its children drawn -
+    /// maximal-style only while its turn is live, everything else explicit
+    /// The scene callers want the full row anatomy, so the
+    /// batch owners are pinned open along with the group.
+    void openGroup(std::int64_t id) {
+        if (id == 0)
+            return;
+        state.chat.groupPins[static_cast<std::int64_t>(id)] = true;
+        auto& a = state.threadAdapter;
+        for (std::size_t g = 0; g < a.groupCount(); ++g) {
+            if (a.groupAt(g).id != static_cast<std::size_t>(id))
+                continue;
+            for (std::size_t b = 0; b < a.blockCount(g); ++b)
+                if (a.blockAt(g, b).ownsBatch)
+                    a.setBlockExpanded(g, b, true);
+        }
+    }
+
+    void openNewestGroup() { openGroup(seed.liveTurnId != 0 ? seed.liveTurnId : seed.turnSeq); }
 
     /// Draw the thread into the 100x30 frame and answer the captured grid.
     Grid draw(bool acceptKeys = true, const std::function<void(ImGuiIO&)>& inject = nullptr) {
@@ -350,7 +501,7 @@ void checkSource() {
           "no colour literal: every ink is a token through ui::color()");
     check(source.find("ChatMessage") == std::string::npos &&
               source.find("RenderGroup") == std::string::npos,
-          "no v4 type reaches the renderer (D-ADAPTER)");
+          "no message type reaches the renderer (D-ADAPTER)");
     check(source.find("DisplaySize") == std::string::npos,
           "no display size read: the renderer is a geometry taker");
     check(source.find("#include \"tui.h\"") == std::string::npos,
@@ -379,6 +530,7 @@ void checkVocabulary() {
         {model::BlockKind::Assistant, "AGENT", ui::ColorToken::roleAgent, false, false},
         {model::BlockKind::ToolCall, "TOOL", ui::ColorToken::roleTool, true, false},
         {model::BlockKind::ToolResult, "TOOL", ui::ColorToken::roleTool, true, false},
+        {model::BlockKind::ToolStep, "TOOL", ui::ColorToken::roleSystem, false, true},
         {model::BlockKind::Thinking, "Thinking", ui::ColorToken::roleAgent, false, true},
         {model::BlockKind::System, "SYSTEM", ui::ColorToken::roleSystem, false, false},
         {model::BlockKind::Code, "AGENT", ui::ColorToken::roleAgent, false, false},
@@ -391,23 +543,33 @@ void checkVocabulary() {
         check(views::blockIsCompactRow(row.kind) == row.compact,
               std::string(row.label) +
                   (row.compact ? " is a compact row" : " is not a compact row"));
-        check(views::blockHasDisclosure(row.kind) == row.disclosure,
+        model::BlockDesc view;
+        view.kind = row.kind;
+        check(views::blockHasDisclosure(view) == row.disclosure,
               std::string(row.label) + (row.disclosure ? " is a disclosure" : " is a role rule"));
     }
 
-    check(views::blockStateGlyph(model::BlockState::None) == ui::Icon::Count,
-          "no state means no glyph (the word carries the meaning)");
-    check(views::blockStateGlyph(model::BlockState::Pending) == ui::Icon::Pending,
-          "pending draws the pending mark");
-    check(views::blockStateGlyph(model::BlockState::Running) == ui::Icon::Running,
-          "running draws the run mark");
-    check(views::blockStateGlyph(model::BlockState::Ok) == ui::Icon::Ok, "ok draws the ok mark");
-    check(views::blockStateGlyph(model::BlockState::Failed) == ui::Icon::Error,
-          "failed draws the error mark");
+    // The disclosure is a property of the row, not of its kind: a
+    // batch's owner row is a plain AGENT row that still folds.
+    {
+        model::BlockDesc owner;
+        owner.kind = model::BlockKind::Assistant;
+        owner.ownsBatch = true;
+        check(views::blockHasDisclosure(owner), "the batch's owner is a disclosure");
+    }
 
     const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
     const views::BlockDraw open{true, false};
     const views::BlockDraw closed{false, false};
+    // The header carries no state glyph: the disclosure arrow, the
+    // text, and - only on a failure - the red FAIL word renderBlock paints after
+    // the text. Nothing else about a state changes the header, so the card's
+    // height is the same folded or open whatever the state is.
+    const model::BlockDesc card = blockOf(model::BlockKind::ToolStep, "TOOL", "grep");
+    check(views::measureBlockHeader(card, m, closed) == m.row,
+          "a tool card is one row tall folded, state included");
+    check(views::measureBlockHeader(card, m, open) == m.row,
+          "a tool card is one row tall open, state included");
     check(views::measureBlockHeader(blockOf(model::BlockKind::User, "YOU", "q"), m, open) == m.row,
           "a role row is one row tall");
     const model::BlockDesc tool = blockOf(model::BlockKind::ToolResult, "TOOL", "r");
@@ -460,8 +622,8 @@ void checkHeaderText() {
     // the frame still previews per the frame, matching the height and the disclosure.
     model::BlockDesc mismatched = user;
     mismatched.expanded = true;
-    check(views::blockHeaderText(mismatched, views::BlockDraw{false, false}, true) ==
-              "YOU  a question",
+    check(views::blockHeaderText(mismatched, views::BlockDraw{false, false},
+                                 ui::metricsFor(true, 1.0f, 1.0f), 1000.0f) == "YOU  a question",
           "the preview follows the draw state, not the descriptor");
     user.timingS = 1.2;
     check(headerText(user, true) == "YOU - 1.2 s",
@@ -488,8 +650,55 @@ void checkHeaderText() {
     model::BlockDesc thinking = blockOf(model::BlockKind::Thinking, "Thinking", "");
     thinking.timingS = 3.2;
     thinking.expanded = false;
-    check(headerText(thinking, true) == "Thinking - 3.2 s",
-          "the thinking disclosure says what it costs (got '" + headerText(thinking, true) + "')");
+    check(headerText(thinking, true) == "Thinking",
+          "the thinking disclosure is the bare word: its duration is the owner's (got '" +
+              headerText(thinking, true) + "')");
+
+    // The composer: an owner's header is the label, the duration,
+    // and the batch's chips - and a folded owner drops the role word.
+    model::BlockDesc owner = blockOf(model::BlockKind::Assistant, "AGENT", "");
+    owner.ownsBatch = true;
+    owner.timingS = 3.2;
+    owner.chips = "[bash] [grep]";
+    owner.expanded = true;
+    check(headerText(owner, true) == "AGENT - 3.2 s - [bash] [grep]",
+          "an open owner says its role word, duration, and chips (got '" + headerText(owner, true) +
+              "')");
+    owner.expanded = false;
+    check(headerText(owner, true) == "3.2 s - [bash] [grep]",
+          "a folded owner drops the role word (got '" + headerText(owner, true) + "')");
+
+    // The fitting: chips drop one token at a time from the right before the
+    // duration does, and the label never drops.
+    owner.expanded = true;
+    owner.chips = "[bash] [grep] [read_file]";
+    owner.timingS = 3.2;
+    check(headerText(owner, true, 40.0f) == "AGENT - 3.2 s - [bash] [grep] +1",
+          "40 units: one chip drops and the count follows it (got '" +
+              headerText(owner, true, 40.0f) + "')");
+    owner.chips = "";
+    check(headerText(owner, true, 10.0f) == "AGENT",
+          "10 units: the timing drops, the label keeps (got '" + headerText(owner, true, 10.0f) +
+              "')");
+    owner.chips = "[bash] [grep]";
+    check(headerText(owner, true, 1.0f) == "AGENT - [bash] +1",
+          "one chip is the floor, and the label is never dropped (got '" +
+              headerText(owner, true, 1.0f) + "')");
+    owner.expanded = false;
+    check(headerText(owner, true, 1.0f) == "[bash] +1",
+          "a folded owner's timing drops after its chips (got '" + headerText(owner, true, 1.0f) +
+              "')");
+
+    // Both profiles fit the same way, in the profile's own unit: the pixel
+    // row's separator is the middle dot, and its units are pixels.
+    model::BlockDesc pixel = owner;
+    pixel.expanded = true;
+    pixel.chips = "[bash] [grep] [read_file]";
+    check(headerText(pixel, false, 1000.0f) ==
+              "AGENT \xC2\xB7 3.2 s \xC2\xB7 [bash] [grep] [read_file]",
+          "the pixel owner joins with the middle dot, in the profile's order");
+    check(headerText(pixel, false, 0.0f) == "AGENT \xC2\xB7 [bash] +2",
+          "the pixel owner fits by the same rules (got '" + headerText(pixel, false, 0.0f) + "')");
 
     model::BlockDesc stream = blockOf(model::BlockKind::Assistant, "AGENT", "half a senten");
     stream.streaming = true;
@@ -497,7 +706,7 @@ void checkHeaderText() {
     check(headerText(stream, true) == "AGENT",
           "a streaming row carries no preview: its body is being written under it");
 
-    // Whatever a label says, it is never an emoji (task 26's rule, at the last place
+    // Whatever a label says, it is never an emoji (checked at the last place
     // the text is chosen).
     const model::BlockKind kinds[] = {
         model::BlockKind::User,      model::BlockKind::Answer,   model::BlockKind::WorkGroup,
@@ -652,11 +861,10 @@ void checkAnatomy() {
         const ui::Rect rect = cellRect(0.0f, 0.0f, 40.0f, 2.0f * m.row);
         views::renderBlock(tool, rect, m, views::BlockDraw{false, false});
     });
-    check(grid.span(3, 0, 4) == "TOOL",
-          "the tool label sits after the rule and the glyph (got '" + grid.span(3, 0, 4) + "')");
+    check(grid.span(1, 0, 4) == "TOOL",
+          "the tool label follows the rule (no glyph, got '" + grid.span(1, 0, 4) + "')");
     check(grid.rowText(1).find("writeFile: 42 lines") != std::string::npos,
           "the summary is the row's second line");
-    check(grid.at(1, 0) != 0, "the state glyph paints its slot");
 
     // A disclosure instead of a rule: the work group's mark toggles, so the first cell
     // is the closed mark, and opening it changes that cell.
@@ -747,9 +955,8 @@ void checkAnatomy() {
 
 void checkThreadDrawsEveryKind() {
     ThreadFixture fixture;
-    fixture.add(message(1, tui::ChatMessageType::User, "[1] how do I build it [1.2s]",
-                        "how do I build it"));
-    fixture.add(message(2, tui::ChatMessageType::FinalAnswer, "[2] run make [3.4s]", "run make"));
+    fixture.add(message(1, MsgKind::User, "[1] how do I build it [1.2s]", "how do I build it"));
+    fixture.add(message(2, MsgKind::FinalAnswer, "[2] run make [3.4s]", "run make"));
     Grid grid = fixture.draw();
     check(grid.contains("YOU"), "a user query draws its role");
     check(grid.contains("ANSWER"), "the final answer draws its role");
@@ -758,18 +965,21 @@ void checkThreadDrawsEveryKind() {
 
     // A work group: header + one row per step, with the tool state as glyph + word.
     ThreadFixture work;
-    work.add(message(1, tui::ChatMessageType::Assistant, "[1] thinking about it [1.0s]",
-                     "I will list the files", "reasoning here"));
-    work.add(message(2, tui::ChatMessageType::ToolCall, "[2] tool call: bash ls [1.1s]",
-                     "tool call: bash ls"));
-    work.add(message(3, tui::ChatMessageType::ToolResponse,
+    work.add(message(1, MsgKind::Assistant, "[1] thinking about it [1.0s]", "I will list the files",
+                     "reasoning here"));
+    work.add(message(2, MsgKind::ToolCall, "[2] tool call: bash ls [1.1s]", "tool call: bash ls"));
+    work.add(message(3, MsgKind::ToolResponse,
                      "[3] tool result \xE2\x9C\x85 writeFile: 42 lines [1.2s]",
                      "tool result writeFile: 42 lines"));
-    work.add(
-        message(4, tui::ChatMessageType::System, "[4] note: 42 files [1.3s]", "note: 42 files"));
+    work.add(message(4, MsgKind::System, "[4] note: 42 files [1.3s]", "note: 42 files"));
+    // Minimal folds the work rows behind the header; the row anatomy below is
+    // the opened group's (the task-8 override), so the fixture opens it.
+    work.openNewestGroup();
     grid = work.draw();
     check(grid.contains("WORK"), "the work group draws its header");
-    check(grid.contains("4 steps"), "the work group counts its steps");
+    // The tool call and its result are one merged card in the typed store, so
+    // the steps are the prose, the card and the notice.
+    check(grid.contains("3 steps"), "the work group counts its steps");
     check(grid.contains("Thinking"), "the thinking disclosure has its own row");
     check(grid.contains("TOOL"), "a tool row draws its label");
     check(grid.contains("writeFile: 42 lines"), "a tool row draws its summary");
@@ -803,10 +1013,13 @@ void checkThreadDrawsEveryKind() {
     }
 
     // A code block: the body is one fence, so the block is a `Code` block and its copy
-    // path copies the code.
+    // path copies the code. It hangs off a turn whose first prose row is the query,
+    // so the row keeps the AGENT role.
     ThreadFixture code;
-    code.add(message(1, tui::ChatMessageType::Assistant, "[1] here it is [1.0s]",
+    code.add(message(1, MsgKind::User, "[1] show me [0.3s]", "show me"));
+    code.add(message(2, MsgKind::Assistant, "[2] here it is [1.0s]",
                      "```\nint main() { return 0; }\n```"));
+    code.openNewestGroup(); // the prose row is work: minimal folds it
     grid = code.draw();
     check(grid.contains("AGENT"), "a code body keeps the message's role word");
     check(grid.contains("int main"), "the code body is drawn");
@@ -842,23 +1055,121 @@ void installClipboard() {
 void checkStreaming() {
     installClipboard();
 
+    // Minimal folds the live turn's work rows behind its header: the
+    // reasoning-only stream draws the header and the query, and the reasoning
+    // waits behind the fold.
     ThreadFixture reasoning;
-    reasoning.addStream(tui::ChatMessageType::Assistant, "", "REASONING-TEXT-VISIBLE");
+    reasoning.addStream(MsgKind::Assistant, "", "REASONING-TEXT-VISIBLE");
     Grid grid = reasoning.draw();
-    check(grid.contains("AGENT"), "a streaming message draws its role");
-    check(grid.contains("Thinking"), "a reasoning-only stream draws the thinking row");
-    check(grid.contains("REASONING-TEXT-VISIBLE"), "and the reasoning itself (got a blank row?)");
+    // The typed live turn carries an empty content block until text arrives, and
+    // an empty prose block draws no row (this is the phase that would have caught
+    // an empty AGENT row).
+    check(!grid.contains("AGENT"), "a reasoning-only stream draws no empty agent row");
+    // The live edge names the streaming reasoning instead: the folded,
+    // count-only Thinking row draws directly under the header - the shape
+    // minimal shows between the query and the answer.
+    check(grid.contains("Thinking"),
+          "the live edge names the streaming reasoning (the folded count-only row)");
+    reasoning.openNewestGroup();
+    grid = reasoning.draw();
+    check(grid.contains("Thinking"), "the opened group draws the thinking row");
+    // A live batch with no call yet is the live tail (FR-4): its thinking body
+    // draws open with its owner - the reader sees what the model is thinking
+    // without a click.
+    check(grid.contains("REASONING-TEXT-VISIBLE"),
+          "the streaming reasoning body draws open (FR-4)");
+
+    // The counted variant (the design names it, so it is pinned): once the
+    // streaming response's calls exist - even only Pending - the live edge
+    // names the count, the way the emitter's batch upserts share one batch id.
+    ThreadFixture counted;
+    counted.seed.runStart("stream this");
+    counted.seed.upsertBlock(counted.seed.liveTurnId, "reasoning#0",
+                             std::to_string(counted.seed.liveTurnId) + "#0", TuiBlockKind_Reasoning,
+                             TuiBlockStatus_None, nullptr, "thinking");
+    counted.seed.upsertBlock(counted.seed.liveTurnId, "tool#0",
+                             std::to_string(counted.seed.liveTurnId) + "#0", TuiBlockKind_Tool,
+                             TuiBlockStatus_Pending, nullptr, "{}", "grep");
+    grid = counted.draw();
+    check(grid.contains("Thinking - 1 tool call"),
+          "the live edge names the count once the batch's calls exist (pending calls count)");
+
+    // A finished turn draws no live edge: the replayed answer whose reasoning
+    // and prose both landed keeps its fold bare - the Thinking row is the live
+    // edge, so it dies with the turn (this is the phase that would have
+    // regoldened the replayed thinking scene).
+    ThreadFixture done;
+    done.add(message(1, MsgKind::Assistant, "[1] the answer is 42 [3.2s]", "the answer is 42",
+                     "because the machine said so"));
+    grid = done.draw();
+    check(!grid.contains("Thinking"), "a finished turn draws no live thinking row");
 
     ThreadFixture both;
-    both.addStream(tui::ChatMessageType::Assistant, "STREAM-PROSE", "STREAM-THINKING");
+    both.addStream(MsgKind::Assistant, "STREAM-PROSE", "STREAM-THINKING");
     grid = both.draw();
-    check(grid.contains("STREAM-THINKING"), "a stream with both draws the reasoning");
+    check(!grid.contains("STREAM-THINKING"), "minimal folds the streamed reasoning");
+    // The content segment is the one child the fold keeps visible on its own
+    // (the content segment's own clause): the newest batch of a live turn draws its prose even
+    // though the owner above it never drew.
+    check(grid.contains("STREAM-PROSE"),
+          "the streamed prose draws under the fold (the content segment's own clause)");
+    // The case the design exists for, pinned on the adapter's
+    // descriptors, not on a screen substring: in the one frame the owner row is
+    // invisible and the segment is visible - both facts are the adapter's (the
+    // derived predicate); the view only obeys `visible`. The rows are
+    // selected by kind, never by number (the projection's indices move).
+    {
+        const auto& a = both.state.threadAdapter;
+        std::size_t ownerRow = a.blockCount(0), segmentRow = a.blockCount(0);
+        for (std::size_t b = 0; b < a.blockCount(0); ++b) {
+            const model::BlockDesc desc = a.blockAt(0, b);
+            if (desc.ownsBatch)
+                ownerRow = b;
+            if (desc.bodySegment)
+                segmentRow = b;
+        }
+        check(ownerRow < a.blockCount(0) && segmentRow < a.blockCount(0),
+              "the folded live batch still projects its owner and its segment");
+        check(ownerRow < a.blockCount(0) && !a.blockAt(0, ownerRow).visible,
+              "no owner row is drawn in minimal's folded group");
+        check(segmentRow < a.blockCount(0) && a.blockAt(0, segmentRow).visible,
+              "but the live batch's content still draws");
+    }
+    both.openNewestGroup();
+    grid = both.draw();
+    // The reasoning row draws open: the batch is the live tail and holds no call
+    // yet, so FR-4 keeps its body on screen.
+    check(grid.contains("Thinking"), "the opened group draws the reasoning row");
+    check(grid.contains("STREAM-THINKING"), "the streaming reasoning body draws open (FR-4)");
     check(grid.contains("STREAM-PROSE"), "and the prose");
     check(grid.rowText(0).find("STREAM-PROSE") == std::string::npos,
           "the prose is not on the reasoning row");
-    check(both.state.threadAdapter.blockExpanded(0, 0), "the streamed reasoning starts open");
+    // The opened group's segment pin (the minimal side): the owner and the
+    // segment are both visible - the segment draws inside the open owner,
+    // once, never a second copy (the owner side reaches the segment as soon
+    // as the owner draws).
+    {
+        const auto& a = both.state.threadAdapter;
+        std::size_t ownerRow = a.blockCount(0), segmentRow = a.blockCount(0);
+        for (std::size_t b = 0; b < a.blockCount(0); ++b) {
+            const model::BlockDesc desc = a.blockAt(0, b);
+            if (desc.ownsBatch)
+                ownerRow = b;
+            if (desc.bodySegment)
+                segmentRow = b;
+        }
+        check(ownerRow < a.blockCount(0) && a.blockAt(0, ownerRow).visible &&
+                  a.blockAt(0, segmentRow).visible,
+              "the opened group draws the owner and the segment (both visible)");
+    }
+    int proseRows = 0;
+    for (int y = 0; y < grid.ny; ++y)
+        if (grid.rowText(y).find("STREAM-PROSE") != std::string::npos)
+            ++proseRows;
+    check(proseRows == 1, "the opened group draws the segment once (no second copy)");
 
-    // The rows are one cell tall each: block 0 is the disclosure, block 1 the body.
+    // The rows' screen order in the opened group: the group's header, the query,
+    // the content, the reasoning - the reasoning row is screen row 4.
     auto clickRow = [&](float y) {
         both.draw(true, [y](ImGuiIO& in) { in.AddMousePosEvent(3.0f, y); });
         both.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, true); });
@@ -866,41 +1177,72 @@ void checkStreaming() {
         return both.draw(true); // the click's answer is drawn on the next frame
     };
 
-    // The reasoning row is a disclosure like any other - and a copy target of its own.
-    grid = clickRow(0.0f);
-    check(both.state.ui.thread.focus ==
-              model::BlockId{1, model::kStreamMessageId, model::BlockKind::Thinking},
-          "the reasoning row is focusable (the stream's BlockId)");
-    check(!both.state.threadAdapter.blockExpanded(0, 0), "a click on it closes it");
-    check(!grid.contains("STREAM-THINKING"), "a closed reasoning row hides its text");
+    // The reasoning row is a copy target of its own once the group is open. The
+    // opened group draws every body, so the row's screen position is the
+    // renderer's - it is found in the captured grid, never assumed.
+    auto rowOf = [](const Grid& g, const std::string& needle) {
+        for (int y = 0; y < g.ny; ++y)
+            if (g.rowText(y).find(needle) != std::string::npos)
+                return y;
+        return -1;
+    };
+    grid = clickRow(static_cast<float>(rowOf(grid, "Thinking")));
+    check(both.state.ui.thread.focus == model::BlockId{1, std::hash<std::string>{}("reasoning#0"),
+                                                       model::BlockKind::Thinking},
+          "the reasoning row is focusable (its typed block's BlockId)");
+    check(!grid.contains("STREAM-THINKING"), "a click on the open reasoning row folds its body");
+    grid = clickRow(static_cast<float>(rowOf(grid, "Thinking")));
+    check(grid.contains("STREAM-THINKING"), "a second click opens the reasoning body again");
     check(grid.contains("STREAM-PROSE"), "the prose stays");
-
-    grid = clickRow(0.0f);
-    check(both.state.threadAdapter.blockExpanded(0, 0), "a second click opens it again");
-    check(grid.contains("STREAM-THINKING"), "and the reasoning is back");
     g_clipboard.clear();
     g_clipboardSet = false;
     both.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
     check(g_clipboard == "STREAM-THINKING",
           "`y` on the reasoning copies the reasoning (got '" + g_clipboard + "')");
 
-    // The body row is its own target: `y` there copies the prose. Its row is *below* the
-    // reasoning body, so it is found in the captured grid rather than assumed.
+    // The body row is the batch's segment now: no header, no
+    // hit box of its own - the row above the body text is the batch's owner
+    // and the owner is the copy target. Found in the captured
+    // grid, never assumed.
+    const int bodyText = rowOf(grid, "STREAM-PROSE");
     int agentRow = -1;
-    for (int y = 0; y < grid.ny; ++y)
-        if (grid.rowText(y).find("AGENT") != std::string::npos && agentRow < 0)
+    for (int y = bodyText; y >= 0; --y)
+        if (grid.rowText(y).find("AGENT") != std::string::npos) {
             agentRow = y;
-    check(agentRow > 0,
-          "the body row is below the reasoning row (row " + std::to_string(agentRow) + ")");
+            break;
+        }
+    check(agentRow >= 0, "the body segment sits under its owner's AGENT header (row " +
+                             std::to_string(agentRow) + ")");
     clickRow(static_cast<float>(agentRow));
     check(both.state.ui.thread.focus ==
-              model::BlockId{1, model::kStreamMessageId, model::BlockKind::Assistant},
-          "the body row is focusable too");
+              model::BlockId{1, std::hash<std::string>{}("batch#1#0"), model::BlockKind::Assistant},
+          "the owner takes the focus; the body segment is body text, not a row hit box");
     g_clipboard.clear();
     g_clipboardSet = false;
     both.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
     check(g_clipboard == "STREAM-PROSE",
-          "`y` on the body copies the prose (got '" + g_clipboard + "')");
+          "`y` on the focused owner copies the batch content (got '" + g_clipboard + "')");
+
+    // The segment's lifetime: a newer batch folds the old segment with
+    // its batch (the newest-only clause lives in the newer response), and the
+    // turn's close folds the last one too. One predicate line changes the
+    // lifetime if the user prefers a single one - the choice is not made here.
+    // A fresh fixture, not the walked one: the clicks above left row pins, and
+    // a pin would give the fold a second cause.
+    ThreadFixture later;
+    later.addStream(MsgKind::Assistant, "OLD-PROSE", "");
+    Grid laterGrid = later.draw();
+    check(laterGrid.contains("OLD-PROSE"),
+          "the first batch's segment draws (it is the newest, live one)");
+    later.seed.nextBatch();
+    later.addStream(MsgKind::Assistant, "NEW-PROSE", "");
+    laterGrid = later.draw();
+    check(laterGrid.contains("NEW-PROSE"),
+          "a newer batch's segment draws (it is the newest, live one)");
+    check(!laterGrid.contains("OLD-PROSE"), "the old segment folded with its batch (newest-only)");
+    later.seed.runStop();
+    laterGrid = later.draw();
+    check(!laterGrid.contains("NEW-PROSE"), "the segment disappears when the turn closes");
 }
 
 void checkFocusAndCopy() {
@@ -908,14 +1250,14 @@ void checkFocusAndCopy() {
 
     // Two messages so "exactly one block is focused" means something.
     ThreadFixture fixture;
-    fixture.add(
-        message(1, tui::ChatMessageType::User, "[1] first question [0.5s]", "first question"));
-    fixture.add(
-        message(2, tui::ChatMessageType::User, "[2] second question [0.6s]", "second question"));
+    fixture.add(message(1, MsgKind::User, "[1] first question [0.5s]", "first question"));
+    fixture.add(message(2, MsgKind::User, "[2] second question [0.6s]", "second question"));
     fixture.state.ui.view = model::ThreadView::Ready;
     fixture.draw();
 
-    // Click the first row: it takes the focus, and the second block does not.
+    // Click the first row: it takes the focus, and the second block does not. The
+    // rows: the query opens the turn (query-first), so the first turn's query
+    // is row 0.
     fixture.draw(true, [](ImGuiIO& in) { in.AddMousePosEvent(5.0f, 0.0f); });
     fixture.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, true); });
     fixture.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, false); });
@@ -923,12 +1265,13 @@ void checkFocusAndCopy() {
     // reported by the row, and the row that reported it was already painted.
     Grid grid = fixture.draw(true);
     // One block at a time: the state is a single BlockId, and the click that took it
-    // names the first block (the user query's group, message id and kind).
-    check(fixture.state.ui.thread.focus == model::BlockId{1, 1, model::BlockKind::User},
+    // names the first block (the user query's group, block id and kind).
+    check(fixture.state.ui.thread.focus ==
+              model::BlockId{1, std::hash<std::string>{}("query"), model::BlockKind::User},
           "a click focuses a block");
     check(grid.contains("Copy"), "the focused block shows its Copy control");
 
-    const std::string body = fixture.state.threadAdapter.blockText(0, 0);
+    const std::string body = fixture.state.threadAdapter.blockText(0, store::kQueryRow);
     check(body == "first question", "the adapter answers the block's body (got '" + body + "')");
 
     // Exactly one block is focused: one row carries the control, however many blocks the
@@ -946,7 +1289,7 @@ void checkFocusAndCopy() {
     // not reach the row underneath it (no toggle, no focus change).
     const std::size_t chipAt = grid.rowText(0).find("Copy");
     const float chipX = static_cast<float>(chipAt) + 2.0f;
-    const bool wasExpanded = fixture.state.threadAdapter.blockExpanded(0, 0);
+    const bool wasExpanded = fixture.state.threadAdapter.blockExpanded(0, store::kQueryRow);
     g_clipboard.clear();
     g_clipboardSet = false;
     fixture.draw(true, [chipX](ImGuiIO& in) { in.AddMousePosEvent(chipX, 0.0f); });
@@ -954,7 +1297,8 @@ void checkFocusAndCopy() {
     fixture.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, false); });
     check(g_clipboardSet && g_clipboard == "first question",
           "a click on the Copy control copies the block (got '" + g_clipboard + "')");
-    check(fixture.state.ui.thread.focus == model::BlockId{1, 1, model::BlockKind::User},
+    check(fixture.state.ui.thread.focus ==
+              model::BlockId{1, std::hash<std::string>{}("query"), model::BlockKind::User},
           "the chip click keeps the focus where it was");
 
     // `y` copies the focused block's body - a character, because the terminal never
@@ -968,30 +1312,45 @@ void checkFocusAndCopy() {
 
     // A block with no focus copies nothing: one `y`, one target.
     ThreadFixture fresh;
-    fresh.add(
-        message(1, tui::ChatMessageType::User, "[1] nobody focused [0.5s]", "nobody focused"));
+    fresh.add(message(1, MsgKind::User, "[1] nobody focused [0.5s]", "nobody focused"));
     fresh.draw();
     g_clipboard.clear();
     g_clipboardSet = false;
     fresh.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
     check(!g_clipboardSet, "with no focused block, `y` copies nothing");
 
-    // And a *code* block's `y` copies the code, not the fences (S-13: the TUI path).
+    // And a *code* block's `y` copies the code, not the fences (the TUI
+    // path). Minimal folds the batch behind its header, so the fixture opens
+    // the group (the fixture override) before the row is clicked. The copy
+    // target is the batch's OWNER now: the body draws as the
+    // batch's header-less segment, and the owner's copy strips the fences
+    // because the content it names is code - the adapter's fence answer.
     ThreadFixture code;
-    code.add(
-        message(1, tui::ChatMessageType::Assistant, "[1] here [1.0s]", "```\nint x = 1;\n```"));
-    code.draw();
-    // The code block is the *second* row of its work group: the group's header is the
-    // first, so the focus has to be put on the row that holds the body.
-    code.draw(true, [](ImGuiIO& in) { in.AddMousePosEvent(2.0f, 1.0f); });
+    code.add(message(1, MsgKind::User, "[1] show [0.2s]", "show"));
+    code.add(message(2, MsgKind::Assistant, "[2] here [1.0s]", "```\nint x = 1;\n```"));
+    code.openNewestGroup();
+    const Grid cg = code.draw();
+    int ownerRow = -1;
+    for (int y = 0; y < cg.ny; ++y)
+        if (cg.rowText(y).find("AGENT") != std::string::npos) {
+            ownerRow = y;
+            break;
+        }
+    check(ownerRow >= 0, "the code batch's owner row is on screen");
+    code.draw(true,
+              [ownerRow](ImGuiIO& in) { in.AddMousePosEvent(2.0f, static_cast<float>(ownerRow)); });
     code.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, true); });
     code.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, false); });
     code.draw(true); // the click's answer is drawn on the next frame
+    check(code.state.ui.thread.focus ==
+              model::BlockId{1, std::hash<std::string>{}("batch#1#0"), model::BlockKind::Assistant},
+          "the owner row takes the focus; the code segment is body text, not a hit box");
     g_clipboard.clear();
     g_clipboardSet = false;
     code.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
     check(g_clipboard == "int x = 1;\n",
-          "`y` on a focused code block copies the code (got '" + g_clipboard + "')");
+          "`y` on the focused owner copies the code without the fences (got '" + g_clipboard +
+              "')");
 
     // A text field keeps its characters: the guard is `ui::takeCharacter`'s own
     // `WantTextInput` check (pinned by the rail's key tests, its first consumer). What
@@ -1016,48 +1375,55 @@ void checkFocusAndCopy() {
 /// the case the task names, and a "Copied WORK" for a block with no body would be a lie the user
 /// cannot check.
 
+/// The typed live turn's reasoning starts open (FR-4: the body is visible while
+/// it streams) and a click closes it. The next run's turn is a new group id, so
+/// the per-row pins do not carry over: a reasoning the reader closed in one
+/// turn starts open again in the next.
 void checkStreamReasoningDefault() {
     ThreadFixture fixture;
     fixture.state.ui.view = model::ThreadView::Ready;
-    tui::tuiUpdateStreamChatMessage(
-        fixture.state, message(0, tui::ChatMessageType::Assistant, "", "prose", "reasoning"));
+    fixture.seed.runStart("stream this");
+    fixture.addStream(MsgKind::Assistant, "prose", "reasoning");
     fixture.draw();
-    check(fixture.state.threadAdapter.blockExpanded(0, 0), "a new stream's reasoning starts open");
+    const size_t bodyRow = 2; // header, the batch's owner row, then the batch's
+                              // children in order: reasoning, content
+    check(fixture.state.threadAdapter.blockExpanded(0, bodyRow),
+          "a streaming response's reasoning starts open (FR-4)");
 
     // Close it, as a click on the disclosure would.
-    fixture.state.threadAdapter.setBlockExpanded(0, 0, false);
-    check(!fixture.state.threadAdapter.blockExpanded(0, 0), "the streamed reasoning can be closed");
+    fixture.state.threadAdapter.setBlockExpanded(0, bodyRow, false);
+    check(!fixture.state.threadAdapter.blockExpanded(0, bodyRow),
+          "the streamed reasoning can be closed");
 
-    // A focus on a streamed row names a block that disappears with the stream; the
-    // clear must drop it, or `y` would keep consuming characters for a dead target.
-    fixture.state.ui.thread.focus =
-        model::BlockId{1, model::kStreamMessageId, model::BlockKind::Thinking};
-    // Commit the stream and start the next one: the new group starts open.
-    tui::tuiStreamChatMessageClear(fixture.state);
-    check(!fixture.state.ui.thread.focus.valid(), "clearing the stream clears a focus on its rows");
-    tui::tuiUpdateStreamChatMessage(
-        fixture.state, message(0, tui::ChatMessageType::Assistant, "", "prose2", "reasoning2"));
+    // The next run's turn is a new group: its reasoning starts open again.
+    fixture.seed.runStop();
+    fixture.seed.runStart("stream this again");
+    fixture.addStream(MsgKind::Assistant, "prose2", "reasoning2");
     fixture.draw();
-    check(fixture.state.threadAdapter.blockExpanded(0, 0),
-          "a later stream's reasoning starts open (the flag is not sticky)");
+    check(fixture.state.threadAdapter.blockExpanded(1, bodyRow),
+          "a later stream's reasoning starts open too (the pin is not sticky)");
 }
 
 /// A stored work group and a stream in one thread: the shape where the two id
-/// namespaces meet. The stream group is 3 (user = 1, work = 2), and message 3 has
-/// both an Assistant body and a Thinking disclosure, so a `(key, kind)` identity
-/// would match two rows for each kind. The BlockId (group, key, kind) keeps the
-/// stored and streamed rows apart, and the stream's reserved key 0 is focusable
-/// because its group is not 0.
+/// namespaces meet. The live run's turn is 2 (the user message opened turn 1),
+/// and message 3 has both an Assistant body and a Thinking disclosure, so a
+/// `(key, kind)` identity would match two rows for each kind. The BlockId
+/// (group, key, kind) keeps the stored and streamed rows apart.
 void checkCrossGroupIdentity() {
     installClipboard();
 
     ThreadFixture fixture;
-    fixture.add(message(1, tui::ChatMessageType::User, "[1] question [0.5s]", "question"));
-    fixture.add(message(2, tui::ChatMessageType::Assistant, "[2] stored two [1.0s]", "stored-two"));
-    fixture.add(message(3, tui::ChatMessageType::Assistant, "[3] stored three [2.0s]",
-                        "stored-three", "think-three"));
+    fixture.add(message(1, MsgKind::User, "[1] question [0.5s]", "question"));
+    fixture.add(message(2, MsgKind::Assistant, "[2] stored two [1.0s]", "stored-two"));
+    fixture.add(
+        message(3, MsgKind::Assistant, "[3] stored three [2.0s]", "stored-three", "think-three"));
     fixture.state.ui.view = model::ThreadView::Ready;
-    fixture.addStream(tui::ChatMessageType::Assistant, "stream-prose", "stream-reasoning");
+    fixture.addStream(MsgKind::Assistant, "stream-prose", "stream-reasoning");
+    // Minimal folds both turns' work rows behind their headers; the row-level
+    // identities below are the pinned-open groups' (the task-10 pins: the
+    // group pin and the batch owners' row pins, both absolute).
+    fixture.openGroup(1);
+    fixture.openNewestGroup();
     Grid grid = fixture.draw();
 
     // The invariant first: this is the assertion that names the cause when a future
@@ -1099,26 +1465,42 @@ void checkCrossGroupIdentity() {
         return count;
     };
 
-    // The stored Assistant body: group 2, key 3. Its 2.0 s timing is unique here.
-    const int storedBody = rowOf(grid, "AGENT - 2.0 s");
-    check(storedBody >= 0, "the stored message 3 body row is on screen");
-    Grid afterStoredBody = clickRow(storedBody);
-    check(fixture.state.ui.thread.focus == model::BlockId{2, 3, model::BlockKind::Assistant},
-          "the stored body focuses its own group and message");
-    check(copyRows(afterStoredBody) == 1,
-          "focusing the stored body shows exactly one Copy control");
+    // The stored Assistant body: the turn's second prose block ("content#1" -
+    // the first was message 2's). After the fold the body draws as the
+    // batch's header-less segment: the row above it is the batch's
+    // owner, and the owner is the copy target. The click focuses the
+    // owner - and toggles the batch, which the re-open below undoes.
+    const int storedBodyText = rowOf(grid, "stored-three");
+    int storedOwner = -1;
+    for (int y = storedBodyText; y >= 0; --y)
+        if (grid.rowText(y).find("AGENT") != std::string::npos) {
+            storedOwner = y;
+            break;
+        }
+    check(storedOwner >= 0, "the stored message 3 owner row is on screen");
+    Grid afterStoredBody = clickRow(storedOwner);
+    check(fixture.state.ui.thread.focus ==
+              model::BlockId{1, std::hash<std::string>{}("batch#1#1"), model::BlockKind::Assistant},
+          "the stored body's owner takes the focus (the segment has no hit box)");
+    check(copyRows(afterStoredBody) == 0,
+          "the focused owner shows no Copy chip (the copy doors are the menu and `y`)");
     g_clipboard.clear();
     g_clipboardSet = false;
     fixture.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
     check(g_clipboard == "stored-three",
-          "`y` on the stored body copies the stored text (got '" + g_clipboard + "')");
+          "`y` on the focused owner copies the batch content (got '" + g_clipboard + "')");
+    fixture.openGroup(1); // the click toggled the batch closed; re-open it
+    grid = fixture.draw();
 
     // The stored Thinking row: same group and key, a different kind - a separate
-    // identity and a separate copy target.
-    const int storedThinking = rowOf(afterStoredBody, "Thinking - 2.0 s");
+    // identity and a separate copy target. The bare word is unique enough here:
+    // it names the stored reasoning, which draws before the live group's own.
+    const int storedThinking = rowOf(grid, "Thinking");
     check(storedThinking >= 0, "the stored message 3 thinking row is on screen");
     Grid afterStoredThinking = clickRow(storedThinking);
-    check(fixture.state.ui.thread.focus == model::BlockId{2, 3, model::BlockKind::Thinking},
+    check(fixture.state.ui.thread.focus == model::BlockId{1,
+                                                          std::hash<std::string>{}("reasoning#1"),
+                                                          model::BlockKind::Thinking},
           "the stored thinking focuses the Thinking kind");
     check(copyRows(afterStoredThinking) == 1,
           "focusing the stored thinking shows exactly one Copy control");
@@ -1128,27 +1510,42 @@ void checkCrossGroupIdentity() {
     check(g_clipboard == "think-three",
           "`y` on the stored thinking copies the stored reasoning (got '" + g_clipboard + "')");
 
-    // The stream's rows are the other half of each pair. The stream body is the last
-    // AGENT header (it has no timing); the stream thinking is the last Thinking one.
-    const int streamBody = rowOf(afterStoredThinking, "AGENT", /*fromBottom=*/true);
-    check(streamBody >= 0, "the streamed body row is on screen");
-    Grid afterStreamBody = clickRow(streamBody);
+    // The stream's rows are the other half of each pair. The stream owner is
+    // the last AGENT header (it has no timing); the click focuses the owner -
+    // the segment itself has no hit box - and toggles the batch, which
+    // the re-open undoes before the Thinking row is addressed.
+    const int streamOwner = rowOf(afterStoredThinking, "AGENT", /*fromBottom=*/true);
+    check(streamOwner >= 0, "the streamed body's owner row is on screen");
+    Grid afterStreamBody = clickRow(streamOwner);
     check(fixture.state.ui.thread.focus ==
-              model::BlockId{3, model::kStreamMessageId, model::BlockKind::Assistant},
-          "the streamed body is focusable with the reserved key 0");
-    check(copyRows(afterStreamBody) == 1, "the streamed body is the only focused row");
+              model::BlockId{2, std::hash<std::string>{}("batch#2#0"), model::BlockKind::Assistant},
+          "the streamed body's owner is focusable (the live turn's copy target)");
+    check(copyRows(afterStreamBody) == 0, "the focused stream owner shows no Copy chip");
     g_clipboard.clear();
     g_clipboardSet = false;
     fixture.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
     check(g_clipboard == "stream-prose",
-          "`y` on the streamed body copies the stream (got '" + g_clipboard + "')");
+          "`y` on the focused stream owner copies the stream (got '" + g_clipboard + "')");
+    fixture.openNewestGroup(); // the click toggled the batch closed; re-open it
+    grid = fixture.draw();
 
-    const int streamThinking = rowOf(afterStreamBody, "Thinking", /*fromBottom=*/true);
+    // The stream's Thinking row: the focusable row directly above the prose
+    // segment (the segment draws the body with no header of its own).
+    // The live edge's folded count-only shadow row sits at the group's bottom
+    // and says the same bare word - so the list's row is addressed by walking
+    // UP from the body text, never the word alone.
+    int streamThinking = -1;
+    for (int y = rowOf(grid, "stream-prose"); y >= 0; --y)
+        if (grid.rowText(y).find("Thinking") != std::string::npos) {
+            streamThinking = y;
+            break;
+        }
     check(streamThinking >= 0, "the streamed reasoning row is on screen");
     Grid afterStreamThinking = clickRow(streamThinking);
-    check(fixture.state.ui.thread.focus ==
-              model::BlockId{3, model::kStreamMessageId, model::BlockKind::Thinking},
-          "the streamed reasoning is focusable with the reserved key 0");
+    check(fixture.state.ui.thread.focus == model::BlockId{2,
+                                                          std::hash<std::string>{}("reasoning#0"),
+                                                          model::BlockKind::Thinking},
+          "the streamed reasoning is focusable (the live turn's reasoning block)");
     check(copyRows(afterStreamThinking) == 1, "the streamed reasoning is the only focused row");
     g_clipboard.clear();
     g_clipboardSet = false;
@@ -1257,56 +1654,77 @@ void checkCopyFromEveryBlock() {
 
     struct Case {
         const char* what;
-        tui::ChatMessageType type;
+        MsgKind type;
         const char* summary;
         const char* text;
         const char* thinking;
         bool stream;
-        const char* label; ///< the block's header word, the row to act on
-        const char* want;  ///< the exact clipboard payload
+        const char* label;  ///< the block's header word, the row to act on
+        const char* want;   ///< the exact clipboard payload
+        bool owner = false; ///< the label row is the batch's owner: body-less, the
+                            ///  copy target for its content - no Copy chip
     };
     const char* table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
     const Case cases[] = {
-        // Stored messages, one per v4 type that produces a body row.
-        {"user", tui::ChatMessageType::User, "[1] q-one [0.5s]", "user body", "", false, "YOU",
-         "user body"},
-        {"assistant", tui::ChatMessageType::Assistant, "[2] a-two [1.0s]", "agent prose", "", false,
-         "AGENT", "agent prose"},
-        {"answer", tui::ChatMessageType::FinalAnswer, "[3] done [1.2s]", "final answer", "", false,
-         "ANSWER", "final answer"},
-        {"system", tui::ChatMessageType::System, "[4] notice [1.4s]", "a notice", "", false,
-         "SYSTEM", "a notice"},
-        {"tool call", tui::ChatMessageType::ToolCall, "[5] writeFile: 42 lines [1.6s]",
-         "writeFile: 42 lines", "", false, "TOOL", "writeFile: 42 lines"},
-        {"tool result", tui::ChatMessageType::ToolResponse, "[6] result: 42 lines [1.8s]",
-         "result: 42 lines", "", false, "TOOL", "result: 42 lines"},
-        {"code", tui::ChatMessageType::Assistant, "[7] code [2.0s]", "```\nint x = 1;\n```", "",
-         false, "AGENT", "int x = 1;\n"},
-        {"table", tui::ChatMessageType::Assistant, "[8] table [2.2s]", table, "", false, "AGENT",
-         table},
-        {"stored thinking", tui::ChatMessageType::Assistant, "[9] think [2.4s]", "the answer",
-         "the reasoning", false, "Thinking", "the reasoning"},
+        // Stored messages, one per kind that produces a body row.
+        {"user", MsgKind::User, "[1] q-one [0.5s]", "user body", "", false, "YOU", "user body"},
+        {"assistant", MsgKind::Assistant, "[2] a-two [1.0s]", "agent prose", "", false, "AGENT",
+         "agent prose", true},
+        {"answer", MsgKind::FinalAnswer, "[3] done [1.2s]", "final answer", "", false, "ANSWER",
+         "final answer"},
+        {"system", MsgKind::System, "[4] notice [1.4s]", "a notice", "", false, "SYSTEM",
+         "a notice"},
+        {"tool call", MsgKind::ToolCall, "[5] writeFile: 42 lines [1.6s]", "writeFile: 42 lines",
+         "", false, "TOOL", "writeFile: 42 lines"},
+        {"tool result", MsgKind::ToolResponse, "[6] result: 42 lines [1.8s]", "result: 42 lines",
+         "", false, "TOOL", "result: 42 lines"},
+        {"code", MsgKind::Assistant, "[7] code [2.0s]", "```\nint x = 1;\n```", "", false, "AGENT",
+         "int x = 1;\n", true},
+        {"table", MsgKind::Assistant, "[8] table [2.2s]", table, "", false, "AGENT", table, true},
+        {"stored thinking", MsgKind::Assistant, "[9] think [2.4s]", "the answer", "the reasoning",
+         false, "Thinking", "the reasoning"},
         // The live answer: its body and its reasoning are two blocks of one group.
-        {"streamed body", tui::ChatMessageType::Assistant, "", "stream-prose", "", true, "AGENT",
-         "stream-prose"},
-        {"streamed thinking", tui::ChatMessageType::Assistant, "", "stream-prose",
-         "stream-reasoning", true, "Thinking", "stream-reasoning"},
+        {"streamed body", MsgKind::Assistant, "", "stream-prose", "", true, "AGENT", "stream-prose",
+         true},
+        {"streamed thinking", MsgKind::Assistant, "", "stream-prose", "stream-reasoning", true,
+         "Thinking", "stream-reasoning"},
     };
 
     for (const Case& c : cases) {
         const std::string what = c.what;
         const auto build = [&c](ThreadFixture& fixture) {
-            if (c.stream)
+            if (c.stream) {
                 fixture.addStream(c.type, c.text, c.thinking);
-            else
-                fixture.add(message(1, c.type, c.summary, c.text, c.thinking));
+                return;
+            }
+            // An Assistant message hangs off a turn whose first prose row is the
+            // query: seed one, so the case's row is the AGENT row it is named for.
+            if (c.type == MsgKind::Assistant)
+                fixture.add(message(0, MsgKind::User, "[0] setup [0.1s]", "setup"));
+            fixture.add(message(1, c.type, c.summary, c.text, c.thinking));
         };
 
         // --- the keyboard door: focus the row, press `y` -------------------------
         ThreadFixture keyboard;
         build(keyboard);
+        keyboard.openNewestGroup(); // the case's row is work: minimal folds it
         Grid grid = keyboard.draw();
-        const int row = findRow(grid, c.label);
+        // A streamed body draws verbatim, so its header is the case's label row
+        // directly above it. Walking up from the body matters for the streamed
+        // Thinking case: the live edge also draws a folded "Thinking" shadow
+        // line under the group's rows, which a bottom-up label search would
+        // hit first - and the shadow is not a focusable row.
+        // The walk-up anchors on the case's DRAWN body text: the streamed
+        // Thinking case's copy target is the reasoning text, which waits
+        // behind its fold - the prose segment under the group's rows is
+        // what is on screen, and its label row is the Thinking row above.
+        const int bodyRow = c.stream ? findRow(grid, *c.text ? c.text : c.want) : -1;
+        int row = -1;
+        for (int y = bodyRow; bodyRow >= 0 && y >= 0 && row < 0; --y)
+            if (grid.rowText(y).find(c.label) != std::string::npos)
+                row = y;
+        if (row < 0)
+            row = findRow(grid, c.label, /*fromBottom=*/true);
         check(row >= 0, what + ": its row is on screen");
         if (row < 0)
             continue;
@@ -1315,8 +1733,15 @@ void checkCopyFromEveryBlock() {
         clickCell(keyboard, 5, row, /*button=*/0);
         grid = keyboard.draw(true);
         check(keyboard.state.ui.thread.focus.valid(), what + ": a click focuses the block");
-        check(grid.rowText(row).find("Copy") != std::string::npos,
-              what + ": the focused block shows its Copy control");
+        // An owner row is body-less: the copy affordance is the menu
+        // and `y`, never a chip - the segment's chip check is the
+        // body-less rule the row's shape keeps.
+        if (c.owner)
+            check(grid.rowText(row).find("Copy") == std::string::npos,
+                  what + ": the focused owner row carries no Copy chip");
+        else
+            check(grid.rowText(row).find("Copy") != std::string::npos,
+                  what + ": the focused block shows its Copy control");
         g_clipboard.clear();
         g_clipboardSet = false;
         keyboard.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
@@ -1326,8 +1751,17 @@ void checkCopyFromEveryBlock() {
         // --- the pointer door: the block menu, on an unfocused block -------------
         ThreadFixture pointer;
         build(pointer);
+        pointer.openNewestGroup();
         const Grid before = pointer.draw();
-        const int menuRow = findRow(before, c.label);
+        // Same body-relative lookup as above: the streamed Thinking case's
+        // label row sits above its prose segment, under the live-edge shadow.
+        const int beforeBody = c.stream ? findRow(before, *c.text ? c.text : c.want) : -1;
+        int menuRow = -1;
+        for (int y = beforeBody; beforeBody >= 0 && y >= 0 && menuRow < 0; --y)
+            if (before.rowText(y).find(c.label) != std::string::npos)
+                menuRow = y;
+        if (menuRow < 0)
+            menuRow = findRow(before, c.label, /*fromBottom=*/true);
         check(menuRow >= 0, what + ": its row is on screen for the menu");
         if (menuRow < 0)
             continue;
@@ -1359,7 +1793,7 @@ void checkBodylessBlocks() {
     int enabledInk = -1;
     {
         ThreadFixture reference;
-        reference.add(message(1, tui::ChatMessageType::User, "[1] x [0.5s]", "x"));
+        reference.add(message(1, MsgKind::User, "[1] x [0.5s]", "x"));
         const Grid before = reference.draw();
         const int row = findRow(before, "YOU");
         check(row >= 0, "the reference block's row is on screen");
@@ -1374,7 +1808,7 @@ void checkBodylessBlocks() {
     // The WORK group's own header: `WORK - N steps`, no body of its own.
     {
         ThreadFixture fixture;
-        fixture.add(message(1, tui::ChatMessageType::Assistant, "[1] one [1.0s]", "the answer"));
+        fixture.add(message(1, MsgKind::Assistant, "[1] one [1.0s]", "the answer"));
         const model::BlockDesc header = fixture.state.threadAdapter.blockAt(0, 0);
         check(header.kind == model::BlockKind::WorkGroup && !header.hasBody,
               "the work group's header has no body");
@@ -1402,29 +1836,24 @@ void checkBodylessBlocks() {
         }
     }
 
-    // The live answer's body row before its first character arrives: present (the row is
-    // stable, task 26) and body-less.
+    // The live answer's body before its first character: the projection drops a
+    // body-less content row outright (D6), so the empty segment cannot reach the
+    // live edge and draw a bare `AGENT` row under the folded header - the
+    // group's reasoning row carries the live turn until text arrives.
     {
         ThreadFixture fixture;
-        fixture.addStream(tui::ChatMessageType::Assistant, "", "reasoning only");
+        fixture.addStream(MsgKind::Assistant, "", "reasoning only");
         const Grid grid = fixture.draw();
-        const int row = findRow(grid, "AGENT");
-        check(row >= 0, "a streamed body row exists before its first character");
-        if (row >= 0) {
-            clickCell(fixture, 5, row, /*button=*/0);
-            Grid after = fixture.draw(true);
-            check(fixture.state.ui.thread.focus.valid(),
-                  "the empty streamed body row is focusable");
-            check(after.rowText(row).find("Copy") == std::string::npos,
-                  "the empty streamed body row shows no Copy control");
-            g_clipboard.clear();
-            g_clipboardSet = false;
-            fixture.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
-            check(!g_clipboardSet, "`y` on the empty streamed body copies nothing");
-            const MenuCopy copy = copyThroughBlockMenu(fixture, row);
-            check(copy.offered && copy.uniqueItem && !copy.askedClipboard,
-                  "the empty streamed body's menu item is offered and copies nothing");
-        }
+        check(!grid.contains("AGENT"),
+              "an empty stream draws no agent body row (the reasoning carries the turn)");
+        // The live edge names the streaming reasoning here too: the folded,
+        // count-only Thinking row draws under the header while the group stays
+        // folded.
+        check(grid.contains("Thinking"),
+              "the live edge names the streaming reasoning (the folded count-only row)");
+        fixture.openNewestGroup();
+        const Grid opened = fixture.draw();
+        check(opened.contains("Thinking"), "and the opened group's reasoning row is on screen");
     }
 }
 
@@ -1436,11 +1865,10 @@ void checkCopyFeedback() {
     installClipboard();
 
     ThreadFixture fixture;
-    fixture.add(
-        message(1, tui::ChatMessageType::User, "[1] first question [0.5s]", "first question"));
+    fixture.add(message(1, MsgKind::User, "[1] first question [0.5s]", "first question"));
     fixture.state.ui.view = model::ThreadView::Ready;
     fixture.draw();
-    clickCell(fixture, 5, 0, /*button=*/0);
+    clickCell(fixture, 5, 0, /*button=*/0); // the query row: query-first puts it at row 0
     fixture.draw(true);
     check(fixture.state.ui.thread.focus.valid(), "the copy fixture has a focused block");
     check(fixture.state.ui.toasts.empty(), "focusing a block says nothing");
@@ -1477,7 +1905,7 @@ void checkCopyFeedback() {
 
     // A body-less row: the WORK group's header copies nothing, so it must not claim a copy.
     ThreadFixture header;
-    header.add(message(1, tui::ChatMessageType::Assistant, "[1] one [1.0s]", "the answer"));
+    header.add(message(1, MsgKind::Assistant, "[1] one [1.0s]", "the answer"));
     Grid headerGrid = header.draw();
     const int row = findRow(headerGrid, "WORK");
     check(row >= 0, "the body-less header is on screen");
@@ -1523,7 +1951,7 @@ void checkBlockMenuOwnership() {
     // Opening latches the owner, and the popup really is an ImGui popup - the fact the
     // frame layer's Esc ownership keys on (`popupOpenLastFrame`, tui.cpp).
     ThreadFixture fixture;
-    fixture.add(message(1, tui::ChatMessageType::User, "[1] q-one [0.5s]", "first body"));
+    fixture.add(message(1, MsgKind::User, "[1] q-one [0.5s]", "first body"));
     const Grid initial = fixture.draw();
     const int row = findRow(initial, "YOU");
     check(row >= 0, "the row is on screen");
@@ -1531,7 +1959,7 @@ void checkBlockMenuOwnership() {
         return;
     const Grid menu = openBlockMenu(fixture, row);
     check(menuCopyRows(menu, row).size() == 1, "the menu drew exactly one Copy item");
-    const model::BlockDesc first = fixture.state.threadAdapter.blockAt(0, 0);
+    const model::BlockDesc first = fixture.state.threadAdapter.blockAt(0, store::kQueryRow);
     check(fixture.state.ui.thread.menuBlockId == first.id(),
           "opening the menu latches its owner by BlockId");
     check(ImGui::IsPopupOpen(static_cast<ImGuiID>(0),
@@ -1552,10 +1980,11 @@ void checkBlockMenuOwnership() {
     check(menuCopyRows(afterEsc, row).empty(), "Esc closes the block menu");
     check(!fixture.state.ui.thread.menuBlockId.valid(), "a closed menu drops its owner");
 
-    // A clear/session switch recycles the ids (`tuiClearOutput()` calls exactly these two):
-    // the owner must be gone and the *new* message must not inherit the old menu.
+    // A clear/session switch wipes the typed store (`tuiClearOutput()` calls exactly
+    // these two): the owner must be gone and the *new* message must not inherit the
+    // old menu.
     ThreadFixture recycled;
-    recycled.add(message(1, tui::ChatMessageType::User, "[1] old [0.5s]", "OLD-BODY"));
+    recycled.add(message(1, MsgKind::User, "[1] old [0.5s]", "OLD-BODY"));
     const Grid old = recycled.draw();
     const int oldRow = findRow(old, "YOU");
     check(oldRow >= 0, "the old message's row is on screen");
@@ -1571,12 +2000,11 @@ void checkBlockMenuOwnership() {
     const model::BlockId oldId = recycled.state.ui.thread.menuBlockId;
     recycled.state.threadAdapter.reset();
     model::resetForSessionSwitch(recycled.state.ui);
-    recycled.state.chat.outputLines.clear();
-    recycled.state.chat.outputLineOpen.clear();
-    recycled.state.chat.openWorkGroups.clear();
-    recycled.add(message(1, tui::ChatMessageType::User, "[1] new [0.6s]", "NEW-BODY"));
+    recycled.state.chat.typedTurns.threadClear();
+    recycled.seed = typed_seed::Seeder(&recycled.state, 1); // the transcript starts over
+    recycled.add(message(1, MsgKind::User, "[1] new [0.6s]", "NEW-BODY"));
     const Grid fresh = recycled.draw();
-    const model::BlockDesc second = recycled.state.threadAdapter.blockAt(0, 0);
+    const model::BlockDesc second = recycled.state.threadAdapter.blockAt(0, store::kQueryRow);
     check(second.id() == oldId, "premise: the reset recycled the BlockId");
     check(!recycled.state.ui.thread.menuBlockId.valid(),
           "a transcript reset drops the menu's owner");
@@ -1599,28 +2027,35 @@ void checkBlockMenuOwnership() {
 void checkMenuKeepsTheFocusedBlock() {
     installClipboard();
     ThreadFixture fixture;
-    fixture.add(message(1, tui::ChatMessageType::User, "[1] first [0.5s]", "FIRST-BODY"));
-    fixture.add(message(2, tui::ChatMessageType::User, "[2] second [0.6s]", "SECOND-BODY"));
+    fixture.add(message(1, MsgKind::User, "[1] first [0.5s]", "FIRST-BODY"));
+    fixture.add(message(2, MsgKind::User, "[2] second [0.6s]", "SECOND-BODY"));
+    // A third turn: with query-first the turns' rows stand close together (a
+    // user-only turn is its query row and its body), and the menu's Copy item must
+    // be the *only* Copy in the band around the clicked row - a third turn keeps
+    // the focused row's own chip out of that band.
+    fixture.add(message(3, MsgKind::User, "[3] third [0.7s]", "THIRD-BODY"));
     Grid grid = fixture.draw();
     const int first = findRow(grid, "YOU");
-    const int second = findRow(grid, "YOU", /*fromBottom=*/true);
-    check(first >= 0 && second > first, "both rows are on screen");
-    if (first < 0 || second <= first)
+    const int third = findRow(grid, "YOU", /*fromBottom=*/true);
+    check(first >= 0 && third > first, "both rows are on screen");
+    if (first < 0 || third <= first)
         return;
     clickCell(fixture, 5, first, /*button=*/0);
     grid = fixture.draw(true);
-    check(fixture.state.ui.thread.focus == model::BlockId{1, 1, model::BlockKind::User},
+    check(fixture.state.ui.thread.focus ==
+              model::BlockId{1, std::hash<std::string>{}("query"), model::BlockKind::User},
           "premise: the first block holds the focus");
-    const Grid menu = openBlockMenu(fixture, second);
-    check(menuCopyRows(menu, second).size() == 1, "the second block's menu is open");
-    check(fixture.state.ui.thread.focus == model::BlockId{1, 1, model::BlockKind::User},
+    const Grid menu = openBlockMenu(fixture, third);
+    check(menuCopyRows(menu, third).size() == 1, "the third block's menu is open");
+    check(fixture.state.ui.thread.focus ==
+              model::BlockId{1, std::hash<std::string>{}("query"), model::BlockKind::User},
           "opening a menu does not move the focus");
     g_clipboard.clear();
     g_clipboardSet = false;
     fixture.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
     check(g_clipboardSet && g_clipboard == "FIRST-BODY",
           "`y` while a menu is open copies the focused block (got '" + g_clipboard + "')");
-    check(menuCopyRows(fixture.draw(true), second).size() == 1,
+    check(menuCopyRows(fixture.draw(true), third).size() == 1,
           "and the menu stays open on the block it belongs to");
 }
 // ---------------------------------------------------------------------------
@@ -1698,6 +2133,97 @@ std::string goldenText(const char* name, const Grid& grid) {
     return text;
 }
 
+// maxlong: a finished six-response turn, maximal. 6 content rows (1 step each) and 12
+// settled calls (2 each) = 30 steps. The group is folded, so only its header draws.
+void buildMaxLong(ThreadFixture& f) {
+    f.state.chat.threadMinimalMode = false;
+    f.seed.upsertTurn(1, TuiTurnState_Done, 12);
+    f.seed.upsertBlock(1, "query", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user",
+                       "refactor the whole tree, module by module");
+    for (int r = 0; r < 6; ++r) { // upsertBlock(..., title, durationMs)
+        const std::string t = std::to_string(r);
+        f.seed.upsertBlock(1, "content#" + t, "1#" + t, TuiBlockKind_Prose, TuiBlockStatus_None,
+                           "assistant", "step " + t + " done", nullptr, 1200);
+        f.seed.upsertBlock(1, "call#a" + t, "1#" + t, TuiBlockKind_Tool, TuiBlockStatus_Ok, "ok",
+                           "ls -R", "bash", 1100);
+        f.seed.upsertBlock(1, "call#b" + t, "1#" + t, TuiBlockKind_Tool, TuiBlockStatus_Ok, "ok",
+                           "grep -r needle", "grep", 1200);
+    }
+    f.seed.upsertBlock(1, "answer", "1#5", TuiBlockKind_Answer, TuiBlockStatus_None, nullptr,
+                       "the refactor is done: ...");
+}
+
+// --- maxlonglive: the same turn mid-run. Batches 0 and 1 settled, batch 2 live (owner open,
+// thinking + content + one running card).
+void buildMaxLongLive(ThreadFixture& f) {
+    f.state.chat.threadMinimalMode = false;
+    f.seed.runStart("refactor the whole tree, module by module");
+    for (int r = 0; r < 2; ++r) {
+        const std::string t = std::to_string(r);
+        f.seed.upsertBlock(1, "content#" + t, "1#" + t, TuiBlockKind_Prose, TuiBlockStatus_None,
+                           "assistant", "step " + t + " done", nullptr, 1100 + 100 * r);
+        f.seed.upsertBlock(1, "call#a" + t, "1#" + t, TuiBlockKind_Tool, TuiBlockStatus_Ok, "ok",
+                           "ls -R", "bash", 1100);
+        f.seed.upsertBlock(1, "call#b" + t, "1#" + t, TuiBlockKind_Tool, TuiBlockStatus_Ok, "ok",
+                           "grep -r needle", "grep", 1200);
+        f.seed.nextBatch();
+    }
+    // The live batch's ids carry the batch index (the wire's naming): "content#0" here would
+    // be batch 0's settled content row again, and the upsert merges into that slot in place -
+    // the row would move to the live batch and lose the 1.1 s duration its owner prints.
+    f.seed.upsertBlock(1, "reasoning#2", "1#2", TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                       nullptr, "rebasing the parser onto the new loader ...");
+    f.seed.upsertBlock(1, "content#2", "1#2", TuiBlockKind_Prose, TuiBlockStatus_None, "assistant",
+                       "Next I will move the loader out of core.");
+    f.seed.upsertBlock(1, "call#0", "1#2", TuiBlockKind_Tool, TuiBlockStatus_Running, nullptr,
+                       "dub test", "execute_command", 0);
+}
+
+// --- maxstream: a LIVE turn's response that has produced only thinking and
+// prose so far - no call has landed. The batch's owner and its thinking draw
+// open (FR-4): the reasoning body is the one thing maximal exists to show while
+// the model streams.
+void buildMaxStream(ThreadFixture& f) {
+    f.state.chat.threadMinimalMode = false;
+    f.seed.runStart("move the loader");
+    f.seed.upsertBlock(1, "reasoning#0", "1#0", TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                       nullptr, "thinking about the loader");
+    f.seed.upsertBlock(1, "content#0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None, "assistant",
+                       "I will move the loader out of core.");
+}
+
+// --- maxnotice: a LIVE turn, two batches. Batch 0 settled (its owner folds), batch 1 live (its
+// owner is open), and the notice sits BETWEEN two rows of batch 1.
+void buildMaxNotice(ThreadFixture& f) {
+    f.state.chat.threadMinimalMode = false;
+    f.seed.runStart("sweep the tree");
+    f.seed.upsertBlock(1, "content#0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None, "assistant",
+                       "I will list the tree first.", nullptr, 1100);
+    f.seed.upsertBlock(1, "call#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, "42 lines",
+                       "ls -R", "bash", 1100);
+    f.seed.nextBatch();
+    f.seed.upsertBlock(1, "content#1", "1#1", TuiBlockKind_Prose, TuiBlockStatus_None, "assistant",
+                       "now the count");
+    f.seed.upsertBlock(1, "notice#1", "1#q", TuiBlockKind_Notice, TuiBlockStatus_None, nullptr,
+                       "context compacted");
+    f.seed.upsertBlock(1, "call#1", "1#1", TuiBlockKind_Tool, TuiBlockStatus_Running, nullptr,
+                       "wc -l", "bash", 0);
+}
+
+// --- maxchips: a settled batch of four distinct tools -> "[a] [b] [c] +1", duration from the
+// response's content row (the owner carries it).
+void buildMaxChips(ThreadFixture& f) {
+    f.state.chat.threadMinimalMode = false;
+    f.seed.upsertTurn(1, TuiTurnState_Done, 9);
+    f.seed.upsertBlock(1, "query", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user", "go");
+    f.seed.upsertBlock(1, "content#0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None, "assistant",
+                       "doing four things", nullptr, 1200);
+    const char* names[] = {"bash", "grep", "read_file", "write_file"};
+    for (int i = 0; i < 4; ++i)
+        f.seed.upsertBlock(1, "call#" + std::to_string(i), "1#0", TuiBlockKind_Tool,
+                           TuiBlockStatus_Ok, "ok", names[i], names[i], 1200);
+}
+
 /// One fixture per message type: the screen a golden pins.
 struct Scene {
     const char* name;
@@ -1706,49 +2232,184 @@ struct Scene {
 
 std::vector<Scene> scenes() {
     std::vector<Scene> list;
-    list.push_back({"user", [](ThreadFixture& f) {
-                        f.add(message(1, tui::ChatMessageType::User, "[1] build the project [1.2s]",
-                                      "build the project"));
-                    }});
+    list.push_back(
+        {"user", [](ThreadFixture& f) {
+             f.add(message(1, MsgKind::User, "[1] build the project [1.2s]", "build the project"));
+         }});
     list.push_back({"answer", [](ThreadFixture& f) {
-                        f.add(message(1, tui::ChatMessageType::FinalAnswer,
-                                      "[1] run make -f tui.mak [3.4s]",
+                        f.add(message(1, MsgKind::FinalAnswer, "[1] run make -f tui.mak [3.4s]",
                                       "run make -f tui.mak\nand then the binary"));
                     }});
     list.push_back({"workgroup", [](ThreadFixture& f) {
-                        f.add(message(1, tui::ChatMessageType::Assistant,
-                                      "[1] looking around [1.0s]", "looking around",
-                                      "reasoning about the tree"));
-                        f.add(message(2, tui::ChatMessageType::ToolCall,
-                                      "[2] tool call: bash ls [1.1s]", "tool call: bash ls"));
-                        f.add(message(3, tui::ChatMessageType::ToolResponse,
+                        f.add(message(1, MsgKind::Assistant, "[1] looking around [1.0s]",
+                                      "looking around", "reasoning about the tree"));
+                        f.add(message(2, MsgKind::ToolCall, "[2] tool call: bash ls [1.1s]",
+                                      "tool call: bash ls"));
+                        f.add(message(3, MsgKind::ToolResponse,
                                       "[3] tool result \xE2\x9C\x85 writeFile: 42 lines [1.2s]",
                                       "tool result writeFile: 42 lines"));
                     }});
+    // The live batch's chips line: only the steps still in flight ride it - a
+    // finished step folds into the header's count, a running one draws live, a
+    // pending one draws dim.
+    list.push_back({"livebatch", [](ThreadFixture& f) {
+                        f.seed.runStart("sweep the tree");
+                        f.seed.upsertBlock(f.seed.liveTurnId, "tool#1", "1#0", TuiBlockKind_Tool,
+                                           TuiBlockStatus_Ok, "42 lines", "ls -R", "bash", 1100, 0,
+                                           0, {}, "42 lines", 0);
+                        f.seed.upsertBlock(f.seed.liveTurnId, "tool#2", "1#0", TuiBlockKind_Tool,
+                                           TuiBlockStatus_Running, nullptr,
+                                           "needle in the haystack", "grep", 0);
+                        f.seed.upsertBlock(f.seed.liveTurnId, "tool#3", "1#0", TuiBlockKind_Tool,
+                                           TuiBlockStatus_Pending, nullptr, "notes.md", "writeFile",
+                                           0);
+                    }});
+    // The streamed answer while it is still a tool's business: the task_done
+    // step rides the chips line, the answer text shows nowhere else yet.
+    list.push_back({"answerchip", [](ThreadFixture& f) {
+                        f.seed.runStart("what is the answer");
+                        f.seed.updateStream("The answer is 42");
+                        f.seed.tool("task_done", "the answer is 42", TuiBlockStatus_Running);
+                    }});
+    // The same turn after the result lands: the answer becomes the content row
+    // (its body draws), the tool folds into the header, the chips line is gone.
+    list.push_back({"answerlanded", [](ThreadFixture& f) {
+                        f.seed.runStart("what is the answer");
+                        f.seed.updateStream("The answer is 42");
+                        f.seed.tool("task_done", "the answer is 42", TuiBlockStatus_Ok, "42", 3200);
+                        f.seed.add(typed_seed::Seeder::Msg::FinalAnswer, "The answer is 42");
+                    }});
+    // A replayed multi-turn thread: the query opens each turn, the work group
+    // carries its tool card behind the header, the answers draw after their
+    // groups - and a turn with no work rows (turn 2) renders headerless.
+    list.push_back({"idle", [](ThreadFixture& f) {
+                        f.seed.upsertTurn(1, TuiTurnState_Done, 4);
+                        f.seed.upsertBlock(1, "q1", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None,
+                                           "user", "what is v5?");
+                        f.seed.upsertBlock(1, "t1", "1#1", TuiBlockKind_Tool, TuiBlockStatus_Ok,
+                                           "42 lines", "listing the tree", "bash", 1100, 0, 0, {},
+                                           "42 lines", 0);
+                        f.seed.upsertBlock(1, "a1", "1#1", TuiBlockKind_Answer, TuiBlockStatus_None,
+                                           nullptr, "the typed store");
+                        f.seed.upsertTurn(2, TuiTurnState_Done, 1);
+                        f.seed.upsertBlock(2, "q2", "2#q", TuiBlockKind_Prose, TuiBlockStatus_None,
+                                           "user", "does it fold?");
+                        f.seed.upsertBlock(2, "a2", "2#0", TuiBlockKind_Answer, TuiBlockStatus_None,
+                                           nullptr, "yes - header only");
+                    }});
+    // Maximal mode's batch anatomy: the group draws open - the
+    // thinking disclosure collapsed behind its tool count, the content row's
+    // body out, the two tool cards indented under the thinking with their
+    // durations, arguments, embedded Results and the one non-zero token field.
+    list.push_back({"maxanatomy", [](ThreadFixture& f) {
+                        f.state.chat.threadMinimalMode = false;
+                        f.seed.upsertTurn(1, TuiTurnState_Done, 5);
+                        f.seed.upsertBlock(1, "q1", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None,
+                                           "user", "read the tree");
+                        f.seed.upsertBlock(1, "r0", "1#0", TuiBlockKind_Reasoning,
+                                           TuiBlockStatus_None, nullptr, "thinking about the tree");
+                        f.seed.upsertBlock(1, "c0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
+                                           "assistant", "the tree has 3 files");
+                        f.seed.upsertBlock(1, "t1", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok,
+                                           "42 lines", "ls -R", "bash", 1100, 1200, 0, {},
+                                           "42 lines", 0);
+                        f.seed.upsertBlock(1, "t2", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok,
+                                           "3 files", "grep -r needle", "grep", 3200, 0, 450,
+                                           {{"files", "3"}, {"needle hits", "7"}}, "", 3);
+                    }});
+    // The failed step draws red inside the open batch - and the step count
+    // still weighs it like a landed one.
+    list.push_back(
+        {"maxfailed", [](ThreadFixture& f) {
+             f.state.chat.threadMinimalMode = false;
+             f.seed.upsertTurn(1, TuiTurnState_Done, 5);
+             f.seed.upsertBlock(1, "q1", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user",
+                                "read the tree");
+             f.seed.upsertBlock(1, "r0", "1#0", TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                                nullptr, "thinking about the tree");
+             f.seed.upsertBlock(1, "c0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
+                                "assistant", "the tree has 3 files");
+             f.seed.upsertBlock(1, "t1", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, "42 lines",
+                                "ls -R", "bash", 1100, 0, 0, {}, "42 lines", 0);
+             f.seed.upsertBlock(1, "t2", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Failed, "exit 1",
+                                "grep -r needle", "grep", 3200, 0, 0, {}, "exit 1", 0);
+         }});
+    // A live batch in maximal mode: the still-running card names its tool with
+    // no duration, the landed one carries its own - and the zero token
+    // fields of both render nothing.
+    list.push_back({"maxlive", [](ThreadFixture& f) {
+                        f.state.chat.threadMinimalMode = false;
+                        f.seed.runStart("sweep the tree");
+                        f.seed.tool("grep", "needle in the haystack", TuiBlockStatus_Running);
+                        f.seed.tool("bash", "ls -R", TuiBlockStatus_Ok, "42 lines", 1100);
+                    }});
+    list.push_back({"maxstream", &buildMaxStream});
+    // The stop mid-batch: the interrupted card renders as its own honest state -
+    // neither Ok-green nor Failed-red.
+    list.push_back({"maxcancelled", [](ThreadFixture& f) {
+                        f.state.chat.threadMinimalMode = false;
+                        f.seed.runStart("sweep the tree");
+                        f.seed.tool("bash", "ls -R", TuiBlockStatus_Running);
+                        f.seed.runStop();
+                        // D's stop marks the in-flight call Cancelled: the same
+                        // call id re-upserts with the honest status.
+                        f.seed.upsertBlock(1, "tool#1", "1#0", TuiBlockKind_Tool,
+                                           TuiBlockStatus_Cancelled, nullptr, "ls -R", "bash", 0);
+                    }});
+    // The maximal-mode fold's four target scenes: a long finished turn, the same
+    // turn mid-run, a notice between a live batch's rows, and the four-chip
+    // chips line. checkOwnerShape pins their target rows as checks.
+    list.push_back({"maxlong", &buildMaxLong});
+    list.push_back({"maxlonglive", &buildMaxLongLive});
+    list.push_back({"maxnotice", &buildMaxNotice});
+    list.push_back({"maxchips", &buildMaxChips});
     list.push_back({"toolcall", [](ThreadFixture& f) {
-                        f.add(message(1, tui::ChatMessageType::ToolCall,
+                        f.add(message(1, MsgKind::ToolCall,
                                       "[1] tool call: readFile proof.qed [2.0s]",
                                       "tool call: readFile proof.qed"));
                     }});
     list.push_back({"toolresult", [](ThreadFixture& f) {
-                        f.add(message(1, tui::ChatMessageType::ToolResponse,
+                        f.add(message(1, MsgKind::ToolResponse,
                                       "[1] tool result \xE2\x9D\x8C bash: exit 1 [2.0s]",
                                       "tool result bash: exit 1"));
                     }});
     list.push_back({"thinking", [](ThreadFixture& f) {
-                        f.add(message(1, tui::ChatMessageType::Assistant,
-                                      "[1] the answer is 42 [3.2s]", "the answer is 42",
-                                      "because the machine said so"));
+                        f.add(message(1, MsgKind::Assistant, "[1] the answer is 42 [3.2s]",
+                                      "the answer is 42", "because the machine said so"));
                     }});
-    list.push_back({"system", [](ThreadFixture& f) {
-                        f.add(message(1, tui::ChatMessageType::System, "[1] session resumed [0.4s]",
-                                      "session resumed"));
-                    }});
+    list.push_back(
+        {"system", [](ThreadFixture& f) {
+             f.add(message(1, MsgKind::System, "[1] session resumed [0.4s]", "session resumed"));
+         }});
     list.push_back({"code", [](ThreadFixture& f) {
-                        f.add(message(1, tui::ChatMessageType::Assistant, "[1] try this [1.0s]",
+                        f.add(message(1, MsgKind::Assistant, "[1] try this [1.0s]",
                                       "```\nint main() { return 0; }\n```"));
                     }});
     return list;
+}
+
+// An empty group renders headerless: a turn whose only rows are the query and
+// the answer draws both stand-alone - no WORK header between them, because the
+// header exists to announce rows the group does not have.
+void checkEmptyGroupHeaderless() {
+    ThreadFixture fixture;
+    fixture.add(message(1, MsgKind::User, "[1] just a question [0.5s]", "just a question"));
+    fixture.add(message(2, MsgKind::FinalAnswer, "[1] done [1.0s]", "just the answer"));
+    fixture.state.ui.view = model::ThreadView::Ready;
+    const Grid grid = fixture.draw();
+
+    check(!grid.contains("WORK"), "an empty group draws no WORK header");
+    check(grid.contains("just a question") && grid.contains("just the answer"),
+          "the query and the answer still draw");
+    int queryRow = -1, answerRow = -1;
+    for (int y = 0; y < grid.ny; ++y) {
+        if (queryRow < 0 && grid.rowText(y).find("just a question") != std::string::npos)
+            queryRow = y;
+        if (grid.rowText(y).find("just the answer") != std::string::npos)
+            answerRow = y;
+    }
+    check(queryRow >= 0 && answerRow > queryRow,
+          "the answer draws after the query (the turn's order holds headerless)");
 }
 
 void checkGoldens(bool update) {
@@ -1831,6 +2492,364 @@ void checkGoldens(bool update) {
     ui::applyTheme(ui::ThemeId::Graphite, ui::ColorDepth::TrueColor);
 }
 
+/// The seeder's batch lifecycle (the wire's shape, stated once): a live run's
+/// steps share ONE batch until `nextBatch`, and the next response - its
+/// content and calls - opens the following batch.
+void checkSeederBatches() {
+    tui::TuiState state;
+    typed_seed::Seeder seed{&state, 1};
+    seed.runStart("sweep the tree");
+    seed.tool("grep", "needle in the haystack", TuiBlockStatus_Running);
+    seed.tool("bash", "ls -R", TuiBlockStatus_Ok, "42 lines", 1100);
+    check(seed.batchId() == "1#0", "the live run's first batch is <turn>#0");
+    check(state.chat.typedTurns.blockCount(1) == 3,
+          "runStart -> tool -> tool = the query plus ONE batch's two cards");
+    const store::TypedBlock& first = state.chat.typedTurns.blockAt(1, 1);
+    const store::TypedBlock& second = state.chat.typedTurns.blockAt(1, 2);
+    check(first.id == "tool#1" && second.id == "tool#2", "the two cards keep their own call ids");
+    check(first.batchId == "1#0" && second.batchId == "1#0",
+          "both cards ride the same response batch");
+    seed.nextBatch();
+    seed.content("the tree has 3 files");
+    check(seed.batchId() == "1#1", "nextBatch opens the next response's batch");
+    const store::TypedBlock& prose = state.chat.typedTurns.blockAt(1, 3);
+    check(state.chat.typedTurns.blockCount(1) == 4 && prose.id == "content#1" &&
+              prose.batchId == "1#1",
+          "the next response's content lands on the second batch");
+    seed.notice("a passing thought");
+    const store::TypedBlock& note = state.chat.typedTurns.blockAt(1, 4);
+    check(state.chat.typedTurns.blockCount(1) == 5 && note.id == "notice#1" && note.turnId == 1 &&
+              note.batchId == "1#q" && note.kind == TuiBlockKind_Notice,
+          "a notice rides the query batch, never a response batch");
+}
+
+/// The row a substring draws on, -1 when nothing on the screen carries it: the
+/// shape checks read the drawn grid, so a row's absence is an answer too.
+int rowOfSub(const Grid& g, const std::string& needle) {
+    for (int y = 0; y < g.ny; ++y)
+        if (g.rowText(y).find(needle) != std::string::npos)
+            return y;
+    return -1;
+}
+
+/// How many rows carry a substring: the live-edge checks count the rows a
+/// word draws on, since the edge's line is the one place its text may repeat.
+int rowsWith(const Grid& g, const std::string& needle) {
+    int count = 0;
+    for (int y = 0; y < g.ny; ++y)
+        if (g.rowText(y).find(needle) != std::string::npos)
+            ++count;
+    return count;
+}
+
+/// The column a substring starts at on its row, -1 when absent: the shape
+/// checks read the drawn grid, so an indent is an answer too.
+int colOfSub(const Grid& g, const std::string& needle) {
+    const int y = rowOfSub(g, needle);
+    if (y < 0)
+        return -1;
+    const std::size_t col = g.rowText(y).find(needle);
+    return col == std::string::npos ? -1 : static_cast<int>(col);
+}
+
+/// The response-owned fold's review checks, as assertions over
+/// the four builders above: the projection, the view and the
+/// live edge, so every check here is green.
+void checkOwnerShape() {
+    { // maxlong (T10, T13): a folded group draws its header, no owner, no card, then the answer
+        ThreadFixture f;
+        buildMaxLong(f);
+        const Grid g = f.draw();
+        check(g.contains("WORK - 30 steps"), "maxlong: the folded header announces 30 steps");
+        check(!g.contains("AGENT"), "maxlong: a closed group draws no owner row");
+        check(!g.contains("TOOL"), "maxlong: a closed group draws no card");
+        check(g.contains("ANSWER") && g.contains("the refactor is done: ..."),
+              "maxlong: the answer closes the turn");
+    }
+    { // maxlonglive (T7, T10, T11, T13)
+        ThreadFixture f;
+        buildMaxLongLive(f);
+        const Grid g = f.draw();
+        // The needles are composed from the pinned glyph set, not the ASCII art
+        // legend: the run pins LLMFUN_ASCII=0, so the grid draws the real marks
+        // - the shape assertion stays exactly as strong, only re-keyed.
+        const std::string open =
+            std::string(ui::icon(ui::Icon::DisclosureOpen, ui::GlyphSet::Glyphs));
+        const std::string shut =
+            std::string(ui::icon(ui::Icon::DisclosureClosed, ui::GlyphSet::Glyphs));
+        check(g.contains(shut + " 1.1 s - [bash] [grep]"),
+              "maxlonglive: a settled owner folds with its duration and chips");
+        check(g.contains(open + " AGENT - [execute_command]"),
+              "maxlonglive: the live owner draws open, no duration yet");
+        check(g.contains(open + " Thinking"), "maxlonglive: the live batch's reasoning draws");
+        check(g.contains("Next I will move the loader out of core."),
+              "maxlonglive: its content draws");
+        check(g.contains("TOOL  execute_command"), "maxlonglive: its live card draws");
+        // The owners are flat siblings - the drawRow indent puts each folded
+        // batch's owner under the previous one - and the live batch's children
+        // share the one indent. The folded owner's line leads with its
+        // duration, so the
+        // column is read off that text.
+        const int ownerA = colOfSub(g, "1.1 s - [bash] [grep]");
+        const int ownerB = colOfSub(g, "1.2 s - [bash] [grep]");
+        check(ownerA >= 0 && ownerA == ownerB,
+              "maxlonglive: folded owners stay flat siblings, no staircase");
+        const int thinking = colOfSub(g, "Thinking");
+        const int card = colOfSub(g, "TOOL  execute_command");
+        check(thinking >= 0 && thinking == card,
+              "maxlonglive: the live batch's children share one indent");
+    }
+    { // maxnotice (T8): the batch block first, the interleaved notice after it
+        ThreadFixture f;
+        buildMaxNotice(f);
+        const Grid g = f.draw();
+        const std::string open =
+            std::string(ui::icon(ui::Icon::DisclosureOpen, ui::GlyphSet::Glyphs));
+        const int owner = rowOfSub(g, open + " AGENT");
+        const int content = rowOfSub(g, "now the count");
+        const int notice = rowOfSub(g, "context compacted");
+        check(owner >= 0, "maxnotice: the live owner row is drawn open");
+        check(owner >= 0 && content > owner, "maxnotice: its content draws under it");
+        check(content >= 0 && notice > content,
+              "maxnotice: the notice is emitted after the batch block");
+    }
+    { // maxstream (FR-4): a live response with no call yet draws its thinking open
+        ThreadFixture f;
+        buildMaxStream(f);
+        const Grid g = f.draw();
+        const std::string open =
+            std::string(ui::icon(ui::Icon::DisclosureOpen, ui::GlyphSet::Glyphs));
+        check(g.contains(open + " Thinking"), "maxstream: the streaming Thinking row draws open");
+        check(g.contains("thinking about the loader"),
+              "maxstream: the thinking body is visible, not folded behind a click");
+        check(g.contains("I will move the loader out of core."),
+              "maxstream: the streamed content draws under the open owner");
+    }
+    { // maxchips (T9, T13)
+        ThreadFixture f;
+        buildMaxChips(f);
+        // The target row is the batch's *folded owner*, and a folded group draws
+        // its header only - so the check pins the group open (the task-10 pin)
+        // in its own fixture and reads the owner the way a settled batch folds.
+        f.state.chat.groupPins[1] = true;
+        const Grid g = f.draw();
+        const std::string shut =
+            std::string(ui::icon(ui::Icon::DisclosureClosed, ui::GlyphSet::Glyphs));
+        check(g.contains(shut + " 1.2 s - [bash] [grep] [read_file] +1"),
+              "maxchips: chips drop to three and a +N");
+    }
+    { // the live edge (T15): maximal draws neither of its lines - the rows are
+      // on screen, so the owner header is the one row that names a running
+      // call and the drawn reasoning row the one Thinking word.
+        ThreadFixture f;
+        buildMaxLongLive(f);
+        const Grid g = f.draw();
+        check(rowsWith(g, "[execute_command]") == 1,
+              "maxlonglive: the running call is named on the owner header alone - no chips line");
+        check(rowsWith(g, "Thinking") == 1,
+              "maxlonglive: the drawn reasoning row is the one Thinking word - no shadow line");
+    }
+    { // an older turn's Running call is stale state the view paints nothing for:
+      // the live edge is the newest drawn group's alone, minimal-style or not.
+        ThreadFixture f;
+        f.seed.upsertTurn(1, TuiTurnState_Done, 3);
+        f.seed.upsertBlock(1, "q1", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user",
+                           "the first question");
+        f.seed.upsertBlock(1, "tool#1", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Running, nullptr,
+                           "still marked running", "bash", 0);
+        f.seed.upsertTurn(2, TuiTurnState_Running, 1);
+        f.seed.upsertBlock(2, "q2", "2#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user",
+                           "the second question");
+        const Grid g = f.draw();
+        check(rowsWith(g, "[bash]") == 0,
+              "an older group's Running call paints no chips line under its fold");
+        check(g.contains("WORK - 1 step"), "the older group still draws its folded header");
+    }
+    { // the live chips line composes its names with the owner header's one
+      // helper: the same `[bash] [grep] [read_file] +1` spelling, +N included.
+        ThreadFixture f;
+        f.seed.runStart("four calls at once");
+        f.seed.tool("bash", "listing the tree", TuiBlockStatus_Running);
+        f.seed.tool("grep", "searching the tree", TuiBlockStatus_Running);
+        f.seed.tool("read_file", "reading a file", TuiBlockStatus_Running);
+        f.seed.tool("write_file", "writing a file", TuiBlockStatus_Running);
+        const Grid g = f.draw();
+        check(g.contains("[bash] [grep] [read_file] +1"),
+              "the live chips line folds past three the way the owner header spells");
+    }
+    // The scene review: the four builders' facts,
+    // each stated once over the drawn grid.
+    { // the owner header's three facts in one row.
+        ThreadFixture f;
+        buildMaxChips(f);
+        f.state.chat.groupPins[1] = true; // a folded group draws its header only
+        const Grid g = f.draw();
+        const std::string shut =
+            std::string(ui::icon(ui::Icon::DisclosureClosed, ui::GlyphSet::Glyphs));
+        check(g.contains(shut + " 1.2 s - [bash] [grep] [read_file] +1"),
+              "the owner header carries chips, duration and a disclosure mark");
+    }
+    { // A2: a live batch draws its whole block open - reasoning, content, cards.
+        ThreadFixture f;
+        buildMaxLongLive(f);
+        const Grid g = f.draw();
+        const std::string open =
+            std::string(ui::icon(ui::Icon::DisclosureOpen, ui::GlyphSet::Glyphs));
+        check(g.contains(open + " AGENT - [execute_command]") && g.contains("Thinking") &&
+                  g.contains("Next I will move the loader out of core.") &&
+                  g.contains("TOOL  execute_command"),
+              "a live batch draws open with its thinking, content and cards");
+    }
+    { // A3: the last call settles the batch - the owner folds to duration and
+      // chips, with no role word and no content segment (the fold).
+        ThreadFixture f;
+        f.state.chat.threadMinimalMode = false;
+        f.seed.runStart("sweep the tree");
+        f.seed.upsertBlock(1, "content#0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
+                           "assistant", "listing the tree", nullptr, 3200);
+        f.seed.upsertBlock(1, "tool#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Pending, nullptr,
+                           "dub test", "execute_command", 0);
+        f.seed.upsertBlock(1, "tool#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, nullptr,
+                           "dub test", "execute_command", 3200); // the result settles the call
+        const Grid g = f.draw();
+        const std::string shut =
+            std::string(ui::icon(ui::Icon::DisclosureClosed, ui::GlyphSet::Glyphs));
+        check(g.contains(shut + " 3.2 s - [execute_command]") && !g.contains("AGENT") &&
+                  !g.contains("listing the tree"),
+              "the last call folds it to '> 3.2 s - [chips]', with no role word");
+    }
+    { // A4: a reasoning-less batch folds the same way.
+        ThreadFixture f;
+        f.state.chat.threadMinimalMode = false;
+        f.seed.runStart("sweep the tree");
+        f.seed.upsertBlock(1, "tool#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Pending, nullptr,
+                           "grep -r x", "grep", 0);
+        f.seed.upsertBlock(1, "tool#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, nullptr,
+                           "grep -r x", "grep", 2700);
+        const Grid g = f.draw();
+        const std::string shut =
+            std::string(ui::icon(ui::Icon::DisclosureClosed, ui::GlyphSet::Glyphs));
+        check(g.contains(shut + " [grep]") && !g.contains("Thinking") && !g.contains("AGENT"),
+              "a reasoning-less batch folds the same way");
+    }
+    { // A5: a content-only batch's folded owner previews the content's first
+      // line - no calls, no chips, the one line instead.
+        ThreadFixture f;
+        f.state.chat.threadMinimalMode = false;
+        f.seed.upsertTurn(1, TuiTurnState_Done, 3);
+        f.seed.upsertBlock(1, "query", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user",
+                           "sweep the tree");
+        f.seed.upsertBlock(1, "content#0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
+                           "assistant", "the tree has 3 files", nullptr, 1200);
+        f.state.chat.groupPins[1] = true; // a settled group folds by default
+        const Grid g = f.draw();
+        const std::string shut =
+            std::string(ui::icon(ui::Icon::DisclosureClosed, ui::GlyphSet::Glyphs));
+        check(g.contains(shut + " 1.2 s  the tree has 3 files"),
+              "a content-only batch previews its first line");
+    }
+    { // a failed call marks the folded header.
+        ThreadFixture f;
+        f.state.chat.threadMinimalMode = false;
+        f.seed.upsertTurn(1, TuiTurnState_Done, 3);
+        f.seed.upsertBlock(1, "query", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user",
+                           "sweep the tree");
+        f.seed.upsertBlock(1, "content#0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
+                           "assistant", "listing the tree", nullptr, 900);
+        f.seed.upsertBlock(1, "tool#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Failed, nullptr,
+                           "boom", "bash", 1100);
+        f.state.chat.groupPins[1] = true;
+        const Grid g = f.draw();
+        const std::string shut =
+            std::string(ui::icon(ui::Icon::DisclosureClosed, ui::GlyphSet::Glyphs));
+        check(g.contains(shut + " 900 ms - [bash] FAIL"), "a failed call marks the folded header");
+    }
+    { // an owner with no surviving child is absent.
+        ThreadFixture f;
+        f.state.chat.threadMinimalMode = false;
+        f.seed.upsertTurn(1, TuiTurnState_Done, 2);
+        f.seed.upsertBlock(1, "query", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user",
+                           "sweep the tree");
+        f.seed.upsertBlock(1, "content#0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
+                           "assistant", "", nullptr, 900); // a body-less content row
+        f.state.chat.groupPins[1] = true;
+        const Grid g = f.draw();
+        check(!g.contains("AGENT") && !g.contains("WORK"),
+              "an owner with no surviving child is absent");
+    }
+    {                    // minimal keeps the live content row and draws no owner row.
+        ThreadFixture f; // minimal is the factory default
+        f.seed.runStart("what is the answer");
+        f.seed.content("The answer is still arriving. A second paragraph, so the body has more "
+                       "than one line.");
+        const Grid g = f.draw();
+        check(g.contains("The answer is still arriving") && !g.contains("AGENT"),
+              "minimal keeps the live content row and draws no owner row");
+    }
+    { // the live content row disappears when the turn closes.
+        ThreadFixture f;
+        f.seed.runStart("what is the answer");
+        f.seed.content("The answer is still arriving.");
+        const bool drawnLive = f.draw().contains("The answer is still arriving");
+        f.seed.upsertTurn(1, TuiTurnState_Done, 1); // the turn closes
+        const bool drawnDone = f.draw().contains("The answer is still arriving");
+        check(drawnLive && !drawnDone, "the content row disappears when the turn closes");
+    }
+    { // B10: neither the shadow line nor the chips line ever draws in maximal.
+        ThreadFixture f;
+        buildMaxLongLive(f);
+        const Grid g = f.draw();
+        check(rowsWith(g, "[execute_command]") == 1 && rowsWith(g, "Thinking") == 1,
+              "neither the shadow line nor the chips line ever draws in maximal");
+    }
+    { // a hidden block weighs 0 and draws nothing.
+        ThreadFixture f;
+        f.state.chat.threadMinimalMode = false;
+        f.seed.runStart("sweep the tree");
+        f.seed.tool("bash", "listing", TuiBlockStatus_Ok, "42 lines", 1100);
+        store::TypedBlock card = f.state.chat.typedTurns.blockAt(1, 1);
+        card.flags |= store::kBlockFlagHidden;
+        f.state.chat.typedTurns.blockUpsert(card);
+        const Grid g = f.draw();
+        check(tui::store::stepCount(f.state.chat.typedTurns, 1) == 0 && !g.contains("bash") &&
+                  !g.contains("[bash]"),
+              "a hidden block weighs 0 and draws nothing");
+    }
+    { // a re-opened settled batch shows its content with its thinking and
+      // cards folded (the fourth art) - the folded children draw their bare
+      // headers, never their bodies.
+        ThreadFixture f;
+        f.state.chat.threadMinimalMode = false;
+        f.seed.upsertTurn(1, TuiTurnState_Done, 5);
+        f.seed.upsertBlock(1, "query", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user",
+                           "sweep the tree");
+        f.seed.upsertBlock(1, "reasoning#0", "1#0", TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                           nullptr, "reading the layout", nullptr, 0);
+        f.seed.upsertBlock(1, "content#0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
+                           "assistant", "moving the loader", nullptr, 4100);
+        f.seed.upsertBlock(1, "tool#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, nullptr,
+                           "ls -R", "bash", 1100);
+        f.seed.upsertBlock(1, "tool#1", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, nullptr,
+                           "grep -r", "grep", 1200);
+        f.state.chat.groupPins[1] = true; // the group folds on a settled default
+        const Grid folded = f.draw();
+        const std::string shut =
+            std::string(ui::icon(ui::Icon::DisclosureClosed, ui::GlyphSet::Glyphs));
+        const int owner = rowOfSub(folded, "4.1 s - [bash] [grep]");
+        const auto clickRow = [&](int y) {
+            f.draw(true, [y](ImGuiIO& in) { in.AddMousePosEvent(5.0f, static_cast<float>(y)); });
+            f.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, true); });
+            f.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, false); });
+            return f.draw(true);
+        };
+        const Grid opened = owner >= 0 ? clickRow(owner) : folded;
+        check(owner >= 0 && opened.contains(shut + " Thinking") &&
+                  opened.contains(shut + " TOOL  bash") && opened.contains("moving the loader") &&
+                  !opened.contains("reading the layout"),
+              "a re-opened settled batch shows its content with thinking and cards folded");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1877,6 +2896,9 @@ int main(int argc, char** argv) {
     checkCtrlCStaysUnbound();
     checkBlockMenuOwnership();
     checkMenuKeepsTheFocusedBlock();
+    checkEmptyGroupHeaderless();
+    checkSeederBatches();
+    checkOwnerShape();
     checkGoldens(update);
 
     ImTui_ImplText_Shutdown();

@@ -14,6 +14,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "imtui/imtui.h"
@@ -40,61 +41,6 @@ struct Context;
 }
 
 namespace llmfun::tui {
-
-// Internal C++ enum mirroring the C TuiChatMessageType.
-enum class ChatMessageType : uint8_t {
-    User = 0,
-    Assistant = 1,
-    ToolCall = 2,
-    ToolResponse = 3,
-    Vision = 4,
-    System = 5,
-    FinalAnswer = 6,
-    Count = 7 // Sentinel — not a valid type
-};
-
-// Role colours for the message headers: exactly one foreground per role.
-//
-// A role header is a rule plus a label in this colour on the neutral thread
-// surface, and nothing else: no per-role row fill, no hover/active variant,
-// no derived black-on-bright text colour.
-//
-// No view reads these colours; the thread draws ui::color(role...) with a
-// state glyph instead. test_theme_contrast measures the six, which is what
-// keeps the struct here.
-struct ChatMessageStyle {
-    // User & Vision: Sky Blue
-    ImVec4 userFg = ImVec4(0.45f, 0.70f, 0.90f, 1.00f);
-
-    // Assistant: Soft Green
-    ImVec4 assistantFg = ImVec4(0.55f, 0.85f, 0.55f, 1.00f);
-
-    // ToolCall: Warm Orange
-    ImVec4 toolCallFg = ImVec4(0.95f, 0.70f, 0.30f, 1.00f);
-
-    // ToolResponse: Dark Orange
-    ImVec4 toolResponseFg = ImVec4(0.95f, 0.59f, 0.40f, 1.00f);
-
-    // System: Light Slate Gray
-    ImVec4 systemFg = ImVec4(0.70f, 0.75f, 0.80f, 1.00f);
-
-    // FinalAnswer: Bright Green
-    ImVec4 finalAnswerFg = ImVec4(0.30f, 0.95f, 0.30f, 1.00f);
-};
-
-struct ChatMessage {
-    std::string summary;
-    std::string text;
-    std::string thinking;
-    ChatMessageType type = ChatMessageType::Assistant;
-    size_t id{0}; // Unique, monotonic increasing ID number
-    // Tool row fields: a non-empty `toolName` makes the message a tool row
-    // (the call and, when filled, its result); empty = an ordinary line.
-    std::string toolName;
-    std::string toolArgs;
-    std::string toolResult;
-    bool toolOk = false;
-};
 
 struct LogMessage {
     std::string summary;
@@ -159,14 +105,6 @@ struct UserQueryState {
     /// (the same reason `ChatTabSessionPanel::renameHadFocus` exists).
     /// Written once per frame by the field.
     bool focusedLastFrame = false;
-};
-
-enum class GroupKind { UserQuery, FinalAnswer, AssistantWork };
-
-struct RenderGroup {
-    size_t start; // inclusive index into outputLines
-    size_t end;   // exclusive index into outputLines
-    GroupKind kind;
 };
 
 // Internal C++ mirror of the C TuiSessionActionType. Append-only ordering:
@@ -234,53 +172,23 @@ struct ChatTabSessionPanel {
 };
 
 struct ChatTab {
-    ChatMessageStyle style;
-    /// Ids of the messages whose body is shown. Keyed by `ChatMessage::id`, not
-    /// by the deque index: ids are monotonic and unique, so an evicted message
-    /// can never hand its expansion state to a neighbour. The default state
-    /// (newest messages and final answers open) is applied once per message —
-    /// see `expansionDefaultThroughId` — so a user toggle is never overwritten
-    /// and a thread loaded from disk opens only its newest messages.
-    std::set<size_t> outputLineOpen;
-    /// Ids of the expanded assistant-work groups. Groups are not messages, so
-    /// they keep their own set; the key is the group's first message id (the
-    /// group identity today — task 25 replaces it with the adapter's group id).
-    std::set<size_t> openWorkGroups;
-    /// Highest message id whose default expansion state has been applied. Ids
-    /// are monotonic, so one watermark is enough; it makes the default a
-    /// one-shot decision exactly like the ImGui storage it replaces, without
-    /// storing per-id state. Expansion is data (D-GROUPID), never ImGui
-    /// per-id storage; reset with the thread (tuiClearOutput).
-    size_t expansionDefaultThroughId{0};
-    std::deque<ChatMessage> outputLines;
-    std::size_t outputLineNextId{1};
-    static constexpr size_t MaxChatMessages = 1000;
+    /// The rows the user pinned open or closed, and the groups they pinned,
+    /// as ABSOLUTE session state: the key is the persisted turnId, the
+    /// row key the wire block id (or `batch#<batchId>` for an owner row),
+    /// never a row index - so a click and a read cannot disagree,
+    /// and an evicted turn can never hand its pin to a neighbour.
+    std::map<std::int64_t, std::map<std::string, bool>> rowPins; // turnId -> rowId -> open
+    std::map<std::int64_t, bool> groupPins;                      // turnId -> open
+    store::TypedThreadStore typedTurns;
 
-    std::vector<RenderGroup> renderGroups;
-    size_t renderGroupFirstId{0};
-    size_t renderGroupLastId{0};
-
-    /// The streaming message's reserved id, shared with `model::kStreamMessageId`:
-    /// one number names the stream group's block.
-    static constexpr size_t StreamChatMessageId = model::kStreamMessageId;
-    /// True while a stream bubble is in flight: the answer is arriving, so the thread
-    /// draws it and the now bar's phase reads `writing` (task 28). Initialised here
-    /// because the frame reads it on every render and a default-constructed `TuiState`
-    /// would otherwise hand out an indeterminate value.
-    bool hasStreamMsg{false};
-    ChatMessage streamMsg;
-
-    /// The newest stream snapshot the update throttle has not applied yet (task 38).
-    ///
-    /// D calls `tuiUpdateStreamChatMessage` on every stream tick - up to ~100 times a second,
-    /// while the thread it feeds is drawn at 20-30 - and each snapshot is the *whole*
-    /// accumulated message. A snapshot that arrives inside `model::kStreamUpdateIntervalMs` of
-    /// the last one is therefore parked here instead of being stored: the next frame after the
-    /// window applies it, so a burst costs one repaint and nothing is lost (the parked snapshot
-    /// is the newest text, and a stop applies it immediately). `pendingStream` is false whenever
-    /// no stream is live - a clear drops both the parked snapshot and the flag.
-    ChatMessage pendingStreamMsg;
-    bool pendingStream{false};
+    /// Whether the thread draws in minimal mode: folded work groups
+    /// with header-only steps, streamed prose hidden behind the answer chip.
+    /// The value is the preference's (`ShellPrefs::threadMinimal`, the
+    /// `ThreadMode=` line in ui.conf): the frame layer mirrors it in here each
+    /// frame - the prefs are the one owner the sheet edits, the store reads
+    /// the mirror (the adapter seam has no profile access). This member is
+    /// therefore never set directly outside the frame.
+    bool threadMinimalMode = true;
 };
 
 /// One pipeline agent's chat store
@@ -291,10 +199,33 @@ struct AgentStream {
 
     ChatTab chat;
 
-    /// The stream throttle's clock: when the newest snapshot was applied
-    /// to `chat.streamMsg`, in `model::agentClockMs()` units (0 = never applied).
-    /// Per-agent, because `ui.thread.stream.lastAppliedMs` is the main thread's.
-    std::int64_t streamLastApplyMs{0};
+    // --- typed drill-down state --------------------------------------------
+    //
+    // The pipeline entry points feed `chat.typedTurns`: one live turn per
+    // run, opened by the first event that arrives and closed by
+    // `tuiPipelineAgentDone`. The payload is coarser than the main thread's
+    // typed events (no batch boundaries cross the wire), so the whole run is
+    // ONE batch and every block id is stable - the store's upsert merge does
+    // the accumulation, and the newest tick of each block wins.
+    /// The live turn's id (0 = none open), folded from the agent id and the
+    /// per-agent run counter: two agents - and two runs of one agent - never
+    /// share a turn id.
+    std::int64_t typedTurnId{0};
+    bool typedTurnActive{false};
+    /// The run counter folded into the turn id.
+    std::uint64_t typedTurnSeq{0};
+    /// Informational LLM-message count the Done upsert carries.
+    int typedMessageCount{0};
+    /// The in-flight call the next result merges into: the newest call this
+    /// turn has upserted. One slot, because a result carries no call id on
+    /// this wire - the merge matches on the tool name, and a second call
+    /// simply replaces the first (the oldest in-flight call's outcome is
+    /// then rendered as a standalone result block, never silently dropped).
+    bool typedHasCall{false};
+    std::string typedCallId, typedCallBatchId, typedCallName, typedCallBody;
+    /// Standalone result blocks (a result with no matching in-flight call):
+    /// unique ids across the turn.
+    int typedResultSeq{0};
 };
 
 /// The pipeline's v4 agent store: `tuiPipelineAgentUpdate` fills it (with the LRU eviction the
@@ -305,10 +236,6 @@ struct ChatTabLeftPanel {
     std::vector<AgentStream> agents;
     static constexpr size_t MaxAgents = 16;
 };
-
-/// The per-agent store cap: each agent's `ChatTab` holds at most this
-/// many messages.
-inline constexpr size_t kAgentChatMaxMessages = 10;
 
 struct TuiState {
     bool isLogActive{false};
@@ -747,32 +674,8 @@ bool isActivityVisible(const TuiState& state);
 /// quit never leaves buffered record lines behind.
 void closeLogArchive(TuiState& state);
 
-/// Add an output line with FIFO eviction if bound exceeded.
-void tuiAddOutputLine(TuiState& state, const ChatMessage& msg);
-
 /// Clear all output lines.
 void tuiClearOutput(TuiState& state);
-
-/// Offer one stream snapshot: the store's write path and its update
-/// throttle in one call.
-///
-/// D calls this on every stream tick - up to ~100 times a second, while the thread it feeds is
-/// drawn at 20-30 - and each snapshot is the *whole* accumulated message. Three outcomes, one
-/// store:
-///
-///   * byte-identical to the text already in the store (or parked) - counted in
-///     `StreamState::unchanged` and nothing else happens: no copy, no revision, no repaint.
-///     D's loop re-sends the accumulated message on every tick, including ticks that changed
-///     nothing, so this is the common case and the cheapest one;
-///   * the window has elapsed (`model::kStreamUpdateIntervalMs`, ~30 fps) or this is the
-///     stream's first snapshot - stored now, `StreamState::applied` advances;
-///   * inside the window - parked in `ChatTab::pendingStreamMsg`, counted in
-///     `StreamState::coalesced`; the next frame after the window stores it, so a burst costs
-///     one repaint instead of one per tick and the last text is never lost (a stop applies a
-///     parked snapshot immediately, before the clock freezes).
-void tuiUpdateStreamChatMessage(TuiState& state, const ChatMessage& msg);
-
-void tuiStreamChatMessageClear(TuiState& state);
 
 /// Apply the run's structured status (task 39's `tuiSetRuntimeStatus`), or clear it.
 ///

@@ -248,6 +248,23 @@ unittest {
     f.teardown();
 }
 
+@("TUI actor: uiAgentBusy clears the ready flag")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // The busy half of the edge is the regression this pins: an entry
+    // point's busy() must leave the ready flag cleared (the composer
+    // flips to Stop), and the ready half restores it. Driven through
+    // the actor's real C state: setReadyStatus crosses on the same
+    // call the flag flips.
+    assert(f.actor.agentReady_, "the actor starts ready");
+    f.actor.uiAgentBusy();
+    assert(!f.actor.agentReady_, "busy clears the ready flag (composer shows Stop)");
+    f.actor.uiAgentReady();
+    assert(f.actor.agentReady_, "ready sets the flag again (composer shows Send)");
+    f.teardown();
+}
+
 @("TUI actor: /stop handling")
 unittest {
     auto f = new TuiDriveFixture();
@@ -534,59 +551,6 @@ unittest {
     assert(f.listener.terminated == 1, "no duplicate uiTerminated");
     assert(f.actor.pendingCount() == 0, "the skipped tick re-armed nothing");
     f.teardown();
-}
-
-@("chat header decoration")
-unittest {
-    import core.time : Duration;
-    import std.datetime : dur;
-    import my.path : Path;
-    import llm.chat : MessageTime, NoProcessingTime;
-
-    auto u = TextUserInterface(tuiCreateState()); // state freed by ~this
-
-    // Undecorated pass-through: nr = 0 equals shortSummary EXACTLY
-    // (no prefix, no suffix, no extra whitespace).
-    u.addChatMessage("hello world", null, TuiChatMessageType_Assistant, 0,
-            MessageTime(NoProcessingTime()));
-    assert(u.lastChatSummary == "hello world");
-    u.addChatMessage("", null, TuiChatMessageType_Assistant, 0, MessageTime(NoProcessingTime()));
-    assert(u.lastChatSummary == "");
-    // 100-char and multi-line inputs keep shortSummary semantics
-    char[100] long1;
-    long1[] = 'x';
-    auto longMsg = cast(string) long1;
-    u.addChatMessage(longMsg, null, TuiChatMessageType_Assistant, 0,
-            MessageTime(NoProcessingTime()));
-    assert(u.lastChatSummary.length == 100);
-    u.addChatMessage("first line\nsecond line", null,
-            TuiChatMessageType_Assistant, 0, MessageTime(NoProcessingTime()));
-    assert(u.lastChatSummary == "first line");
-
-    // Decorated: prefix + body + suffix
-    u.addChatMessage("hello world", null, TuiChatMessageType_User, 1,
-            MessageTime(NoProcessingTime()));
-    assert(u.lastChatSummary == "[1] hello world");
-    u.addChatMessage("hello world", "thinking", TuiChatMessageType_Assistant,
-            2, MessageTime(500.dur!"msecs"));
-    assert(u.lastChatSummary == "[2] hello world [500ms]");
-    u.addChatMessage(longMsg, null, TuiChatMessageType_Assistant, 12,
-            MessageTime(1200.dur!"msecs"));
-    assert(u.lastChatSummary == "[12] " ~ longMsg ~ " [1.2s]");
-    u.addChatMessage("first line\nsecond line", null,
-            TuiChatMessageType_ToolCall, 3, MessageTime(60000.dur!"msecs"));
-    assert(u.lastChatSummary == "[3] first line [1m 0s]");
-
-    // Empty summary edge cases
-    u.addChatMessage("", null, TuiChatMessageType_User, 1, MessageTime(NoProcessingTime()));
-    assert(u.lastChatSummary == "[1]"); // no trailing space
-    u.addChatMessage("", null, TuiChatMessageType_Assistant, 1, MessageTime(0.dur!"msecs"));
-    assert(u.lastChatSummary == "[1]  [0ms]"); // double space, explicit 0 shows [0ms]
-
-    // Wrapper policy on timeSuffix (direct)
-    assert(timeSuffix(MessageTime(NoProcessingTime())) == "");
-    assert(timeSuffix(MessageTime(0.dur!"msecs")) == " [0ms]");
-    assert(timeSuffix(MessageTime(-1200.dur!"msecs")) == ""); // negative: no suffix
 }
 
 @("TUI logger: records, a copied drain and a bounded queue")

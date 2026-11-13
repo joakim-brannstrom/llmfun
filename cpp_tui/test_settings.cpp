@@ -122,6 +122,7 @@ int main() {
         CHECK(prefs.sendKey == SendKey::Tab);
         CHECK(prefs.railOpen == -1);
         CHECK(prefs.inspectorOpen == -1);
+        CHECK(prefs.threadMinimal); // the factory mode is minimal
     }
 
     // uiConfPath: the file named "ui.conf" beside the ini file; no name, no path.
@@ -180,11 +181,13 @@ int main() {
         s.windowWidth = 1024;
         s.windowHeight = 768;
         s.fontScaleMain = 1.25f;
+        s.threadMinimal = false;
         saveUiConf(s, ini);
         CHECK(fileExists(conf));
         CHECK(readText(conf) == "Version=2\n"
                                 "SendKey=enter\n"
                                 "UiLog=trace\n"
+                                "ThreadMode=maximal\n"
                                 "RailOpen=1\n"
                                 "InspectorOpen=0\n"
                                 "InspectorTab=activity\n"
@@ -197,6 +200,7 @@ int main() {
               loaded.railOpen == 1 && loaded.inspectorOpen == 0 &&
               loaded.tab == InspectorTab::Activity && loaded.windowWidth == 1024 &&
               loaded.windowHeight == 768 && loaded.fontScaleMain == 1.25f);
+        CHECK(!loaded.threadMinimal);
         CHECK(uiConfText(loaded) == uiConfText(s));
     }
 
@@ -206,9 +210,9 @@ int main() {
         const std::string ini = iniOf(dir);
         ShellPrefs s; // 0 = "no persisted size"
         saveUiConf(s, ini);
-        CHECK(readText(confOf(dir)) ==
-              "Version=2\nSendKey=tab\nUiLog=info\nRailOpen=auto\nInspectorOpen=auto\n"
-              "InspectorTab=activity\nFontScaleMain=1.00\n");
+        CHECK(readText(confOf(dir)) == "Version=2\nSendKey=tab\nUiLog=info\nThreadMode="
+                                       "minimal\nRailOpen=auto\nInspectorOpen=auto\n"
+                                       "InspectorTab=activity\nFontScaleMain=1.00\n");
         // ... and the load keeps them at the sentinel (never a clamped 1)
         ShellPrefs loaded;
         loadUiConf(loaded, ini);
@@ -356,6 +360,39 @@ int main() {
             CHECK(ok);
             if (!ok)
                 std::printf("  (content \"%s\" -> %.4f, want 1.5000)\n", text, s.fontScaleMain);
+        }
+    }
+
+    // A file WITHOUT the ThreadMode key loads
+    // minimal; a maximal value round-trips; an unknown word keeps the
+    // current value, like every other key.
+    {
+        const std::string dir = caseDir("threadmode");
+        const std::string ini = iniOf(dir);
+        {
+            writeText(confOf(dir), "Version=2\nSendKey=enter\n");
+            ShellPrefs s; // defaults
+            loadUiConf(s, ini);
+            CHECK(s.threadMinimal); // the key's absence is minimal
+        }
+        {
+            writeText(confOf(dir), "ThreadMode=maximal\n");
+            ShellPrefs s;
+            s.threadMinimal = true; // the file beats the current value
+            loadUiConf(s, ini);
+            CHECK(!s.threadMinimal);
+            // ... and the write carries the same word back to the disk
+            saveUiConf(s, ini);
+            ShellPrefs reloaded;
+            loadUiConf(reloaded, ini);
+            CHECK(!reloaded.threadMinimal);
+        }
+        {
+            writeText(confOf(dir), "ThreadMode=folded\n");
+            ShellPrefs s;
+            s.threadMinimal = false; // an unknown word keeps the current value
+            loadUiConf(s, ini);
+            CHECK(!s.threadMinimal);
         }
     }
 

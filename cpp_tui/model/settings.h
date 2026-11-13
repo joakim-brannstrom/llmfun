@@ -126,7 +126,16 @@ struct ShellPrefs {
     int windowWidth = 0;
     int windowHeight = 0;
     float fontScaleMain = 1.0f;
+    /// The thread's render mode
+    bool threadMinimal = true;
 };
+
+inline constexpr char kThreadModeMinimal[] = "minimal";
+inline constexpr char kThreadModeMaximal[] = "maximal";
+
+inline bool threadMinimal(const ShellPrefs& prefs) { return prefs.threadMinimal; }
+
+inline void setThreadMinimal(ShellPrefs& prefs, bool minimal) { prefs.threadMinimal = minimal; }
 
 inline void toggleRail(ShellPrefs& prefs, bool visible) { prefs.railOpen = visible ? 0 : 1; }
 
@@ -139,7 +148,7 @@ std::string uiConfPath(const std::string& iniFilename);
 
 /// The file's bytes, one `Key=Value` line per setting and a trailing newline:
 /// `Version`, `SendKey`, `UiLog`, `RailOpen`, `InspectorOpen`, `InspectorTab`,
-/// `WindowWidth`, `WindowHeight`, `FontScaleMain`.
+/// `WindowWidth`, `WindowHeight`, `FontScaleMain`, `ThreadMode`.
 std::string uiConfText(const ShellPrefs& prefs);
 
 /// Apply the file to `prefs`, and record what the profile holds so that

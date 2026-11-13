@@ -44,8 +44,8 @@
 /// nobody pointed at. `/` is the exception the design asks for ("focus search from
 /// anywhere except the composer").
 ///
-/// Layering: `ui/`, `model/` and imgui. No `tui.h`, no `ChatMessage`, no
-/// `RenderGroup`: the rail is written against the model's rows, which is what
+/// Layering: `ui/`, `model/` and imgui. No `tui.h`: the rail is written against
+/// the model's rows, which is what
 /// lets `./test_rail` draw it into a cell grid with no application state.
 #pragma once
 

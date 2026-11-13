@@ -208,6 +208,8 @@ constexpr ActionInfo kActions[] = {
     {Action::ToggleFocusMode, "ToggleFocusMode", ActionReach::Palette,
      "Give the thread the whole window (Esc leaves)"},
     {Action::ExitFocusMode, "ExitFocusMode", ActionReach::EscapeChain, "Leave focus mode"},
+    {Action::CollapseAll, "CollapseAll", ActionReach::Palette,
+     "Fold every group of the thread back onto its default"},
 };
 
 constexpr ActionList kActionList{kActions, sizeof(kActions) / sizeof(kActions[0])};

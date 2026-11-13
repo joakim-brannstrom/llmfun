@@ -94,6 +94,8 @@
 
 #include "tui.h" // llmfun::tui: TuiState, tuiRender, markdown text-mode lifecycle
 
+#include "test/typed_seed.h" // typed turn/block seeding
+
 #include "ui/markdown.h" // the rich_md seam this file also pins (cases D-G)
 #include "ui/tokens.h"   // the inks and gaps the markdown theme is bridged from
 
@@ -181,7 +183,7 @@ void dumpGrid(FILE* f) {
 
 void fail(const std::string& what) {
     ::fprintf(g_errOut, "FAIL [case %c @ frame %d]: %s\n", g_case, g_frames, what.c_str());
-    ::fprintf(g_errOut, "debug: outputLines=%zu renderGroups=%zu\n", g_dbgLines, g_dbgGroups);
+    ::fprintf(g_errOut, "debug: blocks=%zu turns=%zu\n", g_dbgLines, g_dbgGroups);
     dumpGrid(g_errOut);
     if (!g_capturedErr.empty()) {
         ::fprintf(g_errOut, "captured stderr so far:\n%s\n", g_capturedErr.c_str());
@@ -330,28 +332,22 @@ void frame(llmfun::tui::TuiState& state) {
         fail("tuiRender returned false (quit)");
     ImGui::Render();
     ImTui_ImplText_RenderDrawData(ImGui::GetDrawData(), &g_screen);
-    g_dbgLines = state.chat.outputLines.size();
-    g_dbgGroups = state.chat.renderGroups.size();
+    (void)state; // fail() diagnostics read the typed store (setupCase)
     ++g_frames;
 }
 
 // Fresh case setup: clear the output, close the session panel (white-box
 // state setup — the 30-column open panel would share grid rows 1-3 with
 // the markdown content; the closed 8-column "Open" strip keeps the layout
-// deterministic), re-arm the simulated 80x24 terminal, add ONE assistant
-// message with the case document.
+// deterministic), re-arm the simulated 80x24 terminal, seed ONE typed turn
+// whose answer carries the case document (the answer row renders its body).
 void setupCase(llmfun::tui::TuiState& state, const char* doc) {
     llmfun::tui::tuiClearOutput(state);
     ImGui::GetIO().DisplaySize = ImVec2(80.0f, 24.0f);
-    llmfun::tui::ChatMessage m;
-    m.summary = "Assistant";
-    m.text = doc;
-    m.type = llmfun::tui::ChatMessageType::Assistant;
-    // Monotonic id exactly like the C API (tuiAddChatMessage): buildRenderGroups
-    // caches on (first,last) message ids with a (0,0) sentinel, so an id-0
-    // message would be treated as "unchanged" and never grouped.
-    m.id = state.chat.outputLineNextId++;
-    llmfun::tui::tuiAddOutputLine(state, m);
+    typed_seed::Seeder seed{&state};
+    seed.add(typed_seed::Seeder::Msg::FinalAnswer, doc);
+    g_dbgLines = state.chat.typedTurns.blockCount(1);
+    g_dbgGroups = state.chat.typedTurns.turnCount();
 }
 
 // Optional per-case grid dump for debugging pinned values: set
@@ -363,9 +359,8 @@ void debugDump(llmfun::tui::TuiState& state, const char* phase) {
     FILE* f = ::fopen(path, std::strcmp(phase, "A") == 0 ? "w" : "a");
     if (!f)
         return;
-    ::fprintf(f, "=== case %s (%dx%d, frame %d) outputLines=%zu renderGroups=%zu ===\n", phase,
-              g_screen.nx, g_screen.ny, g_frames, state.chat.outputLines.size(),
-              state.chat.renderGroups.size());
+    ::fprintf(f, "=== case %s (%dx%d, frame %d) blocks=%zu turns=%zu ===\n", phase, g_screen.nx,
+              g_screen.ny, g_frames, g_dbgLines, g_dbgGroups);
     for (int y = 0; y < g_screen.ny; ++y) {
         std::string cells;
         for (int x = 0; x < g_screen.nx; ++x) {

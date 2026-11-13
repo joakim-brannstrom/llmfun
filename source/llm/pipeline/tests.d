@@ -524,3 +524,211 @@ unittest {
     assert(equal(log.stepIds, ["nodeA", "nodeB"]),
             "step events carry the running node's id (got " ~ log.stepIds.join(",") ~ ")");
 }
+
+@("a pool-driven run fires the run-done emitter once, with the node's id") unittest {
+    import std.array : join;
+
+    import llm.types : IRunDoneEmitter, IStepEventEmitter, StreamMessage,
+        StreamToolCall, ServerStat;
+
+    // The same seam shape PipelineStreamMessageUpdater has: the run-done ride
+    // is optional (a cast), so the fake implements it to observe the firing.
+    // The clone shares the recorder object, so the appends cross the seam.
+    class DoneLog {
+        string[] doneIds;
+    }
+
+    class DoneRecorder : IStreamCallback, IStepEventEmitter, IRunDoneEmitter {
+        string id;
+        DoneLog log;
+
+        override void setId(string s) {
+            id = s;
+        }
+
+        override void messageUpdate(StreamMessage, StreamToolCall[], ServerStat) {
+        }
+
+        override void streamMessageDone() {
+        }
+
+        override IStreamCallback clone() {
+            auto c = new DoneRecorder;
+            c.id = id;
+            c.log = log;
+            return c;
+        }
+
+        override void stepEvent(ProcessResult) {
+        }
+
+        override void runDone() {
+            log.doneIds ~= id;
+        }
+    }
+
+    class OutputAgent : IBasicAgent {
+        IStreamCallback streamCb;
+        PipelineControlContext ctx;
+
+        override string id() {
+            return "n1";
+        }
+
+        override void setStreamUpdate(IStreamCallback callback) {
+            streamCb = callback;
+        }
+
+        override void addUserQuery(string) {
+        }
+
+        override void addContinueMessage(string) {
+        }
+
+        override void setPipelineContext(PipelineControlContext c) {
+            this.ctx = c;
+        }
+
+        override ProcessResult runToCompletion(void delegate(ProcessResult) step = null,
+                SummaryAgent.ProgressCallback compressCallback = null,
+                bool delegate() interrupt = null) {
+            if (ctx)
+                ctx.setPipelineOutput("done");
+            return ProcessResult.init;
+        }
+    }
+
+    auto log = new DoneLog;
+    auto recorder = new DoneRecorder;
+    recorder.log = log;
+    auto agent = new OutputAgent;
+    auto pipeline = pipelineBuilder().streamCallback(recorder).addNode("n1",
+            agent).startNode("n1").stopNode("n1").build();
+
+    auto result = pipeline.run(null);
+
+    assert(result.allSuccess, "setup: the run succeeded");
+    assert(log.doneIds == ["n1"],
+            "one run-done per run, tagged with the node's own id (got " ~ log.doneIds.join(
+                ",") ~ ")");
+}
+
+@("a ready-path run fires its run-start once, before its first tick, with the run's query") unittest {
+    import std.algorithm : startsWith;
+    import std.array : join;
+
+    import llm.types : IRunStartEmitter, IStepEventEmitter, StreamMessage,
+        StreamToolCall, ServerStat;
+
+    // The same seam shape the run-done test uses: the emitter ride is an
+    // optional cast, so the fake implements IRunStartEmitter to observe the
+    // firing. Starts and ticks land in one call-order log, so the test can
+    // pin that a run's start precedes the run's own first stream tick.
+    class StartLog {
+        /// "start:<nodeId>:<task>" and "tick:<nodeId>" in call order.
+        string[] events;
+    }
+
+    class StartRecorder : IStreamCallback, IStepEventEmitter, IRunStartEmitter {
+        string id;
+        StartLog log;
+
+        override void setId(string s) {
+            id = s;
+        }
+
+        override void messageUpdate(StreamMessage, StreamToolCall[], ServerStat) {
+            log.events ~= "tick:" ~ id;
+        }
+
+        override void streamMessageDone() {
+        }
+
+        override IStreamCallback clone() {
+            auto c = new StartRecorder;
+            c.id = id;
+            c.log = log;
+            return c;
+        }
+
+        override void stepEvent(ProcessResult) {
+        }
+
+        override void runStart(string task) {
+            log.events ~= "start:" ~ id ~ ":" ~ task;
+        }
+    }
+
+    class OutputAgent : IBasicAgent {
+        string _id;
+        IStreamCallback streamCb;
+        PipelineControlContext ctx;
+
+        this(string id) {
+            _id = id;
+        }
+
+        override string id() {
+            return _id;
+        }
+
+        override void setStreamUpdate(IStreamCallback callback) {
+            streamCb = callback;
+        }
+
+        override void addUserQuery(string) {
+        }
+
+        override void addContinueMessage(string) {
+        }
+
+        override void setPipelineContext(PipelineControlContext c) {
+            this.ctx = c;
+        }
+
+        override ProcessResult runToCompletion(void delegate(ProcessResult) step = null,
+                SummaryAgent.ProgressCallback compressCallback = null,
+                bool delegate() interrupt = null) {
+            if (streamCb !is null)
+                streamCb.messageUpdate(StreamMessage.init, [], ServerStat.init);
+            if (ctx)
+                ctx.setPipelineOutput(_id ~ "-out");
+            return ProcessResult.init;
+        }
+    }
+
+    auto log = new StartLog;
+    auto recorder = new StartRecorder;
+    recorder.log = log;
+    auto agentA = new OutputAgent("n1");
+    auto agentB = new OutputAgent("n2");
+    // The loop edge re-invokes n1 once: a run that goes through the ready
+    // path a second time (the "=== NEW TURN ===" re-execution framing).
+    auto pipeline = pipelineBuilder().streamCallback(recorder).addNode("n1",
+            agentA).addNode("n2", agentB).addEdge("n1", "n2", 1).addEdge("n2",
+            "n1", 1).startNode("n1").stopNode("n2").build();
+
+    auto result = pipeline.run(null);
+
+    assert(result.allSuccess, "setup: the run succeeded");
+    // Two runs went through the ready path (n2's first run, n1's looped
+    // re-run) and each fired exactly one start, ordered before that run's
+    // own first tick. n2's task is the query the submit site built from its
+    // input (n1's output); n1's re-run carries the fresh-turn framing. The
+    // pipeline's first run is submitted by the direct start-node path,
+    // which builds no query (the caller seeded it via addUserQuery before
+    // build), so it fires no start - its tick is the log's first entry.
+    assert(log.events.length == 5,
+            "n1's first tick, then one start and one tick per ready-path run, nothing else (got:\n" ~ log.events.join(
+                "\n") ~ "\n)");
+    assert(log.events[0] == "tick:n1",
+            "the first run fires no start: the direct start-node submit builds no query");
+    assert(log.events[1] == "start:n2:n1-out",
+            "n2's run starts before its first tick, with its query as the task (got "
+            ~ log.events[1] ~ ")");
+    assert(log.events[2] == "tick:n2", "n2's start precedes n2's own first tick");
+    assert(log.events[3].startsWith("start:n1:=== NEW TURN ==="),
+            "the looped re-run starts before its first tick, with the re-invocation query as the task (got "
+            ~ log.events[3] ~ ")");
+    assert(log.events[4] == "tick:n1", "n1's re-run start precedes its own first tick");
+}

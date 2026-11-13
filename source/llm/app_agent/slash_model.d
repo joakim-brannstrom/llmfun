@@ -12,7 +12,6 @@ import std.string : strip;
 import llm.app_agent; // AgentApp (cyclic package import, same pattern as slash.d)
 import llm.app_agent.slash;
 import llm.agent_md : agentMdSwitchMaySummarize;
-import llmfun_tui; // TuiChatMessageType_* (C binding)
 
 package void registerModelCommands(ref SlashCommandRegistry registry) {
     auto ignore = registry.register(SlashCommand("model", [],
@@ -38,7 +37,7 @@ private AgentStatus modelHandler(ref AgentApp app, string arg) {
             m ~= i"  $(i)  $(model.display)$(activeMarker)\n".text;
         }
         m ~= "Use /model <index> or /model <name> to switch.";
-        app.sendChatMessage(m, TuiChatMessageType_Assistant);
+        app.sendChatMessage(m);
     } else {
         const oldModel = app.llmConf.activeCodeModel.display;
         bool switched;
@@ -46,8 +45,7 @@ private AgentStatus modelHandler(ref AgentApp app, string arg) {
         if (idx >= 0) {
             switched = app.llmConf.selectModelByIndex(idx);
             if (!switched) {
-                app.sendChatMessage("error: Invalid model index '%s'. Valid indices: 0-%s.",
-                        TuiChatMessageType_Assistant, arg,
+                app.sendChatMessage("error: Invalid model index '%s'. Valid indices: 0-%s.", arg,
                         app.llmConf.codeModels.length == 0
                         ? "none" : text(app.llmConf.codeModels.length - 1));
             }
@@ -55,18 +53,17 @@ private AgentStatus modelHandler(ref AgentApp app, string arg) {
             auto result = app.llmConf.selectModelByName(arg);
             switched = result.empty;
             if (!switched)
-                app.sendChatMessage("failed to switch model: %s",
-                        TuiChatMessageType_Assistant, result);
+                app.sendChatMessage("failed to switch model: %s", result);
         }
         if (switched) {
             auto newModel = app.llmConf.activeCodeModel();
             app.agent_.resetModel(newModel);
-            app.agent_.setStreamUpdate(app.makeStreamCallback);
+            app.agent_.setStreamUpdate(app.makeTypedStreamCallback);
             if (agentMdSwitchMaySummarize(app.llmConf, newModel, app.agentsMdFile_)) {
-                app.sendChatMessage("recomputing system prompt…", TuiChatMessageType_Assistant);
+                app.sendChatMessage("recomputing system prompt…");
             }
             app.rebuildSystemPrompt();
-            app.sendChatMessage("switched agent model: %s -> %s context: %s", TuiChatMessageType_Assistant, oldModel,
+            app.sendChatMessage("switched agent model: %s -> %s context: %s", oldModel,
                     app.llmConf.activeModelDisplayName(), app.agent_.modelContextSize);
         }
     }

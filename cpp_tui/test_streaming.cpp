@@ -1,29 +1,28 @@
 // test_streaming.cpp
 //
-// Streaming v2: the live answer made legible and cheap.
+// Streaming: the live answer made legible and cheap, on the typed store.
 //
 // What this binary proves, in order:
 //
 //   1. the sources   the streaming state is the frame's (`refreshStreamClock` is called once per
 //                    frame in `views/shell.cpp`), no view names a v4 type, a profile flag or a
-//                    display size, and the bounded window counts the *stored* groups
-//                    (`storedGroupCount`).
+//                    display size, the bounded window counts the *stored* groups
+//                    (`storedGroupCount`), and no production source names a retired fold symbol
+//                    or a pipeline literal (the gate, a closed file list).
 //   2. the clock     a fake clock drives every number: the answer's elapsed time and the
 //                    reasoning's duration (0 while it is still reasoning, frozen when the answer
 //                    begins).
-//   3. the throttle  the store accepts one snapshot per window (~30 fps), parks the newest inside
-//                    it, and treats a byte-identical resend as no repaint at all; a stop applies
-//                    a parked snapshot before the clock freezes, so the partial answer is never
-//                    one window short.
+//   3. the storm     300 stream ticks of one live turn merge into one turn - the query and the
+//                    content block - and one draw rebuilds the group once; a stop stores the turn.
 //   4. the identity  across 300 updates of a markdown-heavy answer the stream group's id and its
-//                    two blocks (`{group, kStreamMessageId, Thinking}` and `... Assistant`) never
-//                    move, and the group's `revision` advances exactly when the text does.
-//   5. the header    the body row names the phase and nothing else - `AGENT · thinking` before
-//                    the first character, `AGENT · writing` while the answer grows, `AGENT ·
-//                    cancelled` after a stop - and never a clock, while the reasoning row keeps
-//                    `Thinking · 3.2 s` once it has ended, streamed or stored.
+//                    content block (`{group, hash("content#0"), Assistant}`) never move, and the
+//                    group's `revision` advances exactly when the text does.
+//   5. the header    the live turn is the work group D stamps: `WORK - N steps` over its rows, the
+//                    reasoning row reads `Thinking` until D stamps its duration at completion, and
+//                    a stamped block keeps its duration (`ANSWER - 2.5 s`, `Thinking - 2.5 s`).
 //   6. the height    within one revision the group's height never shrinks, so a live answer
-//                    cannot oscillate.
+//                    cannot oscillate; folding the live group's header shortens it (minimal mode
+//                    honors the fold).
 //   7. the window    the live answer is drawn after the bounded window, not inside it: three
 //                    stored groups plus the stream is four drawn groups and the paging count is
 //                    the stored conversation's.
@@ -31,8 +30,8 @@
 //   budget.
 //   9. the goldens   the live answer, the cancelled answer, a reasoning-only stream, a stream
 //                    whose last line is a table row, and a stream inside an unclosed fence.
-//  10. the fallback  a streamed body inside an unclosed fence draws as plain text and the stored
-//                    ones never do: the scan resumes where the last snapshot stopped.
+//  10. the fallback  a stored body never takes the plain-text fallback; the live turn's folded
+//                    body is its row's summary, drawn as the text arrived.
 //
 // The grid is the real text backend (the `TScreen` pattern of `test_session_filter_smoke.cpp`)
 // with the real text-mode markdown profile, so a golden is what the terminal would show.
@@ -80,6 +79,9 @@ namespace ui = llmfun::tui::ui;
 namespace model = llmfun::tui::model;
 namespace store = llmfun::tui::store;
 namespace views = llmfun::tui::views;
+
+#include "test/typed_seed.h" // the typed store's seeding shapes (global scope: the
+                             // seeder must name the real `llmfun::tui::TuiState`)
 
 namespace {
 
@@ -269,19 +271,6 @@ ui::Rect cellRect(float x, float y, float w, float h) {
     return r;
 }
 
-/// One message of the v4 store, in the shape D writes it (`"[<nr>] <body> [<time>]"` for a
-/// stored line, nothing for the streamed one).
-tui::ChatMessage message(size_t id, tui::ChatMessageType type, const std::string& summary,
-                         const std::string& text, const std::string& thinking = {}) {
-    tui::ChatMessage msg;
-    msg.id = id;
-    msg.type = type;
-    msg.summary = summary;
-    msg.text = text;
-    msg.thinking = thinking;
-    return msg;
-}
-
 // ---------------------------------------------------------------------------
 // Harness init/shutdown: the real app's order (markdown text mode BEFORE the backend init,
 // which locks the font atlas), then the theme.
@@ -323,6 +312,7 @@ std::string fixtureDocument() {
 
 struct Fixture {
     tui::TuiState state;
+    typed_seed::Seeder seed{&state, 1}; ///< the typed store's live-run seeding
 
     Fixture() {
         state.readyStatus = false; // a run is in flight: the composer's Stop is up
@@ -330,31 +320,73 @@ struct Fixture {
         state.threadAdapter.bind(state);
     }
 
-    void addStored(const tui::ChatMessage& msg) {
-        state.chat.outputLines.push_back(msg);
-        state.chat.hasStreamMsg = false;
+    /// The typed store's seeding shapes: a stored user message opens a `Done` turn
+    /// with its query block, a stored answer hangs the turn's `Answer` block off
+    /// the newest turn.
+    void storedUser(const std::string& text) { seed.add(typed_seed::Seeder::Msg::User, text); }
+    void storedAnswer(const std::string& text) {
+        seed.add(typed_seed::Seeder::Msg::FinalAnswer, text);
     }
 
-    /// Put a streamed answer in the store and derive its clock at `nowMs` - the same two writes
-    /// the store and the frame layer make, with the clock stated instead of read.
+    /// Put a streamed answer in the typed store and derive its clock at `nowMs` - the
+    /// same two writes the emitters and the frame layer make, with the clock stated
+    /// instead of read. The first call opens the live turn (a `Running` turn with the
+    /// query block), every later one merges the content block in place.
     void stream(const std::string& text, const std::string& thinking, std::int64_t nowMs,
                 bool cancelRequested = false) {
-        state.chat.streamMsg = message(0, tui::ChatMessageType::Assistant, "", text, thinking);
-        state.chat.hasStreamMsg = true;
-        model::refreshStreamClock(state.ui.thread.stream, /*hasStream=*/true,
-                                  /*hasText=*/!text.empty(),
-                                  /*hasThinking=*/!thinking.empty(), nowMs, cancelRequested);
+        if (seed.liveTurnId == 0)
+            seed.runStart("stream this");
+        seed.updateStream(text);
+        if (!thinking.empty())
+            seed.upsertBlock(seed.liveTurnId, "reasoning#0", std::to_string(seed.liveTurnId) + "#0",
+                             TuiBlockKind_Reasoning, TuiBlockStatus_None, nullptr, thinking);
+        model::refreshStreamClock(state.ui.thread.stream, state.threadAdapter.hasStream(),
+                                  state.threadAdapter.streamHasText(),
+                                  state.threadAdapter.streamHasThinking(), nowMs, cancelRequested);
     }
 
     /// Advance the clock without touching the text (a frame that changed nothing).
     void tick(std::int64_t nowMs, bool cancelRequested = false) {
-        model::refreshStreamClock(state.ui.thread.stream, state.chat.hasStreamMsg,
-                                  !state.chat.streamMsg.text.empty(),
-                                  !state.chat.streamMsg.thinking.empty(), nowMs, cancelRequested);
+        model::refreshStreamClock(state.ui.thread.stream, state.threadAdapter.hasStream(),
+                                  state.threadAdapter.streamHasText(),
+                                  state.threadAdapter.streamHasThinking(), nowMs, cancelRequested);
     }
 
     size_t streamGroupIndex() const { return state.threadAdapter.storedGroupCount(); }
     store::GroupView streamGroup() const { return state.threadAdapter.groupAt(streamGroupIndex()); }
+
+    /// The stream group's content row: the `Assistant`-kind block D's stream updater
+    /// merges the answer into (`content#0`; the query block is a `User` row, the
+    /// reasoning a `Thinking` one). The batch's synthetic owner row is
+    /// an `Assistant` row too, so the owner's namespaced key is skipped - the
+    /// helper names the streamed body's row, never the owner's. A body-less
+    /// answer is dropped by the projection, so the row need not exist
+    /// yet; the helper reports `npos` rather than pointing at a stand-in.
+    static constexpr size_t npos = static_cast<size_t>(-1);
+
+    size_t streamBodyRow() const {
+        const size_t blocks = state.threadAdapter.blockCount(streamGroupIndex());
+        const std::size_t ownerKey = std::hash<std::string>{}(
+            "batch#" + std::to_string(seed.liveTurnId) + "#" + std::to_string(seed.liveBatch));
+        for (size_t b = 1; b < blocks; ++b)
+            if (state.threadAdapter.blockAt(streamGroupIndex(), b).kind ==
+                    model::BlockKind::Assistant &&
+                state.threadAdapter.blockAt(streamGroupIndex(), b).key != ownerKey)
+                return b;
+        return npos;
+    }
+
+    /// The stream group's reasoning row, found by kind - the batch projection
+    /// emits the owner first and sorts the children stably, so a
+    /// literal index would not hold across the batch emission order.
+    size_t streamReasoningRow() const {
+        const size_t blocks = state.threadAdapter.blockCount(streamGroupIndex());
+        for (size_t b = 1; b < blocks; ++b)
+            if (state.threadAdapter.blockAt(streamGroupIndex(), b).kind ==
+                model::BlockKind::Thinking)
+                return b;
+        return npos;
+    }
 
     /// Draw the thread into the 100x30 frame and answer the captured grid.
     Grid draw(int windowGroups = 40) {
@@ -372,7 +404,8 @@ struct Fixture {
 std::string headerOf(Fixture& fixture, std::size_t block) {
     const model::BlockDesc desc =
         fixture.state.threadAdapter.blockAt(fixture.streamGroupIndex(), block);
-    return views::blockHeaderText(desc, views::BlockDraw{desc.expanded, false}, /*textGrid=*/true);
+    return views::blockHeaderText(desc, views::BlockDraw{desc.expanded, false},
+                                  ui::metricsFor(/*textGrid=*/true, 1.0f, 1.0f), 1000.0f);
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +463,42 @@ void checkSource() {
     if (readWholeFile(dir + "/views/shell.cpp", shell))
         check(shell.find("refreshStreamClock") != std::string::npos,
               "the frame layer derives the live answer's clock once per frame");
+}
+
+// The gate: a retired fold symbol or a wire literal never returns to
+// the production tree. Production sources only: a fixture may name a hidden
+// tool (that is what a fixture is for), a shipped source may not - so the scan
+// is this closed file list, never a recursive walk. A new file needs a new row
+// here: the list is the set of files where these tokens last lived - the
+// paired headers and the rest of the production tree are a follow-up wave's
+// extension, not this gate's closure. `groupMinimal` is on the list because
+// the split into `groupOpen`/`groupStyleIsMinimal` is the point - a
+// returning `groupMinimal` would silently re-conflate style with openness.
+void checkRetiredNames() {
+    const std::string dir = TEST_STREAMING_SOURCE_DIR;
+    const char* kProduction[] = {"store/thread_store.cpp",
+                                 "store/thread_store.h",
+                                 "store/typed_thread_store.cpp",
+                                 "store/typed_thread_store.h",
+                                 "views/thread.cpp",
+                                 "views/blocks.cpp",
+                                 "views/palette.cpp",
+                                 "model/block.h",
+                                 "tui.h",
+                                 "tui_api.cpp"};
+    const char* kRetired[] = {
+        "thinkingOpen",     "batchTools", "groupOverrides", "openWorkGroups",  "typedRowOpen_",
+        "kHiddenToolNames", "task_done",  "taskDone",       "pipeline_output", "groupMinimal"};
+    for (const char* file : kProduction) {
+        std::string source;
+        const bool readable = readWholeFile(dir + "/" + file, source);
+        check(readable && !source.empty(), std::string("readable: ") + file);
+        if (!readable || source.empty())
+            continue;
+        for (const char* token : kRetired)
+            check(source.find(token) == std::string::npos,
+                  std::string(file) + " names no retired token (" + token + ")");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -494,77 +563,42 @@ void checkClock() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. The store's update throttle
+// 3. The store's upsert storm: N ticks of one live turn merge in place
 // ---------------------------------------------------------------------------
 
 void checkThrottle() {
-    phase("throttle");
+    phase("storm");
     Fixture fast;
-    // 300 snapshots as fast as D's loop sends them (the real clock, no frame between): the first
-    // is stored, the rest are coalesced inside one window, and the newest is parked - so nothing
-    // is lost. The *invariants* are asserted unconditionally (every snapshot is accounted for,
-    // and the parked one is the newest); the exact split is asserted only when the loop really
-    // ran inside one window, because the window is the wall clock's and a loaded machine must not
-    // turn the check into a lie.
-    const auto burstStart = std::chrono::steady_clock::now();
+    fast.seed.runStart("stream this");
+    fast.state.threadAdapter.storedGroupCount(); // prime: the store holds the run's start
+    // Minimal folds the live turn's work rows behind its header: pin the
+    // group open so the streamed body draws, and draw once so the pinned-open
+    // group's own rebuild is spent before the storm the check below measures.
+    fast.state.chat.groupPins[static_cast<std::int64_t>(fast.seed.liveTurnId)] = true;
+    fast.draw();
+    const auto buildsBefore = fast.state.threadAdapter.groupBuilds();
+    // 300 ticks as fast as D's loop sends them (no frame between): the store merges every
+    // one in place - the live turn still holds its query and its content block, and the
+    // whole storm costs one rebuild of the group.
     for (int i = 1; i <= 300; ++i)
-        tui::tuiUpdateStreamChatMessage(fast.state, message(0, tui::ChatMessageType::Assistant, "",
-                                                            "chunk " + std::to_string(i)));
-    const double burstMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - burstStart)
-            .count();
-    const model::StreamState& stream = fast.state.ui.thread.stream;
-    check(stream.applied + stream.coalesced + stream.unchanged == 300,
-          "every snapshot is accounted for: stored, coalesced or unchanged (" +
-              std::to_string(stream.applied) + " + " + std::to_string(stream.coalesced) + " + " +
-              std::to_string(stream.unchanged) + ")");
-    check(stream.applied >= 1, "the burst stored at least the snapshot it arrived on (got " +
-                                   std::to_string(stream.applied) + ")");
-    if (burstMs < static_cast<double>(model::kStreamUpdateIntervalMs)) {
-        check(stream.applied == 1, "inside one window only the first snapshot is stored (got " +
-                                       std::to_string(stream.applied) + ")");
-        check(stream.coalesced == 299,
-              "the other 299 are coalesced (got " + std::to_string(stream.coalesced) + ")");
-    } else {
-        check(stream.coalesced + stream.unchanged < 300,
-              "the burst outran the window, so it was stored more than once");
-    }
-    check(fast.state.chat.pendingStream, "and the newest snapshot is parked");
-    check(fast.state.chat.pendingStreamMsg.text == "chunk 300",
-          "which is the newest, not a stale one (got '" + fast.state.chat.pendingStreamMsg.text +
-              "')");
+        fast.seed.updateStream("chunk " + std::to_string(i));
+    const Grid grid = fast.draw();
+    check(fast.state.threadAdapter.groupBuilds() == buildsBefore + 1,
+          "300 ticks merge into one rebuild of the group (got " +
+              std::to_string(fast.state.threadAdapter.groupBuilds() - buildsBefore) + ")");
+    const size_t group = fast.streamGroupIndex();
+    check(fast.state.threadAdapter.blockCount(group) == 3,
+          "the storm still leaves the turn its header, the batch's owner row and one "
+          "content block (got " +
+              std::to_string(fast.state.threadAdapter.blockCount(group)) + ")");
+    check(grid.contains("chunk 300"), "the drawn body is the newest tick");
 
-    // A resend of the newest text (what the store shows or is about to) is not a repaint.
-    const std::uint64_t unchangedBefore = stream.unchanged;
-    const std::uint64_t appliedBefore = stream.applied;
-    const std::uint64_t coalescedBefore = stream.coalesced;
-    tui::tuiUpdateStreamChatMessage(fast.state,
-                                    message(0, tui::ChatMessageType::Assistant, "", "chunk 300"));
-    check(stream.unchanged == unchangedBefore + 1, "a byte-identical resend costs no write");
-    check(stream.applied == appliedBefore && stream.coalesced == coalescedBefore,
-          "and changes neither counter");
-
-    // A stop is the last word on the text: the parked snapshot is applied before the clock freezes.
-    tui::tuiRequestCancel(fast.state);
-    check(fast.state.chat.streamMsg.text == "chunk 300",
-          "a stop applies the parked snapshot (got '" + fast.state.chat.streamMsg.text + "')");
-    check(!fast.state.chat.pendingStream, "and clears the slot");
-    check(stream.applied == appliedBefore + 1,
-          "the stop's write is counted (got " + std::to_string(stream.applied) + ")");
-
-    // Every snapshot lands when the window has elapsed: 300 updates over 300 windows.
-    Fixture paced;
-    for (int i = 1; i <= 300; ++i) {
-        // "The window has elapsed": what the frame's flush sees 33 ms later.
-        paced.state.ui.thread.stream.lastAppliedMs = 0;
-        tui::tuiUpdateStreamChatMessage(
-            paced.state, message(0, tui::ChatMessageType::Assistant, "", "t" + std::to_string(i)));
-    }
-    check(paced.state.ui.thread.stream.applied == 300,
-          "one snapshot per window: all 300 are stored (got " +
-              std::to_string(paced.state.ui.thread.stream.applied) + ")");
-    check(paced.state.ui.thread.stream.coalesced == 0, "and none is parked");
-    check(paced.state.chat.streamMsg.text == "t300", "the store ends on the newest text");
+    // A stop closes the turn: the group is stored, the thread's live answer is gone.
+    fast.seed.runStop();
+    check(!fast.state.threadAdapter.hasStream(), "the stop closes the live turn");
+    check(fast.state.threadAdapter.storedGroupCount() == 1,
+          "and the turn is stored as an ordinary group (got " +
+              std::to_string(fast.state.threadAdapter.storedGroupCount()) + ")");
 }
 
 // ---------------------------------------------------------------------------
@@ -579,14 +613,14 @@ void checkIdentityAndHeight() {
         return;
     }
     Fixture fixture;
-    fixture.addStored(
-        message(1, tui::ChatMessageType::User, "[1] stream this [0.1s]", "stream this"));
+    fixture.storedUser("stream this");
     // The reasoning arrives first (40 updates) and ends when the answer's first character does.
     constexpr int kReasoningUpdates = 40;
 
     bool identityStable = true;
     bool revisionMonotone = true;
     bool heightStableWithinRevision = true;
+    bool sawBody = false;
     std::uint64_t previousRevision = 0;
     size_t groupId = 0;
     std::int64_t now = kT0;
@@ -618,13 +652,23 @@ void checkIdentityAndHeight() {
         if (step == 1)
             groupId = view.id;
         identityStable = identityStable && view.id == groupId;
-        // Both rows keep their identity: the reasoning (when there is one) and the body row.
-        const size_t blocks = fixture.state.threadAdapter.blockCount(fixture.streamGroupIndex());
-        const model::BlockDesc body =
-            fixture.state.threadAdapter.blockAt(fixture.streamGroupIndex(), blocks - 1);
-        identityStable =
-            identityStable && body.id() == model::BlockId{groupId, model::kStreamMessageId,
-                                                          model::BlockKind::Assistant};
+        // The content row keeps its identity: the block D's stream updater merges
+        // the answer into (`content#0`), whatever the reasoning around it does.
+        // A body-less answer is dropped by the projection, so the
+        // reasoning-only updates have no content row at all; once the text has
+        // arrived the row must be there, carry `content#0`'s id, and never
+        // disappear again.
+        const size_t bodyRow = fixture.streamBodyRow();
+        if (bodyRow != Fixture::npos) {
+            const model::BlockDesc body =
+                fixture.state.threadAdapter.blockAt(fixture.streamGroupIndex(), bodyRow);
+            identityStable =
+                identityStable &&
+                body.id() == model::BlockId{groupId, std::hash<std::string>{}("content#0"),
+                                            model::BlockKind::Assistant};
+            sawBody = true;
+        } else if (sawBody)
+            identityStable = false; // the row must not vanish once it has text
         if (step > 1 && view.revision < previousRevision)
             revisionMonotone = false;
         previousRevision = view.revision;
@@ -656,7 +700,9 @@ void checkIdentityAndHeight() {
         }
     }
 
-    check(identityStable, "300 updates keep the stream group's id and both block ids stable");
+    check(sawBody, "the content row exists once the answer's text arrives");
+    check(identityStable,
+          "300 updates keep the stream group's id and the content block's id stable");
     check(groupId != 0, "the stream group has an id (got " + std::to_string(groupId) + ")");
     check(revisionMonotone, "the group's revision never goes backwards");
     check(previousRevision >= 250, "and it advanced with the text (final revision " +
@@ -676,15 +722,16 @@ void checkIdentityAndHeight() {
     check(clock.thinkingElapsedMs == static_cast<std::int64_t>(kReasoningUpdates) * kStreamStepMs,
           "and the row keeps the duration it took (" + toString(clock.thinkingElapsedMs) + " ms)");
 
-    // Within one revision a *shorter* draw must not shrink the hint either: a disclosure toggled
-    // at unchanged text is the case (and it is exactly what the anchor's next frame sees).
+    // The live group's hint is the row-count estimate, so it is expansion-independent:
+    // folding the header changes the drawn height (the fold the render honors), not
+    // the estimate the store hands the anchor. Pin the stability, then leave the
+    // group open for the goldens that follow.
     const float before = fixture.state.threadAdapter.measureHint(groupId);
     fixture.state.threadAdapter.setBlockExpanded(fixture.streamGroupIndex(), 0, false);
     fixture.draw();
     const float after = fixture.state.threadAdapter.measureHint(groupId);
-    check(after >= before - 0.01f, "the hint does not shrink within a revision (" +
-                                       std::to_string(before) + " -> " + std::to_string(after) +
-                                       ")");
+    check(after == before, "the hint is the estimate, and does not move with the fold (" +
+                               std::to_string(before) + " -> " + std::to_string(after) + ")");
     fixture.state.threadAdapter.setBlockExpanded(fixture.streamGroupIndex(), 0, true);
 }
 
@@ -696,110 +743,97 @@ void checkHeader() {
     phase("header");
     Fixture fixture;
     fixture.stream("", "Let me think", kT0);
-    check(headerOf(fixture, 0) == "Thinking",
-          "a reasoning row prints no duration while it reasons (got '" + headerOf(fixture, 0) +
-              "')");
-    check(headerOf(fixture, 1) == "AGENT - thinking",
-          "and the body row says the model is still thinking (got '" + headerOf(fixture, 1) + "')");
+    check(headerOf(fixture, fixture.streamReasoningRow()) == "Thinking",
+          "a reasoning row's header is the bare word while it streams (got '" +
+              headerOf(fixture, fixture.streamReasoningRow()) + "')");
+    check(headerOf(fixture, 0) == "WORK - 1 step",
+          "and the live turn's header is the work group's (got '" + headerOf(fixture, 0) + "')");
 
-    // The answer begins 3.2 s in and the frame lands 12 s in.
-    fixture.stream("The answer", "Let me think", kT0 + 3200);
+    // The answer's text arrives: the reasoning row holds still (D stamps the duration
+    // at completion), and seconds passing move nothing.
     fixture.stream("The answer", "Let me think", kT0 + 12000);
-    check(headerOf(fixture, 0) == "Thinking - 3.2 s",
-          "once the reasoning ends its row keeps the duration (got '" + headerOf(fixture, 0) +
-              "')");
-    const std::string writing = headerOf(fixture, 1);
-    check(writing == "AGENT - writing",
-          "the live row prints `AGENT · writing` (got '" + writing + "')");
-
-    // The phase word is event-driven, so seconds passing moves the header not one character:
-    // three ticks a second apart is the smallest sequence a per-second clock segment would fail.
+    check(headerOf(fixture, fixture.streamReasoningRow()) == "Thinking",
+          "the reasoning row holds still while the answer streams (got '" +
+              headerOf(fixture, fixture.streamReasoningRow()) + "')");
     fixture.tick(kT0 + 13000);
     fixture.tick(kT0 + 14000);
     fixture.tick(kT0 + 15000);
-    check(headerOf(fixture, 1) == writing,
-          "the live row holds still across three seconds of ticking (flicker-free)");
+    check(headerOf(fixture, fixture.streamReasoningRow()) == "Thinking",
+          "and holds still across three seconds of ticking (flicker-free)");
 
-    // A stop names what happened, and the clock is gone with it.
-    fixture.tick(kT0 + 19000, /*cancelRequested=*/true);
-    check(headerOf(fixture, 1) == "AGENT - cancelled",
-          "a stopped answer says so and keeps no clock (got '" + headerOf(fixture, 1) + "')");
-    check(headerOf(fixture, 0) == "Thinking - 3.2 s",
-          "the reasoning's row is unchanged by the stop (got '" + headerOf(fixture, 0) + "')");
+    // A stop closes the turn; the group is stored (the thread's only group) and keeps
+    // the block labels D stamped.
+    fixture.seed.runStop();
+    const size_t group = 0;
+    check(fixture.state.threadAdapter.blockAt(group, 0).label == "WORK",
+          "the stored turn keeps its work header (got '" +
+              fixture.state.threadAdapter.blockAt(group, 0).label + "')");
+    // The reasoning row by kind, not position: the stored batch carries the
+    // owner first and the sorted children after it.
+    size_t storedThinking = Fixture::npos;
+    const size_t storedBlocks = fixture.state.threadAdapter.blockCount(group);
+    for (size_t b = 1; b < storedBlocks; ++b)
+        if (fixture.state.threadAdapter.blockAt(group, b).kind == model::BlockKind::Thinking)
+            storedThinking = b;
+    check(storedThinking != Fixture::npos &&
+              fixture.state.threadAdapter.blockAt(group, storedThinking).label == "Thinking",
+          "and the reasoning row's header, still unstamped (got '" +
+              (storedThinking != Fixture::npos
+                   ? fixture.state.threadAdapter.blockAt(group, storedThinking).label
+                   : "<no reasoning row>") +
+              "')");
 
-    // The header is the block's, so a stored message keeps its own shape.
+    // The header is the block's, so a completed block keeps its own shape: the Answer
+    // block D stamps at completion prints its duration.
     Fixture stored;
-    stored.addStored(message(1, tui::ChatMessageType::FinalAnswer, "[1] done [2.5s]", "done"));
-    const model::BlockDesc desc = stored.state.threadAdapter.blockAt(0, 0);
-    check(views::blockHeaderText(desc, views::BlockDraw{true, false}, true) == "ANSWER - 2.5 s",
-          "a stored answer's header is a duration, not a phase (got '" +
-              views::blockHeaderText(desc, views::BlockDraw{true, false}, true) + "')");
+    stored.seed.upsertTurn(1, TuiTurnState_Done, 1);
+    stored.seed.upsertBlock(1, "answer", "1#0", TuiBlockKind_Answer, TuiBlockStatus_None, nullptr,
+                            "done", nullptr, 2500);
+    const model::BlockDesc desc = stored.state.threadAdapter.blockAt(0, store::kAnswerRow);
+    check(views::blockHeaderText(desc, views::BlockDraw{true, false},
+                                 ui::metricsFor(/*textGrid=*/true, 1.0f, 1.0f),
+                                 1000.0f) == "ANSWER - 2.5 s",
+          "a stamped answer block's header is its duration (got '" +
+              views::blockHeaderText(desc, views::BlockDraw{true, false},
+                                     ui::metricsFor(/*textGrid=*/true, 1.0f, 1.0f), 1000.0f) +
+              "')");
 
-    // A stored reasoning keeps its duration too: the summary's `[2.5s]` is the disclosure's.
-    stored.addStored(message(2, tui::ChatMessageType::FinalAnswer, "[2] reasoned [2.5s]",
-                             "reasoned", "the reasoning"));
-    const model::BlockDesc reasoning = stored.state.threadAdapter.blockAt(1, 0);
-    check(reasoning.kind == model::BlockKind::Thinking,
-          "a stored message's reasoning is its own block");
-    check(views::blockHeaderText(reasoning, views::BlockDraw{true, false}, true) ==
-              "Thinking - 2.5 s",
-          "and a stored reasoning row keeps its duration (got '" +
-              views::blockHeaderText(reasoning, views::BlockDraw{true, false}, true) + "')");
+    // A stamped reasoning drops its duration anyway: the row is the
+    // bare word, the owner carries the cost.
+    stored.seed.upsertBlock(1, "reasoning#0", "1#0", TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                            nullptr, "the reasoning", nullptr, 2500);
+    const model::BlockDesc reasoning = stored.state.threadAdapter.blockAt(0, 2);
+    check(reasoning.kind == model::BlockKind::Thinking, "a turn's reasoning is its own block");
+    check(views::blockHeaderText(reasoning, views::BlockDraw{true, false},
+                                 ui::metricsFor(/*textGrid=*/true, 1.0f, 1.0f),
+                                 1000.0f) == "Thinking",
+          "and a stamped reasoning row drops its duration too (got '" +
+              views::blockHeaderText(reasoning, views::BlockDraw{true, false},
+                                     ui::metricsFor(/*textGrid=*/true, 1.0f, 1.0f), 1000.0f) +
+              "')");
 }
 
 // ---------------------------------------------------------------------------
-// 6. The plain-text fence fallback: the open flip, the close flip, the guards
+// 6. The fence fallback: stored bodies never take it, streamed ones draw raw
 // ---------------------------------------------------------------------------
 
 void checkFenceFallback() {
     phase("fence fallback");
-    // The open flip: markdown-shaped lines above an unclosed fence draw raw, because a heading
-    // or a list item still under the fence would change shape from snapshot to snapshot as the
-    // renderer re-classifies it. The first snapshot settles three lines; the second appends the
-    // fence opener, and the scan must continue from the first snapshot's end.
+    // The typed live turn has no fence fallback to take: its body is D's merged
+    // content block, and an opened live turn draws its body raw - the text as
+    // it arrived, fence opener and all (minimal folds the work rows, so the
+    // check pins the group open first).
     Fixture fixture;
-    fixture.stream("## Heading\n\n- item\n", "", kT0);
-    fixture.draw();
-    const std::size_t settled = fixture.state.threadAdapter.streamFenceScanOffset();
-    check(settled > 0, "the fence scan advances past the lines it settled (got " +
-                           std::to_string(settled) + ")");
-    fixture.stream("## Heading\n\n- item\n\n```python\n", "", kT0 + 1000);
+    fixture.stream("## Heading\n\n- item\n\n```python\n", "", kT0);
+    fixture.state.chat.groupPins[static_cast<std::int64_t>(fixture.seed.liveTurnId)] = true;
     Grid grid = fixture.draw();
-    const std::size_t resumed = fixture.state.threadAdapter.streamFenceScanOffset();
-    check(resumed > settled,
-          "the next snapshot resumed the scan where the last stopped, it did not restart");
-    check(grid.contains("## Heading"),
-          "a streamed body inside an open fence draws its heading raw");
-    check(grid.contains("```python"), "and the fence's own opener is on the screen, not swallowed");
-    const ui::MarkdownCounters open = ui::markdownCounters();
-    check(open.plainTextFallbacks > 0, "the fallback draw reports itself");
+    check(grid.contains("Heading") && grid.contains("item"),
+          "a live body that ends inside a fence still draws - the renderer absorbs the open fence");
 
-    // The close flip: once the fence closes the body is markdown again - the heading loses its
-    // `##` to the renderer, the fence markers disappear into the code block, and no fallback
-    // draw happens for a body that is not inside a fence.
-    fixture.stream("## Heading\n\n- item\n\n```python\nx = 1\n```\n", "", kT0 + 2000);
-    grid = fixture.draw();
-    const ui::MarkdownCounters closed = ui::markdownCounters();
-    check(!grid.contains("```python"), "once the fence closes the body is markdown again");
-    check(!grid.contains("## Heading"), "and the heading is rendered, not printed raw");
-    check(closed.plainTextFallbacks == open.plainTextFallbacks,
-          "and the closing draw took no fallback");
-
-    // The reasoning's body is under the same rule: a stream whose thinking sits inside an
-    // unclosed fence draws raw too (the disclosure starts open when the stream is born).
-    Fixture reasoning;
-    reasoning.stream("", "Notes on the answer:\n\n```python\n", kT0);
-    Grid thinkGrid = reasoning.draw();
-    check(thinkGrid.contains("```python"),
-          "a streamed reasoning body inside an open fence draws raw as well");
-    check(ui::markdownCounters().plainTextFallbacks > open.plainTextFallbacks,
-          "and its fallback draw reports itself too");
-
-    // A stored message with an unterminated fence is a finished message: its body belongs to
-    // the markdown renderer whatever it holds.
+    // A stored body with an unterminated fence is a finished body: it belongs to
+    // the markdown renderer whatever it holds, on every draw.
     Fixture stored;
-    stored.addStored(
-        message(1, tui::ChatMessageType::FinalAnswer, "[1] code [2.0s]", "```python\nx = 1\n"));
+    stored.storedAnswer("```python\nx = 1\n");
     stored.draw();
     const ui::MarkdownCounters first = ui::markdownCounters();
     stored.draw();
@@ -807,7 +841,7 @@ void checkFenceFallback() {
     check(second.renders > first.renders,
           "a stored body still goes through the markdown renderer every draw");
     check(second.plainTextFallbacks == first.plainTextFallbacks,
-          "and a stored message never takes the plain-text fallback");
+          "and a stored body never takes the plain-text fallback");
 }
 
 // ---------------------------------------------------------------------------
@@ -817,13 +851,10 @@ void checkFenceFallback() {
 void checkWindow() {
     phase("window");
     Fixture fixture;
-    for (int i = 1; i <= 100; ++i) {
-        fixture.addStored(
-            message(static_cast<size_t>(i), tui::ChatMessageType::User,
-                    "[" + std::to_string(i) + "] question " + std::to_string(i) + " [0.1s]",
-                    "question " + std::to_string(i)));
-    }
+    for (int i = 1; i <= 100; ++i)
+        fixture.storedUser("question " + std::to_string(i));
     fixture.stream("the live answer", "", kT0);
+    fixture.stream("the live answer, grown", "", kT0 + kStreamStepMs);
     check(fixture.state.threadAdapter.groupCount() == 101, "100 stored groups and the live answer");
     check(fixture.state.threadAdapter.storedGroupCount() == 100,
           "the window counts the stored conversation only (got " +
@@ -849,11 +880,8 @@ void checkWindow() {
 
     // The same thread with no stream draws exactly the window.
     Fixture noStream;
-    for (int i = 1; i <= 100; ++i) {
-        noStream.addStored(message(static_cast<size_t>(i), tui::ChatMessageType::User,
-                                   "[" + std::to_string(i) + "] q" + std::to_string(i) + " [0.1s]",
-                                   "q" + std::to_string(i)));
-    }
+    for (int i = 1; i <= 100; ++i)
+        noStream.storedUser("q" + std::to_string(i));
     noStream.draw(/*windowGroups=*/3);
     check(noStream.state.ui.thread.drawnGroups == 3,
           "without a stream the window alone is drawn (got " +
@@ -874,7 +902,7 @@ void checkCost() {
     while (document.size() < 100 * 1024)
         document += base;
     Fixture fixture;
-    fixture.addStored(message(1, tui::ChatMessageType::User, "[1] stream [0.1s]", "stream"));
+    fixture.storedUser("stream");
     fixture.stream(document, "reasoning", kT0);
     check(document.size() >= 100 * 1024, "the measured answer is a large body (got " +
                                              std::to_string(document.size()) + " bytes)");
@@ -1044,6 +1072,7 @@ int main(int argc, char** argv) {
         [](const ui::Metrics&) {}); // warm-up: the text backend builds its atlas on the first frame
 
     checkSource();
+    checkRetiredNames();
     checkClock();
     checkThrottle();
     checkHeader();

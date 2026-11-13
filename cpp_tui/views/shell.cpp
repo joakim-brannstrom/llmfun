@@ -607,8 +607,8 @@ void deriveAgents(TuiState& state, std::int64_t nowMs) {
 
 /// The live answer's clock.
 ///
-/// Derived once per frame and by the frame alone, for the same reason the lanes' clocks are:
-/// the facts are the store's (`hasStreamMsg`, whether the streamed message already carries
+/// Derived once per frame and by the frame alone:
+/// the facts are the store's (`ChatTab::typedTurns`, whether the live turn already carries
 /// prose or reasoning), this frame's reading of the wall clock and the user's stop. Views read
 /// `UiState::thread.stream` and never ask for a clock of their own, which is what keeps the
 /// live row's phase word and the reasoning row's `Thinking · 3.2 s` reading the *same* clock
@@ -618,9 +618,10 @@ void deriveAgents(TuiState& state, std::int64_t nowMs) {
 /// but a surface may) and before anything draws, because the now bar's inputs are derived
 /// after it.
 void deriveStream(TuiState& state, std::int64_t nowMs) {
-    model::refreshStreamClock(state.ui.thread.stream, /*hasStream=*/state.chat.hasStreamMsg,
-                              /*hasText=*/!state.chat.streamMsg.text.empty(),
-                              /*hasThinking=*/!state.chat.streamMsg.thinking.empty(), nowMs,
+    const store::ThreadStoreAdapter& thread = state.threadAdapter;
+    model::refreshStreamClock(state.ui.thread.stream, /*hasStream=*/thread.hasStream(),
+                              /*hasText=*/thread.streamHasText(),
+                              /*hasThinking=*/thread.streamHasThinking(), nowMs,
                               state.cancelRequested);
 }
 
@@ -1086,6 +1087,11 @@ ShellFrame renderShell(TuiState& state, ImVec2 display) {
     // `ThreadStoreAdapter::bind` (a moved state leaves it unbound, so the frame
     // layer is what re-attaches it).
     state.threadAdapter.bind(state);
+    // `ShellPrefs::threadMinimal`, the `ThreadMode=` line in ui.conf
+    if (state.chat.threadMinimalMode != model::threadMinimal(state.ui.prefs)) {
+        state.chat.threadMinimalMode = model::threadMinimal(state.ui.prefs);
+        state.ui.thread.hints.clear();
+    }
 
     ShellFrame frame;
     frame.display = display;

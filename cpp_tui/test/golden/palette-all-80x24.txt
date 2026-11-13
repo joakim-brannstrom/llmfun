@@ -1,6 +1,6 @@
 name: palette-all
 screen: 80x24
-state: section=0 rows=24 selected=0 query=''
+state: section=0 rows=25 selected=0 query=''
 text:
 
 
@@ -10,7 +10,7 @@ text:
 
 
 
-         Search                                                  ALL 24
+         Search                                                  ALL 25
 
          New session  Start a fresh session (rail +)            ACTIONS
          Focus composer  Move the keyboard to the query field   ACTIONS

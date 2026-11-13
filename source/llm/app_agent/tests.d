@@ -90,6 +90,29 @@ version (unittest) {
         }
     }
 
+    /// Run-exit probe seam: serves the script in order, then repeats the
+    /// last entry - a run that outlives the script still terminates, so a
+    /// ladder-exhaustion probe can use a short script with no overflow
+    /// bookkeeping.
+    private class ScriptedAgent : Agent {
+        import llm.types : ProcessResult;
+        import my.filter : ReFilter;
+
+        ProcessResult[] script;
+        size_t served;
+
+        this(string name, LlmConfig llmConf) {
+            super(name, llmConf, null, null, null, ReFilter.init);
+        }
+
+        override ProcessResult process(bool delegate() interrupt) @trusted nothrow {
+            assert(script.length > 0, "an empty script cannot serve a run");
+            const i = served < script.length ? served : script.length - 1;
+            ++served;
+            return script[i];
+        }
+    }
+
     // Two-phase exit block fakes: the cheap-model seam for the real worker (module scope:
     // SummarizerFn is a plain function pointer and cannot capture; the factory mirrors the
     // worker test seam in llm.rag.dialogue_worker).
@@ -773,7 +796,7 @@ unittest {
     // active meta unchanged, list still refreshed.
     auto unknown = SessionId("20260618-153045-ffff");
     app.doSidebarRename(unknown, "New title");
-    assert(sink.lastChatMessage() == "error: Failed to rename session 'ffff'.",
+    assert(sink.lastNoticeBody() == "error: Failed to rename session 'ffff'.",
             "rename-none must emit the error chat message");
     assert(app.activeSession.id == meta.id, "rename-none must keep the active meta");
     assert(app.activeSession.title == meta.title);
@@ -784,7 +807,7 @@ unittest {
     write(buildPath(tmpDir, "20260618-153046-0bad.json"), "{ not json !!!");
     auto corrupt = SessionId("20260618-153046-0bad");
     app.doSidebarRename(corrupt, "New title");
-    assert(sink.lastChatMessage() == "error: Failed to rename session '0bad'.",
+    assert(sink.lastNoticeBody() == "error: Failed to rename session '0bad'.",
             "corrupt-file rename must emit the error chat message");
     assert(app.activeSession.id == meta.id, "corrupt-file rename must keep the active meta");
     assert(sink.countOf("sessionList") == 2,
@@ -1355,11 +1378,10 @@ unittest {
     assert(snap[1].id == c && !snap[1].isActive);
     assert(sink.countOf("sessionList") == 1, "delete-active must refresh the sidebar snapshot");
 
-    // Confirmation chat message on the fallback path (the exact string locks
-    // the user-facing wording). The replayed history went through
-    // chatThinkMessage, so the confirmation is the only recorded chatMessage.
-    assert(sink.chatMessages.length == 1 && sink.chatMessages[0] == "Session deleted: a1b2. Switched to 'T'.",
-            "delete-active must emit the switch confirmation, got: " ~ sink.lastChatMessage());
+    // Confirmation notice on the fallback path (the exact string locks
+    // the user-facing wording: a chat message is a Notice block).
+    assert(sink.lastNoticeBody() == "Session deleted: a1b2. Switched to 'T'.",
+            "delete-active must emit the switch confirmation, got: " ~ sink.lastNoticeBody());
 }
 
 @("corrupt session files are skipped by listing and the sweep, and switchToSession keeps the current session on load failure")
@@ -1423,7 +1445,7 @@ unittest {
     // switchToSession on the corrupt id: error message, current session kept
     // (the exact string locks the user-facing wording).
     app.switchToSession(corrupt);
-    assert(sink.lastChatMessage() == "error: Cannot load session '20260618-153046-0bad' (not found or corrupt). Staying in current session.",
+    assert(sink.lastNoticeBody() == "error: Cannot load session '20260618-153046-0bad' (not found or corrupt). Staying in current session.",
             "switchToSession must emit the cannot-load error");
     assert(app.activeSession.id == good.id, "a failed load must keep the current session unchanged");
 
@@ -1787,11 +1809,12 @@ unittest {
     assert(got && code == 0, "expected AgentDone(0) from the actor funnel within ~10 s");
 }
 
-// NR derivation: the single shared displayable predicate drives both the
-// ordinal walk and the display decision - live batches are numbered by
-// offset + position over the contiguous history tail, /clear restarts the
-// count at [1], and a session switch replays the other session's own NRs
-// (a measured turn shows the same [NR] and [TIME] as live).
+// NR derivation: the typed walk owns both the display decision and the
+// batching - the step walk merges call+response pairs, the query echo and
+// the nudge emit nothing, a finalAnswer ToolMessage closes the turn with an
+// Answer block, /clear continues the batch index, and a session switch
+// replays the other session's own snapshot (a measured turn replays its
+// original [TIME] in its content block).
 @("NR derivation: predicate, live offset, clear restart, session switch")
 unittest {
     import std.path : buildPath;
@@ -1810,11 +1833,6 @@ unittest {
     auto cfg = testLlmConfig(tmpDir);
     auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
 
-    // 1. Predicate: the four arms, plus the two non-displayable Message cases
-    assert(isDisplayable(Chat.MessageT(Message(Role.assistant, false, "a", null)), cfg));
-    assert(isDisplayable(Chat.MessageT(Message(Role.user, true, "query", null)), cfg));
-    assert(!isDisplayable(Chat.MessageT(Message(Role.user, false, "nudge", null)), cfg));
-    assert(!isDisplayable(Chat.MessageT(Message(Role.system, false, "sys", null)), cfg));
     JSONValue call;
     call["id"] = "c1";
     call["type"] = "function";
@@ -1822,19 +1840,10 @@ unittest {
     fn["name"] = "query_semantic";
     fn["arguments"] = "{}";
     call["function"] = fn;
-    assert(isDisplayable(Chat.MessageT(ToolMessage(null, JSONValue([call]))), cfg));
-    assert(isDisplayable(Chat.MessageT(ToolResponse("ok", "c1", "query_semantic", true)), cfg));
-    assert(!isDisplayable(Chat.MessageT(ToolResponse("done", "c2", "task_done", true)), cfg));
-    assert(!isDisplayable(Chat.MessageT(ToolResponse("out", "c3", "pipeline_output", true)), cfg));
-    assert(isDisplayable(Chat.MessageT(VisionMessage("see", "data:image/png;base64,x")), cfg));
-    assert(displayableCount([
-        Chat.MessageT(Message(Role.system, false, "s", null)),
-        Chat.MessageT(Message(Role.user, false, "n", null)),
-        Chat.MessageT(Message(Role.user, true, "q", null)),
-        Chat.MessageT(Message(Role.assistant, false, "a", null))
-    ], cfg) == 2);
 
-    // 2. Live batch: offset + position; hidden result and nudge consume none
+    // 2. Live batch: the query echo and the nudge emit nothing; the content,
+    //    the tool message's thinking, the merged call/response and the hidden
+    //    response (standalone orphan) all upsert. No Done upsert: no answer.
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
     app.llmConf = cfg;
     app.sessionStore = store;
@@ -1874,20 +1883,22 @@ unittest {
     ];
     app.processResult(result);
 
-    assert(sink.stamps.length == 3, "user query, hidden result and nudge are not displayed live");
-    assert(sink.calls[0].kind == "chatThinkMessage"
-            && sink.calls[0].payload.startsWith("assistant: hello back"));
-    assert(sink.stamps[0].nr == 4); // 2 (offset) + 2nd displayable of the batch (q consumed 3)
-    assert(sink.stamps[0].time.match!((Duration d) { return d == 432.dur!"msecs"; },
-            (NoProcessingTime) { return false; }));
-    assert(sink.stamps[1].nr == 5);
-    assert(sink.stamps[2].nr == 6);
-    assert(sink.stamps[2].time.match!((Duration d) { return d == 42.dur!"msecs"; },
-            (NoProcessingTime) { return false; }));
+    assert(sink.turnUpserts.empty, "no final answer -> the turn stays open");
+    assert(sink.blockUpserts.length == 4,
+            "content, reasoning, merged call and hidden response upsert");
+    assert(sink.blockUpserts[0].id == "content#0"
+            && sink.blockUpserts[0].body == "hello back" && sink.blockUpserts[0].durationMs == 432);
+    assert(sink.blockUpserts[1].id == "reasoning#1"
+            && sink.blockUpserts[1].kind == TuiBlockKind_Reasoning
+            && sink.blockUpserts[1].durationMs == 120);
+    assert(sink.blockUpserts[2].id == "c1"
+            && sink.blockUpserts[2].status == TuiBlockStatus_Ok
+            && sink.blockUpserts[2].durationMs == 42, "call and response merge into one block");
+    assert(sink.blockUpserts[3].id == "c2",
+            "the hidden response emits standalone: the store owns displayability");
 
-    // 3. taskDone finalAnswer carries the same (nr, time) as its tool-call line
-    sink.chatMessages.length = 0;
-    sink.stamps.length = 0;
+    // 3. taskDone finalAnswer: the Answer block closes the turn Done, and the
+    //    call whose response streamed in an earlier step stays unmerged.
     JSONValue sd;
     sd["taskDoneAnswer"] = JSONValue("The answer is 4.");
     auto tm2 = ToolMessage(null, JSONValue([call]), JSONValue.init, sd);
@@ -1897,51 +1908,72 @@ unittest {
     ProcessResult r2;
     r2.chat = [Chat.MessageT(tm2), Chat.MessageT(trh)];
     app.processResult(r2);
-    assert(sink.chatMessages.length == 0); // tool-call line is a think message; hidden result sends nothing
-    assert(sink.stamps.length == 2, "tool-call line and finalAnswer are both recorded");
-    assert(sink.stamps[0].nr == 7 && sink.stamps[1].nr == 7); // same ordinal
-    assert(sink.stamps[1].time == sink.stamps[0].time);
+    assert(sink.blockUpserts.length == 7,
+            "the re-called tool, the hidden response and the answer upsert");
+    assert(sink.blockUpserts[4].id == "c1" && sink.blockUpserts[4].status == TuiBlockStatus_Cancelled,
+            "the response streamed earlier: the call block is not re-merged as Ok");
+    assert(sink.blockUpserts[5].id == "c2", "the hidden response upserts again");
+    assert(sink.blockUpserts[6].id == "answer"
+            && sink.blockUpserts[6].body == "The answer is 4." && sink.blockUpserts[6].durationMs == 555,
+            "the answer carries the ToolMessage's measured time");
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].state == TuiTurnState_Done,
+            "the final answer closes the turn Done");
 
-    // 4. /clear: history truncated to the system prompt -> next is [1]
+    // 4. /clear: history truncated to the system prompt -> the next walk
+    //    continues the same ctx's batch index (the typed store is cleared by
+    //    the slash handler's threadClear, not by chat.clear itself).
     app.agent_.chat.clear;
     ProcessResult r3;
     r3.chat = [Chat.MessageT(Message(Role.assistant, false, "fresh", null))];
     app.processResult(r3);
-    assert(sink.stamps[2].nr == 1);
+    assert(sink.blockUpserts[$ - 1].id == "content#5" && sink.blockUpserts[$ - 1].body == "fresh",
+            "the batch index continues after the clear, got id `" ~ sink.blockUpserts[$ - 1].id
+            ~ "`");
 
-    // 5. Session switch: the other session's own NRs from [1], and a replay
-    //    of a measured turn shows the same [NR] and [TIME] as live
+    // 5. Session switch: the other session's own snapshot replayed from
+    //    scratch, and a measured turn replays the same content with its
+    //    original [TIME]. The doc stamps turn_id like a real persisted
+    //    session (unstamped entries belong to no turn and emit nothing):
+    //    the snapshot's turn id is the history's own turn_id passthrough.
     JSONValue doc;
     JSONValue m1;
     m1["role"] = "user";
     m1["content"] = "what is 2+2?";
-    m1["save_data"] = JSONValue(["user": JSONValue(true)]);
+    m1["save_data"] = JSONValue([
+        "user": JSONValue(true),
+        "turn_id": JSONValue(1L)
+    ]);
     JSONValue m2;
     m2["role"] = "assistant";
     m2["content"] = "4";
     JSONValue sd2;
     sd2["processMs"] = JSONValue(1200);
+    sd2["turn_id"] = JSONValue(1L);
     m2["save_data"] = sd2;
     doc["messages"] = JSONValue([m1, m2]);
     auto metaB = store.create();
     store.save(metaB.id, metaB, doc); // sibling-test order: persist before activating
     app.switchToSession(metaB.id); // commit A, then load + replay B from scratch
-    assert(sink.stamps[sink.stamps.length - 2].nr == 1); // "what is 2+2?" replayed as [1]
-    assert(sink.stamps[sink.stamps.length - 1].nr == 2);
-    assert(sink.stamps[sink.stamps.length - 1].time.match!((Duration d) {
-            return d == 1200.dur!"msecs";
-        }, (NoProcessingTime) { return false; }));
+    assert(sink.setTurnsSnapshots.length == 1, "one replay snapshot");
+    const turns = sink.setTurnsSnapshots[0].turns;
+    const blocks = sink.setTurnsSnapshots[0].blocks;
+    assert(turns.length == 1 && turns[0].id == 1
+            && turns[0].state == TuiTurnState_Done && turns[0].messageCount == 1, "the id is the history's own turn_id; the answer counts as the turn's one message (the query is not counted)");
+    assert(blocks.length == 2);
+    assert(blocks[0].id == "query" && blocks[0].body == "what is 2+2?");
+    assert(blocks[1].id == "content#0" && blocks[1].body == "4"
+            && blocks[1].durationMs == 1200, "the measured answer replays its 1200 ms");
 }
 
-// The user-query echo is sent from runAgent AFTER the turn-start doCompress.
-// Its NR is the displayable count of the possibly-compressed history - the
-// query's true ordinal, no +1, and a compression that purged displayable
-// prefix messages cannot misnumber it (the count is read after doCompress
-// returns, so any rewrite is reflected).
+// The user-query turn opens AFTER the turn-start doCompress: the turn's
+// id comes from the typed walk's own sequence (continuing after any
+// replayed or compressed turns), so a compression that purged displayable
+// prefix messages cannot disturb it - the id is assigned by the typed
+// walk, not derived from a count read after doCompress returns.
 // The isActive() guard keeps the one-shot CLI output byte-stable (the
 // startSetup one-shot branch runs with the default TuiBlockedSink, which is
 // inactive and has no chat line for the prompt today).
-@("runAgent: user-query echo NR is the query's true ordinal")
+@("runAgent: user-query turn opens with the typed walk's own id")
 unittest {
     import std.path : buildPath;
     import std.datetime : Duration, dur;
@@ -1966,39 +1998,44 @@ unittest {
     app.activeSession = store.create();
     clearStopAgent();
 
-    // Non-displayable: consumes no ordinal. Set first: setSystemPrompt
+    // Non-displayable: seeds no turn. Set first: setSystemPrompt
     // replaces history[0] (it would clobber the first seeded message).
     app.agent_.chat.setSystemPrompt("sys");
-    // Two prior displayable messages: the query lands at ordinal 3.
+    // Two prior displayable messages: the live turn is still the walk's
+    // id 1 - turn ids are the typed walk's own sequence, not history
+    // positions.
     app.agent_.chat.add(Message(Role.assistant, false, "a1", null));
     app.agent_.chat.add(Message(Role.assistant, false, "a2", null));
 
     agent.canned = [ProcessResult(status: ProcessResult.Status.networkFailure)];
     app.runAgent("hello");
 
-    // The echo is the first persistent send, numbered 3 - the query's true
-    // ordinal in the persisted history (displayable count AFTER addUserQuery
-    // and the no-op turn-start doCompress), not a pre-derived 2 + 1.
-    assert(sink.stamps.length == 1, "only the echo is persistent for an empty batch");
-    assert(sink.calls[0].kind == "chatMessage" && sink.calls[0].payload == "hello");
-    assert(sink.stamps[0].nr == 3);
-    assert(sink.stamps[0].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }));
+    // The turn opens Running with the query prose block; the empty
+    // (failed) batch emits nothing further and the run's exit path
+    // closes the turn Interrupted without fabricating a block status:
+    // two turn upserts, same id.
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[0].id == 1 && sink.turnUpserts[0].state == TuiTurnState_Running,
+            "the failed turn opens Running with the typed walk's first id");
+    assert(sink.turnUpserts[1].id == 1 && sink.turnUpserts[1].state == TuiTurnState_Interrupted,
+            "the networkFailure run closes the turn Interrupted");
+    assert(sink.blockUpserts.length == 1 && sink.blockUpserts[0].id == "query"
+            && sink.blockUpserts[0].body == "hello", "the query is the turn's first block");
+    assert(sink.setTurnsSnapshots.empty, "the live path sends no setTurns");
     auto msgs = app.agent_.chat.getMessages();
     assert(msgs.length == 4); // system + a1 + a2 + query
     assert(msgs[3].match!((Message m) {
             return m.isUserQuery && m.content == "hello";
         }, (_) => false), "the query is the last persisted entry");
-    assert(displayableCount(msgs, cfg) == 3, "the echo NR equals the persisted ordinal");
 
-    // Slash-consumed query: no persistent echo (query is consumed before the
-    // loop; the unknown-command notice is a display-only nr=0 line).
-    auto stampCount = sink.stamps.length;
+    // Slash-consumed query: no turn opens (the query is consumed before
+    // the loop); the unknown-command notice lands as a Notice block in
+    // the store's newest turn context.
     app.runAgent("/nope");
-    assert(sink.stamps.length == stampCount + 1, "the unknown-command notice is sent");
-    assert(sink.stamps[$ - 1].nr == 0, "a consumed slash query must not be echoed");
-    assert(sink.chatMessages[$ - 1].startsWith("system: Unknown command"));
+    assert(sink.turnUpserts.length == 2,
+            "a consumed slash query must not open a turn (the failed run's two upserts stand)");
+    assert(sink.blockUpserts.length == 2 && sink.blockUpserts[1].kind == TuiBlockKind_Notice
+            && sink.blockUpserts[1].body.startsWith("system: Unknown command"),
+            "the unknown-command notice is sent as a Notice block");
 
     // One-shot byte-stability premise: the default sink is inactive, so the
     // startSetup one-shot branch never emits the echo line.
@@ -2009,7 +2046,7 @@ unittest {
 // Persistence gate: processMs through the REAL persistence path -
 // commit -> file -> load -> replay. The committed session file carries
 // processMs for every measured message (system stripped at commit), and a
-// session switch replays the same [NR] (the ordinal in the history - never
+// session switch replays the same [NR] (the NR in the history - never
 // renumbered) and the original [TIME] for measured messages; unmeasured
 // messages replay as NoProcessingTime (no suffix downstream).
 @("replay after session switch: same [NR] and original [TIME] as live")
@@ -2108,54 +2145,61 @@ unittest {
     assert(fileMsgs[2]["role"].str == "user" && fileMsgs[2]["content"].str == "hello");
     assert(!hasProcessMs(fileMsgs[2]), "the user query was never measured");
 
-    // Live stamps for the turn: a3 [4], tm [5], tr [6] (q consumes ordinal
-    // 3 but is not displayed live - the echo is the user query's own job).
-    assert(sink.stamps.length == 3, "only the measured turn traffic displays live");
-    assert(sink.stamps.map!(s => s.nr).array == [4, 5, 6], "live turn ordinals");
-    assert(sink.stamps[0].time.match!((Duration d) { return d == 432.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "live a3 time");
-    assert(sink.stamps[1].time.match!((Duration d) { return d == 120.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "live tm time");
-    assert(sink.stamps[2].time.match!((Duration d) { return d == 42.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "live tr time");
+    // Live walk for the turn: a3's content, the tool message's thinking and
+    // the merged call/response upsert (the query echo emits nothing - no
+    // turn-start here, the step walk owns the batch). No final answer, so
+    // the turn stays open (no Done upsert).
+    assert(sink.blockUpserts.length == 3, "content, reasoning and merged call upsert live");
+    assert(sink.blockUpserts[0].id == "content#0"
+            && sink.blockUpserts[0].durationMs == 432, "live a3 time");
+    assert(sink.blockUpserts[1].id == "reasoning#1"
+            && sink.blockUpserts[1].durationMs == 120, "live tm time");
+    assert(sink.blockUpserts[2].id == "c1" && sink.blockUpserts[2].durationMs == 42, "live tr time");
+    assert(sink.turnUpserts.empty && sink.setTurnsSnapshots.empty);
 
-    // Switch away and back: the replay shows the SAME [NR] and [TIME] -
-    // the file content alone determines both (cross-instance property).
-    sink.chatMessages.length = 0;
-    sink.stamps.length = 0;
+    // Switch away and back: the replay shows the SAME merged blocks and
+    // [TIME]s - the file content alone determines both (cross-instance
+    // property). The pre-turn a1/a2 entries carry no turn id, so they
+    // belong to no turn and replay nothing.
+    sink.setTurnsSnapshots.length = 0;
+    sink.blockUpserts.length = 0;
     app.switchToSession(metaB.id);
-    assert(sink.stamps.length == 0, "empty session B replays nothing displayable");
+    assert(sink.setTurnsSnapshots.length == 1 && sink.setTurnsSnapshots[0].turns.empty,
+            "empty session B replays nothing displayable");
     app.switchToSession(metaA.id);
-    // Replay A: a1 [1], a2 [2], q [3] (user query now displayed),
-    // a3 [4] 432 ms, tm [5] 120 ms, tr [6] 42 ms.
-    assert(sink.stamps.length == 6, "all six displayable messages replayed");
-    assert(sink.stamps.map!(s => s.nr).array == [1, 2, 3, 4, 5, 6],
-            "replayed [NR] == live [NR] (persisted-NR property)");
-    assert(sink.stamps[0].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "a1 replays unmeasured");
-    assert(sink.stamps[1].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "a2 replays unmeasured");
-    assert(sink.stamps[2].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "q replays unmeasured");
-    assert(sink.stamps[3].time.match!((Duration d) { return d == 432.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "a3 replays its original 432 ms");
-    assert(sink.stamps[4].time.match!((Duration d) { return d == 120.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "tm replays its original 120 ms");
-    assert(sink.stamps[5].time.match!((Duration d) { return d == 42.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "tr replays its original 42 ms");
+    assert(sink.setTurnsSnapshots.length == 2, "one snapshot per switch");
+    const rturns = sink.setTurnsSnapshots[1].turns;
+    const rblocks = sink.setTurnsSnapshots[1].blocks;
+    assert(rturns.length == 1 && rturns[0].id == 1
+            && rturns[0].state == TuiTurnState_Done && rturns[0].messageCount == 5,
+            "the healed a1/a2 prefix + a3 + the call + the result replay as"
+            ~ " one Done turn, got messageCount " ~ rturns[0].messageCount.to!string);
+    assert(rblocks.length == 7,
+            "healed a1/a2, query, content, reasoning, the tool message's content block and merged call replay, got "
+            ~ rblocks.length.to!string ~ ": " ~ (rblocks.length
+                ? rblocks.map!(b => b.id).join(",").idup : ""));
+    assert(rblocks[0].id == "content#0" && rblocks[0].body == "a1",
+            "the healed a1 prefix replays inside the turn");
+    assert(rblocks[1].id == "content#1" && rblocks[1].body == "a2",
+            "the healed a2 prefix replays inside the turn");
+    assert(rblocks[2].id == "query" && rblocks[2].body == "hello", "the query replays unmeasured");
+    assert(rblocks[3].id == "content#2" && rblocks[3].durationMs == 432,
+            "a3 replays its original 432 ms");
+    assert(rblocks[4].id == "reasoning#3" && rblocks[4].durationMs == 120,
+            "tm replays its original 120 ms");
+    assert(rblocks[5].id == "content#3" && rblocks[5].body.empty && rblocks[5].durationMs == 120,
+            "the tool message replays a body-less content block carrying its 120 ms");
+    assert(rblocks[6].id == "c1" && rblocks[6].durationMs == 42, "tr replays its original 42 ms");
 }
 
 // Backward-compat gate: a session file created BEFORE the processMs
-// feature (no save_data.processMs anywhere) must load and replay with
-// contiguous [NR] 1..N and NO [TIME] suffix (NoProcessingTime - unmeasured is
-// distinct from Duration(0)), and a later measured turn must commit WITHOUT
-// giving the legacy messages a processMs key. NR is a pure derivation (the
-// ordinal walk counts displayables), so there is nothing to migrate: if the
-// test exposes a gap, the fix belongs in the layer that causes it.
-@("legacy session files: contiguous NRs, no time suffix, clean round-trip")
+// feature (no save_data.processMs anywhere) must load and replay as typed
+// turns with NO durations (unmeasured is distinct from Duration(0)), and a
+// later measured turn must commit WITHOUT giving the legacy messages a
+// processMs key. Turn ids are healed at load (reconstructTurnIds), so
+// there is nothing to migrate: if the test exposes a gap, the fix belongs
+// in the layer that causes it.
+@("legacy session files: healed turns, no durations, clean round-trip")
 unittest {
     import std.file : readText;
     import std.path : buildPath;
@@ -2202,15 +2246,22 @@ unittest {
 
     app.switchToSession(meta.id); // load + replay the legacy file
 
-    // Contiguous NRs 1..3, ALL unmeasured (NoProcessingTime, not Duration(0)).
-    assert(sink.stamps.length == 3);
-    assert(sink.stamps.map!(s => s.nr).array == [1, 2, 3]);
-    foreach (s; sink.stamps) {
-        assert(s.time.match!((Duration d) { return false; }, (NoProcessingTime) {
-                return true;
-            }), "legacy messages must replay as NoProcessingTime");
-    }
-
+    // Replay of the healed legacy file: one turn carrying the query and the
+    // two unmeasured contents (durationMs 0, not a fabricated duration).
+    assert(sink.setTurnsSnapshots.length == 1);
+    assert(sink.setTurnsSnapshots[0].turns.length == 1
+            && sink.setTurnsSnapshots[0].turns[0].id == 1
+            && sink.setTurnsSnapshots[0].turns[0].state == TuiTurnState_Done,
+            "the healed legacy file replays one Done turn");
+    assert(sink.setTurnsSnapshots[0].blocks.length == 3);
+    assert(sink.setTurnsSnapshots[0].blocks[0].id == "query"
+            && sink.setTurnsSnapshots[0].blocks[0].body == "old question");
+    assert(sink.setTurnsSnapshots[0].blocks[1].id == "content#0"
+            && sink.setTurnsSnapshots[0].blocks[1].body == "old answer one"
+            && sink.setTurnsSnapshots[0].blocks[1].durationMs == 0);
+    assert(sink.setTurnsSnapshots[0].blocks[2].id == "content#1"
+            && sink.setTurnsSnapshots[0].blocks[2].body == "old answer two"
+            && sink.setTurnsSnapshots[0].blocks[2].durationMs == 0);
     // Round-trip: a new measured turn commits the session; the legacy messages
     // must not gain processMs. Mirror the production flow: the agent appends the
     // turn's messages to the chat BEFORE the step hook, so the batch is the
@@ -2224,13 +2275,13 @@ unittest {
     result.chat = [Chat.MessageT(q), Chat.MessageT(a1)];
     app.processResult(result); // commits
 
-    // The measured turn displays live at its true ordinal (5: lu,la1,la2,q,a1)
-    // with its original 250 ms.
-    assert(sink.stamps.length == 4, "the new answer displays live once");
-    assert(sink.stamps[3].nr == 5, "the new answer's ordinal is its history position");
-    assert(sink.stamps[3].time.match!((Duration d) { return d == 250.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "the new answer keeps 250 ms");
-
+    // The measured turn displays live: a1's content block carries its
+    // original 250 ms.
+    assert(sink.blockUpserts.length == 1, "the new answer displays live once");
+    assert(sink.blockUpserts[0].id == "content#0"
+            && sink.blockUpserts[0].body == "new answer"
+            && sink.blockUpserts[0].durationMs == 250, "the new answer keeps 250 ms");
+    assert(sink.turnUpserts.empty, "no final answer -> the turn stays open");
     // Committed file: the legacy messages stayed pre-feature and the new message
     // is the ONLY one with processMs (no 0ms misrepresentation, no invented key).
     auto fileText = readText(buildPath(tmpDir, "chat", meta.id.get ~ ".json"));
@@ -2250,38 +2301,36 @@ unittest {
     assert(nProcessMs == 1, "exactly one message carries processMs (the new one)");
     assert(theValue == 250, "the new message's measured 250 ms round-trips; no 0ms");
 
-    // Mixed-file reload: switch away and back; the
-    // committed legacy+measured file must replay with contiguous NRs 1..5,
-    // legacy messages + query unmeasured, a1 keeping its 250 ms.
-    sink.chatMessages.length = 0;
-    sink.stamps.length = 0;
+    // Mixed-file reload: switch away and back; the committed legacy+measured
+    // file replays as two contiguous turns (the healed legacy turn 1, then
+    // the measured turn 2), legacy contents + query unmeasured, the measured
+    // content keeping its 250 ms.
+    sink.setTurnsSnapshots.length = 0;
     app.switchToSession(throwawayMeta.id);
-    assert(sink.stamps.length == 0, "empty throwaway session replays nothing");
+    assert(sink.setTurnsSnapshots.length == 1 && sink.setTurnsSnapshots[0].turns.empty,
+            "empty throwaway session replays nothing");
     app.switchToSession(meta.id); // reload the mixed committed file
-    assert(sink.stamps.length == 5, "all five displayable messages replayed");
-    assert(sink.stamps.map!(s => s.nr).array == [1, 2, 3, 4, 5],
-            "replayed [NR] contiguous over the mixed file");
-    assert(sink.stamps[0].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "lu replays unmeasured");
-    assert(sink.stamps[1].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "la1 replays unmeasured");
-    assert(sink.stamps[2].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "la2 replays unmeasured");
-    assert(sink.stamps[3].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "q replays unmeasured");
-    assert(sink.stamps[4].time.match!((Duration d) { return d == 250.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "a1 replays its original 250 ms");
+    assert(sink.setTurnsSnapshots.length == 2, "one snapshot per switch");
+    const mturns = sink.setTurnsSnapshots[1].turns;
+    const mblocks = sink.setTurnsSnapshots[1].blocks;
+    assert(mturns.length == 2 && mturns[0].id == 1 && mturns[1].id == 2,
+            "replayed turn ids contiguous over the mixed file");
+    assert(mturns[0].state == TuiTurnState_Done && mturns[1].state == TuiTurnState_Done);
+    assert(mblocks.length == 5, "two queries + three contents replay");
+    assert(mblocks[0].id == "query" && mblocks[0].body == "old question");
+    assert(mblocks[1].id == "content#0" && mblocks[1].body == "old answer one"
+            && mblocks[1].durationMs == 0, "la1 replays unmeasured");
+    assert(mblocks[2].id == "content#1" && mblocks[2].body == "old answer two"
+            && mblocks[2].durationMs == 0, "la2 replays unmeasured");
+    assert(mblocks[3].id == "query" && mblocks[3].body == "new question");
+    assert(mblocks[4].id == "content#0" && mblocks[4].body == "new answer"
+            && mblocks[4].durationMs == 250, "a1 replays its original 250 ms");
 }
-// Branch coverage: a failed or interrupted turn produces no displayable
-// content, so it consumes no NR ordinal - and because NR is a pure derivation
-// (recomputed from the persisted history at send time), the NEXT batch
-// continues from the same offset: contiguous, no gap, no duplicate. There is
-// no counter to desynchronize.
-@("error turn: no stamps, next batch continues from the same offset")
+// Branch coverage: a failed turn's empty batch upserts no blocks and opens
+// no turn - the typed emit ctx is created lazily but its batch index does
+// not advance, so the NEXT batch continues from the same batch index:
+// contiguous, no gap, no duplicate. There is no counter to desynchronize.
+@("error turn: no blocks, next batch continues from the same batch index")
 unittest {
     import std.path : buildPath;
     import std.datetime : Duration, dur;
@@ -2315,16 +2364,17 @@ unittest {
     app.commitActiveSession();
 
     // A failed turn: nothing displayable arrives (user query persistence
-    // is runAgent's job, not modeled here). The empty batch must not display
-    // anything and must not advance any ordinal.
+    // is runAgent's job, not modeled here). The empty batch must not
+    // upsert anything.
     ProcessResult failure;
     failure.status = ProcessResult.Status.unknownFailure;
     failure.chat = [];
     app.processResult(failure);
-    assert(sink.stamps.length == 0, "error turn must not display anything");
+    assert(sink.blockUpserts.empty && sink.turnUpserts.empty,
+            "error turn must not display anything");
 
-    // The next batch continues from the SAME offset: a3 is the 4th
-    // displayable in [sys, a1, a2, q, a3]. Mirror the production flow: the
+    // The next batch continues from the SAME batch index: a3 upserts as
+    // the first content block of the walk. Mirror the production flow: the
     // agent appends the turn's messages before the step hook, so the batch
     // is the contiguous tail of the history.
     auto q = Message(Role.user, true, "hello", null);
@@ -2335,10 +2385,10 @@ unittest {
     ProcessResult result;
     result.chat = [Chat.MessageT(q), Chat.MessageT(a3)];
     app.processResult(result);
-    assert(sink.stamps.length == 1);
-    assert(sink.stamps[0].nr == 4, "next batch continues contiguously");
-    assert(sink.stamps[0].time.match!((Duration d) { return d == 432.dur!"msecs"; },
-            (NoProcessingTime) { return false; }));
+    assert(sink.blockUpserts.length == 1);
+    assert(sink.blockUpserts[0].id == "content#0"
+            && sink.blockUpserts[0].body == "hello back" && sink.blockUpserts[0].durationMs == 432,
+            "next batch continues from the same batch index");
 }
 
 version (unittest) {
@@ -2437,6 +2487,194 @@ unittest {
     app.rag = null; // release app's reference so the TestArea owns the RAG
 }
 
+version (unittest) {
+    // force the result (and optionally a throw) instead of the real summarizer.
+    private class CannedCompressAgent : CannedAgent {
+        import llm.summary_agent : SummaryAgent;
+
+        SummaryAgent.CompressResult cannedCompress;
+        bool throwInCompress;
+
+        this(string name, LlmConfig llmConf) {
+            super(name, llmConf);
+        }
+
+        override SummaryAgent.CompressResult compress(double threshold = 0.9,
+                bool force = false, SummaryAgent.ProgressCallback callback = null) {
+            if (throwInCompress)
+                throw new Exception("simulated compression failure");
+            return cannedCompress;
+        }
+    }
+}
+
+@("agentBusy/agentReady: one crossing per bracket pair, nesting absorbed")
+unittest {
+    auto sink = new TuiRecordingSink();
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.uiMsg = new UiMessenger(sink);
+
+    assert(!app.runInFlight, "the app starts idle");
+    app.agentBusy();
+    assert(app.runInFlight, "the outer open raises the in-flight flag");
+    app.agentBusy();
+    assert(sink.countOf("busy") == 1, "a nested open must not cross a second busy");
+    app.agentReady();
+    assert(app.runInFlight, "a nested close must not restore ready mid-run");
+    assert(sink.countOf("ready") == 0, "the composer stays busy through the nested close");
+    app.agentReady();
+    assert(!app.runInFlight, "the outermost close clears the flag");
+    assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+            "one busy and one ready cross per bracket pair");
+
+    // Unbalanced close: a stray ready with no open bracket is a no-op (no
+    // negative depth, no crossing).
+    app.agentReady();
+    assert(!app.runInFlight && sink.countOf("ready") == 1, "a stray close does not cross");
+}
+
+@("doCompress brackets its run: busy before, ready after, flag restored")
+unittest {
+    auto tmpDir = testArea("app_agent_compress_bracket");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(tmpDir.Path);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    auto agent = new CannedCompressAgent("main", cfg);
+    agent.cannedCompress.compressed = true;
+    app.agent_ = agent;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+    app.activeSession = store.create();
+    clearStopAgent();
+
+    app.doCompress(true);
+
+    assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+            "the compression run is bracketed by exactly one busy and one ready");
+    assert(sink.calls[0].kind == "busy", "busy crosses before the compression");
+    assert(sink.calls[$ - 1].kind == "ready", "ready crosses after the compression notice");
+    assert(!app.runInFlight, "the in-flight flag is restored after the bracket");
+}
+
+@("doCompress unwinding: a thrown compression restores ready")
+unittest {
+    auto tmpDir = testArea("app_agent_compress_throw");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(tmpDir.Path);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    auto agent = new CannedCompressAgent("main", cfg);
+    agent.throwInCompress = true;
+    app.agent_ = agent;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+    app.activeSession = store.create();
+    clearStopAgent();
+
+    auto thrown = collectException(app.doCompress(true));
+
+    assert(thrown !is null, "the simulated compression failure propagates");
+    assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+            "unwinding out of the run restores ready exactly once");
+    assert(!app.runInFlight, "the in-flight flag is restored by the unwinding");
+}
+
+@("userQuery brackets the turn: busy first, ready last, snapshots stamped")
+unittest {
+    import std.path : buildPath;
+
+    auto tmpDir = testArea("app_agent_query_bracket");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    auto actor = new AppAgentActor(UserConfig.init,
+            UserConfig.AgentChatConfig.init, null, WeakAddress.init);
+    ref app = actor.app;
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    auto agent = new CannedAgent("main", cfg);
+    agent.canned = [ProcessResult(status: ProcessResult.Status.networkFailure)];
+    app.agent_ = agent;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+    app.activeSession = store.create();
+    clearStopAgent();
+    app.agent_.chat.setSystemPrompt("sys");
+
+    actor.userQuery("hello");
+
+    assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+            "the turn is bracketed by exactly one busy and one ready");
+    assert(sink.calls[0].kind == "busy", "busy crosses before the turn's work");
+    assert(sink.calls[$ - 3 .. $].map!(c => c.kind).array == [
+        "ready", "sessionList", "runtimeStatus"
+    ], "ready crosses after the run, before the settled end-of-run sends");
+    assert(!app.runInFlight, "the in-flight flag is restored after the turn");
+    // The pre-run snapshot carries the running bit; the end-of-run snapshot
+    // clears it.
+    assert((sink.sessionLists[0][0].flags & 1) == 1,
+            "the pre-run sidebar snapshot stamps the active row running");
+    assert((sink.lastSessionList()[0].flags & 1) == 0,
+            "the end-of-run snapshot clears the running bit");
+}
+
+@(
+        "/plan and /code bracket their pipelines through a thrown run: one busy, one ready, flag restored")
+unittest {
+    import std.path : buildPath;
+
+    auto tmpDir = testArea("app_agent_pipeline_bracket");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.agent_ = new CannedAgent("main", cfg);
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+    // The pipelines fail fast inside the run: the prompt dir is gone, so
+    // getPrompt throws after the bracket's busy crossed. The unwinding is
+    // what must restore ready - the dispatcher swallows the exception.
+    cfg.promptDir = [buildPath(tmpDir, "no_such_prompt_dir").Path];
+    app.llmConf = cfg;
+
+    app.slashCommands_.execute(app, "/plan plan the work");
+    assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+            "the thrown /plan run is bracketed by exactly one busy and one ready");
+    assert(sink.calls[$ - 1].kind == "ready", "ready crosses when the /plan unwinding fires, last");
+    assert(!app.runInFlight, "the /plan unwinding restores the in-flight flag");
+    // The thrown run still brackets its display-only turn: opened Running, the
+    // exceptional exit closes Interrupted - never stranded Running, never Done.
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[0].state == TuiTurnState_Running
+            && sink.turnUpserts[1].state == TuiTurnState_Interrupted,
+            "the thrown /plan run closes its turn Interrupted");
+
+    sink.calls.length = 0;
+    app.slashCommands_.execute(app, "/code write the fix");
+    assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+            "the thrown /code run is bracketed by exactly one busy and one ready");
+    assert(sink.calls[$ - 1].kind == "ready", "ready crosses when the /code unwinding fires, last");
+    assert(!app.runInFlight, "the /code unwinding restores the in-flight flag");
+    assert(sink.turnUpserts.length == 4
+            && sink.turnUpserts[$ - 2].state == TuiTurnState_Running
+            && sink.turnUpserts[$ - 1].state == TuiTurnState_Interrupted,
+            "the thrown /code run closes Interrupted too");
+}
+
 @("the agent prompt file carries the drag&drop attachment marker line") unittest {
     import std.file : write;
     import std.path : buildPath;
@@ -2470,13 +2708,13 @@ unittest {
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
     wireRebuildTestApp(app, td);
 
-    app.agentRunInFlight_ = true;
+    app.runInFlight = true;
     app.rebuildSystemPrompt();
     assert(app.agentMdRebuildPending_, "the rebuild is parked");
     assert(app.systemPrompt_.empty, "no prompt is composed while in flight");
     assert(app.rag.db.getSources.length == 0, "no AGENTS.md processing ran");
 
-    app.agentRunInFlight_ = false;
+    app.runInFlight = false;
     app.rebuildSystemPrompt();
     assert(!app.agentMdRebuildPending_, "the parked rebuild is applied");
     assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
@@ -2806,9 +3044,9 @@ unittest {
             "setup: model A's full treatment injects the AGENTS.md payload");
 
     // Park a rebuild the way the in-flight guard does: the production safe
-    // point (runAgent's post-run block) clears the in-flight flag and calls
-    // rebuildSystemPrompt; the guard itself only parks.
-    app.agentRunInFlight_ = true;
+    // point (runAgent's post-run block) calls rebuildSystemPrompt; the
+    // guard itself only parks.
+    app.runInFlight = true;
     assert(app.slashCommands_.execute(app, "/model model-b") == AgentStatus.active,
             "/model must dispatch as an in-session command");
     assert(app.agentMdRebuildPending_, "the rebuild is parked while the run is in flight");
@@ -2817,7 +3055,7 @@ unittest {
             "model A's payload is still applied while the rebuild is parked");
 
     // The next safe point applies the parked rebuild.
-    app.agentRunInFlight_ = false;
+    app.runInFlight = false;
     app.rebuildSystemPrompt();
     assert(!app.agentMdRebuildPending_, "the parked rebuild is applied");
     assert(!app.systemPrompt_.canFind(fixtureAgentsMdText),
@@ -2854,7 +3092,11 @@ unittest {
 
     app.doCreateSession();
 
-    assert(sink.chatMessages.length == 0, "a new session must not post a chat turn");
+    assert(sink.blockUpserts.empty && sink.turnUpserts.empty,
+            "a new session must not post a chat turn");
+    assert(sink.setTurnsSnapshots.length == 1 && sink.setTurnsSnapshots[0].turns.empty
+            && sink.setTurnsSnapshots[0].blocks.empty,
+            "the new empty session replays an empty thread");
     assert(store.list().length == 1, "the session was created");
     assert(app.activeSession.id.length > 0, "the new session is active");
 }
@@ -2880,6 +3122,7 @@ unittest {
     assert(first.tokensPerSecond == 38.1,
             "tokensPerSecond is stat.predictedPerSecond, sent raw: "
             ~ first.tokensPerSecond.to!string);
+    assert(first.batch == 0, "the first tick is the run's first batch");
 
     // Two calls in one response: the array arrives in protocol order, so the last element is the
     // newest call - the tool name the row shows.
@@ -2897,6 +3140,88 @@ unittest {
     assert(last.role == "assistant", "the role crosses");
     assert(last.content == "done",
             "the content carries no tool decoration: tool traffic rides the structured rows");
+    assert(last.batch == 0, "no stream-done yet: the whole test is one batch");
+}
+
+@("the pipeline updater closes on the run boundary, not on a batch end") unittest {
+    auto sink = new TuiRecordingSink();
+    auto ui = new UiMessenger(sink);
+    auto updater = new PipelineStreamMessageUpdater(ui, 8192, "model-x");
+    updater.setId("coder");
+
+    // The tool loop fires streamMessageDone after every LLM request: a batch
+    // end must close nothing, or one run becomes one drill-down group per
+    // batch. The close rides runDone, which fires once per run. The batch
+    // counter still moves: the payloads carry the batch index.
+    updater.messageUpdate(StreamMessage(content: "one"), null, ServerStat());
+    updater.streamMessageDone();
+    updater.messageUpdate(StreamMessage(content: "two"), null, ServerStat());
+    assert(sink.countOf("pipelineStreamDone") == 0,
+            "a batch end is not the run boundary: nothing closes on it");
+    assert(sink.laneUpdates[0].batch == 0, "the first batch is batch 0");
+    assert(sink.laneUpdates[1].batch == 1,
+            "stream-done counts the batch: the next response is batch 1");
+
+    updater.runDone();
+    assert(sink.countOf("pipelineStreamDone") == 1,
+            "the run's end closes the agent's turn exactly once");
+
+    // The same updater instance is reused for every run of its node (built once
+    // at build time), and a node re-runs in normal operation - its retry loop,
+    // loop edges. The counter must restart at 0 so the numbers stay "within the
+    // run" as the wire doc says; uniqueness across runs comes from the new
+    // run's new turn, not from the batch number.
+    updater.messageUpdate(StreamMessage(content: "three"), null, ServerStat());
+    assert(sink.countOf("pipelineStreamDone") == 1,
+            "the next run's stream is not closed by the last run's boundary");
+    assert(sink.laneUpdates[2].batch == 0, "the next run counts its batches from 0 again");
+}
+
+@("the pipeline updater forwards the run's start with the run's task") unittest {
+    auto sink = new TuiRecordingSink();
+    auto ui = new UiMessenger(sink);
+    auto updater = new PipelineStreamMessageUpdater(ui, 8192, "model-x");
+    updater.setId("coder");
+
+    // The pipeline's submit site fires runStart once per run, before the
+    // agent's first batch: the drill-down's query row - the task the node
+    // was invoked with (the C++ draws its own query row).
+    updater.runStart("get the parser building");
+
+    assert(sink.agentStarts.length == 1, "one start row per run");
+    assert(sink.agentStarts[0].agentId == "coder", "the run's lane is the agent's own id");
+    assert(sink.agentStarts[0].task == "get the parser building", "the run's task travels");
+    assert(sink.laneUpdates.length == 0,
+            "the start row is not a lane content update: the query is its own row");
+    assert(sink.countOf("pipelineStreamDone") == 0,
+            "the start opens nothing's end: the turn closes on runDone, not here");
+}
+
+@("the pipeline updater tags the step's tool traffic with the finished batch") unittest {
+    import std.json : parseJSON;
+
+    auto sink = new TuiRecordingSink();
+    auto ui = new UiMessenger(sink);
+    auto updater = new PipelineStreamMessageUpdater(ui, 8192, "model-x");
+    updater.setId("coder");
+
+    // The real per-batch order: the response streams (batch N), stream-done
+    // counts it, then the step's tool calls/results emit - tagged with the
+    // finished batch N, so they group under the batch whose stream the
+    // drill-down just saw (the C++ builds batch-scoped ids from it).
+    auto step = ProcessResult(chat: [
+        Chat.MessageT(ToolMessage("t", parseJSON(`[]`))),
+        Chat.MessageT(ToolResponse("r", "call-1", "grep_files", true))
+    ]);
+    updater.messageUpdate(StreamMessage(content: "thinking out loud"), null, ServerStat());
+    updater.streamMessageDone();
+    updater.stepEvent(step);
+
+    assert(sink.laneUpdates.length == 1 && sink.laneUpdates[0].batch == 0,
+            "the streamed tick is batch 0");
+    assert(sink.toolCalls.length == 0 && sink.toolResults.length == 1, "setup: one result recorded");
+    assert(sink.toolResults[0].batch == 0,
+            "the step's traffic carries the finished batch, not the counter");
 }
 
 @("the pipeline emitter sends each step's tool calls and results as structured rows")
@@ -2922,7 +3247,7 @@ unittest {
         Chat.MessageT(ToolResponse("ok-2", "call-2", "write_file", false))
     ]);
 
-    emitStepToolEvents(ui, "coder", step);
+    emitStepToolEvents(ui, "coder", step, 0);
 
     assert(sink.toolCalls.length == 2,
             "one structured row per tool call: " ~ sink.toolCalls.length.to!string);
@@ -2930,6 +3255,7 @@ unittest {
     assert(sink.toolCalls[0].name == "grep_files", "the call's name travels");
     assert(sink.toolCalls[0].arguments == `{"pattern": "x"}`, "the call's arguments travel");
     assert(sink.toolCalls[0].id == "call-1", "the protocol id travels");
+    assert(sink.toolCalls[0].batch == 0, "the call carries the step's batch index");
     assert(sink.toolCalls[1].name == "write_file"
             && sink.toolCalls[1].id == "call-2", "the second call follows in chat order");
 
@@ -2940,6 +3266,8 @@ unittest {
     assert(sink.toolResults[0].text == "ok-1", "the response's text travels");
     assert(sink.toolResults[1].ok == 0, "a failed response reports ok=0");
     assert(sink.toolResults[1].text == "ok-2");
+    assert(sink.toolResults[0].batch == 0 && sink.toolResults[1].batch == 0,
+            "the responses carry the step's batch index too");
 
     // The lane rows are untouched by the emitter: content updates stay content.
     assert(sink.laneUpdates.length == 0, "the emitter sends no lane content updates");
@@ -2966,7 +3294,7 @@ unittest {
         Chat.MessageT(ToolResponse(big, "c", "write_file", true))
     ]);
 
-    emitStepToolEvents(ui, "coder", step);
+    emitStepToolEvents(ui, "coder", step, 0);
 
     assert(sink.toolCalls.length == 1 && sink.toolResults.length == 1,
             "setup: one call and one response recorded");
@@ -2994,7 +3322,7 @@ unittest {
         Chat.MessageT(ToolResponse("r", "x", "grep_files", true))
     ]);
 
-    emitStepToolEvents(ui, "coder", step);
+    emitStepToolEvents(ui, "coder", step, 0);
 
     assert(sink.toolCalls.length == 0, "no unusable entry emits a row");
     assert(sink.toolResults.length == 1 && sink.toolResults[0].text == "r",
@@ -3076,7 +3404,7 @@ unittest {
     assert(app.pendingDeleteId == SessionId.init, "the gate clears pending delete");
     assert(app.llmConf.pinnedChatSessions.length == 0, "a malformed id changes nothing");
     assert(sink.countOf("sessionList") == 0, "a malformed id sends nothing");
-    assert(sink.lastChatMessage().length == 0, "a malformed id is not a user error");
+    assert(sink.lastNoticeBody().length == 0, "a malformed id is not a user error");
 
     // An id that is well-formed but unknown to the store is tolerated the same
     // way (no throw, no crash): the set stays unchanged, nothing is saved or
@@ -3087,7 +3415,7 @@ unittest {
     assert(app.pendingDeleteId == SessionId.init, "the store gate clears pending delete");
     assert(app.llmConf.pinnedChatSessions.length == 0, "an unknown id changes nothing");
     assert(sink.countOf("sessionList") == 0, "an unknown id sends nothing");
-    assert(sink.lastChatMessage().length == 0, "an unknown id is not a user error");
+    assert(sink.lastNoticeBody().length == 0, "an unknown id is not a user error");
 }
 
 @("pin toggle survives a restart: state.json round-trip into a fresh app")
@@ -3222,8 +3550,8 @@ unittest {
     assert(cloneSf.doc["messages"].array[0]["content"].str == "what is 2+2?",
             "the cloned message content is identical");
     assert(readText(originalPath) == originalBytes, "the original file is byte-identical");
-    assert(sink.lastChatMessage().canFind("Session cloned"),
-            "the clone posts a confirmation: got '" ~ sink.lastChatMessage() ~ "'");
+    assert(sink.lastNoticeBody().canFind("Session cloned"),
+            "the clone posts a confirmation: got '" ~ sink.lastNoticeBody() ~ "'");
 }
 
 @("sidebar clone rejects invalid ids and degrades on unknown ids")
@@ -3249,8 +3577,8 @@ unittest {
     // (the same gate doSidebarDelete uses).
     app.doSidebarClone(SessionId("not-an-id"));
     assert(app.pendingDeleteId == SessionId.init, "the gate clears pending delete");
-    assert(sink.lastChatMessage().canFind("Invalid session id"),
-            "a malformed id is a user error: got '" ~ sink.lastChatMessage() ~ "'");
+    assert(sink.lastNoticeBody().canFind("Invalid session id"),
+            "a malformed id is a user error: got '" ~ sink.lastNoticeBody() ~ "'");
     assert(sink.countOf("sessionList") == 0, "a malformed id sends no refresh");
 
     // An unknown (well-formed) id: clone -> none -> error message, active
@@ -3258,8 +3586,1441 @@ unittest {
     auto unknown = SessionId("20260618-153045-ffff");
     app.doSidebarClone(unknown);
     assert(app.activeSession.id == meta.id, "clone-none must keep the active session");
-    assert(sink.lastChatMessage() == "error: Failed to clone session 'ffff'.",
+    assert(sink.lastNoticeBody() == "error: Failed to clone session 'ffff'.",
             "clone-none must emit the error chat message");
     assert(store.list().length == 1, "clone-none must not create files");
     assert(sink.countOf("sessionList") == 1, "clone-none must still refresh the sidebar list");
+}
+
+// typed thread turns/blocks
+
+// Shared content for the typed-thread tests: a two-call tool batch (grep_files
+// ok, write_file failed) whose message carries the final answer.
+private struct TypedFixture {
+    Message q;
+    Message a3;
+    ToolMessage tm;
+    ToolResponse tr;
+    ToolResponse tr2;
+    ToolResponse orphan; // pipeline_output result: hidden in v4 AND v5
+
+    static TypedFixture make() {
+        import std.json : JSONValue;
+
+        TypedFixture f;
+        f.q = Message(Role.user, true, "q", null);
+        f.a3 = Message(Role.assistant, false, "C0", null);
+        f.a3.thinking = "T0";
+        f.a3.setProcessTime(MessageTime(100.dur!"msecs"));
+        JSONValue c1;
+        c1["id"] = "c1";
+        c1["type"] = "function";
+        JSONValue fn1;
+        fn1["name"] = "grep_files";
+        fn1["arguments"] = `{"pattern": "x"}`;
+        c1["function"] = fn1;
+        JSONValue c2;
+        c2["id"] = "c2";
+        c2["type"] = "function";
+        JSONValue fn2;
+        fn2["name"] = "write_file";
+        fn2["arguments"] = "{}";
+        c2["function"] = fn2;
+        JSONValue sd;
+        sd["taskDoneAnswer"] = JSONValue("The answer is 4.");
+        f.tm = ToolMessage("T1", JSONValue([c1, c2]), JSONValue.init, sd);
+        f.tm.setProcessTime(MessageTime(120.dur!"msecs"));
+        f.tr = ToolResponse("ok-1", "c1", "grep_files", true);
+        f.tr.setProcessTime(MessageTime(42.dur!"msecs"));
+        f.tr2 = ToolResponse("bad-2", "c2", "write_file", false);
+        f.orphan = ToolResponse("out", "c9", "pipeline_output", true);
+        return f;
+    }
+}
+
+version (unittest) {
+
+    private AgentApp typedTestApp(SessionStore store, string dir, out TuiRecordingSink sink) {
+        import std.path : buildPath;
+
+        import llm.agent : Agent;
+        import my.filter : ReFilter;
+
+        auto app = AgentApp(UserConfig.AgentChatConfig.init);
+        app.llmConf = testLlmConfig(dir);
+        app.sessionStore = store;
+        app.agent_ = new Agent("main", app.llmConf, null, null, null, ReFilter.init);
+        sink = new TuiRecordingSink();
+        app.uiMsg = new UiMessenger(sink);
+        app.activeSession = store.create();
+        return app;
+    }
+
+} // version (unittest)
+
+// NR derivation: the replay walk emits ONE setTurns snapshot with
+// already-merged blocks - call and response pair by call id in a pre-pass,
+// so replay never depends on adjacency; the final answer is the batch's
+// Answer block. Turn ids are the walk's own 1-based sequence.
+@("typed replay: emitReplayTyped sends the merged snapshot")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_replay");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    auto f = TypedFixture.make();
+    app.agent_.chat.setSystemPrompt("sys");
+    app.agent_.chat.add(f.q);
+    app.agent_.chat.add(f.a3);
+    app.agent_.chat.add(f.tm);
+    app.agent_.chat.add(f.tr);
+    app.agent_.chat.add(f.tr2);
+
+    app.emitReplayTyped();
+
+    assert(sink.setTurnsSnapshots.length == 1, "one setTurns snapshot");
+    assert(sink.turnUpserts.empty && sink.blockUpserts.empty && sink.turnRemovals.empty);
+    const turns = sink.setTurnsSnapshots[0].turns;
+    const blocks = sink.setTurnsSnapshots[0].blocks;
+    assert(turns.length == 1);
+    assert(turns[0].id == 1 && turns[0].state == TuiTurnState_Done
+            && turns[0].messageCount == 5, "query + response + 2 calls + 2 results");
+    assert(blocks.length == 8);
+    assert(blocks[0].id == "query" && blocks[0].kind == TuiBlockKind_Prose
+            && blocks[0].meta == "user" && blocks[0].body == "q" && blocks[0].batchId == "1#q");
+    assert(blocks[1].id == "reasoning#0"
+            && blocks[1].kind == TuiBlockKind_Reasoning
+            && blocks[1].body == "T0" && blocks[1].batchId == "1#0");
+    assert(blocks[2].id == "content#0" && blocks[2].meta == "assistant"
+            && blocks[2].body == "C0" && blocks[2].durationMs == 100);
+    assert(blocks[3].id == "reasoning#1"
+            && blocks[3].kind == TuiBlockKind_Reasoning && blocks[3].body == "T1" && blocks[3].batchId == "1#1",
+            "the tool message's own thinking is the batch's reasoning block");
+    assert(blocks[4].id == "content#1" && blocks[4].meta == "assistant"
+            && blocks[4].body.empty && blocks[4].durationMs == 120,
+            "the tool message's content block is body-less and carries the response's duration");
+    assert(blocks[5].id == "c1" && blocks[5].kind == TuiBlockKind_Tool
+            && blocks[5].title == "grep_files" && blocks[5].status == TuiBlockStatus_Ok
+            && blocks[5].meta == "ok-1" && blocks[5].body == `pattern="x"` && blocks[5].durationMs == 42,
+            "call and response merged, response meta wins: id=" ~ blocks[5].id ~ " title="
+            ~ blocks[5].title ~ " status=" ~ blocks[5].status.text ~ " meta="
+            ~ blocks[5].meta ~ " body=" ~ blocks[5].body ~ " dur="
+            ~ blocks[5].durationMs.text ~ " batch=" ~ blocks[5].batchId);
+    assert(blocks[6].id == "c2" && blocks[6].status == TuiBlockStatus_Failed
+            && blocks[6].meta == "bad-2" && blocks[6].body.empty);
+    assert(blocks[7].id == "answer" && blocks[7].kind == TuiBlockKind_Answer
+            && blocks[7].body == "The answer is 4." && blocks[7].batchId == "1#1");
+}
+
+// STARTUP PROBE (temporary): the session-load path must feed the replay
+// snapshot the same turns the switch path does.
+@("startup_probe")
+unittest {
+    import std.datetime : dur;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_startup_replay");
+    scope (exit)
+        tmpDir.cleanup;
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    TuiRecordingSink sinkW;
+    auto writer = typedTestApp(store, tmpDir, sinkW);
+    auto f = TypedFixture.make();
+    writer.agent_.chat.add(f.q);
+    writer.agent_.chat.add(f.a3);
+    writer.agent_.chat.add(f.tm);
+    writer.agent_.chat.add(f.tr);
+    writer.agent_.chat.add(f.tr2);
+    writer.chatDirty = true;
+    writer.commitActiveSession();
+    assert(sinkW.setTurnsSnapshots.empty, "commit emits nothing");
+
+    TuiRecordingSink sinkR;
+    auto reader = typedTestApp(store, tmpDir, sinkR);
+    auto sf = orElse(store.load(writer.activeSession.id), SessionFile());
+    assert(sf.meta.id == writer.activeSession.id, "the session file exists");
+    reader.agent_.chat.load(sf.doc);
+    reader.agent_.chat.resetResponseIndex();
+    reader.emitReplayTyped();
+
+    assert(sinkR.setTurnsSnapshots.length == 1, "one startup snapshot");
+    const turns = sinkR.setTurnsSnapshots[0].turns;
+    const blocks = sinkR.setTurnsSnapshots[0].blocks;
+    assert(turns.length == 1, "the persisted turn replays: got " ~ turns.length.text);
+    assert(blocks.length == 8, "got " ~ blocks.length.text);
+}
+
+// NR derivation: the live walk emits the same shapes as the replay (the
+// typed stream updater upserts per tick with stable ids, the step walk
+// merges calls with responses and closes the turn with a Done upsert),
+// and a stop flips the in-flight calls to Cancelled with the turn
+// Interrupted - never a fabricated Ok.
+@("typed live: turn start, stream ticks, step walk, stop")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+    import llm.types : ServerStat;
+
+    auto tmpDir = testArea("app_agent_typed_live");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    auto f = TypedFixture.make();
+    app.agent_.chat.add(f.q);
+    app.emitTurnStartTyped("q");
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].id == 1
+            && sink.turnUpserts[0].state == TuiTurnState_Running);
+    assert(sink.blockUpserts.length == 1 && sink.blockUpserts[0].id == "query"
+            && sink.blockUpserts[0].body == "q");
+
+    auto updater = cast(TypedStreamMessageUpdater) app.makeTypedStreamCallback();
+    assert(updater !is null && updater.ctx !is null);
+    ServerStat stat;
+    updater.messageUpdate(StreamMessage("assistant", "C", "T"),
+            [StreamToolCall(toolName: "grep_files", arguments: `{`, id: "c1")], stat);
+    updater.messageUpdate(StreamMessage("assistant", "C0", "T0"), [], stat);
+    updater.streamMessageDone();
+    // blockUpserts: query, reasoning#0, content#0, c1 pending,
+    // reasoning#0 + content#0 (final tick, same ids), c1 running.
+    assert(sink.blockUpserts.length == 7);
+    assert(sink.blockUpserts[1].id == "reasoning#0"
+            && sink.blockUpserts[1].kind == TuiBlockKind_Reasoning && sink.blockUpserts[1].body == "T",
+            "the live tick emits reasoning before content (console parity)");
+    assert(sink.blockUpserts[3].id == "c1" && sink.blockUpserts[3].status == TuiBlockStatus_Pending);
+    assert(sink.blockUpserts[4].id == "reasoning#0" && sink.blockUpserts[4].body == "T0");
+    assert(sink.blockUpserts[5].id == "content#0" && sink.blockUpserts[5].body == "C0",
+            "the tick upsert replaces in place (same id and batch)");
+    assert(sink.blockUpserts[6].id == "c1" && sink.blockUpserts[6].status == TuiBlockStatus_Running,
+            "stream-done flips the batch's pending calls to Running");
+    assert(sink.turnUpserts.length == 1, "no Done upsert before the step walk");
+
+    ProcessResult result;
+    result.chat = [
+        Chat.MessageT(f.a3), Chat.MessageT(f.tm), Chat.MessageT(f.tr),
+        Chat.MessageT(f.tr2), Chat.MessageT(f.orphan)
+    ];
+    app.emitStepTyped(result);
+    // blockUpserts += reasoning#0, content#0 (step), reasoning#1, c1 merged ok,
+    // c2 merged failed, the hidden orphan, the answer block.
+    assert(sink.blockUpserts.length == 14);
+    assert(sink.blockUpserts[10].id == "c1"
+            && sink.blockUpserts[10].meta == "ok-1" && sink.blockUpserts[10].status == TuiBlockStatus_Ok,
+            "the step walk merges call and response");
+    assert(sink.blockUpserts[11].id == "c2"
+            && sink.blockUpserts[11].meta == "bad-2"
+            && sink.blockUpserts[11].status == TuiBlockStatus_Failed);
+    assert(sink.blockUpserts[12].title == "pipeline_output",
+            "D emits hidden blocks too; the store owns displayability");
+    assert(sink.blockUpserts[13].id == "answer" && sink.blockUpserts[13].body == "The answer is 4.");
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[1].state == TuiTurnState_Done
+            && sink.turnUpserts[1].messageCount == 6,
+            "query + response + 2 calls + 2 results + orphan");
+    assert(sink.setTurnsSnapshots.empty, "the live path sends no setTurns");
+
+    // Stop: a fresh turn, a streaming call, then the interrupt.
+    auto tmpDir3 = testArea("app_agent_typed_live_stop");
+    scope (exit)
+        tmpDir3.cleanup;
+    TuiRecordingSink sink3;
+    auto app3 = typedTestApp(new SessionStore(buildPath(tmpDir3, "chat").Path), tmpDir3, sink3);
+    app3.agent_.chat.add(Message(Role.user, true, "q3", null));
+    app3.emitTurnStartTyped("q3");
+    auto up3 = cast(TypedStreamMessageUpdater) app3.makeTypedStreamCallback();
+    up3.messageUpdate(StreamMessage("assistant", "", ""), [
+        StreamToolCall(toolName: "grep_files", arguments: `{`, id: "c1")
+    ], ServerStat.init);
+    app3.emitStopTyped();
+    assert(sink3.turnUpserts.length == 2 && sink3.turnUpserts[1].state == TuiTurnState_Interrupted);
+    assert(sink3.blockUpserts[$ - 1].id == "c1" && sink3.blockUpserts[$ - 1].status == TuiBlockStatus_Cancelled,
+            "the interrupted call is Cancelled, never a fabricated Ok");
+}
+// Displayability rides the wire: every typed tool upsert the D side writes
+// folds the config's isHiddenTool verdict into the block's flags - a hidden
+// tool's block carries TuiBlockFlag_Hidden, a visible tool's exactly
+// kToolBlockFlags - and the receiver hides from the flag alone, never the
+// name. All six upsert paths of one turn, checked.
+@("typed hidden tool flags: all six upsert paths ride the wire")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+    import llm.types : ServerStat;
+
+    auto tmpDir = testArea("app_agent_typed_hidden_flags");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+    assert(app.llmConf.isHiddenTool("pipeline_output") && app.llmConf.isHiddenTool("task_done"),
+            "the default config hides the plumbing tools on both axes");
+
+    auto f = TypedFixture.make();
+
+    // Paths 1+2: the live tick's Pending upsert and the stream-done Running
+    // flip - a hidden call next to a visible one, same batch.
+    app.agent_.chat.add(f.q);
+    app.emitTurnStartTyped("q");
+    auto updater = cast(TypedStreamMessageUpdater) app.makeTypedStreamCallback();
+    ServerStat stat;
+    updater.messageUpdate(StreamMessage("assistant", "C", "T"), [
+        StreamToolCall(toolName: "pipeline_output", arguments: `{"out":"x"}`, id: "c1"),
+        StreamToolCall(toolName: "grep_files", arguments: `{"pattern":"x"}`, id: "c2")
+    ], stat);
+    assert((sink.blockUpserts[3].flags & TuiBlockFlag_Hidden) != 0,
+            "the hidden call's Pending upsert carries the Hidden bit");
+    assert(sink.blockUpserts[4].flags == kToolBlockFlags,
+            "the visible call's block carries exactly the tool flags");
+    updater.streamMessageDone();
+    assert((sink.blockUpserts[5].flags & TuiBlockFlag_Hidden) != 0,
+            "the Running flip keeps the Hidden bit");
+    assert(sink.blockUpserts[6].flags == kToolBlockFlags);
+
+    // Paths 4+5: the step walk's merged card and the standalone orphan.
+    ProcessResult result;
+    result.chat = [
+        Chat.MessageT(f.tm), Chat.MessageT(f.tr), Chat.MessageT(f.tr2),
+        Chat.MessageT(f.orphan)
+    ];
+    app.emitStepTyped(result);
+    assert(sink.blockUpserts.length == 12, "+reasoning#0, c1 merged, c2 merged, answer, the orphan");
+    assert(sink.blockUpserts[11].id == "answer", "the answer block is last");
+    assert(sink.blockUpserts[8].flags == kToolBlockFlags,
+            "the merged grep_files card stays visible");
+    assert(sink.blockUpserts[10].title == "pipeline_output"
+            && sink.blockUpserts[10].status == TuiBlockStatus_Ok
+            && (sink.blockUpserts[10].flags & TuiBlockFlag_Hidden) != 0,
+            "the orphan result rides Hidden");
+
+    // Path 3: the replay snapshot rebuilds the same flags from the history -
+    // with its own hidden call whose call AND result are in the history.
+    JSONValue hc;
+    hc["id"] = "ch";
+    hc["type"] = "function";
+    JSONValue hfn;
+    hfn["name"] = "pipeline_output";
+    hfn["arguments"] = `{"out":"x"}`;
+    hc["function"] = hfn;
+    auto htm = ToolMessage("TH", JSONValue([hc]), JSONValue.init, JSONValue.init);
+    auto htr = ToolResponse("ok-h", "ch", "pipeline_output", true);
+
+    auto tmpDir2 = testArea("app_agent_typed_hidden_flags_replay");
+    scope (exit)
+        tmpDir2.cleanup;
+    TuiRecordingSink sink2;
+    auto app2 = typedTestApp(new SessionStore(buildPath(tmpDir2, "chat").Path), tmpDir2, sink2);
+    app2.agent_.chat.add(f.q);
+    app2.agent_.chat.add(f.tm);
+    app2.agent_.chat.add(f.tr);
+    app2.agent_.chat.add(f.tr2);
+    app2.agent_.chat.add(htm);
+    app2.agent_.chat.add(htr);
+    app2.emitReplayTyped();
+    size_t hiddenSeen, visibleSeen;
+    foreach (b; sink2.setTurnsSnapshots[$ - 1].blocks) {
+        if (b.kind != TuiBlockKind_Tool)
+            continue;
+        if (b.title == "pipeline_output") {
+            hiddenSeen++;
+            assert((b.flags & TuiBlockFlag_Hidden) != 0,
+                    "replay carries Hidden for the hidden call");
+        } else {
+            visibleSeen++;
+            assert(b.flags == kToolBlockFlags);
+        }
+    }
+    assert(hiddenSeen == 1 && visibleSeen == 2, "c1, c2 visible; ch hidden");
+
+    // Path 6: the stop flip.
+    auto tmpDir3 = testArea("app_agent_typed_hidden_flags_stop");
+    scope (exit)
+        tmpDir3.cleanup;
+    TuiRecordingSink sink3;
+    auto app3 = typedTestApp(new SessionStore(buildPath(tmpDir3, "chat").Path), tmpDir3, sink3);
+    app3.agent_.chat.add(Message(Role.user, true, "q3", null));
+    app3.emitTurnStartTyped("q3");
+    auto up3 = cast(TypedStreamMessageUpdater) app3.makeTypedStreamCallback();
+    up3.messageUpdate(StreamMessage("assistant", "", ""), [
+        StreamToolCall(toolName: "pipeline_output", arguments: `{`, id: "c1")
+    ], ServerStat.init);
+    app3.emitStopTyped();
+    assert(sink3.blockUpserts[$ - 1].status == TuiBlockStatus_Cancelled
+            && (sink3.blockUpserts[$ - 1].flags & TuiBlockFlag_Hidden) != 0,
+            "the stop flip keeps the Hidden bit");
+}
+
+// The empty hiddenTools config: no upsert path ever sets the Hidden bit -
+// every tool block on the wire carries exactly kToolBlockFlags.
+@("typed hidden tool flags: an empty hiddenTools config hides nothing")
+unittest {
+    import std.datetime : dur;
+    import std.path : buildPath;
+
+    import llm.chat;
+    import llm.types : ServerStat;
+
+    auto tmpDir = testArea("app_agent_typed_no_hidden");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+    app.llmConf.hiddenTools = [];
+
+    auto f = TypedFixture.make();
+    app.agent_.chat.add(f.q);
+    app.emitTurnStartTyped("q");
+    auto updater = cast(TypedStreamMessageUpdater) app.makeTypedStreamCallback();
+    ServerStat stat;
+    updater.messageUpdate(StreamMessage("assistant", "C", "T"), [
+        StreamToolCall(toolName: "pipeline_output", arguments: `{"out":"x"}`, id: "c1")
+    ], stat);
+    updater.streamMessageDone();
+    ProcessResult result;
+    result.chat = [
+        Chat.MessageT(f.tm), Chat.MessageT(f.tr), Chat.MessageT(f.tr2),
+        Chat.MessageT(f.orphan)
+    ];
+    app.emitStepTyped(result);
+    foreach (b; sink.blockUpserts)
+        if (b.kind == TuiBlockKind_Tool)
+            assert(b.flags == kToolBlockFlags,
+                    "no Hidden bit anywhere: " ~ b.title ~ " flags " ~ text(b.flags));
+    assert((sink.blockUpserts[$ - 1].flags & TuiBlockFlag_Hidden) == 0);
+}
+
+// the streamed call's body is arguments only - the streaming path builds
+// the same shape the completed path does, no name( wrapper, no repeated prefix.
+@("typed streaming call body: arguments only")
+unittest {
+    import std.datetime : dur;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_stream_body");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    app.emitTurnStartTyped("q");
+    auto updater = cast(TypedStreamMessageUpdater) app.makeTypedStreamCallback();
+    updater.messageUpdate(StreamMessage("assistant", "", ""), [
+        StreamToolCall(toolName: "grep_files", arguments: `{"pattern":"x"}`, id: "c1")
+    ], ServerStat.init);
+    assert(sink.blockUpserts.length == 3,
+            "query, content, c1 - no reasoning: the tick carries none");
+    assert(sink.blockUpserts[2].id == "c1" && sink.blockUpserts[2].title == "grep_files");
+    assert(sink.blockUpserts[2].body == `pattern="x"`,
+            "the streamed body is the arguments, never a name( wrapper: "
+            ~ sink.blockUpserts[2].body);
+}
+
+// The /plan and /code turn is display-only - a fresh turn id opens on
+// the wire (Running + the query prose row) but no message is added to the
+// history, so a replay rebuild drops the turn; the run's notices attach to it
+// (a notice targets the store's newest turn) and the explicit close lands the
+// honest Done. Interrupted closes Interrupted, and the open/close pair swaps
+// the live context out and back (/c's interrupted agent turn survives).
+@("typed pipeline turn: display-only open, notices, explicit close, restore")
+unittest {
+    import std.datetime : dur;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_pipeline_turn");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    // Open: a fresh turn on the wire, query row first.
+    app.openPipelineTurnTyped("plan the fold");
+    assert(app.agent_.chat.currentTurnId() == 1, "the pipeline turn allocates a fresh id");
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].id == 1
+            && sink.turnUpserts[0].state == TuiTurnState_Running);
+    assert(sink.blockUpserts.length == 1 && sink.blockUpserts[0].id == "query"
+            && sink.blockUpserts[0].batchId == "1#q"
+            && sink.blockUpserts[0].kind == TuiBlockKind_Prose
+            && sink.blockUpserts[0].meta == "user" && sink.blockUpserts[0].body == "plan the fold");
+
+    // Display-only: no history entry carries the turn, so a replay rebuild
+    // never sees it (dropped on reload).
+    assert(app.agent_.chat.getMessages().empty, "no message is added to the history");
+    app.sendChatMessage("running...");
+    assert(sink.blockUpserts[1].kind == TuiBlockKind_Notice
+            && sink.blockUpserts[1].body == "running...",
+            "the run's notices attach to the open pipeline turn");
+
+    // Close: Done explicitly - emitRunEndedTyped would close Interrupted.
+    app.closePipelineTurnTyped(false);
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[1].id == 1
+            && sink.turnUpserts[1].state == TuiTurnState_Done && sink.turnUpserts[1].messageCount == 0,
+            "the pipeline turn closes Done, messageCount 0");
+    assert(sink.blockUpserts.length == 2, "the close adds no block");
+
+    // Reload drops the display-only turn: the replay snapshot is empty.
+    app.emitReplayTyped();
+    assert(sink.setTurnsSnapshots.length == 1 && sink.setTurnsSnapshots[0].turns.empty,
+            "the turn was never persisted, so the rebuild drops it");
+
+    // The spent context does not answer a later stop.
+    app.emitStopTyped();
+    assert(sink.turnUpserts.length == 2, "the context is spent");
+
+    // Interrupted: the interrupted /code run closes Interrupted.
+    auto tmpDir2 = testArea("app_agent_typed_pipeline_turn_stopped");
+    scope (exit)
+        tmpDir2.cleanup;
+    TuiRecordingSink sink2;
+    auto app2 = typedTestApp(new SessionStore(buildPath(tmpDir2, "chat").Path), tmpDir2, sink2);
+    app2.openPipelineTurnTyped("code it");
+    app2.closePipelineTurnTyped(true);
+    assert(sink2.turnUpserts[1].state == TuiTurnState_Interrupted,
+            "a stopped pipeline turn never claims Done");
+
+    // The displaced live context comes back: an interrupted agent turn held
+    // across a pipeline run survives the open/close pair for /c to resume.
+    auto tmpDir3 = testArea("app_agent_typed_pipeline_turn_restore");
+    scope (exit)
+        tmpDir3.cleanup;
+    TuiRecordingSink sink3;
+    auto app3 = typedTestApp(new SessionStore(buildPath(tmpDir3, "chat").Path), tmpDir3, sink3);
+    auto f = TypedFixture.make();
+    app3.agent_.chat.add(f.q);
+    app3.emitTurnStartTyped("agent q"); // the live agent turn, id 1
+    app3.openPipelineTurnTyped("plan it"); // displaces it, turn id 2
+    assert(sink3.turnUpserts[1].id == 2, "the pipeline turn is its own turn");
+    app3.closePipelineTurnTyped(false);
+    app3.emitStopTyped(); // must land on the AGENT turn, not the pipeline turn
+    assert(sink3.turnUpserts.length == 4 && sink3.turnUpserts[2].id == 2
+            && sink3.turnUpserts[2].state == TuiTurnState_Done && sink3.turnUpserts[3].id == 1
+            && sink3.turnUpserts[3].state == TuiTurnState_Interrupted,
+            "the displaced agent turn context is restored, not the pipeline turn");
+}
+
+// The RESULT pair payload: a JSON-object result unpacks to the byte-wise sorted,
+// capped pair set; anything else keeps the pairs empty and carries the one-line
+// fallback string instead.
+@("typed result pairs: shapes through the replay snapshot")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_pairs_shapes");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    JSONValue[string] calls;
+    foreach (id; ["c1", "c2", "c3"]) {
+        JSONValue c;
+        c["id"] = id;
+        c["type"] = "function";
+        JSONValue fn;
+        fn["name"] = "t_" ~ id;
+        fn["arguments"] = "{}";
+        c["function"] = fn;
+        calls[id] = c;
+    }
+    auto tm = ToolMessage("", JSONValue([calls["c1"], calls["c2"], calls["c3"]]));
+    app.agent_.chat.add(Message(Role.user, true, "q", null));
+    app.agent_.chat.add(tm);
+    app.agent_.chat.add(ToolResponse(`{"cmd": "ls -R", "n": 3, "nested": {"a": [1, 2]}}`,
+            "c1", "t_c1", true));
+    app.agent_.chat.add(ToolResponse(`[1, 2]`, "c2", "t_c2", true));
+    app.agent_.chat.add(ToolResponse("plain text,  two spaces", "c3", "t_c3", false));
+
+    app.emitReplayTyped();
+
+    const blocks = sink.setTurnsSnapshots[0].blocks;
+    assert(blocks.length == 5, blocks.length.text);
+    const c1Block = blocks[2];
+    const c2Block = blocks[3];
+    const c3Block = blocks[4];
+    // The flat object walks one level: nested containers stringify as compact
+    // JSON, scalars as text, keys byte-wise sorted.
+    assert(c1Block.resultKeys == ["cmd", "n", "nested"], c1Block.resultKeys.text);
+    assert(c1Block.resultValues == ["ls -R", "3", `{"a":[1,2]}`], c1Block.resultValues.text);
+    assert(c1Block.resultCount == 3 && c1Block.resultMore == 0 && c1Block.resultRaw.empty);
+    // The array result keeps the fallback: the pretty payload collapsed to one line.
+    assert(c2Block.resultKeys.empty && c2Block.resultValues.empty && c2Block.resultMore == 0);
+    assert(c2Block.resultRaw == "[ 1, 2 ]", c2Block.resultRaw);
+    // The non-JSON payload keeps the fallback: the raw payload collapsed.
+    assert(c3Block.resultKeys.empty && c3Block.resultMore == 0);
+    assert(c3Block.resultRaw == "plain text, two spaces", c3Block.resultRaw);
+}
+
+@("typed result pairs: byte-wise sort pin, duplicate keys last-wins, zero-pair object")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_pairs_sort");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    JSONValue c1, c2, c3;
+    c1["id"] = "c1";
+    c1["type"] = "function";
+    JSONValue fn1;
+    fn1["name"] = "t1";
+    fn1["arguments"] = "{}";
+    c1["function"] = fn1;
+    c2["id"] = "c2";
+    c2["type"] = "function";
+    JSONValue fn2;
+    fn2["name"] = "t2";
+    fn2["arguments"] = "{}";
+    c2["function"] = fn2;
+    c3["id"] = "c3";
+    c3["type"] = "function";
+    JSONValue fn3;
+    fn3["name"] = "t3";
+    fn3["arguments"] = "{}";
+    c3["function"] = fn3;
+    auto tm = ToolMessage("", JSONValue([c1, c2, c3]));
+    app.agent_.chat.add(Message(Role.user, true, "q", null));
+    app.agent_.chat.add(tm);
+    // "Z" (0x5A) sorts before "a" (0x61): byte order is not alpha order.
+    app.agent_.chat.add(ToolResponse(`{"Z": "1", "a": "2"}`, "c1", "t1", true));
+    // std.json's duplicate-key parse keeps the last value.
+    app.agent_.chat.add(ToolResponse(`{"k": "first", "k": "second"}`, "c2", "t2", true));
+    // The zero-pair object keeps the fallback too.
+    app.agent_.chat.add(ToolResponse(`{}`, "c3", "t3", true));
+
+    app.emitReplayTyped();
+
+    const blocks = sink.setTurnsSnapshots[0].blocks;
+    assert(blocks.length == 5, blocks.length.text);
+    const c1Block = blocks[2];
+    const c2Block = blocks[3];
+    const c3Block = blocks[4];
+    assert(c1Block.resultKeys == ["Z", "a"], c1Block.resultKeys.text);
+    assert(c1Block.resultValues == ["1", "2"], c1Block.resultValues.text);
+    assert(c2Block.resultKeys == ["k"] && c2Block.resultValues == ["second"],
+            "duplicate keys keep the last value: " ~ c2Block.resultValues.text);
+    assert(c3Block.resultKeys.empty && c3Block.resultRaw == "{}", c3Block.resultRaw);
+}
+
+@("typed result pairs: the pair and value caps")
+unittest {
+    import std.array : replicate;
+    import std.conv : text;
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_pairs_caps");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    JSONValue[] calls;
+    foreach (i; 0 .. 101) {
+        JSONValue c;
+        c["id"] = text("c", i);
+        c["type"] = "function";
+        JSONValue fn;
+        fn["name"] = "t";
+        fn["arguments"] = "{}";
+        c["function"] = fn;
+        calls ~= c;
+    }
+    app.agent_.chat.add(Message(Role.user, true, "q", null));
+    app.agent_.chat.add(ToolMessage("", JSONValue(calls)));
+    JSONValue[string] big;
+    foreach (i; 0 .. 101)
+        big[text("k", i)] = JSONValue("v");
+    app.agent_.chat.add(ToolResponse(JSONValue(big).toString, "c0", "t", true));
+    // A value at exactly 200 codepoints truncates nothing.
+    app.agent_.chat.add(ToolResponse(JSONValue([
+        "exact": JSONValue("x".replicate(200))
+    ]).toString, "c1", "t", true));
+    // One codepoint over cuts to 200, and a multibyte character at the cut
+    // stays whole.
+    app.agent_.chat.add(ToolResponse(JSONValue([
+        "over": JSONValue("x".replicate(201))
+    ]).toString, "c2", "t", true));
+    app.agent_.chat.add(ToolResponse(
+            JSONValue(["cut": JSONValue("a".replicate(199) ~ "é" ~ "b")]).toString,
+            "c3", "t", true));
+    app.agent_.chat.add(ToolResponse(JSONValue([
+        "all": JSONValue("é".replicate(201))
+    ]).toString, "c4", "t", true));
+
+    app.emitReplayTyped();
+
+    foreach (b; sink.setTurnsSnapshots[0].blocks) {
+        if (b.id == "c0") {
+            assert(b.resultCount == 100 && b.resultMore == 1, text(b.resultCount,
+                    " + ", b.resultMore));
+            assert(b.resultKeys.length == 100 && b.resultValues.length == 100);
+        } else if (b.id == "c1") {
+            assert(b.resultValues == ["x".replicate(200)],
+                    "a 200-codepoint value truncates nothing: " ~ b.resultValues[0].length.text);
+        } else if (b.id == "c2") {
+            assert(b.resultValues == ["x".replicate(200)]);
+        } else if (b.id == "c3") {
+            assert(b.resultValues == ["a".replicate(199) ~ "é"],
+                    "the multibyte character at the cut stays whole: " ~ b.resultValues[0]);
+        } else if (b.id == "c4") {
+            assert(b.resultValues == ["é".replicate(200)]);
+        }
+    }
+}
+
+@(
+        "typed result pairs: replay/live parity, cancelled carries none, the orphan's pairs ride the merge")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_pairs_parity");
+    scope (exit)
+        tmpDir.cleanup;
+
+    JSONValue c1, c2;
+    c1["id"] = "c1";
+    c1["type"] = "function";
+    JSONValue fn1;
+    fn1["name"] = "t1";
+    fn1["arguments"] = "{}";
+    c1["function"] = fn1;
+    c2["id"] = "c2";
+    c2["type"] = "function";
+    JSONValue fn2;
+    fn2["name"] = "t2";
+    fn2["arguments"] = "{}";
+    c2["function"] = fn2;
+    auto tm = ToolMessage("", JSONValue([c1, c2]));
+    auto tr1 = ToolResponse(`{"x": "1"}`, "c1", "t1", true);
+
+    // Replay: c1 merges its result, c2 stays cancelled (no stored response).
+    {
+        TuiRecordingSink sink;
+        auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "replay").Path), tmpDir, sink);
+        app.agent_.chat.add(Message(Role.user, true, "q", null));
+        app.agent_.chat.add(tm);
+        app.agent_.chat.add(tr1);
+        app.emitReplayTyped();
+
+        const blocks = sink.setTurnsSnapshots[0].blocks;
+        assert(blocks.length == 4, blocks.length.text);
+        assert(blocks[1].id == "content#0" && blocks[1].body.empty && blocks[1].durationMs == 0,
+                "a response with no content still writes its body-less content block");
+        assert(blocks[2].id == "c1" && blocks[2].status == TuiBlockStatus_Ok);
+        assert(blocks[2].resultKeys == ["x"] && blocks[2].resultValues == ["1"]);
+        assert(blocks[2].resultRaw.empty && blocks[2].resultMore == 0);
+        assert(blocks[3].id == "c2" && blocks[3].status == TuiBlockStatus_Cancelled);
+        assert(blocks[3].resultKeys.empty && blocks[3].resultValues.empty
+                && blocks[3].resultRaw.empty && blocks[3].resultMore == 0,
+                "a cancelled call carries no pair set and no resultRaw");
+    }
+
+    // Live: the same step through the emitter produces the identical pair set.
+    {
+        TuiRecordingSink sink;
+        auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "live").Path), tmpDir, sink);
+        app.emitTurnStartTyped("q");
+        ProcessResult result;
+        result.chat = [Chat.MessageT(tm), Chat.MessageT(tr1)];
+        app.emitStepTyped(result);
+
+        // The LAST upsert per id is the merged state (the step walk re-upserts).
+        bool c1Seen, c2Seen;
+        foreach_reverse (b; sink.blockUpserts) {
+            if (!c1Seen && b.id == "c1") {
+                c1Seen = true;
+                assert(b.status == TuiBlockStatus_Ok);
+                assert(b.resultKeys == ["x"] && b.resultValues == ["1"],
+                        "the live walk emits the replay walk's pair set");
+                assert(b.resultRaw.empty && b.resultMore == 0);
+            }
+            if (!c2Seen && b.id == "c2") {
+                c2Seen = true;
+                assert(b.status == TuiBlockStatus_Cancelled
+                        && b.resultKeys.empty && b.resultRaw.empty);
+            }
+        }
+        assert(c1Seen && c2Seen);
+    }
+
+    // The unknown-callId result: its pair set rides the orphan upsert, and the
+    // call-lands upsert carries both-empty pairs so the store merge keeps them.
+    {
+        TuiRecordingSink sink;
+        auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "orphan").Path), tmpDir, sink);
+        app.emitTurnStartTyped("q");
+        ProcessResult orphanStep;
+        orphanStep.chat = [
+            Chat.MessageT(ToolResponse(`{"o": "9"}`, "c9", "t9", true))
+        ];
+        app.emitStepTyped(orphanStep);
+        assert(sink.blockUpserts[$ - 1].id == "c9"
+                && sink.blockUpserts[$ - 1].status == TuiBlockStatus_Ok);
+        assert(sink.blockUpserts[$ - 1].resultKeys == ["o"] && sink.blockUpserts[$ - 1].resultValues == [
+            "9"
+        ], "the orphan result's pair set rides its own upsert");
+
+        JSONValue c9;
+        c9["id"] = "c9";
+        c9["type"] = "function";
+        JSONValue fn9;
+        fn9["name"] = "t9";
+        fn9["arguments"] = "{}";
+        c9["function"] = fn9;
+        ProcessResult callStep;
+        callStep.chat = [Chat.MessageT(ToolMessage("", JSONValue([c9])))];
+        app.emitStepTyped(callStep);
+        assert(sink.blockUpserts[$ - 1].id == "c9"
+                && sink.blockUpserts[$ - 1].status == TuiBlockStatus_Cancelled);
+        assert(sink.blockUpserts[$ - 1].resultKeys.empty && sink.blockUpserts[$ - 1].resultRaw.empty,
+                "the call-lands upsert stays both-empty so the store merge keeps the pairs");
+    }
+}
+
+// NR derivation: the compression re-emission is ONE setTurns snapshot over
+// the rewritten history. The live turn keeps its walk-assigned id, and
+// the rebuilt snapshot includes the live turn's
+// query block.
+@("typed compression re-emission: setTurns snapshot rebuilds")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_compress");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    auto f = TypedFixture.make();
+    app.agent_.chat.setSystemPrompt("sys");
+    app.agent_.chat.add(f.q);
+    app.agent_.chat.add(f.a3);
+    app.agent_.chat.add(f.tm);
+    app.agent_.chat.add(f.tr);
+    app.agent_.chat.add(f.tr2);
+    app.emitReplayTyped();
+
+    app.agent_.chat.add(Message(Role.user, true, "q2", null));
+    app.emitTurnStartTyped("q2");
+    assert(sink.turnUpserts[$ - 1].id == 2, "the live turn continues after the replayed one");
+
+    app.emitCompressionTyped();
+    assert(sink.setTurnsSnapshots.length == 2);
+    const turns2 = sink.setTurnsSnapshots[1].turns;
+    assert(turns2.length == 2 && turns2[0].id == 1 && turns2[1].id == 2,
+            "the rebuilt snapshot keeps the walk's turn ids over the rewritten history");
+    bool hasQ2;
+    foreach (b; sink.setTurnsSnapshots[1].blocks)
+        if (b.id == "query" && b.body == "q2" && b.turnId == 2)
+            hasQ2 = true;
+    assert(hasQ2, "the live turn's query block is part of the rebuilt snapshot");
+}
+
+// NR derivation: a mid-run switch replays the new session's history as one
+// setTurns snapshot and drops the live emission context - the stale turn's
+// stop is a no-op afterwards and the next live turn's id comes fresh from
+// the walk's own sequence.
+@("typed session switch: replay drops the live context, the chat's ids continue")
+unittest {
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_switch");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    // A live turn in flight, then the switch: replay over the (fresh,
+    // empty) session's history.
+    app.agent_.chat.add(Message(Role.user, true, "q", null));
+    app.emitTurnStartTyped("q");
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].id == 1);
+
+    app.emitReplayTyped();
+
+    assert(sink.setTurnsSnapshots.length == 1, "the switch sends one snapshot");
+    assert(sink.setTurnsSnapshots[0].turns.empty, "the fresh session holds no turns");
+
+    // The stale live turn is gone: its stop emits nothing.
+    app.emitStopTyped();
+    assert(sink.turnUpserts.length == 1, "the dropped context's stop is a no-op");
+
+    // A new live turn continues the chat's own id sequence: the id is the
+    // chat's per-session counter (currentTurnId), not snapshot-derived. It is
+    // 2 here because this test bypasses the real switch's chat reload: a real
+    // reload makes the fresh session's first live turn id 1. The dropped live
+    // turn's id is gone with its context.
+    app.agent_.chat.add(Message(Role.user, true, "q2", null));
+    app.emitTurnStartTyped("q2");
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[1].id == 2 && sink.turnUpserts[1].state == TuiTurnState_Running,
+            "the fresh turn continues the chat's own id sequence, got id `"
+            ~ sink.turnUpserts[1].id.to!string ~ "`");
+}
+
+// NR derivation: the console formatter over the typed events reproduces
+// today's console output byte for byte - the query echo
+// without a prefix, "Thinking: " lines, "assistant: " content, one tool-call
+// line per batch, result lines with the mark, the answer after the results
+// walk, and notices verbatim.
+@("console formatter reproduces today's console output from typed events")
+unittest {
+    import std.array : join;
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+    import std.string : indexOf;
+
+    import llm.chat;
+    import llm.types : ServerStat;
+
+    auto tmpDir = testArea("app_agent_console_typed");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    auto f = TypedFixture.make();
+    app.agent_.chat.add(f.q);
+    app.emitTurnStartTyped("q");
+    auto updater = cast(TypedStreamMessageUpdater) app.makeTypedStreamCallback();
+    ServerStat stat;
+    updater.messageUpdate(StreamMessage("assistant", "C", "T"), [
+        StreamToolCall(toolName: "grep_files", arguments: `{"pattern": "x"}`, id: "c1")
+    ], stat);
+    updater.messageUpdate(StreamMessage("assistant", "C0", "T0"), [], stat);
+    updater.streamMessageDone();
+    ProcessResult result;
+    result.chat = [
+        Chat.MessageT(f.a3), Chat.MessageT(f.tm), Chat.MessageT(f.tr),
+        Chat.MessageT(f.tr2), Chat.MessageT(f.orphan)
+    ];
+    app.emitStepTyped(result);
+    app.emitNoticeTyped("assistant: Compressing... 1/2 : x");
+
+    auto fmt = new ConsoleFormatter();
+    string[] got;
+    got ~= fmt.onTurnUpsert(sink.turnUpserts[0]);
+    foreach (b; sink.blockUpserts)
+        got ~= fmt.onBlockUpsert(b);
+    foreach (t; sink.turnUpserts[1 .. $])
+        got ~= fmt.onTurnUpsert(t);
+
+    // Today's console lines for this content, hand-pinned.
+    string[] expected = [
+        "q", "Thinking: T0", "assistant: C0", "Thinking: T1",
+        `tool call: grep_files(pattern="x")` ~ "\nwrite_file()",
+        "The answer is 4.", "tool result ✅: grep_files ok-1",
+        "tool result ❌: write_file bad-2", "assistant: Compressing... 1/2 : x",
+    ];
+
+    assert(got == expected,
+            "typed console output must match today's\ntoday: " ~ expected.join(
+                "\n") ~ "\nv5: " ~ got.join("\n"));
+    assert(got.length == 9, "echo, thinking+content, thinking+call+answer+2 results, notice");
+    assert(got[0] == "q", "the live echo is the raw text, no prefix");
+    assert(got[1] == "Thinking: T0" && got[2] == "assistant: C0");
+    assert(got[3] == "Thinking: T1");
+    assert(got[4] == "tool call: grep_files(pattern=\"x\")\nwrite_file()");
+    assert(got[5] == "The answer is 4.", "the answer line rides the tool-call message");
+    assert(got[6] == "tool result ✅: grep_files ok-1");
+    assert(got[7] == "tool result ❌: write_file bad-2");
+    assert(got[8] == "assistant: Compressing... 1/2 : x", "notices print verbatim");
+}
+
+// The console hides from the flag alone: a tool block carrying
+// TuiBlockFlag_Hidden prints nothing (and buffers nothing), while the same
+// block without the flag prints today's call/result lines.
+@("console formatter: the Hidden flag, not the name, hides a tool block")
+unittest {
+    import std.array : join;
+
+    import llm.tui : UiTurnData;
+
+    auto hidden = makeBlockData(1, "c1", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok,
+            kToolBlockFlags | TuiBlockFlag_Hidden, "pipeline_output", "out", "body", 0);
+    auto fmt = new ConsoleFormatter();
+    assert(fmt.onBlockUpsert(hidden).empty);
+    assert(fmt.onTurnUpsert(UiTurnData(1, TuiTurnState_Done, 1)).empty,
+            "a flagged-hidden block never reaches the console, buffer included");
+
+    // The config's other verdict rides the same flag: the default hiddenTools
+    // rule taskDone hidden (config.d:637), so a flagged taskDone call prints
+    // nothing either.
+    auto taskDoneHidden = hidden;
+    taskDoneHidden.title = "taskDone";
+    auto fmt3 = new ConsoleFormatter();
+    assert(fmt3.onBlockUpsert(taskDoneHidden).empty);
+    assert(fmt3.onTurnUpsert(UiTurnData(1, TuiTurnState_Done, 1)).empty,
+            "the config's taskDone verdict rides the same flag: nothing prints");
+
+    auto visible = hidden;
+    visible.flags = kToolBlockFlags;
+    auto fmt2 = new ConsoleFormatter();
+    assert(fmt2.onBlockUpsert(visible).empty, "the block buffers until the batch ends");
+    const got = fmt2.onTurnUpsert(UiTurnData(1, TuiTurnState_Done, 1));
+    assert(got == [
+        "tool call: pipeline_output(body)", "tool result ✅: pipeline_output out"
+    ], "the same block without the flag prints today's lines: " ~ got.join(" | "));
+}
+
+// Run exits: a stop interrupts through emitStopTyped (honest Cancelled
+// flips, no fabricated status), and the /c resume re-opens the SAME turn
+// Running before the next batch's blocks land.
+@("runAgent: stop interrupts and /c re-opens the same turn")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+    import llm.types : ProcessResult;
+
+    auto tmpDir = testArea("app_agent_run_stop_resume");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    auto agent = new CannedAgent("main", cfg);
+    app.agent_ = agent;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+    app.activeSession = store.create();
+    clearStopAgent();
+    app.agent_.chat.setSystemPrompt("sys");
+
+    // The step the interrupt lands in: a ToolMessage whose call streams but
+    // gets no response (still live when the stop arrives).
+    JSONValue call;
+    call["id"] = "c1";
+    call["type"] = "function";
+    JSONValue fn;
+    fn["name"] = "grep_files";
+    fn["arguments"] = `{}`;
+    call["function"] = fn;
+    auto liveTm = ToolMessage("T1", JSONValue([call]));
+
+    // The resume step: a response, merged calls and the final answer.
+    JSONValue sd;
+    sd["taskDoneAnswer"] = JSONValue("Done: 4.");
+    auto answeredTm = ToolMessage("T1", JSONValue([call]), JSONValue.init, sd);
+    answeredTm.setProcessTime(MessageTime(120.dur!"msecs"));
+    auto a3 = Message(Role.assistant, false, "C0", null);
+    a3.thinking = "T0";
+    a3.setProcessTime(MessageTime(100.dur!"msecs"));
+    auto tr = ToolResponse("ok-1", "c1", "grep_files", true);
+    tr.setProcessTime(MessageTime(42.dur!"msecs"));
+
+    agent.canned = [
+        ProcessResult(status: ProcessResult.Status.ok, hasToolCall: true, chat: [
+            Chat.MessageT(liveTm)
+        ]),
+        ProcessResult(status: ProcessResult.Status.ok, hasToolCall: true,
+                chat: [
+                    Chat.MessageT(a3), Chat.MessageT(answeredTm),
+                    Chat.MessageT(tr)
+        ]), ProcessResult(status: ProcessResult.Status.networkFailure)
+    ];
+
+    // Exit 2 - stop: the interrupt fires after the first step, so the stop
+    // path (emitStopTyped) closes the turn.
+    stopAgent();
+    app.runAgent("q");
+    clearStopAgent();
+
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[0].id == 1
+            && sink.turnUpserts[0].state == TuiTurnState_Running && sink.turnUpserts[1].id == 1
+            && sink.turnUpserts[1].state == TuiTurnState_Interrupted,
+            "the stop closes the turn Interrupted (same id)");
+
+    assert(sink.blockUpserts.length == 3 && sink.blockUpserts[1].id == "reasoning#0"
+            && sink.blockUpserts[2].id == "c1" && sink.blockUpserts[2].status == TuiBlockStatus_Cancelled,
+            "the live call is Cancelled, never a fabricated Ok");
+
+    // Exit 5 - /c resume: the interrupted turn re-opens Running (same id)
+    // BEFORE any block of the next batch streams.
+    app.runAgent("/c");
+
+    assert(sink.turnUpserts.length == 4 && sink.turnUpserts[2].id == 1
+            && sink.turnUpserts[2].state == TuiTurnState_Running,
+            "/c re-opens the interrupted turn Running");
+    assert(sink.turnUpserts[3].id == 1 && sink.turnUpserts[3].state == TuiTurnState_Done
+            && sink.turnUpserts[3].messageCount == 4,
+            "query + response + call + result close the turn Done");
+    // The resumed batch: the continue notice appends under the query's batch,
+    // a3 streams as batch "1#1", and the answered ToolMessage's batch "1#2"
+    // carries the merged call (upserted in place, Ok) and the final answer.
+    // The live call's stop-run row stays untouched (its Cancelled is never
+    // rewritten); the merge lands as a new upsert on the new owner batch.
+    assert(sink.blockUpserts[3].id == "notice#1"
+            && sink.blockUpserts[3].kind == TuiBlockKind_Notice && sink.blockUpserts[3].batchId == "1#q",
+            "the continue request is a Notice block in the query's batch");
+    assert(sink.blockUpserts[4].id == "reasoning#1"
+            && sink.blockUpserts[4].batchId == "1#1" && sink.blockUpserts[4].durationMs == 100);
+    assert(sink.blockUpserts[5].id == "content#1"
+            && sink.blockUpserts[5].batchId == "1#1" && sink.blockUpserts[5].durationMs == 100);
+    assert(sink.blockUpserts[6].id == "reasoning#2"
+            && sink.blockUpserts[6].batchId == "1#2" && sink.blockUpserts[6].durationMs == 120);
+    assert(sink.blockUpserts[7].id == "c1"
+            && sink.blockUpserts[7].batchId == "1#2" && sink.blockUpserts[7].status == TuiBlockStatus_Ok
+            && sink.blockUpserts[7].durationMs == 42,
+            "the merged call lands on the answered ToolMessage's batch");
+    assert(sink.blockUpserts[8].id == "answer"
+            && sink.blockUpserts[8].batchId == "1#2" && sink.blockUpserts[8].body == "Done: 4."
+            && sink.blockUpserts[8].durationMs == 120,
+            "the answer lands on the response's batch with the ToolMessage's time");
+    // Interleaving, through the sink's unified call log: the Running
+    // re-upsert precedes the resumed batch's first block (reasoning#1
+    // exists only in the resumed batch, so its first upsert is the
+    // batch's opening emission). Turn upserts for id 1, in order: the
+    // opening Running, the Interrupted close, the /c re-open, then the
+    // Done close (which lands after the resumed batch's blocks).
+    size_t seen, reOpen, firstBlock;
+    foreach (i, c; sink.calls) {
+        if (c.kind == "turnUpsert" && c.payload == "1") {
+            ++seen;
+            if (seen == 3)
+                reOpen = i;
+        }
+        if (c.kind == "blockUpsert" && c.payload == "reasoning#1" && firstBlock == 0)
+            firstBlock = i;
+    }
+    assert(seen == 4 && reOpen > 0 && reOpen < firstBlock,
+            "the Running re-upsert crosses before the next batch's blocks");
+}
+
+// Run exits: the nudge ladder's exhaustion fails the turn
+// agentStuckInLoop, the harness still explains, and the run's exit closes the
+// turn Interrupted without touching any block status.
+@("runAgent: agentStuckInLoop explains and closes the turn Interrupted")
+unittest {
+    import std.array : replicate;
+    import std.path : buildPath;
+
+    import llm.chat;
+    import llm.types : ProcessResult;
+
+    auto tmpDir = testArea("app_agent_run_stuck");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+    auto agent = new ScriptedAgent("main", cfg);
+    app.agent_ = agent;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+    app.activeSession = store.create();
+    clearStopAgent();
+    app.agent_.chat.setSystemPrompt("sys");
+
+    // ok with no tool call: the recovery nudge ladder exhausts (the shipped
+    // depths are MaxConsecutiveSameStatus = 3 and MaxConsecutiveNoToolCallOk
+    // = 5, agent/package.d:567-569 - 12 entries stay past any of them; the
+    // seam repeats the last entry, so a deepened ladder cannot range-error)
+    // and fails the turn agentStuckInLoop.
+    agent.script = [ProcessResult(status: ProcessResult.Status.ok)].replicate(12);
+    app.runAgent("q");
+
+    assert(sink.lastNoticeBody().canFind("stuck in a loop") && sink.lastNoticeBody()
+            .canFind("/c"), "the harness still explains the stuck loop and the /c escape");
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[0].state == TuiTurnState_Running
+            && sink.turnUpserts[1].id == 1 && sink.turnUpserts[1].state == TuiTurnState_Interrupted,
+            "the stuck run closes the turn Interrupted");
+    assert(sink.blockUpserts.length == 2 && sink.blockUpserts[0].id == "query"
+            && sink.blockUpserts[1].kind == TuiBlockKind_Notice,
+            "no block status is written the transport did not report");
+}
+
+// Run exits, replay: emitReplayTyped() after a finished run emits a
+// snapshot whose rows equal the live run's final shape - same ids, same
+// batch ids, same order, durations included.
+@("runAgent: emitReplayTyped replays a finished run's live shape")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.types : ProcessResult;
+
+    auto tmpDir = testArea("app_agent_run_replay");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto cfg = testLlmConfig(tmpDir);
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = cfg;
+    app.sessionStore = store;
+
+    // The real worker appends each step's messages to the chat before the
+    // step walk streams them; the probe mirrors that so the replay built
+    // from the history sees the same turn the live walk streamed. The run
+    // exits after the answer step through a failed follow-up step: the
+    // closed turn's last upsert stays Done (the exit path skips the
+    // Interrupted close for an answer-closed turn).
+    class AppendingAgent : ScriptedAgent {
+        this(string name, LlmConfig llmConf) {
+            super(name, llmConf);
+        }
+
+        override ProcessResult process(bool delegate() interrupt) @trusted nothrow {
+            auto r = super.process(interrupt);
+            foreach (m; r.chat)
+                m.match!((Message v) => chat.add(v),
+                        (ToolMessage v) => chat.add(v), (ToolResponse v) => chat.add(v),
+                        (VisionMessage v) => chat.add(v));
+            return r;
+        }
+    }
+
+    auto agent = new AppendingAgent("main", cfg);
+    app.agent_ = agent;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+    app.activeSession = store.create();
+    clearStopAgent();
+    app.agent_.chat.setSystemPrompt("sys");
+
+    // The finishing step: the response streams (thinking + content), the
+    // answered ToolMessage carries the call, the result and the final
+    // answer; the failed follow-up step then ends the run (the exit path
+    // skips the Interrupted close for an answer-closed turn).
+    JSONValue call;
+    call["id"] = "c1";
+    call["type"] = "function";
+    JSONValue fn;
+    fn["name"] = "grep_files";
+    fn["arguments"] = `{}`;
+    call["function"] = fn;
+    JSONValue sd;
+    sd["taskDoneAnswer"] = JSONValue("Done: 4.");
+    auto answeredTm = ToolMessage("T1", JSONValue([call]), JSONValue.init, sd);
+    answeredTm.setProcessTime(MessageTime(120.dur!"msecs"));
+    auto a3 = Message(Role.assistant, false, "C0", null);
+    a3.thinking = "T0";
+    a3.setProcessTime(MessageTime(100.dur!"msecs"));
+    auto tr = ToolResponse("ok-1", "c1", "grep_files", true);
+    tr.setProcessTime(MessageTime(42.dur!"msecs"));
+
+    agent.script = [
+        ProcessResult(status: ProcessResult.Status.ok, hasToolCall: true, chat: [
+            Chat.MessageT(a3), Chat.MessageT(answeredTm), Chat.MessageT(tr)
+        ]), ProcessResult(status: ProcessResult.Status.networkFailure)
+    ];
+
+    app.runAgent("q");
+
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[0].state == TuiTurnState_Running
+            && sink.turnUpserts[1].id == 1 && sink.turnUpserts[1].state == TuiTurnState_Done,
+            "the finished run closes the turn Done");
+
+    // The live run's final shape, folded from the upsert log: the last
+    // upsert per id wins, in first-appearance order.
+    string[] fIds, fBatches;
+    long[] fDurs;
+    foreach (b; sink.blockUpserts) {
+        ptrdiff_t at = -1;
+        foreach (i, id; fIds)
+            if (id == b.id) {
+                at = i;
+                break;
+            }
+        if (at < 0) {
+            fIds ~= b.id;
+            fBatches ~= b.batchId;
+            fDurs ~= b.durationMs;
+        } else {
+            fBatches[at] = b.batchId;
+            fDurs[at] = b.durationMs;
+        }
+    }
+    assert(fIds == [
+        "query", "reasoning#0", "content#0", "reasoning#1", "c1", "answer"
+    ], "the finished run's live shape, got ids `" ~ fIds.join(" ") ~ "`");
+    assert(fBatches == ["1#q", "1#0", "1#0", "1#1", "1#1", "1#1"],
+            "the live batch ids, got `" ~ fBatches.join(" ") ~ "`");
+    assert(fDurs == [0, 100, 100, 120, 42, 120], "the live durations");
+
+    // Replay: the live rows plus the tooling batch's body-less content block.
+    // Its duration rides it. The streamed prose is not persisted, so a run
+    // without stream ticks has no live content block for that batch, and the
+    // projection drops the body-less child, keeping the owner's duration.
+    app.emitReplayTyped();
+    assert(sink.setTurnsSnapshots.length == 1, "one replay snapshot");
+    const turns = sink.setTurnsSnapshots[0].turns;
+    const blocks = sink.setTurnsSnapshots[0].blocks;
+    assert(turns.length == 1 && turns[0].id == 1
+            && turns[0].state == TuiTurnState_Done, "the finished turn replays Done");
+    assert(blocks.map!(b => b.id).array == fIds[0 .. 4] ~ "content#1" ~ fIds[4 .. $],
+            "same ids, same order, got `" ~ blocks.map!(b => b.id).array.join(" ") ~ "`");
+    assert(blocks.map!(b => b.batchId)
+            .array == fBatches[0 .. 4] ~ "1#1" ~ fBatches[4 .. $], "same batch ids");
+    assert(blocks.map!(b => b.durationMs)
+            .array == fDurs[0 .. 4] ~ 120L ~ fDurs[4 .. $], "same durations");
+}
+
+// The stream callback is installed once (startup, then only a model switch)
+// while every turn start installs a new typed context: the updater must
+// resolve the live context per event, not capture the one it was born with.
+@("typed live: the stream callback writes into the turn it is streaming")
+unittest {
+    import std.path : buildPath;
+
+    import llm.types : ProcessResult, StreamMessage;
+
+    auto tmpDir = testArea("app_agent_stream_ctx");
+    scope (exit)
+        tmpDir.cleanup;
+
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = testLlmConfig(tmpDir);
+    app.sessionStore = store;
+
+    // One tool-calling step: the call and its response, the shape the step
+    // walk merges into one card.
+    static ProcessResult toolStep(string id, string name) {
+        JSONValue call;
+        call["id"] = id;
+        call["type"] = "function";
+        JSONValue fn;
+        fn["name"] = name;
+        fn["arguments"] = `{}`;
+        call["function"] = fn;
+        return ProcessResult(status: ProcessResult.Status.ok, hasToolCall: true, chat: [
+            Chat.MessageT(ToolMessage("T", JSONValue([call]))),
+            Chat.MessageT(ToolResponse("ok", id, name, true))
+        ]);
+    }
+
+    // Ticks the installed callback the way Agent.process does, so the test
+    // exercises the wiring startSetup installs, not a hand-made updater.
+    class TickAgent : ScriptedAgent {
+        IStreamCallback installed;
+
+        this(string name, LlmConfig llmConf) {
+            super(name, llmConf);
+        }
+
+        override ProcessResult process(bool delegate() interrupt) @trusted nothrow {
+            auto r = super.process(interrupt);
+            if (r.status != ProcessResult.Status.ok || !r.hasToolCall || installed is null)
+                return r;
+            try {
+                StreamMessage sm;
+                sm.role = "assistant";
+                sm.content = "C";
+                sm.reasoning = "T";
+                installed.messageUpdate(sm, [], ServerStat.init);
+                installed.streamMessageDone();
+            } catch (Exception e) {
+                // The block assertions below are the check that the tick landed.
+                logger.trace(e.msg).collectException;
+            }
+            return r;
+        }
+    }
+
+    auto agent = new TickAgent("main", app.llmConf);
+    app.agent_ = agent;
+    auto sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+    app.activeSession = store.create();
+    clearStopAgent();
+    app.agent_.chat.setSystemPrompt("sys");
+
+    // The startup install, before any turn exists: one callback for the whole
+    // process (startSetup's line).
+    agent.installed = app.makeTypedStreamCallback();
+    app.agent_.setStreamUpdate(agent.installed);
+
+    agent.script = [
+        toolStep("c1", "get_memory_topics"),
+        ProcessResult(status: ProcessResult.Status.networkFailure),
+        toolStep("c2", "read_file"),
+        ProcessResult(status: ProcessResult.Status.networkFailure)
+    ];
+
+    app.runAgent("q1");
+
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[0].id == 1
+            && sink.turnUpserts[1].id == 1 && sink.turnUpserts[1].state == TuiTurnState_Interrupted,
+            "the first run opens and closes turn 1");
+    bool sawTick;
+    foreach (b; sink.blockUpserts)
+        if (b.id == "reasoning#0" || b.id == "c1") {
+            sawTick = true;
+            assert(b.turnId == 1 && b.batchId == "1#0",
+                    "turn 1's block names turn 1, got turn " ~ b.turnId.text ~ " batch " ~ b
+                        .batchId);
+        }
+    assert(sawTick, "turn 1's stream tick and merged card arrived");
+
+    const size_t turn1End = sink.blockUpserts.length;
+    app.runAgent("q2");
+
+    bool sawTurn2;
+    foreach (b; sink.blockUpserts[turn1End .. $])
+        if (b.id == "reasoning#0" || b.id == "c2") {
+            sawTurn2 = true;
+            assert(b.turnId == 2 && b.batchId == "2#0",
+                    "the second turn's stream block must name turn 2, got turn "
+                    ~ b.turnId.text ~ " batch " ~ b.batchId);
+        }
+    assert(sawTurn2, "turn 2's stream tick and merged card arrived");
+    assert(sink.turnUpserts.length == 4 && sink.turnUpserts[2].id == 2,
+            "the second run opens turn 2");
 }

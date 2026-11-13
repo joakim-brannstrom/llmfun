@@ -1,4 +1,5 @@
 #include "tui_api.h"
+#include "fnv1a.h"
 #include "tui.h"
 #include "tui_backend.h"
 
@@ -101,43 +102,48 @@ void mirrorLaneUpdate(::llmfun::tui::TuiState& state, const std::string& id,
     return agents.back();
 }
 
-/// Append one tool row to the agent's store under the cap: the cap
-/// counts `outputLines` entries and the streaming slot is never in the list, so
-/// the oldest entry is simply dropped. Ids come from the tab's own counter — the
-/// same minting the main writes use.
-void appendToolRow(::llmfun::tui::AgentStream& agent, ::llmfun::tui::ChatMessage row) {
-    auto& chat = agent.chat;
-    row.id = chat.outputLineNextId++;
-    chat.outputLines.push_back(std::move(row));
-    while (chat.outputLines.size() > ::llmfun::tui::kAgentChatMaxMessages)
-        chat.outputLines.pop_front();
+/// The tool block's flags: the same set D's tool upserts carry (collapsible,
+/// open by default, selectable).
+inline constexpr int kToolBlockFlags =
+    TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
+
+/// Open the agent's live typed turn if none is open: the turn id
+/// folds the agent id with the per-agent run counter. Answers the turn id.
+std::int64_t openTypedTurn(::llmfun::tui::AgentStream& agent) {
+    if (agent.typedTurnActive)
+        return agent.typedTurnId;
+    agent.typedTurnSeq++;
+    ::llmfun::tui::Fnv1a64 h;
+    h.foldBytes(agent.agentId);
+    h.fold(agent.typedTurnSeq);
+    agent.typedTurnId = static_cast<std::int64_t>(h.value());
+    agent.typedTurnActive = true;
+    agent.typedMessageCount = 0;
+    agent.typedHasCall = false;
+    ::llmfun::tui::store::TypedTurn turn;
+    turn.id = agent.typedTurnId;
+    turn.state = TuiTurnState_Running;
+    turn.messageCount = 0;
+    agent.chat.typedTurns.turnUpsert(turn);
+    return agent.typedTurnId;
 }
 
-/// Apply one stream snapshot to the agent's `ChatTab` with the main thread's park
-/// semantics (the `pendingStream` doc in `tui.h`): the first snapshot of an answer
-/// applies immediately, a snapshot inside the throttle window parks, and an
-/// unchanged resend is not a repaint (D re-sends the accumulated message every tick).
-void applyAgentSnapshot(::llmfun::tui::AgentStream& agent, ::llmfun::tui::ChatMessage snapshot,
-                        std::int64_t nowMs) {
-    auto& chat = agent.chat;
-    const auto& current = chat.pendingStream ? chat.pendingStreamMsg : chat.streamMsg;
-    if (chat.hasStreamMsg && snapshot.text == current.text &&
-        snapshot.thinking == current.thinking && snapshot.type == current.type) {
-        return; // unchanged: not a repaint
-    }
-    const bool fresh = !chat.hasStreamMsg;
-    const bool windowElapsed =
-        agent.streamLastApplyMs == 0 || nowMs < agent.streamLastApplyMs ||
-        nowMs - agent.streamLastApplyMs >= ::llmfun::tui::model::kStreamUpdateIntervalMs;
-    if (fresh || windowElapsed) {
-        chat.streamMsg = snapshot;
-        chat.hasStreamMsg = true;
-        chat.pendingStream = false;
-        agent.streamLastApplyMs = nowMs;
-    } else {
-        chat.pendingStreamMsg = snapshot;
-        chat.pendingStream = true;
-    }
+/// One block upsert into the agent's typed store, with the wire vocabulary the
+/// store speaks (the same fields the main tab's `tuiBlockUpsert` copies).
+void upsertTypedBlock(::llmfun::tui::AgentStream& agent, std::int64_t turnId, std::string id,
+                      std::string batchId, int kind, int status, int flags, std::string title,
+                      std::string meta, std::string body) {
+    ::llmfun::tui::store::TypedBlock b;
+    b.turnId = turnId;
+    b.id = std::move(id);
+    b.batchId = std::move(batchId);
+    b.title = std::move(title);
+    b.meta = std::move(meta);
+    b.body = std::move(body);
+    b.kind = kind;
+    b.status = status;
+    b.flags = flags;
+    agent.chat.typedTurns.blockUpsert(std::move(b));
 }
 
 } // namespace
@@ -562,53 +568,9 @@ void tuiAddLogMessageEx(TuiState* state, TuiLogLevel level, String summary, Stri
     tuiAddLogRecord(state, &record);
 }
 
-void tuiAddChatMessage(TuiState* state, ChatMessageParam param) {
-    if (!state || !state->inner)
-        return;
-    if (param.type < 0 || param.type >= TuiChatMessageType_Count) {
-        param.type = TuiChatMessageType_Assistant;
-    }
-    std::string summary_(param.summary.data ? param.summary.data : "",
-                         param.summary.data ? param.summary.len : 0);
-    std::string text_(param.text.data ? param.text.data : "", param.text.data ? param.text.len : 0);
-    std::string thinking_(param.thinking.data ? param.thinking.data : "",
-                          param.thinking.data ? param.thinking.len : 0);
-    auto cppType = static_cast<::llmfun::tui::ChatMessageType>(param.type);
-    ::llmfun::tui::tuiAddOutputLine(
-        *state->inner, ::llmfun::tui::ChatMessage{summary_, text_, thinking_, cppType,
-                                                  state->inner->chat.outputLineNextId++});
-}
-
-void tuiClearChatMessages(TuiState* state) {
-    if (!state || !state->inner)
-        return;
-    ::llmfun::tui::tuiClearOutput(*state->inner);
-}
-
-void tuiUpdateStreamChatMessage(TuiState* state, ChatMessageParam param) {
-    if (!state || !state->inner)
-        return;
-    std::string summary_;
-    std::string text_(param.text.data ? param.text.data : "", param.text.data ? param.text.len : 0);
-    std::string thinking_(param.thinking.data ? param.thinking.data : "",
-                          param.thinking.data ? param.thinking.len : 0);
-    auto cppType = ::llmfun::tui::ChatMessageType::Assistant;
-    ::llmfun::tui::tuiUpdateStreamChatMessage(
-        *state->inner, ::llmfun::tui::ChatMessage{summary_, text_, thinking_, cppType,
-                                                  state->inner->chat.StreamChatMessageId});
-}
-
-void tuiStreamChatMessageClear(TuiState* state) {
-    if (!state || !state->inner)
-        return;
-    ::llmfun::tui::tuiStreamChatMessageClear(*state->inner);
-}
-
 void tuiSetRuntimeStatus(TuiState* state, const TuiRuntimeStatus* status) {
     if (!state || !state->inner)
         return;
-    // Clearing is always honoured: a status set before a switch must still be droppable (the
-    // same rule `tuiSetRawLogOpen`'s close follows).
     if (!status) {
         ::llmfun::tui::tuiSetRuntimeStatus(*state->inner, ::llmfun::tui::model::RuntimeStatus{});
         return;
@@ -616,11 +578,6 @@ void tuiSetRuntimeStatus(TuiState* state, const TuiRuntimeStatus* status) {
     ::llmfun::tui::model::RuntimeStatus inbound;
     inbound.phase = status->phase;
     if (inbound.phase < 0 || inbound.phase >= ::llmfun::tui::model::kPhaseCount) {
-        // A phase this build does not know is idle, not a crash and not a neighbour: the sender may
-        // be newer than the UI, and its other numbers are still readable. Warned when the unknown
-        // ordinal changes, not once per update: a newer sender's 20 Hz stream would otherwise fill
-        // the log for a whole run with the same line. The memory is this state's (a test or a
-        // re-init starts clean); the counter is what makes the dedup observable.
         if (!state->inner->warnedUnknownPhase || status->phase != state->inner->lastUnknownPhase) {
             state->inner->warnedUnknownPhase = true;
             state->inner->lastUnknownPhase = status->phase;
@@ -721,6 +678,26 @@ void tuiInitQueryHistory(TuiState* state, const String* history, size_t count) {
     ::llmfun::tui::tuiInitQueryHistory(*state->inner, vec);
 }
 
+void tuiPipelineAgentStart(TuiState* state, String agentId, String task) {
+    if (!state || !state->inner)
+        return;
+    std::string id(agentId.data ? agentId.data : "", agentId.data ? agentId.len : 0);
+    if (id.empty())
+        return;
+    std::string t(task.data ? task.data : "", task.data ? task.len : 0);
+    auto& agent = agentStore(*state->inner, id);
+    // The run's query row, the exact block the main thread's turn start emits
+    // (`app_agent/package.d`'s turn open): one prose block on the query batch
+    // ("<turnId>#q", role "user"), so the drill-down's turn anatomy matches the
+    // main thread's - query -> work batches -> answer. Opening here owns the
+    // run's turn: `openTypedTurn` opens only when none is active, so every tick
+    // this run sends joins the already-open turn (one turn per run) and
+    // the query rides its own batch, a turn-level row the fold never owns.
+    const std::int64_t turnId = openTypedTurn(agent);
+    upsertTypedBlock(agent, turnId, "query", std::to_string(turnId) + "#q", TuiBlockKind_Prose,
+                     TuiBlockStatus_None, 0, "", "user", t);
+}
+
 void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage msg) {
     // Copied field by field across the boundary, so the layout is a wire contract: `tui_api.h`
     // states it, `llm/tui/package.d` pins the same size in a `static assert`, and
@@ -745,13 +722,19 @@ void tuiPipelineAgentUpdate(TuiState* state, String agentId, PipelineChatMessage
     auto& agent = agentStore(*state->inner, id);
     agent.lastUpdate = std::chrono::system_clock::now();
 
-    ::llmfun::tui::ChatMessage snapshot;
-    snapshot.id = ::llmfun::tui::ChatTab::StreamChatMessageId;
-    snapshot.type = role_ == "user" ? ::llmfun::tui::ChatMessageType::User
-                                    : ::llmfun::tui::ChatMessageType::Assistant;
-    snapshot.text = c;
-    snapshot.thinking = r;
-    applyAgentSnapshot(agent, snapshot, ::llmfun::tui::model::agentClockMs());
+    // One batch per step, one reasoning/content pair per batch - the shape the
+    // main thread's typed walk emits (`app_agent/package.d`'s per-batch walk).
+    // The payload's `batch` is D's per-response counter, so the ids are
+    // batch-scoped and a step's ticks still merge in place: the newest tick of
+    // a batch wins, per batch, and the next batch starts a fresh pair.
+    const std::int64_t turnId = openTypedTurn(agent);
+    const std::string batchId = std::to_string(turnId) + "#" + std::to_string(msg.batch);
+    upsertTypedBlock(agent, turnId, "content#" + std::to_string(msg.batch), batchId,
+                     TuiBlockKind_Prose, TuiBlockStatus_None, 0, "", role_, c);
+    if (!r.empty())
+        upsertTypedBlock(agent, turnId, "reasoning#" + std::to_string(msg.batch), batchId,
+                         TuiBlockKind_Reasoning, TuiBlockStatus_None, TuiBlockFlag_Collapsible, "",
+                         "", r);
 
     mirrorLaneUpdate(*state->inner, id, role_, c, tool, ctxUsed, msg.tokensPerSecond);
 }
@@ -765,13 +748,22 @@ void tuiPipelineAgentToolCall(TuiState* state, String agentId, TuiToolCallParam 
     std::string name(call.name.data ? call.name.data : "", call.name.data ? call.name.len : 0);
     std::string args(call.arguments.data ? call.arguments.data : "",
                      call.arguments.data ? call.arguments.len : 0);
+    std::string callId(call.id.data ? call.id.data : "", call.id.data ? call.id.len : 0);
 
     auto& agent = agentStore(*state->inner, id);
-    ::llmfun::tui::ChatMessage row;
-    row.type = ::llmfun::tui::ChatMessageType::ToolCall;
-    row.toolName = name;
-    row.toolArgs = args;
-    appendToolRow(agent, std::move(row));
+    const std::int64_t turnId = openTypedTurn(agent);
+    const std::string batchId = std::to_string(turnId) + "#" + std::to_string(call.batch);
+    // The call's block, Pending (the merged step's walk upserts Ok/Failed over
+    // it when the result lands). The in-flight slot remembers what a result
+    // merges into, because the result payload carries no call id.
+    upsertTypedBlock(agent, turnId, callId, batchId, TuiBlockKind_Tool, TuiBlockStatus_Pending,
+                     kToolBlockFlags, name, "", args);
+    agent.typedHasCall = true;
+    agent.typedCallId = std::move(callId);
+    agent.typedCallBatchId = batchId;
+    agent.typedCallName = std::move(name);
+    agent.typedCallBody = std::move(args);
+    agent.typedMessageCount++;
 }
 
 void tuiPipelineAgentToolResult(TuiState* state, String agentId, TuiToolResultParam result) {
@@ -784,15 +776,30 @@ void tuiPipelineAgentToolResult(TuiState* state, String agentId, TuiToolResultPa
                      result.name.data ? result.name.len : 0);
     std::string text(result.text.data ? result.text.data : "",
                      result.text.data ? result.text.len : 0);
+    const int status = result.ok != 0 ? TuiBlockStatus_Ok : TuiBlockStatus_Failed;
 
     auto& agent = agentStore(*state->inner, id);
-    ::llmfun::tui::ChatMessage row;
-    row.type = ::llmfun::tui::ChatMessageType::ToolResponse;
-    row.toolName = name;
-    row.toolResult = text;
-    row.toolOk = result.ok != 0;
-    appendToolRow(agent, std::move(row));
+    const std::int64_t turnId = openTypedTurn(agent);
+    const std::string batchId = std::to_string(turnId) + "#" + std::to_string(result.batch);
+    if (agent.typedHasCall && agent.typedCallName == name) {
+        // The merged step: the call's block gains its outcome, the result
+        // summary rides `meta` and the call's arguments stay the body - the
+        // same shape D's merged walk emits for a call+result pair.
+        upsertTypedBlock(agent, turnId, agent.typedCallId, agent.typedCallBatchId,
+                         TuiBlockKind_Tool, status, kToolBlockFlags, name, text,
+                         agent.typedCallBody);
+        agent.typedHasCall = false;
+        agent.typedMessageCount++;
+        return;
+    }
+    // No in-flight call to merge into: a result-only block under its own id,
+    // recorded never dropped.
+    agent.typedResultSeq++;
+    upsertTypedBlock(agent, turnId, "result#" + std::to_string(agent.typedResultSeq), batchId,
+                     TuiBlockKind_Tool, status, kToolBlockFlags, name, text, "");
+    agent.typedMessageCount++;
 }
+
 void tuiPipelineAgentDone(TuiState* state, String agentId) {
     if (!state || !state->inner)
         return;
@@ -803,18 +810,27 @@ void tuiPipelineAgentDone(TuiState* state, String agentId) {
     auto& agents = state->inner->left.agents;
     for (auto& agent : agents) {
         if (agent.agentId == id) {
-            auto& chat = agent.chat;
-            ::llmfun::tui::ChatMessage done =
-                chat.pendingStream ? chat.pendingStreamMsg : chat.streamMsg;
-            chat.pendingStream = false;
-            if (chat.hasStreamMsg && (!done.text.empty() || !done.thinking.empty())) {
-                done.id = chat.outputLineNextId++;
-                chat.outputLines.push_back(done);
-                while (chat.outputLines.size() > ::llmfun::tui::kAgentChatMaxMessages)
-                    chat.outputLines.pop_front();
+            if (agent.typedTurnActive) {
+                // The run's close: a call that never got its result shows
+                // Running, never a fabricated Ok (the stream-done flip,
+                // applied here because the payload has no earlier boundary);
+                // then the turn closes Done with its informational count.
+                if (agent.typedHasCall) {
+                    upsertTypedBlock(agent, agent.typedTurnId, agent.typedCallId,
+                                     agent.typedCallBatchId, TuiBlockKind_Tool,
+                                     TuiBlockStatus_Running, kToolBlockFlags, agent.typedCallName,
+                                     "", agent.typedCallBody);
+                    agent.typedHasCall = false;
+                }
+                ::llmfun::tui::store::TypedTurn turn;
+                turn.id = agent.typedTurnId;
+                turn.state = TuiTurnState_Done;
+                turn.messageCount = agent.typedMessageCount;
+                agent.chat.typedTurns.turnUpsert(turn);
+                agent.chat.typedTurns.evictForCapacity(turn.id);
+                agent.typedTurnActive = false;
+                agent.typedTurnId = 0;
             }
-            chat.hasStreamMsg = false;
-            chat.streamMsg = {};
             // Note: lastUpdate is NOT refreshed — done agents are evicted
             // first (LRU policy) if capacity is exceeded.
             ::llmfun::tui::model::finishAgentLane(state->inner->ui, id);
@@ -830,6 +846,130 @@ void tuiPipelineClear(TuiState* state) {
     state->inner->agentThreadAdapter = {};
     state->inner->ui.focusedAgent.clear();
     ::llmfun::tui::model::clearAgentLanes(state->inner->ui);
+}
+
+/* --- Thread turns/blocks (the C ABI over the typed store) ------------------
+ * The typed store's C entry points. Every one lands on the main tab's typed
+ * store (`chat.typedTurns`): the store merges in place, and the adapter's
+ * rebuild guard picks the change up on the next draw of the typed path. Null
+ * state / null inner / null payload pointers are the silent no-op every entry
+ * point here is (the legacy ones above set the same precedent).
+ */
+
+void tuiSetTurns(TuiState* state, const TuiTurn* turns, size_t turnCount, const TuiBlock* blocks,
+                 size_t blockCount) {
+    if (!state || !state->inner)
+        return;
+    const auto str = [](String s) { return std::string(s.data ? s.data : "", s.data ? s.len : 0); };
+    std::vector<::llmfun::tui::store::TypedTurn> typedTurns;
+    typedTurns.reserve(turnCount);
+    for (size_t k = 0; turns && k < turnCount; ++k) {
+        ::llmfun::tui::store::TypedTurn t;
+        t.id = turns[k].id;
+        t.state = turns[k].state;
+        t.messageCount = turns[k].messageCount;
+        typedTurns.push_back(t);
+    }
+    std::vector<::llmfun::tui::store::TypedBlock> typedBlocks;
+    typedBlocks.reserve(blockCount);
+    for (size_t k = 0; blocks && k < blockCount; ++k) {
+        const TuiBlock& b = blocks[k];
+        ::llmfun::tui::store::TypedBlock nb;
+        nb.turnId = b.turnId;
+        nb.id = str(b.id);
+        nb.batchId = str(b.batchId);
+        nb.title = str(b.title);
+        nb.meta = str(b.meta);
+        nb.body = str(b.body);
+        nb.kind = b.kind;
+        nb.status = b.status;
+        nb.flags = b.flags;
+        nb.durationMs = b.durationMs;
+        nb.tokensIn = b.tokensIn;
+        nb.tokensOut = b.tokensOut;
+        for (uint32_t p = 0; b.resultKeys && b.resultValues && p < b.resultCount; ++p)
+            nb.resultPairs.emplace_back(str(b.resultKeys[p]), str(b.resultValues[p]));
+        nb.resultRaw = str(b.resultRaw);
+        nb.resultMore = b.resultMore;
+        typedBlocks.push_back(std::move(nb));
+    }
+    state->inner->chat.typedTurns.setTurns(std::move(typedTurns), std::move(typedBlocks));
+    // A session switch re-emits the whole snapshot: no pin survives it -
+    // the new session's turns start unpinned, their groups on the mode.
+    state->inner->chat.rowPins.clear();
+    state->inner->chat.groupPins.clear();
+}
+
+void tuiTurnUpsert(TuiState* state, const TuiTurn* turn) {
+    if (!state || !state->inner || !turn)
+        return;
+    ::llmfun::tui::store::TypedTurn t;
+    t.id = turn->id;
+    t.state = turn->state;
+    t.messageCount = turn->messageCount;
+    state->inner->chat.typedTurns.turnUpsert(t);
+    state->inner->chat.typedTurns.evictForCapacity(turn->id);
+    // The eviction took whole turns out of the store; their pins would be memory
+    // kept for nothing - a pin for a turn nobody can draw. Prune by
+    // turn id, never by row index: the row list churns while a response streams.
+    auto& rowPins = state->inner->chat.rowPins;
+    for (auto it = rowPins.begin(); it != rowPins.end();) {
+        if (state->inner->chat.typedTurns.turnById(it->first) == nullptr)
+            it = rowPins.erase(it);
+        else
+            ++it;
+    }
+    auto& groupPins = state->inner->chat.groupPins;
+    for (auto it = groupPins.begin(); it != groupPins.end();) {
+        if (state->inner->chat.typedTurns.turnById(it->first) == nullptr)
+            it = groupPins.erase(it);
+        else
+            ++it;
+    }
+}
+
+void tuiBlockUpsert(TuiState* state, const TuiBlock* block) {
+    if (!state || !state->inner || !block)
+        return;
+    const auto str = [](String s) { return std::string(s.data ? s.data : "", s.data ? s.len : 0); };
+    ::llmfun::tui::store::TypedBlock nb;
+    nb.turnId = block->turnId;
+    nb.id = str(block->id);
+    nb.batchId = str(block->batchId);
+    nb.title = str(block->title);
+    nb.meta = str(block->meta);
+    nb.body = str(block->body);
+    nb.kind = block->kind;
+    nb.status = block->status;
+    nb.flags = block->flags;
+    nb.durationMs = block->durationMs;
+    nb.tokensIn = block->tokensIn;
+    nb.tokensOut = block->tokensOut;
+    for (uint32_t p = 0; block->resultKeys && block->resultValues && p < block->resultCount; ++p)
+        nb.resultPairs.emplace_back(str(block->resultKeys[p]), str(block->resultValues[p]));
+    nb.resultRaw = str(block->resultRaw);
+    nb.resultMore = block->resultMore;
+    state->inner->chat.typedTurns.blockUpsert(std::move(nb));
+}
+
+void tuiTurnRemove(TuiState* state, int64_t turnId) {
+    if (!state || !state->inner)
+        return;
+    state->inner->chat.typedTurns.turnRemove(turnId);
+    // The turn's pins die with the turn: a compression re-emit
+    // (turnRemove + re-upsert) leaves no stale pin behind.
+    state->inner->chat.rowPins.erase(turnId);
+    state->inner->chat.groupPins.erase(turnId);
+}
+
+void tuiThreadClear(TuiState* state) {
+    if (!state || !state->inner)
+        return;
+    state->inner->chat.typedTurns.threadClear();
+    // A clear is a reset: the pins are session-local state and
+    // the session's thread is gone.
+    state->inner->chat.rowPins.clear();
+    state->inner->chat.groupPins.clear();
 }
 
 /* Compile-time linkage between the C enum (tui_api.h) and the internal C++

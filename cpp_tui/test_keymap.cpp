@@ -3,8 +3,9 @@
 // Task 11's contract for quit and key hygiene (D-KEYMAP / D-ESC):
 //
 //   * one binding table, focus-aware: no two rows claim the same (chord, scope)
-//     pair, every `Action` of the registry is reachable through the table or
-//     through the `Esc` chain, a plain key never fires while a text field has
+//     pair, every `Action` of the registry is reachable through the table,
+//     through the `Esc` chain, or through its palette row, a plain key never
+//     fires while a text field has
 //     the keyboard, and an overlay is a trap except for the chords it lists
 //     itself;
 //   * `Ctrl+Q` quits, one press per quit, exactly one hint line in the UI log and
@@ -38,6 +39,7 @@
 #include "imgui/imgui_internal.h"
 
 #include "model/keymap.h"
+#include "test/typed_seed.h" // typed turn/block seeding
 #include "tui.h"
 #include "views/palette.h"
 #include "views/rawlog.h"
@@ -47,6 +49,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <string>
 #include <vector>
@@ -134,6 +137,10 @@ bool findDuplicatePair(const model::Keymap& keymap, std::string& what) {
 }
 
 void checkRegistry() {
+    // The harness state (defined with the interaction section below): the
+    // palette row walk needs a live state to read, and `paletteActions` answers
+    // from the model alone, so an unrendered state is enough.
+    extern llmfun::tui::TuiState g_state;
     g_phase = "R1 collisions";
     std::string what;
     check(!findDuplicatePair(model::defaultKeymap(), what),
@@ -158,6 +165,13 @@ void checkRegistry() {
                 reachable[static_cast<int>(action)] = true;
         }
     }
+    // The palette is the third entry point: an action with
+    // no chord and no escape step - `Collapse all` - is reachable through its
+    // row alone, so the table walk above would report the contract violated.
+    std::deque<std::string> paletteIds;
+    for (const views::PaletteItem& item : views::paletteActions(g_state, std::string(), paletteIds))
+        if (item.action != model::Action::None)
+            reachable[static_cast<int>(item.action)] = true;
     const model::EscapeContext escapeContexts[] = {{true, false, false},
                                                    {false, true, false},
                                                    {false, false, true},
@@ -316,7 +330,8 @@ void checkRegistry() {
 // ---------------------------------------------------------------------------
 
 ImTui::TScreen g_screen;
-TuiState g_state;
+llmfun::tui::TuiState g_state; // qualified: `typed_seed.h` also pulls the C
+                               // surface's global `::TuiState` handle in
 
 /// Render one frame. The quit scenarios set `quitRequested`, which makes the
 /// next render report "user terminated" - that is asserted where it matters, so
@@ -517,16 +532,12 @@ SessionEntry mkSession(const char* id, const char* title, const char* preview, i
 }
 
 void seedThread() {
-    g_state.chat.outputLines.clear();
-    g_state.chat.outputLineOpen.clear();
-    g_state.chat.expansionDefaultThroughId = 0;
-    g_state.chat.outputLineNextId = 1;
-    g_state.chat.outputLines.push_back(ChatMessage{"[1] run the tests", "run the tests", "",
-                                                   ChatMessageType::User,
-                                                   g_state.chat.outputLineNextId++});
-    g_state.chat.outputLines.push_back(ChatMessage{"[2] running", "partial output", "",
-                                                   ChatMessageType::Assistant,
-                                                   g_state.chat.outputLineNextId++});
+    // The typed store's two-turn thread: a done query turn and an in-progress
+    // answer turn (the same shape the replay + a live run leave).
+    typed_seed::Seeder seed{&g_state};
+    seed.add(typed_seed::Seeder::Msg::User, "run the tests");
+    seed.runStart("running");
+    seed.updateStream("partial output");
 }
 
 /// Fresh state for one scenario: three sessions, a two-message thread, no run,
@@ -576,14 +587,14 @@ void scenarioQuit() {
     resetClean();
     g_state.isLogActive = true;
     idle(1);
-    const std::size_t threadBefore = g_state.chat.outputLines.size();
+    const std::size_t threadBefore = g_state.chat.typedTurns.turnCount();
     std::string written;
     const bool quit = pressCtrl(ImGuiKey_Q, &written);
     check(quit, "S1: Ctrl+Q requests the quit");
     check(countMatchingLines(written, "Ctrl+Q -> Quit") == 1,
           "S1: the quit chord logs exactly one line (" +
               std::to_string(countMatchingLines(written, "Ctrl+Q -> Quit")) + ")");
-    check(g_state.chat.outputLines.size() == threadBefore,
+    check(g_state.chat.typedTurns.turnCount() == threadBefore,
           "S1: nothing was printed into the thread");
 
     g_phase = "S1 exact modifiers";
@@ -610,7 +621,7 @@ void scenarioQuitConfirm() {
     g_state.isLogActive = true;
     idle(1);
     check(!screenHas("Ctrl+Q again"), "S2: no prompt before the chord is pressed");
-    const std::size_t threadBefore = g_state.chat.outputLines.size();
+    const std::size_t threadBefore = g_state.chat.typedTurns.turnCount();
 
     std::string first;
     check(!pressCtrl(ImGuiKey_Q, &first), "S2: the first Ctrl+Q during a run does not quit");
@@ -623,7 +634,7 @@ void scenarioQuitConfirm() {
     idle(1);
     check(screenHas("Ctrl+Q again"),
           "S2: the armed confirmation is on screen (it is visible with the UI log off)");
-    check(g_state.chat.outputLines.size() == threadBefore,
+    check(g_state.chat.typedTurns.turnCount() == threadBefore,
           "S2: the prompt did not write anything into the thread");
 
     check(pressCtrl(ImGuiKey_Q), "S2: the second Ctrl+Q quits");
@@ -669,20 +680,21 @@ void scenarioEscapeChain() {
     check(input() == "draft text", "S4: the composer holds the draft");
     check(ImGui::GetIO().WantTextInput, "S4: the composer owns the keyboard");
     llmfun::tui::tuiSetReadyStatus(g_state, false); // a run is active
-    const std::size_t threadBefore = g_state.chat.outputLines.size();
+    const std::size_t threadBefore = g_state.chat.typedTurns.turnCount();
 
     // Step 2: the run is cancelled and nothing else happens.
     pressKey(ImGuiKey_Escape);
     check(g_state.cancelPending && g_state.cancelRequested, "S4: the first Esc cancels the run");
     check(input() == "draft text", "S4: it keeps the draft (one step per press)");
     check(!g_state.palette.open, "S4: it does not touch the overlay");
-    check(g_state.chat.outputLines.size() == threadBefore, "S4: the run's partial output is kept");
+    check(g_state.chat.typedTurns.turnCount() == threadBefore,
+          "S4: the run's partial output is kept");
 
     // Step 3: with the stop already requested, the same key clears the input.
     focusComposer();
     pressKey(ImGuiKey_Escape);
     check(input().empty(), "S4: the second Esc clears the input");
-    check(g_state.chat.outputLines.size() == threadBefore, "S4: the thread is still untouched");
+    check(g_state.chat.typedTurns.turnCount() == threadBefore, "S4: the thread is still untouched");
 
     // Step 4: nothing left to clear, so the keyboard is released.
     focusComposer();
@@ -878,9 +890,9 @@ void scenarioShellIntact() {
                                                       std::to_string(g_screen.ny) + ")");
     check(screenHas("llmfun"), "S9: the top bar's wordmark is on screen");
     check(screenHas("Ask anything"), "S9: the composer placeholder is on screen");
-    const std::size_t threadBefore = g_state.chat.outputLines.size();
+    const std::size_t threadBefore = g_state.chat.typedTurns.turnCount();
     pressKey(ImGuiKey_End);
-    check(g_state.chat.outputLines.size() == threadBefore, "S9: End does not touch the thread");
+    check(g_state.chat.typedTurns.turnCount() == threadBefore, "S9: End does not touch the thread");
 }
 
 void scenarioFocusMode() {

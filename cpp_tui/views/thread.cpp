@@ -1,11 +1,3 @@
-/// The thread region (views/thread.h owns the contract).
-///
-/// What this file does *not* do: draw a message. It asks the v4 adapter how many
-/// groups there are, which one sits where and how tall it expects to be, and then
-/// hands each visible group back to the adapter to draw in the current window's
-/// flow. The adapter is the only v4-aware code here (D-ADAPTER); the renderer it
-/// used to feed is gone (task 41), so what it owns now is the store walk and the
-/// block model.
 #include "views/thread.h"
 
 #include "views/blocks.h"
@@ -18,6 +10,7 @@
 #include "store/thread_store.h"
 #include "ui/input.h"
 #include "ui/layout.h"
+
 #include "ui/markdown.h"
 #include "ui/metrics.h"
 #include "ui/primitives.h"
@@ -112,22 +105,23 @@ constexpr const char* kTranscriptBackLabel = "Back to main";
 constexpr const char* kLoadEarlierLabel = "Load earlier";
 
 /// Copy one block's text (task 26): the focused block's `Copy` control, the block menu's
-/// `Copy` item (task 44) and the `y` key all land here, so a block has exactly one copy
+/// `Copy` item and the `y` key all land here, so a block has exactly one copy
 /// path - and the item that asked never chooses the text.
 ///
 /// What reaches the clipboard is the wrapper's decision, not this file's: a `Code`
 /// block copies its *code* (`ui::copyText`), everything else its body verbatim - and
-/// the wrapper is the only place allowed to know what a fence is.
+/// the wrapper is the only place allowed to know what a fence is. A batch owner
+/// copies its batch's content, and the fence answer is the content's own
+/// kind - the adapter's, never re-derived here.
 ///
 /// Answers whether the clipboard was written: a row with no body copies nothing, which is what
 /// keeps a body-less block (the `WORK` header, a stream row before its first token) from
 /// claiming a copy nobody got - and from raising the feedback item for one (task 45).
-bool copyBlock(store::ThreadStoreAdapter& thread, std::size_t groupIndex, std::size_t block,
-               const model::BlockDesc& desc) {
+bool copyBlock(store::ThreadStoreAdapter& thread, std::size_t groupIndex, std::size_t block) {
     const std::string body = thread.blockText(groupIndex, block);
     if (body.empty())
         return false;
-    const std::string text = ui::copyText(body, desc.kind == model::BlockKind::Code);
+    const std::string text = ui::copyText(body, thread.blockCopyIsCode(groupIndex, block));
     if (text.empty())
         return false;
     ImGui::SetClipboardText(text.c_str());
@@ -452,13 +446,7 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
     bool blockMenuOpen = false;
     for (const std::size_t index : drawn) {
         const store::GroupView group = thread.groupAt(index);
-        const float headerScreenY = ImGui::GetCursorScreenPos().y;
-        headerRows.emplace_back(group.id, headerScreenY - ImGui::GetWindowPos().y);
-        if (ts.firstGroupId == 0 && headerScreenY >= clipMin.y &&
-            headerScreenY + m.row <= clipMax.y) {
-            ts.firstGroupId = group.id;
-            ts.firstGroupY = headerScreenY;
-        }
+        const bool styleMinimal = thread.groupStyleIsMinimal(group.id);
         // The cell is what the caller reserves for the group: its width is the content
         // width and its height the adapter's own expectation. The hint is a hint - the
         // group is drawn in full even when it is taller.
@@ -469,23 +457,181 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
         if (!thread.beginGroup(index, cell))
             continue;
 
-        // One block per row (design §4.5): the group's header, then a message's thinking
+        // One block per row: the group's header, then a message's thinking
         // disclosure and its body row, or - for a work group - one row per step. The view
         // draws each row's chrome and the adapter draws the body under it, which is what
         // keeps markdown in the one translation unit that owns it.
         const std::size_t blocks = thread.blockCount(index);
-        for (std::size_t b = 0; b < blocks; ++b) {
-            const model::BlockDesc desc = thread.blockAt(index, b);
+        // The rows up front: the chips line draws between the header and the
+        // rows, so the live steps must be known before the first row is drawn -
+        // and the work loop below reads the prefetched rows instead of probing
+        // the adapter once per row.
+        //
+        // the query opens the turn above the WORK header and the answer
+        // closes it after the group - both are turn-level rows, addressed
+        // through the sentinels; a turn without one answers an empty descriptor
+        // (group == 0) and draws nothing. The WORK header renders only
+        // while the group has work rows - an empty group (the adapter's list
+        // always carries the header itself, so one entry) renders headerless
+        // and the turn's rows stand alone.
+        const model::BlockDesc queryRow = thread.blockAt(index, store::kQueryRow);
+        const model::BlockDesc answerRow = thread.blockAt(index, store::kAnswerRow);
+        const bool hasWorkRows = blocks >= 2;
+        std::vector<model::BlockDesc> rows;
+        rows.reserve(blocks);
+        if (hasWorkRows)
+            for (std::size_t b = 0; b < blocks; ++b)
+                rows.push_back(thread.blockAt(index, b));
+        // The live edge: the newest drawn group - the last one drawn, a turn
+        // only ever starting after every earlier one ended - draws exactly one
+        // live element, and only while its style is minimal: the fold is what
+        // the edge stands in for, and a drawn group's rows are on screen. The
+        // chips line while a call runs: one chip per RUNNING call, tool name
+        // only, orange, not clickable. Pending calls draw no chip. The line
+        // folds the moment a call goes dormant, mid-batch included - the
+        // selection re-reads the store's states every frame.
+        bool runningSteps = false;
+        std::vector<std::string> runningCalls;
+        for (const model::BlockDesc& d : rows) {
+            if (d.kind != model::BlockKind::ToolStep || d.state != model::BlockState::Running)
+                continue;
+            runningSteps = true;
+            runningCalls.push_back(d.summary);
+        }
+        // The chips line's one text, the store's own composer: the same
+        // `[bash] [grep]`, `+N` past three, no duplicates the owner header
+        // spells - a batch's names read one way, whichever row carries them.
+        const std::string liveChips = store::chipsText(runningCalls);
+        // Else the folded, count-only Thinking row while the model streams
+        // thinking: the live turn's last Thinking-kind row. The rows that
+        // follow it are its batch's calls - the store keeps first-emission
+        // order and a batch's reasoning precedes its calls - so the row draws
+        // while none of them has landed, and folds the moment one does. Its
+        // count is the response's live call count, pending calls included,
+        // read off those rows. A tool-less batch draws the bare word. A
+        // finished turn draws nothing: the fold is the live edge, so it dies
+        // with the turn.
+        const model::BlockDesc* liveThinking = nullptr;
+        if (!runningSteps && liveAnswer && index == drawn.back() && !rows.empty())
+            for (std::size_t b = rows.size(); b-- > 0;) {
+                if (rows[b].kind != model::BlockKind::Thinking)
+                    continue;
+                bool landed = false;
+                for (std::size_t k = b + 1; k < rows.size(); ++k)
+                    if (rows[k].kind == model::BlockKind::ToolStep &&
+                        rows[k].state != model::BlockState::Pending)
+                        landed = true;
+                if (!landed)
+                    liveThinking = &rows[b];
+                break;
+            }
+        // The live edge's one element: the chips line while a call runs,
+        // else the folded Thinking row while thinking streams, else nothing.
+        // `x`/`y` name the line's top-left and `w` its width. The answer is the
+        // height the caller must skip (one row or none).
+        const auto drawLiveEdge = [&](float x, float y, float w) -> float {
+            if (runningSteps) {
+                // One line: the composer's answer carries the spacing, so the
+                // view places the whole string and measures nothing.
+                const float chipsX = x + m.pad2;
+                lineAt(m, ui::Rect{chipsX, y, std::max(0.0f, x + w - chipsX), m.row, m.textGrid},
+                       chipsX, y, liveChips.c_str(), ui::ColorToken::stateWarn);
+                return m.row;
+            }
+            if (liveThinking != nullptr) {
+                // The folded Thinking row's own chrome: the closed disclosure
+                // mark, then the word - bare when the response carries no calls
+                // yet, the count once they exist - in the ink a folded Thinking
+                // row draws. Not clickable: the row is the stream's shadow, the
+                // list's own rows are the surface.
+                ui::iconMark(m, ui::Rect{x, y, m.gu, m.row, m.textGrid}, ui::Icon::DisclosureClosed,
+                             ui::ColorToken::textLow);
+                std::string text = "Thinking";
+                // The shadow's count is its own: the Tool rows after the
+                // shadow's row are the batch's calls (reasoning precedes
+                // calls), pending calls included. Not a descriptor
+                // field - the row is the stream's shadow, and the drawn
+                // rows are what the stream has.
+                int liveTools = 0;
+                for (auto it = liveThinking + 1; it != rows.data() + rows.size(); ++it)
+                    if (it->kind == model::BlockKind::ToolStep)
+                        ++liveTools;
+                if (liveTools > 0) {
+                    text += m.textGrid ? " - " : " \xC2\xB7 ";
+                    text += std::to_string(liveTools);
+                    text += liveTools == 1 ? " tool call" : " tool calls";
+                }
+                lineAt(m, ui::Rect{x, y, std::max(0.0f, w), m.row, m.textGrid}, x + m.gu + m.pad1,
+                       y, text.c_str(), ui::ColorToken::roleAgent);
+                return m.row;
+            }
+            return 0.0f;
+        };
+        // One draw for every row the turn owns - the query, the work rows, the
+        // answer - so the turn's anatomy shares the one chrome/body path. `b` is
+        // the row's adapter address: a work row's list index, a turn-level row's
+        // sentinel. The bool is the work list's continuation answer, and it is
+        // `true` everywhere: the fold is the rows' `visible`, so
+        // no early stop and no exception list survives in the view.
+        const auto drawRow = [&](const model::BlockDesc& desc, std::size_t b) -> bool {
             ui::Rect row;
             row.x = ImGui::GetCursorScreenPos().x;
             row.y = ImGui::GetCursorScreenPos().y;
             row.w = std::max(0.0f, ImGui::GetContentRegionAvail().x);
             row.cells = m.textGrid;
+            // The batch's tool cards: each card hangs indented beneath the
+            // batch's owner row, sharing one left rule - the indent starts
+            // before the row is measured, so the card's own body narrows with
+            // it. The predicate is ownership, not the mode: a
+            // minimal fold hides the card through `visible`, so the shape
+            // needs no mode test here.
+            const bool card = desc.batchOwned && desc.kind == model::BlockKind::ToolStep;
+            // The batch's children - thinking, content, cards - share one
+            // indent and one rail under the owner row; the owner itself stays
+            // at the group's level. The minimal live-tail segment keeps the
+            // turn-level indent: it draws with no owner row above it.
+            const bool child = !styleMinimal && (card || (desc.batchOwned && !desc.ownsBatch));
             const bool focused = desc.id() == ts.focus;
-            // The block menu's owner (task 44): the one block the state names may submit
+            // The loop's whole visibility contract: nothing else in the view
+            // may decide whether a row draws - the adapter already folded the
+            // owner's openness into it.
+            // A row the predicate hides paints nothing, takes no focus, opens
+            // no menu, and the loop's caller keeps going.
+            if (!desc.visible)
+                return true; // paints nothing, the loop's caller keeps going
+            // A body segment: no header, so no measure, no
+            // InvisibleButton, no menu, no copy chip and no `expanded` read -
+            // the body is the row, and the renderer owns its height. Under its
+            // owner it takes the batch's pad2, the same indent the batch's
+            // cards draw at. With no owner row on screen - the minimal
+            // live tail's segment - it takes the mark column instead: the
+            // body indent one grid cell in
+            // from the group's edge.
+            if (desc.bodySegment) {
+                const float segIndent = child ? m.pad2 : m.gu;
+                ImGui::Indent(segIndent);
+                ui::Rect body;
+                body.x = ImGui::GetCursorScreenPos().x;
+                body.y = ImGui::GetCursorScreenPos().y;
+                body.w = std::max(0.0f, ImGui::GetContentRegionAvail().x);
+                body.h = 0.0f; // the renderer measures what it draws
+                body.cells = m.textGrid;
+                thread.renderBlockBody(index, b, body);
+                ImGui::Unindent(segIndent);
+                return true;
+            }
+            if (child)
+                ImGui::Indent(m.pad2);
+            // The block menu's owner: the one block the state names may submit
             // the popup, so an ImGui id that a transcript reset recycled cannot re-own a
             // menu the user opened on a different message.
-            const BlockDraw draw{desc.expanded, focused, desc.id() == ts.menuBlockId};
+            // The openness is the adapter's resolved answer:
+            // the turn-level sentinels are hard-coded open on the wire side, a
+            // pin overrides, the live defaults decide the rest. The view keeps
+            // no mode special case: the fold's exceptions are clauses
+            // of the one predicate, never branches here.
+            const bool rowOpen = desc.expanded;
+            const BlockDraw draw{rowOpen, focused, desc.id() == ts.menuBlockId};
             row.h = measureBlockHeader(desc, m, draw);
             const BlockResult result = renderBlock(desc, row, m, draw);
             if (result.menuRequested) {
@@ -510,7 +656,7 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
                 toggledGroup = group.id;
             }
             if (result.copyPressed || (focused && copyKey)) {
-                if (copyBlock(thread, index, b, desc)) {
+                if (copyBlock(thread, index, b)) {
                     // The copy's answer (task 45): exactly one item per press, naming the block
                     // that was copied - the label the row itself draws, or its kind's word when
                     // the descriptor carried none. All three doors (the chip, the menu, `y`) reach
@@ -543,11 +689,98 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
                 thread.renderBlockBody(index, b, body);
                 ImGui::Unindent(m.pad1);
             }
+            if (card) {
+                // The shared left rule: from the card's top to its bottom,
+                // at the x the indent started from - every card's segment lands
+                // on the same vertical, so the batch's cards read as one rail.
+                const float cardBottom = ImGui::GetCursorScreenPos().y;
+                ImGui::Unindent(m.pad2);
+                const float ruleW = std::min(m.textGrid ? 1.0f : 2.0f, row.w);
+                if (ruleW > 0.0f && cardBottom > row.y)
+                    ui::rule(m, ui::Rect{row.x, row.y, ruleW, cardBottom - row.y, m.textGrid},
+                             ui::ColorToken::roleTool);
+            } else if (child) {
+                ImGui::Unindent(m.pad2);
+            }
             // A collapsed work group hides the rows under its header: the header *is* the
-            // group, and its steps are the rows `blockCount()` reports.
-            if (b == 0 && desc.kind == model::BlockKind::WorkGroup && !desc.expanded)
-                break;
+            // group, and its steps are the rows `blockCount()` reports. The fold
+            // itself is those rows' `visible == false`: the loop
+            // draws on, and each hidden row returns at the contract above - no
+            // early return, no kind list here. The turn's rows (the query, the
+            // answer) stand outside the fold, drawn before and after the loop,
+            // and the folded live group names its live steps in one chips line:
+            // its edge draws directly under the header, where no other row of
+            // the group renders. The edge is the newest drawn group's alone -
+            // an older fold's Running call is history the turn left behind, and
+            // it paints nothing.
+            if (b == 0 && desc.kind == model::BlockKind::WorkGroup && !desc.expanded) {
+                if (styleMinimal && group.typedTurn && index == drawn.back()) {
+                    const float used = drawLiveEdge(row.x, row.y + row.h, row.w);
+                    // The SetPos below is a boundary extension: ImGui only
+                    // tolerates one when an item validates it (a Dummy after
+                    // the fact). When nothing of the group draws past the
+                    // chips - every row the fold hid and no answer row - the
+                    // position has no consumer, so it is not moved: the
+                    // natural cursor after the chips line is what the group's
+                    // height hint and the next group's rows read.
+                    const bool drawsOn =
+                        answerRow.group != 0 ||
+                        std::any_of(rows.begin() + 1, rows.end(),
+                                    [](const model::BlockDesc& d) { return d.visible; });
+                    if (used > 0.0f && drawsOn)
+                        ImGui::SetCursorScreenPos(ImVec2(row.x, row.y + row.h + used));
+                }
+            }
+            return true; // the work list draws on
+        };
+        // The query row opens the turn, above the WORK header.
+        if (queryRow.group != 0)
+            drawRow(queryRow, store::kQueryRow);
+        // The anchor contract: the group's
+        // header row is the anchor, and it is sampled HERE - immediately
+        // before that row draws - so the anchor is the header's own row,
+        // never "the cursor after the query row": an owner row or a body
+        // segment the projection invents above the header cannot shift it.
+        // A fold changes how many rows follow the header, never where the
+        // header starts. A group with no work rows draws no header
+        // and records nothing: the cursor then sits on the next group's
+        // query row, which is not a header row.
+        if (hasWorkRows) {
+            const float headerScreenY =
+                ImGui::GetCursorScreenPos().y; // BEFORE the header row is drawn
+            headerRows.emplace_back(group.id, headerScreenY - ImGui::GetWindowPos().y);
+            if (ts.firstGroupId == 0 && headerScreenY >= clipMin.y &&
+                headerScreenY + m.row <= clipMax.y) {
+                ts.firstGroupId = group.id;
+                ts.firstGroupY = headerScreenY;
+            }
         }
+        if (hasWorkRows)
+            for (std::size_t b = 0; b < blocks; ++b)
+                if (!drawRow(rows[b], b))
+                    break;
+        // The answer closes the turn, after the group's rows.
+        if (answerRow.group != 0)
+            drawRow(answerRow, store::kAnswerRow);
+        // The live edge's second site, at the group's bottom after the answer
+        // row. The minimal style draws the edge under the folded header (the
+        // drawRow case), so a folded group never reaches this site, and a
+        // group whose style is not minimal draws its rows on screen - the
+        // edge has no row to stand in for there. What does reach it in the
+        // minimal style is a group the fold case does not cover: an untyped
+        // (legacy) group, and a group with no work rows - the edge stands in
+        // for whatever rows such a group hides, and a group with no live
+        // element draws nothing (the lambda answers 0).
+        const bool foldedRows =
+            styleMinimal && group.typedTurn && !rows.empty() && !rows[0].expanded;
+        if (index == drawn.back() && styleMinimal && !foldedRows) {
+            const ImVec2 edge = ImGui::GetCursorScreenPos();
+            (void)drawLiveEdge(edge.x, edge.y, std::max(0.0f, ImGui::GetContentRegionAvail().x));
+        }
+        // The hint keeps using the height the group drew (not the `cell.h`
+        // reservation): `endGroup` stores the drawn height, so a batch folding
+        // in place changes the next hint, never the anchor row sampled above
+        // the fold.
         thread.endGroup(index, cell);
     }
     ts.drawnGroups = drawn.size();

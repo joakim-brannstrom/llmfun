@@ -7,9 +7,8 @@ import std.conv : text;
 import std.format : format;
 import std.functional : toDelegate;
 
-import llm.app_agent; // AgentApp (cyclic package import, same pattern as slash.d)
+import llm.app_agent;
 import llm.app_agent.slash;
-import llmfun_tui; // TuiChatMessageType_* (C binding)
 
 import llm.config : effectiveAgentsMd;
 
@@ -24,7 +23,7 @@ package void registerSkillsCommands(ref SlashCommandRegistry registry) {
 
 /// `/skills`: list the loaded skills.
 private AgentStatus skillsHandler(ref AgentApp app, string arg) {
-    app.sendChatMessage(formatSkillsList(app), TuiChatMessageType_Assistant);
+    app.sendChatMessage(formatSkillsList(app));
     return AgentStatus.active;
 }
 
@@ -58,8 +57,7 @@ private string formatSkillsList(ref AgentApp app) {
 private AgentStatus refreshAgentMdHandler(ref AgentApp app, string arg) {
     const activeModel = app.llmConf.codeModels[app.llmConf.activeCodeModelIndex];
     if (!effectiveAgentsMd(app.llmConf, activeModel).enabled) {
-        app.sendChatMessage("AGENTS.md handling is disabled; nothing to refresh",
-                TuiChatMessageType_Assistant);
+        app.sendChatMessage("AGENTS.md handling is disabled; nothing to refresh");
         return AgentStatus.active;
     }
     app.rebuildSystemPrompt(true); // forceRefresh: clear the cache, re-summarize

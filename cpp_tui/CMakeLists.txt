@@ -118,6 +118,7 @@ add_library(llmfun_tui_lib STATIC
     views/thread.cpp
     views/topbar.cpp
     store/thread_store.cpp
+    store/typed_thread_store.cpp
 )
 
 target_include_directories(llmfun_tui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -375,7 +376,7 @@ target_link_libraries(test_clear_output_state PRIVATE
 # text/background pair the thread draws reaches 4.5:1 in both profiles, no ImGui
 # colour slot carries a role colour, and the canvas/surface pair stays neutral.
 # Links llmfun_tui_all_lib so the binary sees the real applyTheme() and the real
-# ChatMessageStyle defaults; runs headless (no ncurses, no PTY, no display):
+# token table; runs headless (no ncurses, no PTY, no display):
 #   ./test_theme_contrast [-v]
 add_executable(test_theme_contrast
     test_theme_contrast.cpp
@@ -842,6 +843,26 @@ add_executable(test_thread_window
 )
 add_dependencies(test_thread_window llmfun_tui_all_lib)
 target_link_libraries(test_thread_window PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
+)
+
+# the wire's upsert merge semantics, the step-count
+# weights and the typed-backed projection the adapter serves test-driven. Like
+# `test_thread_window` this needs no
+# ImGui context, no renderer and no terminal - the store answers from its
+# vectors and the typed projection never draws. `tui.h` (the ChatTab the typed
+# store rides in) needs the cpp_tui root on the path. Invoke from the build
+# dir: ./test_typed_thread_store [-v]
+add_executable(test_typed_thread_store
+    test_typed_thread_store.cpp
+)
+add_dependencies(test_typed_thread_store llmfun_tui_all_lib)
+target_include_directories(test_typed_thread_store PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_typed_thread_store PRIVATE
     llmfun_tui_all_lib
     imtui-ncurses
     ncursesw

@@ -534,8 +534,8 @@ void checkRows() {
     std::vector<views::SettingsRow> rows = views::settingsRows(sheet, prefs, m);
     // The three sections' rows plus one header each: the `ALL` section shows everything.
     const int headers = 3;
-    check(rows.size() == static_cast<std::size_t>(7 + headers),
-          "ALL lists the seven settings under three section headers (got " +
+    check(rows.size() == static_cast<std::size_t>(8 + headers),
+          "ALL lists the eight settings under three section headers (got " +
               std::to_string(rows.size()) + ")");
     check(std::strcmp(rows.front().label.c_str(), views::kSettingsSectionAppearance) == 0,
           "the list starts with the APPEARANCE header");
@@ -642,6 +642,28 @@ void checkRows() {
     check(rawLog != nullptr && rawLog->value == "error", "an out-of-range UiLog reads as `error`");
     prefs.rawLog = model::kRawLogInfo;
 
+    // The thread mode is a two-word choice: the row prints the same
+    // words `uiConfText()` writes, and a press flips between them.
+    rows = views::settingsRows(sheet, prefs, m);
+    const views::SettingsRow* threadMode = findRow(rows, views::kSettingsRowThreadMode);
+    check(threadMode != nullptr && threadMode->kind == views::SettingsRowKind::Choice,
+          "the thread mode is a choice");
+    check(threadMode != nullptr && threadMode->value == "minimal",
+          "and starts at the factory default");
+    check(threadMode != nullptr && threadMode->section == views::kSettingsSectionBehaviour,
+          "and lives in the behaviour section");
+    model::setThreadMinimal(prefs, false);
+    rows = views::settingsRows(sheet, prefs, m);
+    threadMode = findRow(rows, views::kSettingsRowThreadMode);
+    check(threadMode != nullptr && threadMode->value == "maximal", "and reads the pref's value");
+    if (threadMode != nullptr)
+        views::activate(sheet, prefs, m, *threadMode);
+    check(model::threadMinimal(prefs), "a press flips back to minimal");
+    if (threadMode != nullptr)
+        views::activate(sheet, prefs, m, *threadMode);
+    check(!model::threadMinimal(prefs), "and again to maximal");
+    model::setThreadMinimal(prefs, true);
+
     // The font scale is a fact on the grid and a choice in the pixel profile.
     rows = views::settingsRows(sheet, prefs, m);
     const views::SettingsRow* scale = findRow(rows, views::kSettingsRowFontScale);
@@ -694,7 +716,7 @@ void checkRows() {
     check(rows.empty(), "a search that only matches a note matches nothing");
     std::snprintf(sheet.search.data(), sheet.search.size(), "%s", "   ");
     rows = views::settingsRows(sheet, prefs, m);
-    check(rows.size() == 10, "a blanks-only search is no search");
+    check(rows.size() == 11, "a blanks-only search is no search");
     sheet.search.fill(0);
 }
 
@@ -712,7 +734,7 @@ void checkKeys() {
     appFrame(state, w, h);
     appFrame(state, w, h);
     check(state.settingsSheet.open, "the sheet is open");
-    check(state.settingsSheet.rowsBuilt == 10, "and built its rows");
+    check(state.settingsSheet.rowsBuilt == 11, "and built its rows");
 
     // The field takes the keyboard on open (the `F` request's one-shot answer), and what is typed
     // into it filters the rows live - the field owns the characters while it holds the keyboard.
@@ -752,7 +774,7 @@ void checkKeys() {
     state.settingsSheet.search.fill('\0');
     ++state.settingsSheet.searchSeq;
     appFrame(state, w, h);
-    check(state.settingsSheet.rowsBuilt == 10, "clearing the field restores every row");
+    check(state.settingsSheet.rowsBuilt == 11, "clearing the field restores every row");
 
     // Tab walks the sections, Shift+Tab walks them back, and the cycle wraps.
     check(state.settingsSheet.section == 0, "the strip starts on ALL");

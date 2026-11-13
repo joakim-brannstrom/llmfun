@@ -51,6 +51,9 @@ struct StreamMessage {
 struct StreamToolCall {
     string toolName;
     string arguments;
+    // The call id the server assigned to this invocation ("" if the server did
+    // not send one).
+    string id;
 
     string toPrettyString(size_t limit) @safe {
         import std.algorithm : min;
@@ -84,6 +87,17 @@ interface IStreamCallback {
 
 interface IStepEventEmitter {
     void stepEvent(ProcessResult result);
+}
+
+interface IRunDoneEmitter {
+    /// fired once per run, after the agent's last batch.
+    void runDone();
+}
+
+interface IRunStartEmitter {
+    /// fired once per run, before
+    /// the agent's first batch, with the task the node was invoked with.
+    void runStart(string task);
 }
 
 struct ServerStat {

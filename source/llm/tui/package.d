@@ -33,6 +33,102 @@ string toString(String s) {
     return r;
 }
 
+// Typed thread turn/block conversions
+//
+// The channel crossing carries D-owned strings (UiTurnData/UiBlockData): a
+// TuiBlock's `String` fields borrow caller memory, so they cannot survive the
+// queue hop between the sender thread and the UI actor. The actor converts back
+// to the wire structs with short-lived `String`s at C-call time (the C side
+// copies inbound strings).
+
+// Wire turn -> D-owned turn payload.
+UiTurnData toTurnData(TuiTurn t) {
+    return UiTurnData(t.id, t.state, t.messageCount);
+}
+
+// D-owned turn payload -> wire turn (no strings in the struct).
+TuiTurn toTuiTurn(UiTurnData t) {
+    TuiTurn r;
+    r.id = t.id;
+    r.state = t.state;
+    r.messageCount = t.messageCount;
+    return r;
+}
+
+UiBlockData toBlockData(TuiBlock b) {
+    string[] resultKeys, resultValues;
+    if (b.resultCount > 0 && b.resultKeys !is null && b.resultValues !is null) {
+        foreach (i; 0 .. b.resultCount) {
+            resultKeys ~= toString(cast(String) b.resultKeys[i]);
+            resultValues ~= toString(cast(String) b.resultValues[i]);
+        }
+    }
+    return UiBlockData(b.turnId, toString(b.id), toString(b.batchId),
+            toString(b.title), toString(b.meta), toString(b.body),
+            b.durationMs, b.tokensIn, b.tokensOut, b.kind, b.status, b.flags,
+            resultKeys, resultValues, toString(b.resultRaw), b.resultCount, b.resultMore);
+}
+
+TuiBlock toTuiBlock(UiBlockData b) {
+    assert(b.resultKeys.length == b.resultValues.length,
+            "UiBlockData result pair arrays must be the same length");
+    TuiBlock r;
+    r.turnId = b.turnId;
+    r.id = toTuiString(b.id);
+    r.batchId = toTuiString(b.batchId);
+    r.title = toTuiString(b.title);
+    r.meta = toTuiString(b.meta);
+    r.body = toTuiString(b.body);
+    r.durationMs = b.durationMs;
+    r.tokensIn = b.tokensIn;
+    r.tokensOut = b.tokensOut;
+    r.kind = b.kind;
+    r.status = b.status;
+    r.flags = b.flags;
+    String[] keyViews;
+    String[] valueViews;
+    foreach (i, const k; b.resultKeys)
+        keyViews ~= toTuiString(k);
+    foreach (i, const v; b.resultValues)
+        valueViews ~= toTuiString(v);
+    r.resultKeys = keyViews.ptr;
+    r.resultValues = valueViews.ptr;
+    r.resultRaw = toTuiString(b.resultRaw);
+    r.resultCount = cast(uint) b.resultKeys.length;
+    r.resultMore = b.resultMore;
+    return r;
+}
+
+TuiTurn[] toTuiTurns(UiTurnData[] turns) {
+    auto wire = new TuiTurn[turns.length];
+    foreach (i, ref const t; turns)
+        wire[i] = toTuiTurn(t);
+    return wire;
+}
+
+TuiBlock[] toTuiBlocks(UiBlockData[] blocks) {
+    auto wire = new TuiBlock[blocks.length];
+    foreach (i, ref b; blocks)
+        wire[i] = toTuiBlock(b);
+    return wire;
+}
+
+// Snapshot conversions the other way, for sinks that hand the payloads to the
+// channel/recording paths.
+UiTurnData[] toTurnDataAll(TuiTurn[] turns) {
+    auto out_ = new UiTurnData[turns.length];
+    foreach (i, ref const t; turns)
+        out_[i] = toTurnData(t);
+    return out_;
+}
+
+UiBlockData[] toBlockDataAll(TuiBlock[] blocks) {
+    auto out_ = new UiBlockData[blocks.length];
+    foreach (i, ref b; blocks)
+        out_[i] = toBlockData(b);
+    return out_;
+}
+
 // Extracts a short summary from a message (strips `#` headers, takes first line up to 100 chars).
 string shortSummary(string msg) nothrow {
     import std.algorithm : until;
@@ -281,7 +377,6 @@ TuiLogRecord makeLogRecord(TuiLogRecordData record, TuiLogAction action, string 
 void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
     if (!log.isSwapped)
         return;
-
     foreach (record; log.drainEntries) {
         auto apiRecord = makeLogRecord(record, TuiLogAction_None, null);
         tuiAddLogRecord(tuiState, &apiRecord);
@@ -333,13 +428,8 @@ struct TextUserInterface {
     }
 
     package {
-        string query_;
-        // what D last sent, replayed to the C++ frame on every render tick.
+        string query_; // what D last sent, replayed to the C++ frame on every render tick.
         UiRuntimeStatus runtimeStatus_;
-        // Last header summary computed by addChatMessage
-        string lastChatSummary;
-        // Set when the C frame reports user-terminated (GUI window close);
-        // consumed by the actor's postProcess exit handshake.
         bool userTerminated_;
     }
 
@@ -354,32 +444,6 @@ struct TextUserInterface {
         // whatever runs after the UI (D-RAWLOG's "and in the shutdown path").
         restoreRawLogLevel();
         tuiDestroyState(tuiState);
-    }
-
-    void addChatMessage(string msg, string thinking, TuiChatMessageType type,
-            size_t nr, MessageTime time) {
-        string summary;
-        if (nr == 0) {
-            summary = shortSummary(msg);
-        } else {
-            auto head = "[" ~ nr.text ~ "]";
-            auto body = shortSummary(msg);
-            auto tail = timeSuffix(time);
-            if (body.empty) {
-                summary = tail.empty ? head : head ~ " " ~ tail;
-            } else {
-                summary = head ~ " " ~ body ~ tail;
-            }
-        }
-        lastChatSummary = summary;
-        auto s = String(summary.ptr, summary.length);
-        auto q = String(msg.ptr, msg.length);
-        auto t = String(thinking.ptr, thinking.length);
-        tuiAddChatMessage(tuiState, ChatMessageParam(s, q, t, type));
-    }
-
-    void clearChat() {
-        tuiClearChatMessages(tuiState);
     }
 
     void setIniFile(Path path) {
@@ -418,18 +482,6 @@ struct TextUserInterface {
         return tuiTakeCancel(tuiState) != 0;
     }
 
-    void streamChat(string msg, string thinking) {
-        auto s = String(null, 0);
-        auto q = String(msg.ptr, msg.length);
-        auto t = String(thinking.ptr, thinking.length);
-        tuiUpdateStreamChatMessage(tuiState, ChatMessageParam(s, q, t,
-                TuiChatMessageType_Assistant));
-    }
-
-    void streamChatDone() {
-        tuiStreamChatMessageClear(tuiState);
-    }
-
     void pipelineMessage(UiPipelineStreamChatMessage msg) {
         auto id = msg.agentId.toTuiString;
         auto content = msg.content.toTuiString;
@@ -438,13 +490,19 @@ struct TextUserInterface {
         auto currentTool = msg.currentTool.toTuiString;
         String finish;
         tuiPipelineAgentUpdate(tuiState, id, PipelineChatMessage(content: content, reasoning: reasoning, role: role,
-                finishReason: finish, currentTool: currentTool, contextUsed: msg.contextUsed,
-                contextMax: msg.contextMax, tokensPerSecond: msg.tokensPerSecond));
+                finishReason: finish, currentTool: currentTool, contextUsed: msg.contextUsed, contextMax: msg
+                .contextMax, tokensPerSecond: msg.tokensPerSecond, batch: msg.batch));
     }
 
     void pipelineMessage(UiPipelineStreamDone msg) {
         auto id = msg.agentId.toTuiString;
         tuiPipelineAgentDone(tuiState, id);
+    }
+
+    void pipelineMessage(UiPipelineAgentStart msg) {
+        auto id = msg.agentId.toTuiString;
+        auto task = msg.task.toTuiString;
+        tuiPipelineAgentStart(tuiState, id, task);
     }
 
     void pipelineToolCall(UiPipelineToolCall msg) {
@@ -453,7 +511,7 @@ struct TextUserInterface {
         auto arguments = msg.arguments.toTuiString;
         auto callId = msg.id.toTuiString;
         tuiPipelineAgentToolCall(tuiState, id, TuiToolCallParam(name: name,
-                arguments: arguments, id: callId));
+                arguments: arguments, id: callId, batch: msg.batch));
     }
 
     void pipelineToolResult(UiPipelineToolResult msg) {
@@ -461,11 +519,31 @@ struct TextUserInterface {
         auto name = msg.name.toTuiString;
         auto text = msg.text.toTuiString;
         tuiPipelineAgentToolResult(tuiState, id, TuiToolResultParam(name: name,
-                ok: msg.ok, text: text));
+                ok: msg.ok, text: text, batch: msg.batch));
     }
 
     void pipelineClear() {
         tuiPipelineClear(tuiState);
+    }
+
+    void setTurns(TuiTurn[] turns, TuiBlock[] blocks) {
+        tuiSetTurns(tuiState, turns.ptr, turns.length, blocks.ptr, blocks.length);
+    }
+
+    void turnUpsert(TuiTurn turn) {
+        tuiTurnUpsert(tuiState, &turn);
+    }
+
+    void blockUpsert(TuiBlock block) {
+        tuiBlockUpsert(tuiState, &block);
+    }
+
+    void turnRemove(long turnId) {
+        tuiTurnRemove(tuiState, turnId);
+    }
+
+    void threadClear() {
+        tuiThreadClear(tuiState);
     }
 
     void useUiLogFile(bool useFile) {
@@ -620,25 +698,25 @@ interface TUIListener {
 }
 
 interface TUICommands {
-    void uiMsg(UiChatMessage m);
-    void uiMsg(UiChatThinkMessage m);
-    void uiMsg(UiFinalAnswer m);
     void uiMsg(UiRuntimeStatus m);
     void uiMsg(UiInitHistory m);
     void uiMsg(UiSessionList m);
-    void uiMsg(UiStreamChatMessage m);
     void uiMsg(UiLogFile m);
     void uiMsg(UiPipelineStreamChatMessage m);
     void uiMsg(UiPipelineStreamDone m);
+    void uiMsg(UiPipelineAgentStart m);
     void uiMsg(UiPipelineToolCall m);
     void uiMsg(UiPipelineToolResult m);
     void uiMsg(UiDropReport m);
-    void uiStreamChatDone();
     void uiPipelineClear();
-    void uiClearChat();
     void uiAgentBusy();
     void uiAgentReady();
     void uiTerminate();
+    void uiMsg(UiSetTurns m);
+    void uiMsg(UiTurnUpsert m);
+    void uiMsg(UiBlockUpsert m);
+    void uiMsg(UiTurnRemove m);
+    void uiThreadClear();
 }
 
 // Human-readable TuiBackendKind name for the startup log line.
@@ -679,7 +757,6 @@ void playNotification() {
             hasPlayer = false;
         }
     }, (None _) {});
-
 }
 
 class TextUserInterfaceActor : TUICommands {
@@ -847,16 +924,16 @@ class TextUserInterfaceActor : TUICommands {
     }
 
     /** Non-destructive peek over the actor's mailbox before the render -
-     * pending work means the render must not park.
-     */
+      * pending work means the render must not park.
+      */
     package bool hasPending() @safe {
         return selfRef.hasPending();
     }
 
     /** How many incoming messages are pending: the count twin of the
-     * `hasPending()` peek above (same incoming-only semantics - see there
-     * for the stash/delayed/repeating reasoning). The mailbox must hold
-     * exactly the one re-armed tick, never an accumulated pile. */
+      * `hasPending()` peek above (same incoming-only semantics - see there
+      * for the stash/delayed/repeating reasoning). The mailbox must hold
+      * exactly the one re-armed tick, never an accumulated pile. */
     package size_t pendingCount() @safe {
         return selfRef.pendingCount();
     }
@@ -970,18 +1047,6 @@ class TextUserInterfaceActor : TUICommands {
         postProcess();
     }
 
-    void uiMsg(UiChatMessage a) {
-        ui.addChatMessage(a.msg, null, a.type, a.nr, a.time);
-    }
-
-    void uiMsg(UiChatThinkMessage a) {
-        ui.addChatMessage(a.msg, a.thinking, a.type, a.nr, a.time);
-    }
-
-    void uiMsg(UiFinalAnswer a) {
-        ui.addChatMessage(a.msg, null, TuiChatMessageType_FinalAnswer, a.nr, a.time);
-    }
-
     void uiMsg(UiRuntimeStatus a) {
         ui.setRuntimeStatus(a);
     }
@@ -998,10 +1063,6 @@ class TextUserInterfaceActor : TUICommands {
         ui.setDropChipStatus(m.chipId, m.state, m.finalPath, m.display);
     }
 
-    void uiMsg(UiStreamChatMessage m) {
-        ui.streamChat(m.msg, m.thinking);
-    }
-
     void uiMsg(UiLogFile a) {
         // do not call postProcess because this is only an initialization
         ui.useUiLogFile(a.useFile);
@@ -1015,6 +1076,10 @@ class TextUserInterfaceActor : TUICommands {
         ui.pipelineMessage(m);
     }
 
+    void uiMsg(UiPipelineAgentStart m) {
+        ui.pipelineMessage(m);
+    }
+
     void uiMsg(UiPipelineToolCall m) {
         ui.pipelineToolCall(m);
     }
@@ -1023,24 +1088,40 @@ class TextUserInterfaceActor : TUICommands {
         ui.pipelineToolResult(m);
     }
 
-    void uiStreamChatDone() {
-        ui.streamChatDone();
+    void uiMsg(UiSetTurns m) {
+        ui.setTurns(toTuiTurns(m.turns), toTuiBlocks(m.blocks));
+    }
+
+    void uiMsg(UiTurnUpsert m) {
+        ui.turnUpsert(toTuiTurn(m.turn));
+    }
+
+    void uiMsg(UiBlockUpsert m) {
+        ui.blockUpsert(toTuiBlock(m.block));
+    }
+
+    void uiMsg(UiTurnRemove m) {
+        ui.turnRemove(m.turnId);
+    }
+
+    void uiThreadClear() {
+        ui.threadClear();
     }
 
     void uiPipelineClear() {
         ui.pipelineClear();
     }
 
-    void uiClearChat() {
-        ui.clearChat;
-    }
+    package bool agentReady_ = true;
 
     void uiAgentBusy() {
-        ui.setReadyStatus(false);
+        agentReady_ = false;
+        ui.setReadyStatus(agentReady_);
     }
 
     void uiAgentReady() {
-        ui.setReadyStatus(true);
+        agentReady_ = true;
+        ui.setReadyStatus(agentReady_);
         playNotification();
     }
 
@@ -1063,38 +1144,6 @@ class TextUserInterfaceActor : TUICommands {
 
 struct UiInitHistory {
     string[] queries;
-}
-
-struct UiChatMessage {
-    string msg;
-    TuiChatMessageType type = TuiChatMessageType_Assistant;
-    size_t nr = 0; // 0 = display-only line (undecorated)
-    MessageTime time = NoProcessingTime();
-}
-
-struct UiChatThinkMessage {
-    string msg;
-    string thinking;
-    TuiChatMessageType type = TuiChatMessageType_Assistant;
-    size_t nr = 0;
-    MessageTime time = NoProcessingTime();
-}
-
-struct UiStreamChatMessage {
-    string msg;
-    string thinking;
-}
-
-struct UiStreamChatDone {
-}
-
-struct UiFinalAnswer {
-    string msg;
-    size_t nr = 0;
-    MessageTime time = NoProcessingTime();
-}
-
-struct UiClearChat {
 }
 
 /// The UI's phase vocabulary, mirrored from the C side's `model::Phase`
@@ -1159,10 +1208,17 @@ struct UiPipelineStreamChatMessage {
     string currentTool;
     long contextUsed;
     long contextMax;
+    long batch;
 }
 
 struct UiPipelineStreamDone {
     string agentId;
+}
+
+struct UiPipelineAgentStart {
+    string agentId;
+    /// The task the node was invoked with
+    string task;
 }
 
 struct UiPipelineToolCall {
@@ -1170,6 +1226,7 @@ struct UiPipelineToolCall {
     string name;
     string arguments;
     string id;
+    long batch;
 }
 
 struct UiPipelineToolResult {
@@ -1177,6 +1234,7 @@ struct UiPipelineToolResult {
     string name;
     int ok;
     string text;
+    long batch;
 }
 
 struct UiPipelineClear {
@@ -1206,4 +1264,50 @@ struct UiDropReport {
     int state; // TuiChipStatus_*
     Path finalPath;
     string display;
+}
+
+// One turn of the typed thread store.
+struct UiTurnData {
+    long id; // persisted turnId (0 = unstamped)
+    int state; // TuiTurnState_*
+    int messageCount; // informational: LLM messages the turn covers
+}
+
+// One block of the typed thread store.
+struct UiBlockData {
+    long turnId;
+    string id; // tool callId | "answer" | "query" | "content#<n>" | ...
+    string batchId; // "<turnId>#<batchIndex>" (per-response groups); "<turnId>#q" for query/vision/notice
+    string title; // tool block: tool name
+    string meta; // tool block: result summary
+    string body; // display body
+    long durationMs;
+    long tokensIn;
+    long tokensOut;
+    int kind; // TuiBlockKind_*
+    int status; // TuiBlockStatus_*
+    int flags; // TuiBlockFlags bits
+    string[] resultKeys;
+    string[] resultValues;
+    string resultRaw;
+    uint resultCount; // informational: the sender's pair count (== resultKeys.length when set)
+    uint resultMore; // pairs past the sender's cap, 0 when under
+}
+
+// One snapshot of the whole thread: turns + their blocks.
+struct UiSetTurns {
+    UiTurnData[] turns;
+    UiBlockData[] blocks;
+}
+
+struct UiTurnUpsert {
+    UiTurnData turn;
+}
+
+struct UiBlockUpsert {
+    UiBlockData block;
+}
+
+struct UiTurnRemove {
+    long turnId;
 }

@@ -16,9 +16,9 @@
 //     pinned, a snapshot round-trips into SessionEntry unchanged, and the fields
 //     the ABI must not carry (createdAt, unread, pinned) are absent;
 //   - the pipeline lane fields: PipelineChatMessage's size and offsets are
-//     pinned, the numbers, the tool name, and the rate round-trip into the
-//     lane the Agents tab draws, and `0/0` (no reading) is told apart from
-//     `0/8192` (a real zero);
+//     pinned, the numbers, the tool name, the rate, and the batch index
+//     round-trip into the lane the Agents tab draws, and `0/0` (no reading) is
+//     told apart from `0/8192` (a real zero);
 //   - the drop-chip seams: the two pop-one queues carry each drop's chip id,
 //     the by-id setter no-ops for an unknown id or ordinal, the snapshot
 //     reads the row in creation order with the workarea paths, the clear
@@ -58,8 +58,9 @@
 //
 // Headless — run from the build dir:  ./test_tui_api_v4
 
-#include "imtui/imtui.h" // ImGui:: context bookkeeping points
-#include "tui.h"         // llmfun::tui::debugIsFrameThread (cancel-flag case)
+#include "imtui/imtui.h"              // ImGui:: context bookkeeping points
+#include "store/typed_thread_store.h" // kBlockFlagHidden mirrors the wire flag
+#include "tui.h"                      // llmfun::tui::debugIsFrameThread (cancel-flag case)
 #include "tui_api.h"
 
 #include <array>
@@ -1009,8 +1010,8 @@ void caseSessionRowFields() {
 void casePipelineLaneFields() {
     g_where = "case 1f: PipelineChatMessage lane fields";
 
-    static_assert(sizeof(PipelineChatMessage) == 104,
-                  "PipelineChatMessage is 104 bytes on the 64-bit ABI");
+    static_assert(sizeof(PipelineChatMessage) == 112,
+                  "PipelineChatMessage is 112 bytes on the 64-bit ABI (v16 appended the batch)");
     static_assert(offsetof(PipelineChatMessage, content) == 0, "content keeps offset 0");
     static_assert(offsetof(PipelineChatMessage, reasoning) == 16, "reasoning keeps offset 16");
     static_assert(offsetof(PipelineChatMessage, role) == 32, "role keeps offset 32");
@@ -1023,25 +1024,35 @@ void casePipelineLaneFields() {
     static_assert(offsetof(PipelineChatMessage, contextMax) == 88, "contextMax sits at offset 88");
     static_assert(offsetof(PipelineChatMessage, tokensPerSecond) == 96,
                   "tokensPerSecond sits at offset 96");
+    static_assert(offsetof(PipelineChatMessage, batch) == 104,
+                  "batch is appended at offset 104 (v16)");
     static_assert(sizeof(PipelineChatMessage::contextUsed) == 8 &&
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
-    static_assert(TUI_API_VERSION == 11,
+    static_assert(TUI_API_VERSION == 16,
                   "the lane contract changed; bump one version per ABI event");
+    static_assert(llmfun::tui::store::kBlockFlagHidden == TuiBlockFlag_Hidden,
+                  "the store's flag mirror must track the wire flag it mirrors");
     static_assert(sizeof(SessionItem) == 80, "SessionItem is unaffected by the lane fields");
 
-    // The tool-call pair's wire pins: three Strings for a call. The result's
+    // The tool-call pair's wire pins: three Strings plus the batch for a call.
+    // The result's
     // `int ok` rides between two Strings and pads to the String alignment.
-    static_assert(sizeof(TuiToolCallParam) == 48,
-                  "TuiToolCallParam is three Strings on the 64-bit ABI");
+    static_assert(sizeof(TuiToolCallParam) == 56,
+                  "TuiToolCallParam is three Strings plus the batch on the 64-bit ABI");
     static_assert(offsetof(TuiToolCallParam, name) == 0, "the call's name keeps offset 0");
     static_assert(offsetof(TuiToolCallParam, arguments) == 16, "the arguments sit at offset 16");
     static_assert(offsetof(TuiToolCallParam, id) == 32, "the call id sits at offset 32");
-    static_assert(sizeof(TuiToolResultParam) == 40,
-                  "TuiToolResultParam pads the int to the String alignment (40 bytes)");
+    static_assert(offsetof(TuiToolCallParam, batch) == 48,
+                  "the call's batch is appended at offset 48 (v16)");
+    static_assert(
+        sizeof(TuiToolResultParam) == 48,
+        "TuiToolResultParam pads the int to the String alignment and appends the batch (48 bytes)");
     static_assert(offsetof(TuiToolResultParam, name) == 0, "the result's name keeps offset 0");
     static_assert(offsetof(TuiToolResultParam, ok) == 16, "ok sits at offset 16");
     static_assert(offsetof(TuiToolResultParam, text) == 24, "the result text sits at offset 24");
+    static_assert(offsetof(TuiToolResultParam, batch) == 40,
+                  "the result's batch is appended at offset 40 (v16)");
 
     // NULL-safe, and an empty agent id still registers nothing.
     tuiPipelineAgentUpdate(nullptr, makeStr("coder"), PipelineChatMessage{});
@@ -1049,6 +1060,12 @@ void casePipelineLaneFields() {
     expect(state != nullptr, "tuiCreateState succeeds");
     tuiPipelineAgentUpdate(state, String{nullptr, 0}, PipelineChatMessage{});
     expect(state->inner->ui.agents.empty(), "an update with no agent id registers no lane");
+
+    // The start's own null-safety, the same contract the header states: a NULL
+    // state or an empty agent id is a silent no-op (no lane, no store, no turn).
+    tuiPipelineAgentStart(nullptr, makeStr("coder"), makeStr("the task"));
+    tuiPipelineAgentStart(state, String{nullptr, 0}, makeStr("the task"));
+    expect(state->inner->left.agents.empty(), "a start with no agent id opens no turn");
 
     const std::string content =
         "Let me read that file.\n--- Tool ---\nread_file\n```json\n{}\n```\n";
@@ -1066,15 +1083,15 @@ void casePipelineLaneFields() {
     // A second tick exercises the update path (the first one registered the lane).
     tuiPipelineAgentUpdate(state, makeStr("coder"), msg);
 
-    // The v4 store keeps the snapshot in the agent's own ChatTab stream slot.
-    expect(state->inner->left.agents.size() == 1, "the v4 store registers the agent once");
-    expect(state->inner->left.agents[0].chat.hasStreamMsg,
-           "the streamed tick fills the agent's stream slot");
-    expect(state->inner->left.agents[0].chat.streamMsg.text == content,
-           "...and the agent's stream text, unchanged");
-    expect(state->inner->left.agents[0].chat.streamMsg.id ==
-               llmfun::tui::ChatTab::StreamChatMessageId,
-           "the stream slot keeps the reserved stream id");
+    // The typed store keeps the tick in the agent's own run turn: the
+    // content-so-far block merges in place (same id every tick), so the newest
+    // tick wins - the typed stream updater's contract, mirrored for the
+    // coarser pipeline payload.
+    expect(state->inner->left.agents.size() == 1, "the typed store registers the agent once");
+    const auto& agentChat = state->inner->left.agents[0].chat;
+    expect(agentChat.typedTurns.turnCount() == 1, "the streamed tick opens the agent's run turn");
+    expect(agentChat.typedTurns.blockCount(agentChat.typedTurns.turnAt(0).id) >= 1,
+           "the streamed tick fills the agent's content block");
 
     // ... and the lane the Agents tab draws carries the count and the tool name as fields. The
     // lane is re-fetched for every assertion: a reference into the vector would dangle - turning a
@@ -1136,125 +1153,91 @@ void casePipelineLaneFields() {
                lane().currentTool == "write_file",
            "tuiPipelineAgentDone keeps the lane's last numbers");
 
-    // The per-step commit: the streaming entry folds into the store and the
-    // slot resets, so the next step's first snapshot starts fresh.
-    expect(state->inner->left.agents[0].chat.outputLines.size() == 1,
-           "Done folds the streaming entry into the store");
-    expect(state->inner->left.agents[0].chat.outputLines.front().text == plainContent,
-           "the folded row carries the last streamed text");
-    expect(!state->inner->left.agents[0].chat.hasStreamMsg,
-           "...and the stream slot is reset for the next step");
+    // The run's close: the typed turn closes Done, so the
+    // next step's first upsert opens a fresh turn.
+    expect(state->inner->left.agents[0].chat.typedTurns.turnCount() == 1,
+           "Done keeps the run's single turn in the agent's typed store");
+    expect(state->inner->left.agents[0].chat.typedTurns.turnAt(0).state ==
+               static_cast<std::int32_t>(TuiTurnState_Done),
+           "Done closes the run turn as Done, not live");
 
     tuiDestroyState(state);
 }
 
-// The agent store's tool rows: a call (and its result) appends a tool row to the
-// agent's own ChatTab - before any lane exists, under the 10-row cap, with ids minted from
-// the tab's own counter - and the streaming slot is never touched on the tool paths.
-void caseAgentToolEvents() {
-    g_where = "case: agent store tool events";
+// The thread turn/block wire types: the layout the D side
+// asserts from the other direction (source/llm/tui/package.d). Declare-only
+// here - this case pins the ABI and calls nothing. The entry-pointer pins below
+// odr-use the five entry points, so a missing definition still fails the link:
+// the tripwire that keeps the header and the store definitions in step.
+void caseThreadTurnBlockFields() {
+    g_where = "case: turn/block layout";
 
-    // NULL-safe: no crash, and an empty agent id registers nothing.
-    tuiPipelineAgentToolCall(nullptr, makeStr("x"), TuiToolCallParam{});
-    tuiPipelineAgentToolResult(nullptr, makeStr("x"), TuiToolResultParam{});
-    TuiState* state = tuiCreateState();
-    expect(state != nullptr, "tuiCreateState succeeds");
-    tuiPipelineAgentToolCall(state, String{nullptr, 0}, TuiToolCallParam{});
-    expect(state->inner->left.agents.empty(), "an empty agent id registers no store entry");
+    static_assert(TUI_API_VERSION == 16,
+                  "this case pins the current generation (v16); bump one version per ABI event");
 
-    // Upsert-before-lane: a tool event may arrive before the first streamed tick. The
-    // store entry exists on demand; the lane mirror stays untouched (lanes are born
-    // only in mirrorLaneUpdate).
-    TuiToolCallParam call{};
-    call.name = makeStr("read_file");
-    call.arguments = makeStr("{\"path\":\"src/main.d\"}");
-    call.id = makeStr("call-1");
-    tuiPipelineAgentToolCall(state, makeStr("coder"), call);
-    expect(state->inner->left.agents.size() == 1, "the first tool event creates the store entry");
-    expect(state->inner->ui.agents.empty(), "a tool event creates no lane");
+    // TuiTurn: int64 + 3x int32 (+ a 4-byte tail pad) = 24 bytes on the 64-bit
+    // ABI. The state and the message count follow the id; the reserved word
+    // closes the struct.
+    static_assert(sizeof(TuiTurn) == 24, "TuiTurn is 24 bytes on the 64-bit ABI");
+    static_assert(offsetof(TuiTurn, id) == 0, "id sits at offset 0");
+    static_assert(offsetof(TuiTurn, state) == 8, "state sits at offset 8");
+    static_assert(offsetof(TuiTurn, messageCount) == 12, "messageCount sits at offset 12");
+    static_assert(offsetof(TuiTurn, reserved) == 16, "reserved sits at offset 16");
 
-    const auto& store = state->inner->left.agents.front();
-    expect(store.agentId == "coder", "the store entry is named after the agent id");
-    expect(store.chat.outputLines.size() == 1, "one row per event");
-    expect(store.chat.outputLines.front().type == llmfun::tui::ChatMessageType::ToolCall,
-           "the call is a tool row");
-    expect(store.chat.outputLines.front().toolName == "read_file", "the tool name crosses");
-    expect(store.chat.outputLines.front().toolArgs == "{\"path\":\"src/main.d\"}",
-           "the arguments cross");
-    expect(store.chat.outputLines.front().id != 0, "the row has an id from the tab's counter");
-    expect(!store.chat.hasStreamMsg, "the tool path never touches the streaming slot");
+    // TuiBlock: turnId + five 16-byte Strings + three int64 + 4x int32 + the
+    // result transport (two pointers + one 16-byte String + three uint32 with a
+    // 4-byte tail pad) = 176 bytes, aligned like String (8).
+    static_assert(sizeof(TuiBlock) == 176, "TuiBlock is 176 bytes on the 64-bit ABI");
+    static_assert(alignof(TuiBlock) == 8, "TuiBlock's alignment is String's 8");
+    static_assert(offsetof(TuiBlock, turnId) == 0, "turnId sits at offset 0");
+    static_assert(offsetof(TuiBlock, id) == 8, "id sits at offset 8");
+    static_assert(offsetof(TuiBlock, batchId) == 24, "batchId sits at offset 24");
+    static_assert(offsetof(TuiBlock, title) == 40, "title sits at offset 40");
+    static_assert(offsetof(TuiBlock, meta) == 56, "meta sits at offset 56");
+    static_assert(offsetof(TuiBlock, body) == 72, "body sits at offset 72");
+    static_assert(offsetof(TuiBlock, durationMs) == 88, "durationMs sits at offset 88");
+    static_assert(offsetof(TuiBlock, tokensIn) == 96, "tokensIn sits at offset 96");
+    static_assert(offsetof(TuiBlock, tokensOut) == 104, "tokensOut sits at offset 104");
+    static_assert(offsetof(TuiBlock, kind) == 112, "kind sits at offset 112");
+    static_assert(offsetof(TuiBlock, status) == 116, "status sits at offset 116");
+    static_assert(offsetof(TuiBlock, flags) == 120, "flags sits at offset 120");
+    static_assert(offsetof(TuiBlock, reserved) == 124, "reserved sits at offset 124");
+    static_assert(offsetof(TuiBlock, resultKeys) == 128, "resultKeys sits at offset 128");
+    static_assert(offsetof(TuiBlock, resultValues) == 136, "resultValues sits at offset 136");
+    static_assert(offsetof(TuiBlock, resultRaw) == 144, "resultRaw sits at offset 144");
+    static_assert(offsetof(TuiBlock, resultCount) == 160, "resultCount sits at offset 160");
+    static_assert(offsetof(TuiBlock, resultMore) == 164, "resultMore sits at offset 164");
+    static_assert(offsetof(TuiBlock, resultReserved) == 168, "resultReserved sits at offset 168");
 
-    // C-02 on the tool path: scribbling over the caller's buffer changes nothing.
-    std::string scribbled = "{\"path\":\"src/main.d\"}";
-    call.arguments = String{scribbled.data(), scribbled.size()};
-    TuiToolCallParam second = call;
-    tuiPipelineAgentToolCall(state, makeStr("coder"), second);
-    scribbled.assign(scribbled.size(), 'x');
-    expect(state->inner->left.agents.front().chat.outputLines.back().toolArgs ==
-               "{\"path\":\"src/main.d\"}",
-           "the arguments were copied during the call, not borrowed");
-    expect(state->inner->left.agents.front().chat.outputLines.size() == 2,
-           "a second event appends a second row");
+    // The typed vocabulary: values are the wire contract (the D emitter and the
+    // typed store both switch on them), so a renumbering is an ABI event.
+    static_assert(TuiTurnState_Running == 0 && TuiTurnState_Done == 1 &&
+                      TuiTurnState_Interrupted == 2,
+                  "TuiTurnState values are the wire contract");
+    static_assert(TuiBlockKind_Prose == 0 && TuiBlockKind_Reasoning == 1 &&
+                      TuiBlockKind_Tool == 2 && TuiBlockKind_Answer == 3 &&
+                      TuiBlockKind_Notice == 4,
+                  "TuiBlockKind values are the wire contract");
+    static_assert(TuiBlockStatus_None == 0 && TuiBlockStatus_Pending == 1 &&
+                      TuiBlockStatus_Running == 2 && TuiBlockStatus_Ok == 3 &&
+                      TuiBlockStatus_Failed == 4 && TuiBlockStatus_Cancelled == 5,
+                  "TuiBlockStatus values are the wire contract");
+    static_assert(TuiBlockFlag_Collapsible == 1 && TuiBlockFlag_DefaultOpen == 2 &&
+                      TuiBlockFlag_Selectable == 4,
+                  "TuiBlockFlags are bit flags");
 
-    // The result row follows the call, fields as sent.
-    TuiToolResultParam result{};
-    result.name = makeStr("read_file");
-    result.ok = 1;
-    result.text = makeStr("12 lines");
-    tuiPipelineAgentToolResult(state, makeStr("coder"), result);
-    expect(state->inner->left.agents.front().chat.outputLines.size() == 3,
-           "the result appends its own row");
-    const auto& last = state->inner->left.agents.front().chat.outputLines.back();
-    expect(last.type == llmfun::tui::ChatMessageType::ToolResponse, "the result is a tool row");
-    expect(last.toolName == "read_file" && last.toolResult == "12 lines" && last.toolOk,
-           "the result's fields cross (name, text, ok)");
-    expect(last.id > state->inner->left.agents.front().chat.outputLines.front().id,
-           "ids are monotonic across rows");
+    // Odr-uses the five typed entry points without calling them: a missing
+    // definition is a link error, the tripwire the case comment promises.
+    using VoidFn = void (*)();
+    [[maybe_unused]] static const VoidFn v5EntryPins[] = {
+        reinterpret_cast<VoidFn>(&tuiSetTurns), reinterpret_cast<VoidFn>(&tuiTurnUpsert),
+        reinterpret_cast<VoidFn>(&tuiBlockUpsert), reinterpret_cast<VoidFn>(&tuiTurnRemove),
+        reinterpret_cast<VoidFn>(&tuiThreadClear)};
 
-    // The cap kAgentChatMaxMessages: ten rows kept, the oldest dropped. Two
-    // rows are in the list already, so the 9th of the burst drops the call row and the
-    // 12-event burst ends with the last ten rows only.
-    for (int i = 0; i < 12; ++i) {
-        TuiToolResultParam r{};
-        r.name = makeStr("note");
-        r.ok = 0;
-        std::string text = "row " + std::to_string(i);
-        r.text = String{text.data(), text.size()};
-        tuiPipelineAgentToolResult(state, makeStr("coder"), r);
-    }
-    expect(state->inner->left.agents.front().chat.outputLines.size() ==
-               llmfun::tui::kAgentChatMaxMessages,
-           "the store holds at most kAgentChatMaxMessages rows");
-    expect(state->inner->left.agents.front().chat.outputLines.front().toolResult == "row 2",
-           "the oldest rows are the ones dropped");
-    expect(state->inner->left.agents.front().chat.outputLines.back().toolResult == "row 11",
-           "the newest row survives");
-
-    // LRU eviction of a focused agent drops the focus with it (the drill-down must not
-    // show a transcript the store does not have).
-    state->inner->ui.focusedAgent = "coder";
-    PipelineChatMessage msg{};
-    const std::string text = "tick";
-    msg.content = String{text.data(), text.size()};
-    for (int i = 0; i < 16; ++i) {
-        std::string id = "a" + std::to_string(i);
-        msg.role = String{id.data(), id.size()};
-        tuiPipelineAgentUpdate(state, String{id.data(), id.size()}, msg);
-    }
-    expect(state->inner->left.agents.size() == state->inner->left.MaxAgents,
-           "the store stays at capacity");
-    expect(state->inner->ui.focusedAgent.empty(),
-           "an evicted agent takes its transcript with it (the focus is dropped)");
-
-    // Clear forgets the stores and the focus.
-    state->inner->ui.focusedAgent = "a15";
-    tuiPipelineClear(state);
-    expect(state->inner->left.agents.empty() && state->inner->ui.focusedAgent.empty(),
-           "tuiPipelineClear empties the stores and the focus");
-
-    tuiDestroyState(state);
+    expect(true, "turn/block layout pinned (the static asserts are the case)");
 }
-// The structured log records (task 32, v5): the fields D sends arrive unchanged, a record
+
+// The structured log records: the fields D sends arrive unchanged, a record
 // with no clock is stamped at arrival, the two-string compatibility wrapper maps onto the
 // same store, and the ring is the single bounded store with a dropped counter.
 void caseLogRecords() {
@@ -1695,15 +1678,15 @@ int main(int argc, char** argv) {
             (void)std::remove("llmfun_ui_log.txt");
     });
 
-    static_assert(TUI_API_VERSION == 11,
-                  "this contract test pins the current API generation (v11)");
+    static_assert(TUI_API_VERSION == 16,
+                  "this contract test pins the current API generation (v16)");
 
     caseNoneStateInert();
     caseLogRecords();
     caseLogArchiveRetry();
     caseSessionRowFields();
     casePipelineLaneFields();
-    caseAgentToolEvents();
+    caseThreadTurnBlockFields();
     caseQueryHistory();
     caseCancelFlag();
     caseRuntimeStatus();

@@ -20,8 +20,9 @@
 //   5. the interaction. A click drills into a lane, `m`/right-click opens the lane menu, the
 //      menu's `Stop lane` freezes one lane, and `Stop all` asks before it stops the run
 //      through the existing stop path (`tuiRequestCancel` -> `/stop`);
-//   6. the drill-down. The thread shows only that agent's transcript with `Back to main`, and
-//      the main transcript comes back byte-identical;
+//   6. the drill-down. The thread shows only that agent's transcript with `Back to main`, the
+//      main transcript comes back byte-identical, and the drill-down's mount draws the same row
+//      shape as the main thread's for the same turn (the second mount stays identical);
 //   7. the layout. The rail and the inspector are both up at 100x30 and at 1280x820;
 //   8. the goldens: lanes running, a failed lane, and the transcript drill-down.
 //
@@ -49,6 +50,7 @@
 #include "imtui/imtui.h"
 
 #include "test/tui_state_handle.h"
+#include "test/typed_seed.h"
 
 #include "imgui/imgui.h"
 
@@ -1157,18 +1159,14 @@ void checkInteraction() {
 // 9. The drill-down: the thread is that agent's transcript, and back is back
 // ---------------------------------------------------------------------------
 
-/// A state with one stored message (the main transcript) and one lane with its own text.
+/// A state with one stored turn (the main transcript) and one lane with its own text.
 tui::TuiState drillState() {
     tui::TuiState state;
     state.readyStatus = false;
     state.ui.prefs.inspectorOpen = 1;
     state.ui.prefs.tab = model::InspectorTab::Agents;
-    tui::ChatMessage msg;
-    msg.id = 1;
-    msg.type = tui::ChatMessageType::Assistant;
-    msg.summary = "[1] the main thread's own words [2026-06-18]";
-    msg.text = "the main thread's own words";
-    state.chat.outputLines.push_back(msg);
+    typed_seed::Seeder seeder(&state);
+    seeder.add(typed_seed::Seeder::Msg::User, "the main thread's own words");
     state.ui.view = model::ThreadView::Ready;
     state.ui.agents.push_back(lane("coder", model::kAgentStateRunning, true, "read_file", 4200,
                                    31'000, "the coder's private notes"));
@@ -1235,31 +1233,85 @@ void checkDrilldownMount() {
     const int h = 30;
     tui::TuiState state = drillState();
 
-    // The agent's store: two committed tool rows and a live stream - the traffic
-    // a real agent store carries. The paragraph fallback cannot render this; only
-    // the thread renderer can, so its presence on screen is the mount's signature.
+    // The agent's store: one committed turn with a merged tool step, plus a live
+    // run with its reasoning and stream content - the traffic a real agent store
+    // carries. The paragraph fallback cannot render this; only the thread
+    // renderer can, so its presence on screen is the mount's signature.
     tui::AgentStream stream;
     stream.agentId = "coder";
-    tui::ChatMessage call;
-    call.id = stream.chat.outputLineNextId++;
-    call.type = tui::ChatMessageType::ToolCall;
-    call.summary = "[1] read_file src/app.d";
-    call.toolName = "read_file";
-    call.toolArgs = "src/app.d";
-    stream.chat.outputLines.push_back(call);
-    tui::ChatMessage response;
-    response.id = stream.chat.outputLineNextId++;
-    response.type = tui::ChatMessageType::ToolResponse;
-    response.summary = "[2] read_file failed";
-    response.toolName = "read_file";
-    response.toolResult = "read 120 lines";
-    response.toolOk = false;
-    stream.chat.outputLines.push_back(response);
-    stream.chat.streamMsg.id = tui::ChatTab::StreamChatMessageId;
-    stream.chat.streamMsg.type = tui::ChatMessageType::Assistant;
-    stream.chat.streamMsg.text = "the coder is rewriting the parser";
-    stream.chat.streamMsg.thinking = "the coder is thinking about tokens";
-    stream.chat.hasStreamMsg = true;
+    using llmfun::tui::store::TypedBlock;
+    using llmfun::tui::store::TypedTurn;
+    {
+        TypedTurn turn;
+        turn.id = 1;
+        turn.state = TuiTurnState_Done;
+        turn.messageCount = 2;
+        stream.chat.typedTurns.turnUpsert(turn);
+        TypedBlock query;
+        query.turnId = 1;
+        query.id = "query";
+        query.batchId = "1#q";
+        query.kind = TuiBlockKind_Prose;
+        query.meta = "user";
+        query.body = "get the parser building";
+        stream.chat.typedTurns.blockUpsert(std::move(query));
+        TypedBlock step;
+        step.turnId = 1;
+        step.id = "call-1";
+        step.batchId = "1#0";
+        step.kind = TuiBlockKind_Tool;
+        step.status = TuiBlockStatus_Ok;
+        step.flags = TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
+        step.title = "read_file";
+        step.meta = "read 120 lines";
+        step.body = "src/app.d";
+        stream.chat.typedTurns.blockUpsert(std::move(step));
+        // The committed group is one the user pinned open: the work rows show.
+        // The pins are absolute: the group pin and the batch
+        // owner's row pin - the owner row never draws open from a group pin.
+        stream.chat.groupPins[1] = true;
+        stream.chat.rowPins[1]["batch#1#0"] = true;
+    }
+    {
+        TypedTurn turn;
+        turn.id = 2;
+        turn.state = TuiTurnState_Running;
+        stream.chat.typedTurns.turnUpsert(turn);
+        TypedBlock query;
+        query.turnId = 2;
+        query.id = "query";
+        query.batchId = "2#q";
+        query.kind = TuiBlockKind_Prose;
+        query.meta = "user";
+        query.body = "rewrite the parser";
+        stream.chat.typedTurns.blockUpsert(std::move(query));
+        TypedBlock thinking;
+        thinking.turnId = 2;
+        thinking.id = "reasoning#0";
+        thinking.batchId = "2#0";
+        thinking.kind = TuiBlockKind_Reasoning;
+        thinking.flags = TuiBlockFlag_Collapsible;
+        thinking.body = "the coder is thinking about tokens\nand about the parser's invariants";
+        stream.chat.typedTurns.blockUpsert(std::move(thinking));
+        TypedBlock content;
+        content.turnId = 2;
+        content.id = "content#0";
+        content.batchId = "2#0";
+        content.kind = TuiBlockKind_Prose;
+        content.meta = "assistant";
+        content.body = "the coder is rewriting the parser";
+        stream.chat.typedTurns.blockUpsert(std::move(content));
+        TypedBlock live;
+        live.turnId = 2;
+        live.id = "call-live";
+        live.batchId = "2#0";
+        live.kind = TuiBlockKind_Tool;
+        live.status = TuiBlockStatus_Running;
+        live.flags = TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
+        live.title = "read_file";
+        live.body = "src/app.d";
+        stream.chat.typedTurns.blockUpsert(std::move(live));
+    }
     state.left.agents.push_back(stream);
 
     Grid mainGrid;
@@ -1278,16 +1330,21 @@ void checkDrilldownMount() {
           "the mount binds the agent's store to the thread adapter");
     check(state.ui.agentThread.drawnGroups >= 1,
           "the mount renders through the real thread renderer (groups drawn)");
-    // The work group drew (the newest stored group opens by default). Its rows
-    // belong to the thread's column, not to the lane inspector beside it - the
-    // column is how the test tells the transcript from the mirror.
+    // The work group drew (the user opened the committed one). Its rows belong
+    // to the thread's column, not to the lane inspector beside it - the column
+    // is how the test tells the transcript from the mirror. The live turn folds
+    // like any work group (minimal mode keeps the query and the answer under the
+    // fold out of work rows), and its live edge names its step in the chips
+    // line - a line only the thread renderer draws, so drawing it is the
+    // mount's signature.
     int workX = -1;
     int workY = -1;
     check(agentGrid.find("WORK - 2 steps", workX, workY) && workX < 74,
           "the agent's work group draws in the thread's column");
     check(agentGrid.find("TOOL", workX, workY) && workX < 74,
           "the agent's tool rows draw in the thread's column");
-    check(agentGrid.hasText("the coder is rewriting the parser"), "the agent's live stream draws");
+    check(agentGrid.hasText("[read_file]"),
+          "the live turn's chips line draws (the thread renderer's own line)");
     check(!agentGrid.hasText("the main thread's own words"),
           "the main transcript stays filtered out");
     check(!agentGrid.hasText("the coder's private notes"),
@@ -1307,24 +1364,36 @@ void checkDrilldownMount() {
     check(restored.allText() == mainText, "the main transcript is restored unchanged");
 
     // Re-entry binds the same pair, so the same view state (and its caches) come
-    // back: the drill-down is a lens, not a reload.
+    // back: the drill-down is a lens, not a reload. The live turn's group stays
+    // folded: minimal hides its work rows behind the header, and the click below
+    // is what opens it.
     model::focusAgentLane(state.ui, "coder");
     Grid again;
     shellFrameGrid(state, w, h, again);
     check(state.agentThreadAdapter.bound(), "re-entry binds the agent's store again");
     check(state.ui.agentThread.drawnGroups >= 1, "and draws the same groups again");
 
-    // The thinking disclosure belongs to the agent's own view state: a click
-    // flips it through the adapter, the way it flips on the main thread.
-    const bool thinkingOpen = again.hasText("the coder is thinking about tokens");
+    // The live turn's work rows are the agent store's own view state: minimal
+    // folds them behind the header (the thinking body waits there with them),
+    // and a click on the group's header flips the fold through the agent's own
+    // chat store - the same mechanism the main thread's fold uses.
+    check(!again.hasText("and about the parser's invariants"),
+          "minimal folds the live turn's thinking behind the header");
+    // The live turn's group is the thread's LAST group: its folded header is
+    // the bottom-most `WORK` row (turn 1's, opened, draws above it).
     int toggleX = -1;
     int toggleY = -1;
-    check(again.find("Thinking", toggleX, toggleY), "premise: the stream's thinking row is up");
+    for (int y = again.ny - 1; y >= 0 && toggleY < 0; --y)
+        if (again.rowText(y).find("WORK") != std::string::npos) {
+            toggleX = again.colOf(y, "WORK");
+            toggleY = y;
+        }
+    check(toggleY >= 0, "premise: the folded group's header is up");
     clickAt(state, w, h, static_cast<float>(toggleX), static_cast<float>(toggleY));
     Grid afterThinking;
     shellFrameGrid(state, w, h, afterThinking);
-    check(afterThinking.hasText("the coder is thinking about tokens") != thinkingOpen,
-          "the thinking disclosure answers a click through the agent's own view state");
+    check(afterThinking.hasText("and about the parser's invariants"),
+          "the group's header answers a click through the agent's own store");
 
     // The eviction fallback, on the grid too: no store, the paragraph draws and
     // the adapter is left unbound - never carrying the evicted address.
@@ -1354,20 +1423,30 @@ void checkStructuredToolRows() {
     const auto wire = [](const char* s) { return String{s, std::strlen(s)}; };
     ::TuiState api{&state};
     // The lane's store starts empty (the lane mirror alone exists); the tool events
-    // create it. Eight plain notes go in first: several groups, so the compact-window
-    // check below has something to floor over (one work group alone fits any window).
+    // create it. Three plain note turns go in first: several groups, so the
+    // compact-window check below has something to floor over (one work group alone
+    // fits any window).
     {
         tui::AgentStream stream;
         stream.agentId = "coder";
         state.left.agents.push_back(stream);
-        tui::AgentStream& seeded = state.left.agents.front();
-        for (int k = 0; k < 8; ++k) {
-            tui::ChatMessage note;
-            note.id = seeded.chat.outputLineNextId++;
-            note.type = k % 2 == 0 ? tui::ChatMessageType::User : tui::ChatMessageType::Assistant;
-            note.summary = "note " + std::to_string(k);
-            note.text = "agent note " + std::to_string(k);
-            seeded.chat.outputLines.push_back(note);
+        using llmfun::tui::store::TypedBlock;
+        using llmfun::tui::store::TypedTurn;
+        auto& turns = state.left.agents.front().chat.typedTurns;
+        for (int k = 0; k < 3; ++k) {
+            TypedTurn turn;
+            turn.id = k + 1;
+            turn.state = TuiTurnState_Done;
+            turn.messageCount = 1;
+            turns.turnUpsert(turn);
+            TypedBlock query;
+            query.turnId = k + 1;
+            query.id = "query";
+            query.batchId = std::to_string(k + 1) + "#q";
+            query.kind = TuiBlockKind_Prose;
+            query.meta = "user";
+            query.body = "agent note " + std::to_string(k);
+            turns.blockUpsert(std::move(query));
         }
     }
     TuiToolCallParam readCall{};
@@ -1390,41 +1469,51 @@ void checkStructuredToolRows() {
     writeResult.ok = 0;
     writeResult.text = wire("disk full");
     tuiPipelineAgentToolResult(&api, wire("coder"), writeResult);
+    // The live run turn folds like any work group: its merged rows draw closed,
+    // so each names its tool on the header row (the summary is a closed row's
+    // second line).
 
     check(state.left.agents.size() == 1, "premise: the tool events made the agent's store");
     const tui::ChatTab& store = state.left.agents.front().chat;
-    check(store.outputLines.size() == 10, "premise: six notes and four tool rows, the cap holds");
-    check(store.outputLines[6].summary.empty() && store.outputLines[6].text.empty(),
-          "premise: the real API path sets only the structured fields");
+    check(store.typedTurns.turnCount() == 4,
+          "premise: three note turns plus the run's turn, the cap holds");
+    const std::int64_t run = store.typedTurns.turnAt(3).id;
+    check(store.typedTurns.blockCount(run) == 2,
+          "premise: the run's turn carries its two merged steps");
+    check(store.typedTurns.blockAt(run, 0).id == "call-1" &&
+              store.typedTurns.blockAt(run, 0).meta == "12 lines",
+          "premise: the real API path keeps the wire's structured fields (the call id, the result "
+          "meta)");
 
     // The adapter composes each row from the structured fields.
     llmfun::tui::store::ThreadStoreAdapter probe;
     model::ThreadState probeView;
     probe.bind(state.left.agents.front().chat, probeView);
-    check(probe.groupCount() >= 5, "premise: the notes and the work group make several groups");
+    check(probe.groupCount() == 4, "premise: the note turns and the run's group make four groups");
     const std::size_t work = probe.groupCount() - 1;
+    // The group's rows: the WORK header, the batch's owner row, then
+    // the batch's children in canonical order - the calls are blocks 2 and 3.
     const model::BlockDesc readDesc = probe.blockAt(work, 2);
     check(readDesc.label == std::string("TOOL"), "the structured call row keeps its role label");
     check(readDesc.summary == "read_file", "the call's summary is the tool name");
-    check(readDesc.state == model::BlockState::Pending, "a call states itself pending");
+    check(readDesc.state == model::BlockState::Ok, "the merged call states its result's ok");
     check(readDesc.hasBody && probe.blockText(work, 2) == "src/app.d",
-          "the call's body is its arguments");
-    const model::BlockDesc okDesc = probe.blockAt(work, 3);
-    check(okDesc.summary == "read_file" && okDesc.state == model::BlockState::Ok,
-          "a successful result states itself ok");
-    check(okDesc.hasBody && probe.blockText(work, 3) == "12 lines",
-          "the result's body is its result text");
-    const model::BlockDesc writeDesc = probe.blockAt(work, 4);
-    check(writeDesc.summary == "write_file" && writeDesc.state == model::BlockState::Pending,
-          "the second call states itself pending too");
-    const model::BlockDesc failDesc = probe.blockAt(work, 5);
-    check(failDesc.summary == "write_file" && failDesc.state == model::BlockState::Failed,
+          "the merged call's body stays its arguments");
+    const model::BlockDesc writeDesc = probe.blockAt(work, 3);
+    check(writeDesc.summary == "write_file" && writeDesc.state == model::BlockState::Failed,
           "a failed result states itself failed");
-    check(failDesc.hasBody && probe.blockText(work, 5) == "disk full",
-          "the failed result's body is its result text");
+    check(writeDesc.hasBody && probe.blockText(work, 3) == "out.txt",
+          "the second merged call's body stays its arguments too");
 
     // On screen: the composed names draw in the thread's column, not in the inspector
-    // beside it (whose lane mirror also carries the tool name - the column is the test).
+    // beside it (whose lane mirror also carries the tool name - the column is the
+    // test). The run's turn is pinned open first: minimal folds its rows,
+    // and the names ride the open cards' headers. The pins are absolute:
+    // the group pin and the batch owner's row pin together.
+    state.left.agents.front().chat.groupPins[static_cast<std::int64_t>(run)] = true;
+    for (std::size_t b = 0; b < probe.blockCount(work); ++b)
+        if (probe.blockAt(work, b).ownsBatch)
+            probe.setBlockExpanded(work, b, true);
     model::focusAgentLane(state.ui, "coder");
     Grid agentGrid;
     shellFrameGrid(state, w, h, agentGrid);
@@ -1459,6 +1548,310 @@ void checkStructuredToolRows() {
     check(state.agentThreadAdapter.bound(), "premise: the mount is bound");
     tuiPipelineClear(&api);
     check(!state.agentThreadAdapter.bound(), "a pipeline clear unbinds the drill-down's adapter");
+}
+
+/// The batched steps: the pipeline path consumes the run's batch index, so a
+/// two-step run draws the main thread's shape - one reasoning/content pair per
+/// batch, the ids batch-scoped (`<turnId>#<n>` / `reasoning#<n>`), the next
+/// batch a fresh pair instead of a tick overwriting the previous one's blocks.
+/// One typed turn per run is unchanged; only the batches inside
+/// multiply, and the run's start opens that turn with its query row:
+/// the steps below join the already-open turn, and the query is the turn-level
+/// row the fold never owns.
+void checkPipelineBatchSteps() {
+    tui::TuiState state = drillState();
+    state.agentThreadAdapter = {};
+
+    const auto wire = [](const char* s) { return String{s, std::strlen(s)}; };
+    ::TuiState api{&state};
+
+    // The run's start fires first (drawn here): the run's
+    // turn opens at the start with its query row, and the steps below join the
+    // already-open turn - no second turn, and the query is the same block the
+    // main thread's turn start emits (id "query", batch "<turnId>#q").
+    tuiPipelineAgentStart(&api, wire("coder"), wire("get the parser building"));
+
+    // Step 0: a tick with content and reasoning, then the step's tool call and
+    // its result - all on batch 0 (the zero value D sends for the first step).
+    PipelineChatMessage step0{};
+    step0.content = wire("step zero prose");
+    step0.reasoning = wire("step zero thinking");
+    step0.role = wire("assistant");
+    step0.batch = 0;
+    tuiPipelineAgentUpdate(&api, wire("coder"), step0);
+    TuiToolCallParam call{};
+    call.name = wire("read_file");
+    call.arguments = wire("src/app.d");
+    call.id = wire("call-1");
+    call.batch = 0;
+    tuiPipelineAgentToolCall(&api, wire("coder"), call);
+    TuiToolResultParam result{};
+    result.name = wire("read_file");
+    result.ok = 1;
+    result.text = wire("12 lines");
+    result.batch = 0;
+    tuiPipelineAgentToolResult(&api, wire("coder"), result);
+
+    // Step 1: its own tick on batch 1 - a different reasoning body, so an
+    // overwrite of the batch-0 block would be visible in the id alone.
+    PipelineChatMessage step1{};
+    step1.content = wire("step one prose");
+    step1.reasoning = wire("step one thinking");
+    step1.role = wire("assistant");
+    step1.batch = 1;
+    tuiPipelineAgentUpdate(&api, wire("coder"), step1);
+    tuiPipelineAgentDone(&api, wire("coder"));
+
+    check(state.left.agents.size() == 1, "premise: the run made the agent's store");
+    const tui::ChatTab& store = state.left.agents.front().chat;
+    check(store.typedTurns.turnCount() == 1, "premise: one typed turn per run, not per batch");
+    const std::int64_t run = store.typedTurns.turnAt(0).id;
+    const std::size_t blocks = store.typedTurns.blockCount(run);
+    check(blocks == 6,
+          "the query row plus the two steps make six blocks (the query, two reasoning, two "
+          "content, one call)");
+
+    // The query row: the run's task on the query batch, the same block the
+    // main thread's turn start emits - turn-level, so it draws whatever
+    // the fold does with the batches. It opened the turn, so it is block 0
+    // (bucket order is insertion order).
+    {
+        const auto& query = store.typedTurns.blockAt(run, 0);
+        check(query.id == "query" && query.batchId == std::to_string(run) + "#q" &&
+                  query.kind == TuiBlockKind_Prose && query.meta == "user" &&
+                  query.body == "get the parser building",
+              "the run's start upserts the query row on the query batch (<turnId>#q)");
+    }
+
+    // The batch-0 reasoning survived the batch-1 tick: the ids are batch-scoped,
+    // so the second step's pair landed beside the first instead of over it.
+    std::string reasoning0, reasoning1, callBatchId;
+    std::size_t distinctBatches = 0;
+    {
+        std::string seen[8];
+        std::size_t seenCount = 0;
+        for (std::size_t i = 0; i < blocks && i < 8; ++i) {
+            const auto& b = store.typedTurns.blockAt(run, i);
+            // The query row's batch is not a response batch - the scan
+            // counts the steps' batches alone.
+            if (b.batchId == std::to_string(run) + "#q")
+                continue;
+            if (b.id == "reasoning#0")
+                reasoning0 = b.body;
+            if (b.id == "reasoning#1")
+                reasoning1 = b.body;
+            if (b.id == "call-1")
+                callBatchId = b.batchId;
+            bool fresh = true;
+            for (std::size_t s = 0; s < seenCount; ++s)
+                if (seen[s] == b.batchId)
+                    fresh = false;
+            if (fresh && seenCount < 8)
+                seen[seenCount++] = b.batchId;
+        }
+        distinctBatches = seenCount;
+    }
+    check(reasoning0 == "step zero thinking",
+          "the batch-1 tick did not overwrite batch 0's reasoning block");
+    check(reasoning1 == "step one thinking",
+          "the second step's reasoning landed under its own batch-scoped id");
+    check(distinctBatches == 2,
+          "the run's turn carries two response batches beside the query's (the ids are the "
+          "wire's, per batch)");
+    check(callBatchId == std::to_string(run) + "#0",
+          "the step's tool call rides the batch that made it (batch 0)");
+    check(store.typedTurns.turnAt(0).state == TuiTurnState_Done,
+          "the turn the run's start opened still closes Done on tuiPipelineAgentDone");
+
+    // On screen: the query row draws above the work. It is turn-level, so the
+    // fold never hides it (the query is not a batch-owned row), and it renders
+    // as the same YOU header over its body segment the main thread's turn start
+    // puts up. The group is pinned open so the work rows' shape does not
+    // ride the factory default.
+    state.left.agents.front().chat.groupPins[run] = true;
+    model::focusAgentLane(state.ui, "coder");
+    Grid agentGrid;
+    shellFrameGrid(state, 100, 30, agentGrid);
+    check(state.agentThreadAdapter.bound(), "the mount binds the API-driven store");
+    int queryRow = -1;
+    int bodyRow = -1;
+    int workRow = -1;
+    for (int y = 0; y < agentGrid.ny; ++y) {
+        const std::string row = agentGrid.rowText(y);
+        if (row.find("YOU") != std::string::npos && queryRow < 0)
+            queryRow = y;
+        if (row.find("get the parser building") != std::string::npos && bodyRow < 0)
+            bodyRow = y;
+        if (row.find("read_file") != std::string::npos && workRow < 0)
+            workRow = y;
+    }
+    check(queryRow >= 0, "the run's task draws the drill-down's query row (the YOU header)");
+    check(bodyRow > queryRow, "the query's body segment draws beneath its YOU row");
+    check(workRow >= 0, "premise: the run's work names its tool on the grid");
+    check(queryRow < workRow, "the query row draws above the work");
+}
+
+// ---------------------------------------------------------------------------
+// 9c. The second mount stays identical: the drill-down inherits the fold
+// ---------------------------------------------------------------------------
+
+/// One seeded turn, the same on both mounts: a settled exchange whose batch
+/// carries thinking, two calls (one failed) and the answer, with the group and
+/// its owner row pinned open. The pins are absolute and live on the
+/// chat they are set on alone - the caller hands over one `ChatTab` at a time,
+/// so each mount folds by its own store's pins and never by another's.
+void seedFoldTurn(tui::ChatTab& chat) {
+    using llmfun::tui::store::TypedBlock;
+    using llmfun::tui::store::TypedTurn;
+    TypedTurn turn;
+    turn.id = 1;
+    turn.state = TuiTurnState_Done;
+    turn.messageCount = 2;
+    chat.typedTurns.turnUpsert(turn);
+    TypedBlock query;
+    query.turnId = 1;
+    query.id = "query";
+    query.batchId = "1#q";
+    query.kind = TuiBlockKind_Prose;
+    query.meta = "user";
+    query.body = "get the parser building";
+    chat.typedTurns.blockUpsert(std::move(query));
+    TypedBlock thinking;
+    thinking.turnId = 1;
+    thinking.id = "reasoning#0";
+    thinking.batchId = "1#0";
+    thinking.kind = TuiBlockKind_Reasoning;
+    thinking.flags = TuiBlockFlag_Collapsible;
+    thinking.body = "the parser's invariants, one by one";
+    chat.typedTurns.blockUpsert(std::move(thinking));
+    TypedBlock content;
+    content.turnId = 1;
+    content.id = "content#0";
+    content.batchId = "1#0";
+    content.kind = TuiBlockKind_Prose;
+    content.meta = "assistant";
+    content.body = "the parser builds again";
+    chat.typedTurns.blockUpsert(std::move(content));
+    TypedBlock read;
+    read.turnId = 1;
+    read.id = "call-1";
+    read.batchId = "1#0";
+    read.kind = TuiBlockKind_Tool;
+    read.status = TuiBlockStatus_Ok;
+    read.flags = TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
+    read.title = "read_file";
+    read.meta = "read 120 lines";
+    read.body = "src/app.d";
+    read.durationMs = 800;
+    chat.typedTurns.blockUpsert(std::move(read));
+    TypedBlock write;
+    write.turnId = 1;
+    write.id = "call-2";
+    write.batchId = "1#0";
+    write.kind = TuiBlockKind_Tool;
+    write.status = TuiBlockStatus_Failed;
+    write.flags = TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
+    write.title = "write_file";
+    write.meta = "disk full";
+    write.body = "out.txt";
+    write.durationMs = 2'400;
+    chat.typedTurns.blockUpsert(std::move(write));
+    // The answer rides its response's batch: the batch's content child
+    // is the answer's to suppress.
+    TypedBlock answer;
+    answer.turnId = 1;
+    answer.id = "answer";
+    answer.batchId = "1#0";
+    answer.kind = TuiBlockKind_Answer;
+    answer.body = "the parser builds again";
+    chat.typedTurns.blockUpsert(std::move(answer));
+    chat.groupPins[1] = true;
+    chat.rowPins[1]["batch#1#0"] = true;
+}
+
+/// The same turn, drawn twice: the main thread and the drill-down. Compare the
+/// *rows*, not pixels: kind, label, visible and expanded per row - the shape
+/// the fold produces.
+std::vector<model::BlockDesc> shapeOf(const llmfun::tui::store::ThreadStoreAdapter& a,
+                                      std::size_t group) {
+    std::vector<model::BlockDesc> out;
+    for (std::size_t b = 0; b < a.blockCount(group); ++b)
+        out.push_back(a.blockAt(group, b));
+    return out;
+}
+
+bool sameShape(const std::vector<model::BlockDesc>& mainRows,
+               const std::vector<model::BlockDesc>& drillRows) {
+    if (mainRows.size() != drillRows.size())
+        return false;
+    for (std::size_t r = 0; r < mainRows.size(); ++r) {
+        const model::BlockDesc& a = mainRows[r];
+        const model::BlockDesc& b = drillRows[r];
+        if (a.kind != b.kind || a.label != b.label || a.visible != b.visible ||
+            a.expanded != b.expanded || a.ownsBatch != b.ownsBatch ||
+            a.bodySegment != b.bodySegment)
+            return false;
+    }
+    return true;
+}
+
+void checkDrilldownShape() {
+    const int w = 100;
+    const int h = 30;
+    tui::TuiState state;
+    state.readyStatus = false;
+    state.ui.prefs.inspectorOpen = 1;
+    state.ui.prefs.tab = model::InspectorTab::Agents;
+    state.ui.view = model::ThreadView::Ready;
+    state.ui.agents.push_back(lane("coder", model::kAgentStateRunning, true, "read_file", 4200,
+                                   31'000, "the coder's private notes"));
+    tui::AgentStream stream;
+    stream.agentId = "coder";
+    seedFoldTurn(state.chat);  // the main mount's store
+    seedFoldTurn(stream.chat); // the drill-down's own store, the same turn
+    state.left.agents.push_back(stream);
+
+    // The main mount, drawn and read through its adapter.
+    Grid mainGrid;
+    shellFrameGrid(state, w, h, mainGrid);
+    check(state.threadAdapter.bound(), "premise: the main mount is bound");
+    check(state.threadAdapter.groupCount() == 1, "premise: the seed made one group");
+    const std::vector<model::BlockDesc> mainShape = shapeOf(state.threadAdapter, 0);
+    bool ownerDraws = false;
+    for (const model::BlockDesc& row : mainShape)
+        if (row.ownsBatch && row.visible)
+            ownerDraws = true;
+    check(ownerDraws, "premise: the pinned group's owner row is part of the shape");
+
+    // The drill-down, drawn through its own adapter over the agent's store.
+    model::focusAgentLane(state.ui, "coder");
+    Grid agentGrid;
+    shellFrameGrid(state, w, h, agentGrid);
+    check(state.agentThreadAdapter.bound(), "premise: the drill-down's mount is bound");
+    check(state.agentThreadAdapter.groupCount() == 1, "the drill-down sees the same groups");
+    const std::vector<model::BlockDesc> drillShape = shapeOf(state.agentThreadAdapter, 0);
+    check(sameShape(mainShape, drillShape),
+          "the drill-down draws the same shape as the main thread (kind, label, visible, "
+          "expanded, ownsBatch, bodySegment)");
+
+    // A pin set on the main mount lives on the main mount's `ChatTab` alone: the
+    // drill-down holds a different store, so its rows cannot move. That
+    // guarantee is exactly what this check pins - a divergence fails here,
+    // not by eye.
+    state.chat.rowPins[1]["batch#1#0"] = false;
+    state.ui.focusedAgent.clear();
+    Grid repinned;
+    shellFrameGrid(state, w, h, repinned);
+    bool ownerFolded = false;
+    for (const model::BlockDesc& row : shapeOf(state.threadAdapter, 0))
+        if (row.ownsBatch && row.visible && !row.expanded)
+            ownerFolded = true;
+    check(ownerFolded, "premise: the main mount's pin folded its owner row");
+    model::focusAgentLane(state.ui, "coder");
+    Grid pinnedAgent;
+    shellFrameGrid(state, w, h, pinnedAgent);
+    check(sameShape(drillShape, shapeOf(state.agentThreadAdapter, 0)),
+          "a pin set on the main mount does not leak into the drill-down");
 }
 
 // ---------------------------------------------------------------------------
@@ -1534,6 +1927,14 @@ std::string goldenText(const Scene& scene) {
     if (scene.layout == 2) {
         state.ui.focusedAgent = "coder";
         state.ui.view = model::ThreadView::Ready;
+        // The drill-down draws the agent's store through its own mount (the
+        // lane mirror is only the no-store fallback): the seeded, pinned-open
+        // turn is what puts the fold's rows - the owner row among them - on
+        // the screen this golden pins.
+        tui::AgentStream stream;
+        stream.agentId = "coder";
+        seedFoldTurn(stream.chat);
+        state.left.agents.push_back(stream);
     }
 
     // Two frames, and the second is captured: every harness shares one ImGui context, so a
@@ -1660,6 +2061,8 @@ int main(int argc, char** argv) {
     checkDrilldown();
     checkDrilldownMount();
     checkStructuredToolRows();
+    checkPipelineBatchSteps();
+    checkDrilldownShape();
     checkRailAndInspector();
     checkGoldens(update);
 
