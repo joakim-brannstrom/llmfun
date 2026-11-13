@@ -62,6 +62,8 @@
 // works with and without the `cpp_tui/` include path.
 #include "../ui/markdown.h"
 
+#include "typed_thread_store.h"
+
 namespace llmfun::tui::model {
 struct ThreadState;
 } // namespace llmfun::tui::model
@@ -99,6 +101,15 @@ struct GroupView {
 };
 
 /// The only v4-aware class the shell touches.
+///
+/// The two projection sources (task 2): `V4Messages` - today's live path, the
+/// message store of `tui.h` - and `TypedTurns`, the typed v5 store the wire
+/// upserts. Pre-cutover the selector exists so the typed path is test-driven
+/// only; the cutover (task 5) flips the live source and this header loses the
+/// selector and the v4 path. The two never mix: a `ChatTab` is one or the other,
+/// and `setSource()` drops every cache a source switch invalidates.
+enum class ProjectionSource { V4Messages, TypedTurns };
+
 class ThreadStoreAdapter {
 public:
     /// Unbound: every accessor answers empty until a `bind()`.
@@ -149,6 +160,11 @@ public:
         groups_.clear();
         indexById_.clear();
         idByStart_.clear();
+        source_ = ProjectionSource::V4Messages;
+        typedRevision_.clear();
+        typedFingerprints_.clear();
+        typedRowOpen_.clear();
+        typedSynced_ = false;
         chat_ = nullptr;
         thread_ = nullptr;
         nextId_ = 1;
@@ -176,6 +192,19 @@ public:
     /// False on an adapter that has not been bound since its state moved. Only the
     /// frame layer's `bind()` makes it true again.
     bool bound() const { return chat_ != nullptr && thread_ != nullptr; }
+
+    void setSource(ProjectionSource source) {
+        if (source_ == source)
+            return;
+        source_ = source;
+        groups_.clear();
+        indexById_.clear();
+        idByStart_.clear();
+        typedRevision_.clear();
+        typedFingerprints_.clear();
+        typedSynced_ = false;
+    }
+    ProjectionSource source() const { return source_; }
 
     /// Groups in the thread, streaming message included as the last one. Cheap:
     /// the group list is rebuilt only when the store changed (append, eviction,
@@ -362,6 +391,14 @@ private:
         bool thinking = false; ///< the message's thinking disclosure
         bool code = false;     ///< the body is a single fenced code block
         bool expandable = false;
+        std::int64_t typedTurnId = 0;
+        std::string typedBlockId;
+        /// The store block's title (the tool name on a Tool row): the typed
+        /// tool card's summary previews it, the way the v4 tool row previews
+        /// `toolName`.
+        std::string typedTitle;
+        std::string typedBody;
+        bool typedQuery = false;
     };
 
     struct Entry {
@@ -402,6 +439,21 @@ private:
     mutable size_t syncedFront_ = 0;
     mutable size_t syncedBack_ = 0;
     mutable uint64_t syncedStream_ = 0;
+
+    // he typed-backed projection
+    ProjectionSource source_ = ProjectionSource::V4Messages;
+    mutable bool typedSynced_ = false;
+    mutable std::uint64_t syncedTypedVersion_ = 0;
+    /// Per-turn change counter for `view.revision` (0 = unchanged since birth),
+    /// keyed by the persisted turnId; bumped when a rebuild observes the turn's
+    /// block fingerprint change, dropped when the turn is gone.
+    mutable std::map<std::int64_t, std::uint64_t> typedRevision_;
+    /// The per-turn block fingerprint the revision compares (last rebuild's).
+    mutable std::map<std::int64_t, std::uint64_t> typedFingerprints_;
+    mutable std::map<std::int64_t, std::set<std::string>> typedRowOpen_;
+
+    /// The typed-backed rebuild (design §4: group id = the persisted turnId).
+    void syncTyped() const;
 
     /// The streamed bodies' cached unclosed-fence answer, one per body (the
     /// answer text and the reasoning carry independent fences). `scan`

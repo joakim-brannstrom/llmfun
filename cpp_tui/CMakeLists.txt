@@ -849,6 +849,26 @@ target_link_libraries(test_thread_window PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
+# The v5 typed thread store (tasks 1-2, design P0-2): the wire's upsert merge
+# semantics, the step-count weights and the typed-backed projection the adapter
+# serves test-driven until the cutover. Like `test_thread_window` this needs no
+# ImGui context, no renderer and no terminal - the store answers from its
+# vectors and the typed projection never draws. `tui.h` (the ChatTab the typed
+# store rides in) needs the cpp_tui root on the path. Invoke from the build
+# dir: ./test_typed_thread_store [-v]
+add_executable(test_typed_thread_store
+    test_typed_thread_store.cpp
+)
+add_dependencies(test_typed_thread_store llmfun_tui_all_lib)
+target_include_directories(test_typed_thread_store PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_typed_thread_store PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
+)
+
 # The frame's layout contract: the overlay layer draws on the tiling the shell
 # painted, so a chord that changes a tiling preference after the shell has run cannot
 # put the palette inside a thread rect the screen does not show. `layoutPrefsFor()`,

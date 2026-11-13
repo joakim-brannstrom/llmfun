@@ -41,7 +41,7 @@ extern "C" {
 /* TUI_API_VERSION - API generation marker. Documentation only: no runtime
  * behavior depends on it.
  */
-#define TUI_API_VERSION 11
+#define TUI_API_VERSION 12
 
 /* TuiChatMessageType — Pure C enum for chat message types.
  * Used to color-code chat message headers in the TUI.
@@ -713,6 +713,72 @@ void tuiPipelineAgentDone(TuiState* state, String agentId);
  * Null-safe: no-op if state is NULL.
  */
 void tuiPipelineClear(TuiState* state);
+
+/* --- v5 thread turns/blocks (task 1, design §4) ---------------------------
+ * The typed turn/block model the thread draws from after the cutover. v5 is
+ * additive: nothing emits these yet, both sides build.
+ */
+
+/* Verbatim contract — v5 thread types (design §4) */
+typedef enum TuiTurnState {
+    TuiTurnState_Running = 0, TuiTurnState_Done = 1, TuiTurnState_Interrupted = 2
+} TuiTurnState;
+typedef enum TuiBlockKind {
+    TuiBlockKind_Prose = 0, TuiBlockKind_Reasoning = 1, TuiBlockKind_Tool = 2,
+    TuiBlockKind_Answer = 3, TuiBlockKind_Notice = 4
+} TuiBlockKind;
+typedef enum TuiBlockStatus {
+    TuiBlockStatus_None = 0, TuiBlockStatus_Pending = 1, TuiBlockStatus_Running = 2,
+    TuiBlockStatus_Ok = 3, TuiBlockStatus_Failed = 4, TuiBlockStatus_Cancelled = 5
+} TuiBlockStatus;
+typedef enum TuiBlockFlags {
+    TuiBlockFlag_Collapsible = 1, TuiBlockFlag_DefaultOpen = 2, TuiBlockFlag_Selectable = 4
+} TuiBlockFlags;
+
+/* id = persisted turnId (0 = unstamped); ordinal = 1-based display position
+ * among displayed turns, D-assigned; messageCount informational. */
+typedef struct TuiTurn {
+    int64_t id;
+    int32_t ordinal;
+    int32_t state;
+    int32_t messageCount;
+    int32_t reserved;
+} TuiTurn;
+
+/* One block per (turnId, id). id = tool callId | "answer" | batch-scoped id.
+ * batchId = "<turnId>#<batchIndex>", recomputed deterministically on replay,
+ * stable within the turn's lifetime in one process run, not persisted.
+ * Tool-less batches (thinking+content only) carry a batchId too.
+ * Strings are inbound/non-owning (copied by the UI), same as ChatMessageParam.
+ * durationMs 0 = unknown (not rendered); tokensIn/tokensOut 0 = not rendered. */
+typedef struct TuiBlock {
+    int64_t turnId;
+    String id;
+    String batchId;
+    String title;
+    String meta;
+    String body;
+    int64_t durationMs;
+    int64_t tokensIn;
+    int64_t tokensOut;
+    int32_t kind;
+    int32_t status;
+    int32_t flags;
+    int32_t reserved;
+} TuiBlock;
+
+/* Bulk snapshot (replay, session switch): clears the store, then loads the
+ * turns and their blocks. Turns in array order. */
+void tuiSetTurns(TuiState* state, const TuiTurn* turns, size_t turnCount,
+                 const TuiBlock* blocks, size_t blockCount);
+/* Upsert the only mutating paths: a first upsert creates the slot, later
+ * upserts merge in place (keyed by (turnId, id) for blocks). */
+void tuiTurnUpsert(TuiState* state, const TuiTurn* turn);
+void tuiBlockUpsert(TuiState* state, const TuiBlock* block);
+/* Removes the turn AND cascades to the turn's blocks (no per-block remove). */
+void tuiTurnRemove(TuiState* state, int64_t turnId);
+/* Replaces clear-chat: empties the typed store. */
+void tuiThreadClear(TuiState* state);
 
 /* TuiRuntimeStatus — the run's status as numbers.
  *

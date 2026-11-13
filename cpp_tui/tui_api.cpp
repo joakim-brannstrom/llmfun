@@ -832,6 +832,102 @@ void tuiPipelineClear(TuiState* state) {
     ::llmfun::tui::model::clearAgentLanes(state->inner->ui);
 }
 
+/* --- v5 thread turns/blocks (task 1's ABI, task 2's store) ------------------
+ * The typed store's C entry points. Every one lands on the main tab's typed
+ * store (`chat.typedTurns`): the store merges in place, and the adapter's
+ * rebuild guard picks the change up on the next draw of the typed path. Null
+ * state / null inner / null payload pointers are the silent no-op every entry
+ * point here is (the v4 ones above set the same precedent).
+ */
+
+void tuiSetTurns(TuiState* state, const TuiTurn* turns, size_t turnCount,
+                 const TuiBlock* blocks, size_t blockCount) {
+    if (!state || !state->inner)
+        return;
+    const auto str = [](String s) {
+        return std::string(s.data ? s.data : "", s.data ? s.len : 0);
+    };
+    std::vector<::llmfun::tui::store::TypedTurn> typedTurns;
+    typedTurns.reserve(turnCount);
+    for (size_t k = 0; turns && k < turnCount; ++k) {
+        ::llmfun::tui::store::TypedTurn t;
+        t.id = turns[k].id;
+        t.ordinal = turns[k].ordinal;
+        t.state = turns[k].state;
+        t.messageCount = turns[k].messageCount;
+        typedTurns.push_back(t);
+    }
+    std::vector<::llmfun::tui::store::TypedBlock> typedBlocks;
+    typedBlocks.reserve(blockCount);
+    for (size_t k = 0; blocks && k < blockCount; ++k) {
+        const TuiBlock& b = blocks[k];
+        ::llmfun::tui::store::TypedBlock nb;
+        nb.turnId = b.turnId;
+        nb.id = str(b.id);
+        nb.batchId = str(b.batchId);
+        nb.title = str(b.title);
+        nb.meta = str(b.meta);
+        nb.body = str(b.body);
+        nb.kind = b.kind;
+        nb.status = b.status;
+        nb.flags = b.flags;
+        nb.durationMs = b.durationMs;
+        nb.tokensIn = b.tokensIn;
+        nb.tokensOut = b.tokensOut;
+        typedBlocks.push_back(std::move(nb));
+    }
+    state->inner->chat.typedTurns.setTurns(std::move(typedTurns), std::move(typedBlocks));
+}
+
+void tuiTurnUpsert(TuiState* state, const TuiTurn* turn) {
+    if (!state || !state->inner || !turn)
+        return;
+    ::llmfun::tui::store::TypedTurn t;
+    t.id = turn->id;
+    t.ordinal = turn->ordinal;
+    t.state = turn->state;
+    t.messageCount = turn->messageCount;
+    state->inner->chat.typedTurns.turnUpsert(t);
+    // The eviction rides the turn upsert (W2): a block upsert never evicts,
+    // so the call it lands in cannot fight an eviction of the turn it is
+    // writing into.
+    state->inner->chat.typedTurns.evictForCapacity(turn->id);
+}
+
+void tuiBlockUpsert(TuiState* state, const TuiBlock* block) {
+    if (!state || !state->inner || !block)
+        return;
+    const auto str = [](String s) {
+        return std::string(s.data ? s.data : "", s.data ? s.len : 0);
+    };
+    ::llmfun::tui::store::TypedBlock nb;
+    nb.turnId = block->turnId;
+    nb.id = str(block->id);
+    nb.batchId = str(block->batchId);
+    nb.title = str(block->title);
+    nb.meta = str(block->meta);
+    nb.body = str(block->body);
+    nb.kind = block->kind;
+    nb.status = block->status;
+    nb.flags = block->flags;
+    nb.durationMs = block->durationMs;
+    nb.tokensIn = block->tokensIn;
+    nb.tokensOut = block->tokensOut;
+    state->inner->chat.typedTurns.blockUpsert(std::move(nb));
+}
+
+void tuiTurnRemove(TuiState* state, int64_t turnId) {
+    if (!state || !state->inner)
+        return;
+    state->inner->chat.typedTurns.turnRemove(turnId);
+}
+
+void tuiThreadClear(TuiState* state) {
+    if (!state || !state->inner)
+        return;
+    state->inner->chat.typedTurns.threadClear();
+}
+
 /* Compile-time linkage between the C enum (tui_api.h) and the internal C++
  * mirror (tui.h): both lists are append-only and must stay in sync, or the
  * static_cast in tuiGetSessionAction would silently mis-map future values.

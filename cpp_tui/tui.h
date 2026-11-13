@@ -244,7 +244,7 @@ struct ChatTab {
     std::set<size_t> outputLineOpen;
     /// Ids of the expanded assistant-work groups. Groups are not messages, so
     /// they keep their own set; the key is the group's first message id (the
-    /// group identity today — task 25 replaces it with the adapter's group id).
+    /// group identity today.
     std::set<size_t> openWorkGroups;
     /// Highest message id whose default expansion state has been applied. Ids
     /// are monotonic, so one watermark is enough; it makes the default a
@@ -263,6 +263,7 @@ struct ChatTab {
     /// The streaming message's reserved id, shared with `model::kStreamMessageId`:
     /// one number names the stream group's block.
     static constexpr size_t StreamChatMessageId = model::kStreamMessageId;
+    store::TypedThreadStore typedTurns;
     /// True while a stream bubble is in flight: the answer is arriving, so the thread
     /// draws it and the now bar's phase reads `writing` (task 28). Initialised here
     /// because the frame reads it on every render and a default-constructed `TuiState`

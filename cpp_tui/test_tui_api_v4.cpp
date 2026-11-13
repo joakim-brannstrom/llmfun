@@ -1026,7 +1026,7 @@ void casePipelineLaneFields() {
     static_assert(sizeof(PipelineChatMessage::contextUsed) == 8 &&
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
-    static_assert(TUI_API_VERSION == 11,
+    static_assert(TUI_API_VERSION == 12,
                   "the lane contract changed; bump one version per ABI event");
     static_assert(sizeof(SessionItem) == 80, "SessionItem is unaffected by the lane fields");
 
@@ -1146,6 +1146,64 @@ void casePipelineLaneFields() {
            "...and the stream slot is reset for the next step");
 
     tuiDestroyState(state);
+}
+
+// The v5 thread turn/block wire types (task 1, additive): the layout the D side
+// asserts from the other direction (source/llm/tui/package.d). Declare-only in
+// this generation - the store is task 2 - so this case pins the ABI and calls
+// nothing: the five entry points are odr-unused here by design, and a stray call
+// would fail the link, which is the tripwire keeping the header and the task-2
+// definitions in step.
+void caseThreadTurnBlockFields() {
+    g_where = "case: v5 turn/block layout";
+
+    static_assert(TUI_API_VERSION == 12,
+                  "this case pins the v5 generation (v12); bump one version per ABI event");
+
+    // TuiTurn: int64 + 4x int32 = 24 bytes on the 64-bit ABI, no padding.
+    static_assert(sizeof(TuiTurn) == 24, "TuiTurn is 24 bytes on the 64-bit ABI");
+    static_assert(offsetof(TuiTurn, id) == 0, "id sits at offset 0");
+    static_assert(offsetof(TuiTurn, ordinal) == 8, "ordinal sits at offset 8");
+    static_assert(offsetof(TuiTurn, state) == 12, "state sits at offset 12");
+    static_assert(offsetof(TuiTurn, messageCount) == 16, "messageCount sits at offset 16");
+    static_assert(offsetof(TuiTurn, reserved) == 20, "reserved sits at offset 20");
+
+    // TuiBlock: turnId + five 16-byte Strings + three int64 + 4x int32 = 128
+    // bytes, aligned like String (8), no padding beyond the tail.
+    static_assert(sizeof(TuiBlock) == 128, "TuiBlock is 128 bytes on the 64-bit ABI");
+    static_assert(alignof(TuiBlock) == 8, "TuiBlock's alignment is String's 8");
+    static_assert(offsetof(TuiBlock, turnId) == 0, "turnId sits at offset 0");
+    static_assert(offsetof(TuiBlock, id) == 8, "id sits at offset 8");
+    static_assert(offsetof(TuiBlock, batchId) == 24, "batchId sits at offset 24");
+    static_assert(offsetof(TuiBlock, title) == 40, "title sits at offset 40");
+    static_assert(offsetof(TuiBlock, meta) == 56, "meta sits at offset 56");
+    static_assert(offsetof(TuiBlock, body) == 72, "body sits at offset 72");
+    static_assert(offsetof(TuiBlock, durationMs) == 88, "durationMs sits at offset 88");
+    static_assert(offsetof(TuiBlock, tokensIn) == 96, "tokensIn sits at offset 96");
+    static_assert(offsetof(TuiBlock, tokensOut) == 104, "tokensOut sits at offset 104");
+    static_assert(offsetof(TuiBlock, kind) == 112, "kind sits at offset 112");
+    static_assert(offsetof(TuiBlock, status) == 116, "status sits at offset 116");
+    static_assert(offsetof(TuiBlock, flags) == 120, "flags sits at offset 120");
+    static_assert(offsetof(TuiBlock, reserved) == 124, "reserved sits at offset 124");
+
+    // The v5 vocabulary: values are the wire contract (the D emitter and the
+    // typed store both switch on them), so a renumbering is an ABI event.
+    static_assert(TuiTurnState_Running == 0 && TuiTurnState_Done == 1 &&
+                      TuiTurnState_Interrupted == 2,
+                  "TuiTurnState values are the wire contract");
+    static_assert(TuiBlockKind_Prose == 0 && TuiBlockKind_Reasoning == 1 &&
+                      TuiBlockKind_Tool == 2 && TuiBlockKind_Answer == 3 &&
+                      TuiBlockKind_Notice == 4,
+                  "TuiBlockKind values are the wire contract");
+    static_assert(TuiBlockStatus_None == 0 && TuiBlockStatus_Pending == 1 &&
+                      TuiBlockStatus_Running == 2 && TuiBlockStatus_Ok == 3 &&
+                      TuiBlockStatus_Failed == 4 && TuiBlockStatus_Cancelled == 5,
+                  "TuiBlockStatus values are the wire contract");
+    static_assert(TuiBlockFlag_Collapsible == 1 && TuiBlockFlag_DefaultOpen == 2 &&
+                      TuiBlockFlag_Selectable == 4,
+                  "TuiBlockFlags are bit flags");
+
+    expect(true, "v5 turn/block layout pinned (the static asserts are the case)");
 }
 
 // The agent store's tool rows: a call (and its result) appends a tool row to the
@@ -1695,14 +1753,15 @@ int main(int argc, char** argv) {
             (void)std::remove("llmfun_ui_log.txt");
     });
 
-    static_assert(TUI_API_VERSION == 11,
-                  "this contract test pins the current API generation (v11)");
+    static_assert(TUI_API_VERSION == 12,
+                  "this contract test pins the current API generation (v12)");
 
     caseNoneStateInert();
     caseLogRecords();
     caseLogArchiveRetry();
     caseSessionRowFields();
     casePipelineLaneFields();
+    caseThreadTurnBlockFields();
     caseAgentToolEvents();
     caseQueryHistory();
     caseCancelFlag();

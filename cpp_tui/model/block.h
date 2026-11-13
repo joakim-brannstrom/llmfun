@@ -45,6 +45,7 @@ enum class BlockKind {
     Thinking,
     System,
     Code,
+    ToolStep,
 };
 
 /// The state a block paints beside its label - mirrored from the store, never
@@ -61,6 +62,7 @@ enum class BlockState {
     Running,
     Ok,
     Failed,
+    Cancelled,
 };
 
 /// The streaming message's reserved key. The stream is not in the message store;

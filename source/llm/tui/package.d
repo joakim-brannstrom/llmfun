@@ -273,937 +273,1093 @@ TuiLogRecord makeLogRecord(TuiLogRecordData record, TuiLogAction action, string 
             record.line, record.seq, // seq: the log-order stamp from the capture site
             String(message.ptr, message.length),
             String(detail.ptr, detail.length), String(record.moduleName.ptr,
-                record.moduleName.length), String(record.funcName.ptr, record.funcName.length),
-            String(record.file.ptr, record.file.length),
-            String(actionPayload.ptr, actionPayload.length));
+                record.moduleName.length), String(record.funcName.ptr,
+                record.funcName.length), String(record.file.ptr, record.file.length),
 }
 
 void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
     if (!log.isSwapped)
-        return;
-
-    foreach (record; log.drainEntries) {
-        auto apiRecord = makeLogRecord(record, TuiLogAction_None, null);
-        tuiAddLogRecord(tuiState, &apiRecord);
-    }
-}
-
-struct RawLogLevelBorrow {
-    private {
-        LogLevel saved;
-        bool raised;
-    }
-
-    /// One call per frame with the borrow's state
-    bool sync(bool open) {
-        if (open == raised)
-            return false;
-        if (open) {
-            saved = globalLogLevel;
-            if (saved > LogLevel.trace)
-                globalLogLevel = LogLevel.trace;
-            raised = true;
-        } else {
-            globalLogLevel = saved;
-            raised = false;
-        }
-        return true;
-    }
-
-    /// Put back what was borrowed. Idempotent, so the quit path can call it whether or not the
-    /// surface is open (a quit with the surface up is the case the design names explicitly).
-    void restore() {
-        if (!raised)
-            return;
-        globalLogLevel = saved;
-        raised = false;
-    }
-
-    /// Is the level currently borrowed? Read by the tests and the actor's log line.
-    bool isRaised() const {
-        return raised;
-    }
-}
-
-struct TextUserInterface {
-    private {
-        TuiState* tuiState;
-        TuiLogSwap logSwap;
-        RawLogLevelBorrow rawLogLevel;
-    }
-
-    package {
-        string query_;
-        // what D last sent, replayed to the C++ frame on every render tick.
-        UiRuntimeStatus runtimeStatus_;
-        // Last header summary computed by addChatMessage
-        string lastChatSummary;
-        // Set when the C frame reports user-terminated (GUI window close);
-        // consumed by the actor's postProcess exit handshake.
-        bool userTerminated_;
-    }
-
-    this(TuiState* state) {
-        this.tuiState = state;
-        tuiSetLogging(tuiState, false);
-    }
-
-    ~this() {
-        // The Raw Log's borrowed level is restored on the way out as well as on close: a quit
-        // with the surface open must not leave the process logging at the developer level for
-        // whatever runs after the UI (D-RAWLOG's "and in the shutdown path").
-        restoreRawLogLevel();
-        tuiDestroyState(tuiState);
-    }
-
-    void addChatMessage(string msg, string thinking, TuiChatMessageType type,
-            size_t nr, MessageTime time) {
-        string summary;
-        if (nr == 0) {
-            summary = shortSummary(msg);
-        } else {
-            auto head = "[" ~ nr.text ~ "]";
-            auto body = shortSummary(msg);
-            auto tail = timeSuffix(time);
-            if (body.empty) {
-                summary = tail.empty ? head : head ~ " " ~ tail;
-            } else {
-                summary = head ~ " " ~ body ~ tail;
-            }
-        }
-        lastChatSummary = summary;
-        auto s = String(summary.ptr, summary.length);
-        auto q = String(msg.ptr, msg.length);
-        auto t = String(thinking.ptr, thinking.length);
-        tuiAddChatMessage(tuiState, ChatMessageParam(s, q, t, type));
-    }
-
-    void clearChat() {
-        tuiClearChatMessages(tuiState);
-    }
-
-    void setIniFile(Path path) {
-        import std.file : exists;
-
-        auto s = () {
-            if (path.dirName.exists) {
-                return toTuiString(path);
-            }
-            return toTuiString(null);
-        }();
-        tuiSetIniFilename(tuiState, s);
-    }
-
-    void setRuntimeStatus(UiRuntimeStatus s) @safe {
-        runtimeStatus_ = s;
-    }
-
-    void setMaxWidth(int w) {
-        tuiSetMaxWidth(tuiState, w);
-    }
-
-    void setIdlePark(int ms) {
-        tuiSetIdlePark(tuiState, ms);
-    }
-
-    void setReadyStatus(bool x) {
-        tuiReadyStatus(tuiState, x ? 1 : 0);
-    }
-
-    // Composer Stop (task 3): the C++ frame code records a one-slot cancel
-    // request; consuming it here keeps the typed "/stop" path as the only stop
-    // implementation (D-CANCEL), so partial output is preserved exactly as it
-    // is for the slash command.
-    bool takeCancel() @trusted {
-        return tuiTakeCancel(tuiState) != 0;
-    }
-
-    void streamChat(string msg, string thinking) {
-        auto s = String(null, 0);
-        auto q = String(msg.ptr, msg.length);
-        auto t = String(thinking.ptr, thinking.length);
-        tuiUpdateStreamChatMessage(tuiState, ChatMessageParam(s, q, t,
-                TuiChatMessageType_Assistant));
-    }
-
-    void streamChatDone() {
-        tuiStreamChatMessageClear(tuiState);
-    }
-
-    void pipelineMessage(UiPipelineStreamChatMessage msg) {
-        auto id = msg.agentId.toTuiString;
-        auto content = msg.content.toTuiString;
-        auto reasoning = msg.thinking.toTuiString;
-        auto role = msg.role.toTuiString;
-        auto currentTool = msg.currentTool.toTuiString;
-        String finish;
-        tuiPipelineAgentUpdate(tuiState, id, PipelineChatMessage(content: content, reasoning: reasoning, role: role,
-                finishReason: finish, currentTool: currentTool, contextUsed: msg.contextUsed,
-                contextMax: msg.contextMax, tokensPerSecond: msg.tokensPerSecond));
-    }
-
-    void pipelineMessage(UiPipelineStreamDone msg) {
-        auto id = msg.agentId.toTuiString;
-        tuiPipelineAgentDone(tuiState, id);
-    }
-
-    void pipelineToolCall(UiPipelineToolCall msg) {
-        auto id = msg.agentId.toTuiString;
-        auto name = msg.name.toTuiString;
-        auto arguments = msg.arguments.toTuiString;
-        auto callId = msg.id.toTuiString;
-        tuiPipelineAgentToolCall(tuiState, id, TuiToolCallParam(name: name,
-                arguments: arguments, id: callId));
-    }
-
-    void pipelineToolResult(UiPipelineToolResult msg) {
-        auto id = msg.agentId.toTuiString;
-        auto name = msg.name.toTuiString;
-        auto text = msg.text.toTuiString;
-        tuiPipelineAgentToolResult(tuiState, id, TuiToolResultParam(name: name,
-                ok: msg.ok, text: text));
-    }
-
-    void pipelineClear() {
-        tuiPipelineClear(tuiState);
-    }
-
-    void useUiLogFile(bool useFile) {
-        tuiSetLogging(tuiState, useFile);
-    }
-
-    void setUiAsStdLogger() {
-        logSwap = swapToTuiLogger();
-    }
-
-    // Raw Log access (`--debug-ui`, task 33). One call before the first frame is all the flag
-    // needs: the C++ frame reads it when it lays out, so the overlay is up on the frame the
-    // window appears - which is what the design means by "starts with the Raw Log open".
-    void setRawLogOpen(bool open) {
-        tuiSetRawLogOpen(tuiState, open ? 1 : 0);
-    }
-
-    void syncRawLogLevel() {
-        rawLogLevel.sync(tuiIsRawLogOpen(tuiState) != 0
-                && tuiRawLogFloor(tuiState) == TuiLogLevel_Trace);
-    }
-
-    void restoreRawLogLevel() {
-        rawLogLevel.restore();
-    }
-
-    string userQuery() @safe {
-        auto tmp = query_;
-        query_ = null;
-        return tmp;
-    }
-
-    void setHistory(string[] history) {
-        if (history.empty) // on purpose do NOT clear the history. By not clearing it is easy
-            // to "repeat" previous questions with a cleared chat.
-            return;
-        auto app = appender!(String[])();
-        foreach (a; history) {
-            app.put(String(a.ptr, a.length));
-        }
-        tuiInitQueryHistory(tuiState, app[].ptr, app[].length);
-    }
-
-    void setSessionList(UiSessionItem[] items) {
-        if (items.length == 0) {
-            tuiSetSessionList(tuiState, null, 0);
-            return;
-        }
-        auto app = appender!(SessionItem[])();
-        foreach (ref const item; items) {
-            app.put(SessionItem(toTuiString(item.id.get), toTuiString(item.title),
-                    toTuiString(item.preview), item.messageCount,
-                    item.isActive ? 1 : 0, item.updatedAtMs, item.flags, 0));
-        }
-        tuiSetSessionList(tuiState, app[].ptr, app[].length);
-    }
-
-    // Pops at most one sidebar action from the C++ queue.
-    void pollSessionAction(out TuiSessionActionType type, out string id, out string title) {
-        if (tuiIsSessionActionReady(tuiState) == 0)
-            return;
-        auto action = tuiGetSessionAction(tuiState);
-        type = action.type;
-        id = toString(action.sessionId);
-        title = toString(action.title);
-        String_Free(action.sessionId);
-        String_Free(action.title);
-    }
-
-    // Chip status line (worker -> UI).
-    //
-    // Params:
-    //   `path` is the workarea-relative path D reports on Done and FailedRaw (the functional data D reads back at Send time)
-    //   `display` is the chip text D authors
-    void setDropChipStatus(long chipId, int state, string path, string display) {
-        tuiSetChipStatus(tuiState, chipId, state, toTuiString(path), toTuiString(display));
-    }
-
-    // Pops at most one dropped-file path from the C++ queue. chipId 0 +
-    // an empty path mean "nothing queued"; the popped string is owned here
-    // and copied out before the free.
-    void pollDroppedPath(out long chipId, out string path) {
-        chipId = 0;
-        path = null;
-        auto dropped = tuiGetDroppedPath(tuiState);
-        if (dropped.chipId == 0)
-            return;
-        chipId = dropped.chipId;
-        path = toString(dropped.path);
-        String_Free(dropped.path);
-    }
-
-    // Pops at most one chip-cancel request (the chip id, 0 = none).
-    long pollChipCancel() {
-        return tuiGetChipCancel(tuiState);
-    }
-
-    bool hasUserTerminated() @safe {
-        return userTerminated_;
-    }
-
-    void render(bool blocking = false) {
-        TuiRuntimeStatus rs = TuiRuntimeStatus.init;
-        rs.phase = runtimeStatus_.phase;
-        rs.detail = toTuiString(runtimeStatus_.detail);
-        rs.model = toTuiString(runtimeStatus_.model);
-        rs.contextUsed = runtimeStatus_.contextUsed;
-        rs.contextMax = runtimeStatus_.contextMax;
-        rs.compactAt = runtimeStatus_.compactAt;
-        rs.tokensPerSecond = runtimeStatus_.tokensPerSecond;
-        static assert(TuiRuntimeStatus.sizeof == 88,
-                "the D mirror of TuiRuntimeStatus must pin the ABI layout");
-        tuiSetRuntimeStatus(tuiState, &rs);
-
-        if (tuiIsSubmitReady(tuiState) != 0) {
-            String userQuery = tuiGetSubmitQuery(tuiState);
-            query_ = toString(userQuery);
-            String_Free(userQuery);
-            tuiResetSubmit(tuiState);
-
-            DropChipSnapshot[] chips;
-            foreach (i; 0 .. tuiGetChipCount(tuiState)) {
-                auto chip = tuiGetChipAt(tuiState, i);
-                chips ~= DropChipSnapshot(chip.chipId, chip.status, toString(chip.path));
-                String_Free(chip.path);
-            }
-            query_ = composeQueryWithMarkers(query_, chips);
-            tuiClearChipRow(tuiState);
+        return; foreach (record; log.drainEntries) {
+            auto apiRecord = makeLogRecord(record, TuiLogAction_None, null); tuiAddLogRecord(tuiState,
+                    &apiRecord);}
         }
 
-        tuiLogToTui(logSwap, tuiState);
+    struct RawLogLevelBorrow {
+        private {
+            LogLevel saved; bool raised;}
 
-        syncRawLogLevel();
+            /// One call per frame with the borrow's state
+            bool sync(bool open) {
+                if (open == raised)
+                    return false; if (open) {
+                        saved = globalLogLevel; if (saved > LogLevel.trace)
+                            globalLogLevel = LogLevel.trace; raised = true;} else {
+                            globalLogLevel = saved; raised = false;}
+                            return true;}
 
-        tuiRenderBlocking(tuiState, blocking ? 1 : 0);
+                            /// Put back what was borrowed. Idempotent, so the quit path can call it whether or not the
+                            /// surface is open (a quit with the surface up is the case the design names explicitly).
+                            void restore() {
+                                if (!raised)
+                                    return; globalLogLevel = saved; raised = false;
+                            }
 
-        if (tuiQuitRequested(tuiState) != 0)
-            userTerminated_ = true;
-    }
-}
+                            /// Is the level currently borrowed? Read by the tests and the actor's log line.
+                            bool isRaised() const {
+                                return raised;}
+                            }
 
-interface TUIListener {
-    void userQuery(string s);
-    void sessionSelect(SessionId id);
-    void sessionNew();
-    void sessionRename(SessionId id, string title);
-    void sessionDelete(SessionId id);
-    void sessionPinToggle(SessionId id);
-    void sessionClone(SessionId id);
-    void uiTerminated();
-    void uiStartupFailed(string reason);
-}
+                            struct TextUserInterface {
+                                private {
+                                    TuiState* tuiState; TuiLogSwap logSwap; RawLogLevelBorrow rawLogLevel;
+                                }
 
-interface TUICommands {
-    void uiMsg(UiChatMessage m);
-    void uiMsg(UiChatThinkMessage m);
-    void uiMsg(UiFinalAnswer m);
-    void uiMsg(UiRuntimeStatus m);
-    void uiMsg(UiInitHistory m);
-    void uiMsg(UiSessionList m);
-    void uiMsg(UiStreamChatMessage m);
-    void uiMsg(UiLogFile m);
-    void uiMsg(UiPipelineStreamChatMessage m);
-    void uiMsg(UiPipelineStreamDone m);
-    void uiMsg(UiPipelineToolCall m);
-    void uiMsg(UiPipelineToolResult m);
-    void uiMsg(UiDropReport m);
-    void uiStreamChatDone();
-    void uiPipelineClear();
-    void uiClearChat();
-    void uiAgentBusy();
-    void uiAgentReady();
-    void uiTerminate();
-}
+                                package {
+                                    string query_; // what D last sent, replayed to the C++ frame on every render tick.
+                                    UiRuntimeStatus runtimeStatus_; // Last header summary computed by addChatMessage
+                                    string lastChatSummary; // Set when the C frame reports user-terminated (GUI window close);
+                                    // consumed by the actor's postProcess exit handshake.
+                                    bool userTerminated_;}
 
-// Human-readable TuiBackendKind name for the startup log line.
-private string backendKindName(int kind) {
-    switch (kind) {
-    case TuiBackendKind_Tui:
-        return "Tui";
-    case TuiBackendKind_Gui:
-        return "Gui";
-    default:
-        return "None";
-    }
-}
+                                    this(TuiState* state) {
+                                        this.tuiState = state; tuiSetLogging(tuiState, false);
+                                    }
 
-void playNotification() {
-    import llm.config : ProgramName;
-    import my.optional;
-    import my.resource;
-    import std.file : exists;
-    import std.process : spawnProcess, Config;
-    import std.stdio : File;
-    import std.sumtype : match;
+                                    ~this() {
+                                        // The Raw Log's borrowed level is restored on the way out as well as on close: a quit
+                                        // with the surface open must not leave the process logging at the developer level for
+                                        // whatever runs after the UI (D-RAWLOG's "and in the shutdown path").
+                                        restoreRawLogLevel(); tuiDestroyState(tuiState);
+                                    }
 
-    static bool hasPlayer = true;
+                                    void addChatMessage(string msg, string thinking,
+                                            TuiChatMessageType type, size_t nr, MessageTime time) {
+                                        string summary; if (nr == 0) {
+                                            summary = shortSummary(msg);} else {
+                                                auto head = "[" ~ nr.text ~ "]"; auto body = shortSummary(
+                                                        msg); auto tail = timeSuffix(time);
+                                                    if (body.empty) {
+                                                        summary = tail.empty ? head : head
+                                                            ~ " " ~ tail;} else {
+                                                                summary = head ~ " " ~ body ~ tail;
+                                                            }
+                                                    }
+                                                lastChatSummary = summary; auto s = String(summary.ptr,
+                                                        summary.length); auto q = String(msg.ptr,
+                                                        msg.length); auto t = String(thinking.ptr,
+                                                        thinking.length); tuiAddChatMessage(tuiState,
+                                                        ChatMessageParam(s, q, t, type));
+                                            }
 
-    if (!hasPlayer)
-        return;
+                                            void clearChat() {
+                                                tuiClearChatMessages(tuiState);}
 
-    auto path = dataSearch(ProgramName).resolve(Path("notification.wav"));
-    path.match!((Some!ResourceFile p) {
-        try {
-            if (p.get.exists) {
-                auto f = File("/dev/null");
-                spawnProcess(["aplay", p.get.toString], f, f, f, null, Config.detached);
-            }
-        } catch (Exception e) {
-            logger.trace(e.msg);
-            hasPlayer = false;
-        }
-    }, (None _) {});
+                                                void setIniFile(Path path) {
+                                                    import std.file : exists;
 
-}
+                                                    auto s = () {
+                                                        if (path.dirName.exists) {
+                                                            return toTuiString(path);
+                                                        }
+                                                        return toTuiString(null);
+                                                    }(); tuiSetIniFilename(tuiState, s);
+                                                }
 
-class TextUserInterfaceActor : TUICommands {
-    import std.datetime : dur, Clock, Duration, SysTime;
-    import llm.utility : stopAgent;
-    import std.conv : to;
+                                                void setRuntimeStatus(UiRuntimeStatus s) @safe {
+                                                    runtimeStatus_ = s;}
 
-    private {
-        ActorRef selfRef;
+                                                    void setMaxWidth(int w) {
+                                                        tuiSetMaxWidth(tuiState, w);
+                                                    }
 
-        TypedAddress!TUIListener listenerAddress;
-        Channel!TUIListener listener;
+                                                    void setIdlePark(int ms) {
+                                                        tuiSetIdlePark(tuiState, ms);
+                                                    }
 
-        // Guards uiTick(): the chain stopper. An in-flight tick may still be
-        // dispatched after uiTerminate - skip the poll/render work rather than
-        // touch the torn-down UI. No repeating entry exists anymore, so
-        // nothing needs canceling.
-        bool running = true;
-    }
+                                                    void setReadyStatus(bool x) {
+                                                        tuiReadyStatus(tuiState, x ? 1 : 0);
+                                                    }
 
-    // Package-visible state: read/write seam for the llm.tui.tests driver
-    // (see the TextUserInterface block above).
-    package {
-        // Incremented each render cycle which make it possible to observe if
-        // and how often the UI render has executed.
-        ulong updateCycle;
+                                                    // Composer Stop (task 3): the C++ frame code records a one-slot cancel
+                                                    // request; consuming it here keeps the typed "/stop" path as the only stop
+                                                    // implementation (D-CANCEL), so partial output is preserved exactly as it
+                                                    // is for the slash command.
+                                                    bool takeCancel() @trusted {
+                                                        return tuiTakeCancel(tuiState) != 0;
+                                                    }
 
-        // Non-empty when the backend attach failed (it runs in onSpawn, on
-        // the actor's own thread); dispatched once from onSpawn via
-        // uiStartupFailed (the typed listener exists only there) instead of
-        // arming the frame tick. The startup-failure test injects it before
-        // onSpawn runs.
-        string startupError;
+                                                    void streamChat(string msg, string thinking) {
+                                                        auto s = String(null, 0); auto q = String(msg.ptr,
+                                                                msg.length); auto t = String(thinking.ptr,
+                                                                thinking.length); tuiUpdateStreamChatMessage(tuiState,
+                                                                ChatMessageParam(s,
+                                                                    q, t,
+                                                                    TuiChatMessageType_Assistant));
+                                                    }
 
-        bool debugUi;
+                                                    void streamChatDone() {
+                                                        tuiStreamChatMessageClear(tuiState);
+                                                    }
 
-        TextUserInterface ui;
+                                                    void pipelineMessage(
+                                                            UiPipelineStreamChatMessage msg) {
+                                                        auto id = msg.agentId.toTuiString;
+                                                            auto content = msg.content.toTuiString;
+                                                            auto reasoning = msg
+                                                                .thinking.toTuiString;
+                                                        auto role = msg.role.toTuiString;
+                                                            auto currentTool = msg
+                                                                .currentTool.toTuiString;
+                                                        String finish; tuiPipelineAgentUpdate(tuiState, id,
+                                                                PipelineChatMessage(content: content, reasoning: reasoning, role: role,
+                                                                    finishReason: finish,
+                                                                    currentTool: currentTool,
+                                                                    contextUsed: msg.contextUsed, contextMax: msg.contextMax,
+                                                                    tokensPerSecond: msg
+                                                                    .tokensPerSecond));
+                                                    }
 
-        // Production path: the backend attach is deferred from the ctor to
-        // onSpawn so the GLFW/GL context (thread-affine) is created on the
-        // same thread that later drives the frames (the actor is spawned
-        // with Config.detached). state is non-owning: ui owns it and its
-        // dtor destroys it once.
-        bool initPending;
-        TuiBackendMode pendingMode;
-        TuiState* state;
+                                                    void pipelineMessage(UiPipelineStreamDone msg) {
+                                                        auto id = msg.agentId.toTuiString;
+                                                            tuiPipelineAgentDone(tuiState, id);
+                                                    }
 
-        TuiSessionActionType pendingAction = TuiSessionAction_None;
+                                                    void pipelineToolCall(UiPipelineToolCall msg) {
+                                                        auto id = msg.agentId.toTuiString;
+                                                            auto name = msg.name.toTuiString;
+                                                            auto arguments = msg
+                                                                .arguments.toTuiString;
+                                                        auto callId = msg.id.toTuiString;
+                                                            tuiPipelineAgentToolCall(tuiState, id,
+                                                                    TuiToolCallParam(name: name, arguments: arguments,
+                                                                        id: callId));
+                                                    }
 
-        string pendingActionId;
-        string pendingActionTitle;
+                                                    void pipelineToolResult(UiPipelineToolResult msg) {
+                                                        auto id = msg.agentId.toTuiString;
+                                                            auto name = msg.name.toTuiString;
+                                                            auto text = msg.text.toTuiString;
+                                                            tuiPipelineAgentToolResult(tuiState, id,
+                                                                    TuiToolResultParam(name: name, ok: msg.ok,
+                                                                        text: text));
+                                                    }
 
-        TypedAddress!DropWorker dropWorkerAddress;
-    }
+                                                    void pipelineClear() {
+                                                        tuiPipelineClear(tuiState);
+                                                    }
 
-    // Production path: create the C state now (no backend); the backend
-    // attach selected by `mode` is deferred to onSpawn so the window and the
-    // GL context are created on the actor's own thread - GLFW/GL state is
-    // thread-affine and the frame loop below drives it (the actor is spawned
-    // with Config.detached, keeping onSpawn and every frame on one thread).
-    // Auto's GUI->TUI failover is resolved in C++ (a TTY check cannot be
-    // faked from here); a failure records the precise reason, dispatched
-    // from onSpawn. On success the active backend and any fallback note are
-    // logged; the note also seeds the status line. The ui field takes the
-    // state on every path so its dtor tears it down once.
-    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth, TuiBackendMode mode,
-            bool debugUi = false, long idleParkMs = 0,
-            TypedAddress!DropWorker dropWorker = TypedAddress!DropWorker.init) {
-        assert(maxWidth >= 0 && maxWidth <= 10_000,
-                "maxWidth out of int-safe range: " ~ maxWidth.to!string);
-        this.listenerAddress = listener;
-        this.dropWorkerAddress = dropWorker;
-        this.debugUi = debugUi;
-        pendingMode = mode;
-        initPending = true;
-        state = tuiCreateState();
-        ui = TextUserInterface(state);
-        ui.setMaxWidth(cast(int) maxWidth);
-        ui.setIdlePark(cast(int) idleParkMs);
-        ui.setIniFile(iniFile);
-    }
+                                                    void useUiLogFile(bool useFile) {
+                                                        tuiSetLogging(tuiState, useFile);
+                                                    }
 
-    // Headless injection seam (tests): raw C state pointer, no init; a
-    // by-value TextUserInterface parameter would double-free the state (its
-    // copy's dtor runs at ctor exit, then the field's dtor runs again in
-    // onExit). Ownership transfers on successful return only; a throw
-    // (assert) leaves the state with the caller.
-    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth, TuiState* state,
-            long idleParkMs = 0, TypedAddress!DropWorker dropWorker = TypedAddress!DropWorker.init) {
-        assert(maxWidth >= 0 && maxWidth <= 10_000,
-                "maxWidth out of int-safe range: " ~ maxWidth.to!string);
-        this.listenerAddress = listener;
-        this.dropWorkerAddress = dropWorker;
-        this.state = state;
-        ui = TextUserInterface(state);
-        ui.setMaxWidth(cast(int) maxWidth);
-        ui.setIdlePark(cast(int) idleParkMs);
-        ui.setUiAsStdLogger;
-        ui.setIniFile(iniFile);
-    }
+                                                    void setUiAsStdLogger() {
+                                                        logSwap = swapToTuiLogger();
+                                                    }
 
-    // with the flag set, open the Raw Log before the first frame and run the logger sync off the
-    // same edge the per-frame poll uses, so records emitted between process start and the first
-    // frame (backend attach, first agent traffic) are captured too - but only when the floor asks
-    // for trace: the poll's predicate decides, so a floor of info leaves the logger configured.
-    // Without the flag, nothing changes.
-    package void debugUiSpawnEdge() {
-        if (!debugUi)
-            return;
-        ui.setRawLogOpen(true);
-        ui.syncRawLogLevel();
-    }
+                                                    // Raw Log access (`--debug-ui`, task 33). One call before the first frame is all the flag
+                                                    // needs: the C++ frame reads it when it lays out, so the overlay is up on the frame the
+                                                    // window appears - which is what the design means by "starts with the Raw Log open".
+                                                    void setRawLogOpen(bool open) {
+                                                        tuiSetRawLogOpen(tuiState, open ? 1 : 0);
+                                                    }
 
-    void onSpawn(ActorRef selfRef) {
-        void attachBackend() {
-            // the window and the GL context are created (and the context made
-            // current) HERE, the thread that also drives the frames. On success
-            // the active backend and any fallback note are logged; the note also
-            // seeds the status line. The TuiLogger swap only makes sense with a UI
-            // that drains it: on a failed init nothing renders, so the normal
-            // console logger stays installed and the app's shutdown diagnostics
-            // are not swallowed.
-            initPending = false;
-            string note;
-            if (tuiInit(state, pendingMode) != 0) {
-                auto err = tuiLastError();
-                startupError = .toString(err);
-                String_Free(err);
-                return;
-            }
-            logger.infof("UI backend active: %s", backendKindName(tuiBackendActive(state)));
-            auto n = tuiBackendNote();
-            note = .toString(n);
-            String_Free(n);
-            if (!note.empty)
-                logger.info("UI backend note: ", note);
-            ui.setUiAsStdLogger;
-            if (!note.empty)
-                ui.setRuntimeStatus(UiRuntimeStatus(TuiPhase.idle, note));
-            debugUiSpawnEdge();
-        }
+                                                    void syncRawLogLevel() {
+                                                        rawLogLevel.sync(tuiIsRawLogOpen(tuiState) != 0
+                                                                && tuiRawLogFloor(tuiState) == TuiLogLevel_Trace);
+                                                    }
 
-        this.selfRef = selfRef;
-        listener = typeof(listener)(listenerAddress, this.selfRef);
-        // attach the backend HERE, on the actor's own thread.
-        if (initPending && startupError.empty)
-            attachBackend();
-        if (!startupError.empty) {
-            listener.uiStartupFailed(startupError);
-            return;
-        }
-        dynSend(selfRef.address, "uiTick");
-    }
+                                                    void restoreRawLogLevel() {
+                                                        rawLogLevel.restore();}
 
-    void onExit(ExitMsg _) {
-        ui = TextUserInterface.init;
-    }
+                                                        string userQuery() @safe {
+                                                            auto tmp = query_; query_ = null;
+                                                                return tmp;}
 
-    void onException(Exception e) {
-        logger.warning("TUI actor exception: ", e.msg);
-    }
+                                                                void setHistory(string[] history) {
+                                                                    if (history.empty) // on purpose do NOT clear the history. By not clearing it is easy
+                                                                        // to "repeat" previous questions with a cleared chat.
+                                                                        return; auto app = appender!(
+                                                                                String[])();
+                                                                            foreach (a;
+                                                                                    history) {
+                                                                                app.put(String(a.ptr,
+                                                                                        a.length));
+                                                                            }
+                                                                    tuiInitQueryHistory(tuiState, app[].ptr,
+                                                                            app[].length);
+                                                                }
 
-    void onError(ErrorMsg e) {
-        logger.warning("TUI actor error: ", e.reason.to!string);
-    }
+                                                            void setSessionList(
+                                                                    UiSessionItem[] items) {
+                                                                if (items.length == 0) {
+                                                                    tuiSetSessionList(tuiState,
+                                                                            null, 0);
+                                                                        return;}
+                                                                        auto app = appender!(
+                                                                                SessionItem[])();
+                                                                        foreach (ref const item;
+                                                                                items) {
+                                                                            app.put(
+                                                                                    SessionItem(toTuiString(item.id.get),
+                                                                                    toTuiString(item.title),
+                                                                                    toTuiString(item.preview),
+                                                                                    item.messageCount, item.isActive
+                                                                                    ? 1 : 0,
+                                                                                    item.updatedAtMs, item.flags,
+                                                                                    0));
+                                                                        }
+                                                                    tuiSetSessionList(tuiState, app[].ptr,
+                                                                            app[].length);
+                                                                }
 
-    /** Non-destructive peek over the actor's mailbox before the render -
+                                                                // Pops at most one sidebar action from the C++ queue.
+                                                                void pollSessionAction(out TuiSessionActionType type,
+                                                                        out string id,
+                                                                        out string title) {
+                                                                    if (tuiIsSessionActionReady(
+                                                                            tuiState) == 0)
+                                                                        return; auto action = tuiGetSessionAction(
+                                                                                tuiState);
+                                                                            type = action.type;
+                                                                            id = toString(
+                                                                                    action
+                                                                                    .sessionId);
+                                                                            title = toString(
+                                                                                    action.title);
+                                                                            String_Free(
+                                                                                    action
+                                                                                    .sessionId);
+                                                                            String_Free(
+                                                                                    action.title);
+                                                                }
+
+                                                                // Chip status line (worker -> UI).
+                                                                //
+                                                                // Params:
+                                                                //   `path` is the workarea-relative path D reports on Done and FailedRaw (the functional data D reads back at Send time)
+                                                                //   `display` is the chip text D authors
+                                                                void setDropChipStatus(long chipId, int state,
+                                                                        string path, string display) {
+                                                                    tuiSetChipStatus(tuiState, chipId, state,
+                                                                            toTuiString(path),
+                                                                            toTuiString(display));
+                                                                }
+
+                                                                // Pops at most one dropped-file path from the C++ queue. chipId 0 +
+                                                                // an empty path mean "nothing queued"; the popped string is owned here
+                                                                // and copied out before the free.
+                                                                void pollDroppedPath(out long chipId,
+                                                                        out string path) {
+                                                                    chipId = 0; path = null;
+                                                                        auto dropped = tuiGetDroppedPath(
+                                                                                tuiState);
+                                                                        if (dropped.chipId == 0) return;
+                                                                        chipId = dropped.chipId;
+                                                                        path = toString(
+                                                                                dropped.path);
+                                                                        String_Free(dropped.path);
+                                                                }
+
+                                                                // Pops at most one chip-cancel request (the chip id, 0 = none).
+                                                                long pollChipCancel() {
+                                                                    return tuiGetChipCancel(
+                                                                            tuiState);
+                                                                }
+
+                                                                bool hasUserTerminated() @safe {
+                                                                    return userTerminated_;
+                                                                }
+
+                                                                void render(bool blocking = false) {
+                                                                    TuiRuntimeStatus rs = TuiRuntimeStatus
+                                                                        .init; rs.phase
+                                                                        = runtimeStatus_.phase;
+                                                                    rs.detail = toTuiString(
+                                                                            runtimeStatus_.detail);
+                                                                        rs.model = toTuiString(
+                                                                                runtimeStatus_
+                                                                                .model);
+                                                                        rs.contextUsed
+                                                                        = runtimeStatus_
+                                                                            .contextUsed;
+                                                                    rs.contextMax
+                                                                        = runtimeStatus_.contextMax;
+                                                                    rs.compactAt
+                                                                        = runtimeStatus_.compactAt;
+                                                                    rs.tokensPerSecond
+                                                                        = runtimeStatus_
+                                                                            .tokensPerSecond;
+                                                                    static assert(TuiRuntimeStatus.sizeof == 88, "the D mirror of TuiRuntimeStatus must pin the ABI layout");
+                                                                        tuiSetRuntimeStatus(tuiState,
+                                                                                &rs);
+
+                                                                        if (
+                                                                            tuiIsSubmitReady(
+                                                                                tuiState) != 0) {
+                                                                            String userQuery = tuiGetSubmitQuery(
+                                                                                    tuiState);
+                                                                                query_ = toString(
+                                                                                        userQuery);
+                                                                                String_Free(
+                                                                                        userQuery);
+                                                                                tuiResetSubmit(
+                                                                                        tuiState);
+
+                                                                                DropChipSnapshot[] chips;
+                                                                                foreach (i;
+                                                                                        0 .. tuiGetChipCount(
+                                                                                            tuiState)) {
+                                                                                    auto chip = tuiGetChipAt(tuiState,
+                                                                                            i);
+                                                                                        chips ~= DropChipSnapshot(
+                                                                                                chip.chipId,
+                                                                                                chip.status,
+                                                                                                toString(
+                                                                                                    chip
+                                                                                                    .path));
+                                                                                        String_Free(
+                                                                                                chip
+                                                                                                .path);
+                                                                                }
+                                                                            query_ = composeQueryWithMarkers(query_,
+                                                                                    chips);
+                                                                                tuiClearChipRow(
+                                                                                        tuiState);
+                                                                        }
+
+                                                                    tuiLogToTui(logSwap, tuiState);
+
+                                                                        syncRawLogLevel();
+
+                                                                        tuiRenderBlocking(tuiState, blocking
+                                                                                ? 1 : 0);
+
+                                                                        if (
+                                                                            tuiQuitRequested(
+                                                                                tuiState) != 0) userTerminated_ = true;
+                                                                }
+                                                            }
+
+                                                            interface TUIListener {
+                                                                void userQuery(string s);
+                                                                    void sessionSelect(SessionId id);
+                                                                    void sessionNew();
+                                                                    void sessionRename(SessionId id,
+                                                                            string title);
+                                                                    void sessionDelete(SessionId id);
+                                                                    void sessionPinToggle(
+                                                                            SessionId id);
+                                                                    void sessionClone(SessionId id);
+                                                                    void uiTerminated();
+                                                                    void uiStartupFailed(
+                                                                            string reason);
+                                                            }
+
+                                                            interface TUICommands {
+                                                                void uiMsg(UiChatMessage m);
+                                                                    void uiMsg(UiChatThinkMessage m);
+                                                                    void uiMsg(UiFinalAnswer m);
+                                                                    void uiMsg(UiRuntimeStatus m);
+                                                                    void uiMsg(UiInitHistory m);
+                                                                    void uiMsg(UiSessionList m);
+                                                                    void uiMsg(UiStreamChatMessage m);
+                                                                    void uiMsg(UiLogFile m);
+                                                                    void uiMsg(
+                                                                            UiPipelineStreamChatMessage m);
+                                                                    void uiMsg(
+                                                                            UiPipelineStreamDone m);
+                                                                    void uiMsg(UiPipelineToolCall m);
+                                                                    void uiMsg(
+                                                                            UiPipelineToolResult m);
+                                                                    void uiMsg(UiDropReport m);
+                                                                    void uiStreamChatDone();
+                                                                    void uiPipelineClear();
+                                                                    void uiClearChat();
+                                                                    void uiAgentBusy();
+                                                                    void uiAgentReady();
+                                                                    void uiTerminate();
+                                                            }
+
+                                                            // Human-readable TuiBackendKind name for the startup log line.
+                                                            private string backendKindName(int kind) {
+                                                                switch (kind) {
+                                                                case TuiBackendKind_Tui:
+                                                                    return "Tui"; case TuiBackendKind_Gui:
+                                                                    return "Gui"; default:
+                                                                    return "None";
+                                                                }
+                                                            }
+
+                                                            void playNotification() {
+                                                                import llm.config : ProgramName;
+                                                                import my.optional;
+                                                                import my.resource;
+                                                                import std.file : exists;
+                                                                import std.process : spawnProcess,
+                                                                    Config;
+                                                                import std.stdio : File;
+                                                                import std.sumtype : match;
+
+                                                                static bool hasPlayer = true;
+
+                                                                    if (!hasPlayer) return;
+
+                                                                    auto path = dataSearch(
+                                                                            ProgramName).resolve(
+                                                                            Path("notification.wav"));
+                                                                    path.match!(
+                                                                            (Some!ResourceFile p) {
+                                                                        try {
+                                                                            if (p.get.exists) {
+                                                                                auto f = File(
+                                                                                    "/dev/null");
+                                                                                spawnProcess([
+                                                                                    "aplay",
+                                                                                    p.get.toString
+                                                                                ], f, f, f, null,
+                                                                                    Config.detached);
+                                                                            }
+                                                                        } catch (Exception e) {
+                                                                            logger.trace(e.msg);
+                                                                            hasPlayer = false;
+                                                                        }
+                                                                    }, (None _) {
+                                                                    });}
+
+                                                                    class TextUserInterfaceActor
+                                                                    : TUICommands {
+                                                                        import std.datetime : dur, Clock, Duration,
+                                                                            SysTime;
+                                                                        import llm.utility : stopAgent;
+                                                                        import std.conv : to;
+
+                                                                        private {
+                                                                            ActorRef selfRef;
+
+                                                                                TypedAddress!TUIListener listenerAddress;
+                                                                                Channel!TUIListener listener;
+
+                                                                                // Guards uiTick(): the chain stopper. An in-flight tick may still be
+                                                                                // dispatched after uiTerminate - skip the poll/render work rather than
+                                                                                // touch the torn-down UI. No repeating entry exists anymore, so
+                                                                                // nothing needs canceling.
+                                                                                bool running = true;
+                                                                        }
+
+                                                                        // Package-visible state: read/write seam for the llm.tui.tests driver
+                                                                        // (see the TextUserInterface block above).
+                                                                        package {
+                                                                            // Incremented each render cycle which make it possible to observe if
+                                                                            // and how often the UI render has executed.
+                                                                            ulong updateCycle;
+
+                                                                                // Non-empty when the backend attach failed (it runs in onSpawn, on
+                                                                                // the actor's own thread); dispatched once from onSpawn via
+                                                                                // uiStartupFailed (the typed listener exists only there) instead of
+                                                                                // arming the frame tick. The startup-failure test injects it before
+                                                                                // onSpawn runs.
+                                                                                string startupError;
+
+                                                                                bool debugUi;
+
+                                                                                TextUserInterface ui;
+
+                                                                                // Production path: the backend attach is deferred from the ctor to
+                                                                                // onSpawn so the GLFW/GL context (thread-affine) is created on the
+                                                                                // same thread that later drives the frames (the actor is spawned
+                                                                                // with Config.detached). state is non-owning: ui owns it and its
+                                                                                // dtor destroys it once.
+                                                                                bool initPending;
+                                                                                TuiBackendMode pendingMode;
+                                                                                TuiState* state;
+
+                                                                                TuiSessionActionType pendingAction = TuiSessionAction_None;
+
+                                                                                string pendingActionId;
+                                                                                string pendingActionTitle;
+
+                                                                                TypedAddress!DropWorker dropWorkerAddress;
+                                                                        }
+
+                                                                        // Production path: create the C state now (no backend); the backend
+                                                                        // attach selected by `mode` is deferred to onSpawn so the window and the
+                                                                        // GL context are created on the actor's own thread - GLFW/GL state is
+                                                                        // thread-affine and the frame loop below drives it (the actor is spawned
+                                                                        // with Config.detached, keeping onSpawn and every frame on one thread).
+                                                                        // Auto's GUI->TUI failover is resolved in C++ (a TTY check cannot be
+                                                                        // faked from here); a failure records the precise reason, dispatched
+                                                                        // from onSpawn. On success the active backend and any fallback note are
+                                                                        // logged; the note also seeds the status line. The ui field takes the
+                                                                        // state on every path so its dtor tears it down once.
+                                                                        this(TypedAddress!TUIListener listener,
+                                                                                Path iniFile,
+                                                                                long maxWidth,
+                                                                                TuiBackendMode mode,
+                                                                                bool debugUi
+                                                                                = false,
+                                                                                long idleParkMs = 0,
+                                                                                TypedAddress!DropWorker dropWorker
+                                                                                = TypedAddress!DropWorker
+                                                                                    .init) {
+                                                                            assert(maxWidth >= 0 && maxWidth <= 10_000,
+                                                                                    "maxWidth out of int-safe range: "
+                                                                                    ~ maxWidth
+                                                                                        .to!string);
+                                                                                this.listenerAddress
+                                                                                = listener;
+                                                                                this.dropWorkerAddress
+                                                                                = dropWorker;
+                                                                                this.debugUi
+                                                                                = debugUi;
+                                                                                pendingMode = mode;
+                                                                                initPending = true;
+                                                                                state = tuiCreateState();
+                                                                                ui = TextUserInterface(
+                                                                                        state);
+                                                                                ui.setMaxWidth(
+                                                                                        cast(int) maxWidth);
+                                                                                ui.setIdlePark(
+                                                                                        cast(int) idleParkMs);
+                                                                                ui.setIniFile(
+                                                                                        iniFile);
+                                                                        }
+
+                                                                        // Headless injection seam (tests): raw C state pointer, no init; a
+                                                                        // by-value TextUserInterface parameter would double-free the state (its
+                                                                        // copy's dtor runs at ctor exit, then the field's dtor runs again in
+                                                                        // onExit). Ownership transfers on successful return only; a throw
+                                                                        // (assert) leaves the state with the caller.
+                                                                        this(TypedAddress!TUIListener listener,
+                                                                                Path iniFile,
+                                                                                long maxWidth, TuiState* state, long idleParkMs = 0,
+                                                                                TypedAddress!DropWorker dropWorker
+                                                                                = TypedAddress!DropWorker
+                                                                                    .init) {
+                                                                            assert(maxWidth >= 0 && maxWidth <= 10_000,
+                                                                                    "maxWidth out of int-safe range: "
+                                                                                    ~ maxWidth
+                                                                                        .to!string);
+                                                                                this.listenerAddress
+                                                                                = listener;
+                                                                                this.dropWorkerAddress
+                                                                                = dropWorker;
+                                                                                this.state = state;
+                                                                                ui = TextUserInterface(
+                                                                                        state);
+                                                                                ui.setMaxWidth(
+                                                                                        cast(int) maxWidth);
+                                                                                ui.setIdlePark(
+                                                                                        cast(int) idleParkMs);
+                                                                                ui.setUiAsStdLogger;
+                                                                                ui.setIniFile(
+                                                                                        iniFile);
+                                                                        }
+
+                                                                        // with the flag set, open the Raw Log before the first frame and run the logger sync off the
+                                                                        // same edge the per-frame poll uses, so records emitted between process start and the first
+                                                                        // frame (backend attach, first agent traffic) are captured too - but only when the floor asks
+                                                                        // for trace: the poll's predicate decides, so a floor of info leaves the logger configured.
+                                                                        // Without the flag, nothing changes.
+                                                                        package void debugUiSpawnEdge() {
+                                                                            if (!debugUi)
+                                                                                return;
+                                                                                    ui.setRawLogOpen(
+                                                                                            true);
+                                                                                    ui.syncRawLogLevel();
+                                                                        }
+
+                                                                        void onSpawn(
+                                                                                ActorRef selfRef) {
+                                                                            void attachBackend() {
+                                                                                // the window and the GL context are created (and the context made
+                                                                                // current) HERE, the thread that also drives the frames. On success
+                                                                                // the active backend and any fallback note are logged; the note also
+                                                                                // seeds the status line. The TuiLogger swap only makes sense with a UI
+                                                                                // that drains it: on a failed init nothing renders, so the normal
+                                                                                // console logger stays installed and the app's shutdown diagnostics
+                                                                                // are not swallowed.
+                                                                                initPending = false;
+                                                                                    string note;
+                                                                                    if (tuiInit(state,
+                                                                                            pendingMode) != 0) {
+                                                                                        auto err = tuiLastError();
+                                                                                            startupError = .toString(
+                                                                                                    err);
+                                                                                            String_Free(
+                                                                                                    err);
+                                                                                            return;
+                                                                                    }
+                                                                                logger.infof("UI backend active: %s",
+                                                                                        backendKindName(
+                                                                                            tuiBackendActive(
+                                                                                            state)));
+                                                                                    auto n = tuiBackendNote();
+                                                                                    note = .toString(
+                                                                                            n);
+                                                                                    String_Free(n);
+                                                                                    if (
+                                                                                        !note.empty) logger.info(
+                                                                                            "UI backend note: ",
+                                                                                            note);
+                                                                                    ui
+                                                                                        .setUiAsStdLogger;
+                                                                                if (!note.empty)
+                                                                                    ui.setRuntimeStatus(UiRuntimeStatus(
+                                                                                            TuiPhase.idle,
+                                                                                            note));
+                                                                                        debugUiSpawnEdge();
+                                                                            }
+
+                                                                            this.selfRef = selfRef;
+                                                                                listener = typeof(
+                                                                                        listener)(listenerAddress,
+                                                                                        this
+                                                                                            .selfRef);
+                                                                                // attach the backend HERE, on the actor's own thread.
+                                                                                if (initPending
+                                                                                        && startupError
+                                                                                            .empty) attachBackend();
+                                                                                if (
+                                                                                    !startupError
+                                                                                        .empty) {
+                                                                                    listener.uiStartupFailed(
+                                                                                            startupError);
+                                                                                        return;
+                                                                                }
+                                                                            dynSend(selfRef.address,
+                                                                                    "uiTick");
+                                                                        }
+
+                                                                        void onExit(ExitMsg _) {
+                                                                            ui = TextUserInterface
+                                                                                .init;
+                                                                        }
+
+                                                                        void onException(Exception e) {
+                                                                            logger.warning("TUI actor exception: ",
+                                                                                    e.msg);
+                                                                        }
+
+                                                                        void onError(ErrorMsg e) {
+                                                                            logger.warning("TUI actor error: ",
+                                                                                    e.reason
+                                                                                        .to!string);
+                                                                        }
+
+                                                                        /** Non-destructive peek over the actor's mailbox before the render -
      * pending work means the render must not park.
      */
-    package bool hasPending() @safe {
-        return selfRef.hasPending();
-    }
+                                                                        package bool hasPending() @safe {
+                                                                            return selfRef.hasPending();
+                                                                        }
 
-    /** How many incoming messages are pending: the count twin of the
+                                                                        /** How many incoming messages are pending: the count twin of the
      * `hasPending()` peek above (same incoming-only semantics - see there
      * for the stash/delayed/repeating reasoning). The mailbox must hold
      * exactly the one re-armed tick, never an accumulated pile. */
-    package size_t pendingCount() @safe {
-        return selfRef.pendingCount();
-    }
+                                                                        package size_t pendingCount() @safe {
+                                                                            return selfRef.pendingCount();
+                                                                        }
 
-    // Must be called by every message handler except uiTerminate. Renders -
-    // parking inside the C call when the mailbox is clean (no pending work) -
-    // then polls the pending user query and at most one session action (the
-    // polls harvest what the C++ side collected during the park).
-    private void postProcess() {
-        import std.string : strip;
+                                                                        // Must be called by every message handler except uiTerminate. Renders -
+                                                                        // parking inside the C call when the mailbox is clean (no pending work) -
+                                                                        // then polls the pending user query and at most one session action (the
+                                                                        // polls harvest what the C++ side collected during the park).
+                                                                        private void postProcess() {
+                                                                            import std.string : strip;
 
-        const pending = hasPending();
-        ui.render(!pending);
+                                                                            const pending = hasPending();
+                                                                                ui.render(
+                                                                                        !pending);
 
-        // GUI window close / quit chord: the parked entry answers the
-        // user-terminated condition (tuiQuitRequested). Run the same exit
-        // handshake as the app-initiated uiTerminate (final render + notify +
-        // exit).
-        if (ui.hasUserTerminated()) {
-            uiTerminate();
-            return;
-        }
+                                                                                // GUI window close / quit chord: the parked entry answers the
+                                                                                // user-terminated condition (tuiQuitRequested). Run the same exit
+                                                                                // handshake as the app-initiated uiTerminate (final render + notify +
+                                                                                // exit).
+                                                                                if (
+                                                                                    ui.hasUserTerminated()) {
+                                                                                    uiTerminate();
+                                                                                        return;
+                                                                                }
 
-        ++updateCycle;
+                                                                            ++updateCycle;
 
-        auto query = ui.userQuery();
+                                                                                auto query = ui.userQuery();
 
-        // Composer Stop / Esc (task 3): one poll per rendered frame, before the
-        // typed-query dispatch below. Same call the "/stop" intercept makes, so
-        // a UI cancel and a typed stop are indistinguishable to the agent.
-        if (ui.takeCancel()) {
-            stopAgent();
-            ui.setRuntimeStatus(UiRuntimeStatus(TuiPhase.waiting, "Stopping agent"));
-        }
+                                                                                // Composer Stop / Esc (task 3): one poll per rendered frame, before the
+                                                                                // typed-query dispatch below. Same call the "/stop" intercept makes, so
+                                                                                // a UI cancel and a typed stop are indistinguishable to the agent.
+                                                                                if (ui.takeCancel()) {
+                                                                                    stopAgent();
+                                                                                        ui.setRuntimeStatus(
+                                                                                                UiRuntimeStatus(
+                                                                                                TuiPhase.waiting,
+                                                                                                "Stopping agent"));
+                                                                                }
 
-        if (!query.strip.empty) {
-            if (query == "/stop") {
-                stopAgent();
-                ui.setRuntimeStatus(UiRuntimeStatus(TuiPhase.waiting, "Stopping agent"));
-            } else {
-                listener.userQuery(query);
-            }
-        }
+                                                                            if (!query.strip.empty) {
+                                                                                if (query == "/stop") {
+                                                                                    stopAgent();
+                                                                                        ui.setRuntimeStatus(
+                                                                                                UiRuntimeStatus(
+                                                                                                TuiPhase.waiting,
+                                                                                                "Stopping agent"));
+                                                                                } else {
+                                                                                    listener.userQuery(
+                                                                                            query);
+                                                                                }
+                                                                            }
 
-        if (pendingAction != TuiSessionAction_None) {
-            switch (pendingAction) {
-            case TuiSessionAction_Select:
-                listener.sessionSelect(SessionId(pendingActionId));
-                break;
-            case TuiSessionAction_New:
-                listener.sessionNew();
-                break;
-            case TuiSessionAction_Rename:
-                listener.sessionRename(SessionId(pendingActionId), pendingActionTitle);
-                break;
-            case TuiSessionAction_Delete:
-                listener.sessionDelete(SessionId(pendingActionId));
-                break;
-            case TuiSessionAction_PinToggle:
-                listener.sessionPinToggle(SessionId(pendingActionId));
-                break;
-            case TuiSessionAction_Clone:
-                listener.sessionClone(SessionId(pendingActionId));
-                break;
-            default:
-                logger.warningf("Unknown session action type %s", pendingAction);
-                break;
-            }
-            pendingAction = TuiSessionAction_None;
-            pendingActionId = null;
-            pendingActionTitle = null;
-        }
+                                                                            if (
+                                                                                pendingAction != TuiSessionAction_None) {
+                                                                                switch (
+                                                                                            pendingAction) {
+                                                                                case TuiSessionAction_Select:
+                                                                                    listener.sessionSelect(
+                                                                                            SessionId(
+                                                                                            pendingActionId));
+                                                                                        break;
+                                                                                case TuiSessionAction_New:
+                                                                                    listener.sessionNew();
+                                                                                        break;
+                                                                                case TuiSessionAction_Rename:
+                                                                                    listener.sessionRename(
+                                                                                            SessionId(pendingActionId),
+                                                                                            pendingActionTitle);
+                                                                                        break;
+                                                                                case TuiSessionAction_Delete:
+                                                                                    listener.sessionDelete(
+                                                                                            SessionId(
+                                                                                            pendingActionId));
+                                                                                        break;
+                                                                                case TuiSessionAction_PinToggle:
+                                                                                    listener.sessionPinToggle(
+                                                                                            SessionId(
+                                                                                            pendingActionId));
+                                                                                        break;
+                                                                                case TuiSessionAction_Clone:
+                                                                                    listener.sessionClone(
+                                                                                            SessionId(
+                                                                                            pendingActionId));
+                                                                                        break;
+                                                                                default:
+                                                                                    logger.warningf("Unknown session action type %s",
+                                                                                            pendingAction);
+                                                                                        break;
+                                                                                }
+                                                                                pendingAction = TuiSessionAction_None;
+                                                                                    pendingActionId = null;
+                                                                                    pendingActionTitle = null;
+                                                                            }
 
-        // Poll one session action per frame; never overwrite an
-        // action still awaiting forward.
-        if (pendingAction == TuiSessionAction_None) {
-            ui.pollSessionAction(pendingAction, pendingActionId, pendingActionTitle);
-        }
+                                                                            // Poll one session action per frame; never overwrite an
+                                                                            // action still awaiting forward.
+                                                                            if (
+                                                                                pendingAction == TuiSessionAction_None) {
+                                                                                ui.pollSessionAction(pendingAction,
+                                                                                        pendingActionId,
+                                                                                        pendingActionTitle);
+                                                                            }
 
-        import std.exception : collectException;
+                                                                            import std.exception : collectException;
 
-        if (!dropWorkerAddress.empty) {
-            long chipId;
-            string dropPath;
-            ui.pollDroppedPath(chipId, dropPath);
-            if (chipId != 0)
-                try {
-                    Channel!DropWorker(dropWorkerAddress, null).drop(chipId, dropPath.AbsolutePath);
-                } catch (Throwable t) {
-                    logger.warningf("dropped file hand-off failed (chip %s): %s",
-                            chipId, t.msg).collectException;
-                }
-            const cancelChip = ui.pollChipCancel();
-            if (cancelChip != 0)
-                try {
-                    Channel!DropWorker(dropWorkerAddress, null).stop(cancelChip);
-                } catch (Throwable t) {
-                    logger.warningf("chip cancel hand-off failed (chip %s): %s",
-                            cancelChip, t.msg).collectException;
-                }
-        }
-    }
+                                                                            if (
+                                                                                !dropWorkerAddress
+                                                                                    .empty) {
+                                                                                long chipId;
+                                                                                    string dropPath;
+                                                                                    ui.pollDroppedPath(chipId,
+                                                                                            dropPath);
+                                                                                    if (chipId != 0) try {
+                                                                                        Channel!DropWorker(
+                                                                                                dropWorkerAddress,
+                                                                                                null).drop(chipId,
+                                                                                                dropPath
+                                                                                                    .AbsolutePath);
+                                                                                    } catch (
+                                                                                        Throwable t) {
+                                                                                        logger.warningf("dropped file hand-off failed (chip %s): %s",
+                                                                                                chipId,
+                                                                                                t
+                                                                                                    .msg)
+                                                                                            .collectException;
+                                                                                    }
+                                                                                    const cancelChip = ui
+                                                                                        .pollChipCancel();
+                                                                                    if (
+                                                                                        cancelChip != 0) try {
+                                                                                        Channel!DropWorker(
+                                                                                                dropWorkerAddress,
+                                                                                                null).stop(
+                                                                                                cancelChip);
+                                                                                    } catch (
+                                                                                        Throwable t) {
+                                                                                        logger.warningf("chip cancel hand-off failed (chip %s): %s",
+                                                                                                cancelChip,
+                                                                                                t
+                                                                                                    .msg)
+                                                                                            .collectException;
+                                                                                    }
+                                                                            }
+                                                                        }
 
-    void uiTick() {
-        if (!running)
-            return; // in-flight tick after uiTerminate: skip the work
-        scope (exit) {
-            if (running)
-                dynSend(selfRef.address, "uiTick");
-        }
-        postProcess();
-    }
+                                                                        void uiTick() {
+                                                                            if (!running)
+                                                                                return; // in-flight tick after uiTerminate: skip the work
+                                                                                    scope (exit) {
+                                                                                        if (running)
+                                                                                            dynSend(selfRef.address,
+                                                                                                    "uiTick");
+                                                                                    }
+                                                                            postProcess();
+                                                                        }
 
-    void uiMsg(UiChatMessage a) {
-        ui.addChatMessage(a.msg, null, a.type, a.nr, a.time);
-    }
+                                                                        void uiMsg(UiChatMessage a) {
+                                                                            ui.addChatMessage(a.msg, null, a.type,
+                                                                                    a.nr, a.time);
+                                                                        }
 
-    void uiMsg(UiChatThinkMessage a) {
-        ui.addChatMessage(a.msg, a.thinking, a.type, a.nr, a.time);
-    }
+                                                                        void uiMsg(
+                                                                                UiChatThinkMessage a) {
+                                                                            ui.addChatMessage(a.msg, a.thinking,
+                                                                                    a.type, a.nr,
+                                                                                    a.time);
+                                                                        }
 
-    void uiMsg(UiFinalAnswer a) {
-        ui.addChatMessage(a.msg, null, TuiChatMessageType_FinalAnswer, a.nr, a.time);
-    }
+                                                                        void uiMsg(UiFinalAnswer a) {
+                                                                            ui.addChatMessage(a.msg, null,
+                                                                                    TuiChatMessageType_FinalAnswer,
+                                                                                    a.nr, a.time);
+                                                                        }
 
-    void uiMsg(UiRuntimeStatus a) {
-        ui.setRuntimeStatus(a);
-    }
+                                                                        void uiMsg(UiRuntimeStatus a) {
+                                                                            ui.setRuntimeStatus(a);
+                                                                        }
 
-    void uiMsg(UiInitHistory m) {
-        ui.setHistory(m.queries);
-    }
+                                                                        void uiMsg(UiInitHistory m) {
+                                                                            ui.setHistory(
+                                                                                    m.queries);
+                                                                        }
 
-    void uiMsg(UiSessionList m) {
-        ui.setSessionList(m.items);
-    }
+                                                                        void uiMsg(UiSessionList m) {
+                                                                            ui.setSessionList(
+                                                                                    m.items);
+                                                                        }
 
-    void uiMsg(UiDropReport m) {
-        ui.setDropChipStatus(m.chipId, m.state, m.finalPath, m.display);
-    }
+                                                                        void uiMsg(UiDropReport m) {
+                                                                            ui.setDropChipStatus(m.chipId, m.state,
+                                                                                    m.finalPath,
+                                                                                    m.display);
+                                                                        }
 
-    void uiMsg(UiStreamChatMessage m) {
-        ui.streamChat(m.msg, m.thinking);
-    }
+                                                                        void uiMsg(
+                                                                                UiStreamChatMessage m) {
+                                                                            ui.streamChat(m.msg,
+                                                                                    m.thinking);
+                                                                        }
 
-    void uiMsg(UiLogFile a) {
-        // do not call postProcess because this is only an initialization
-        ui.useUiLogFile(a.useFile);
-    }
+                                                                        void uiMsg(UiLogFile a) {
+                                                                            // do not call postProcess because this is only an initialization
+                                                                            ui.useUiLogFile(
+                                                                                    a.useFile);
+                                                                        }
 
-    void uiMsg(UiPipelineStreamChatMessage m) {
-        ui.pipelineMessage(m);
-    }
+                                                                        void uiMsg(
+                                                                                UiPipelineStreamChatMessage m) {
+                                                                            ui.pipelineMessage(m);
+                                                                        }
 
-    void uiMsg(UiPipelineStreamDone m) {
-        ui.pipelineMessage(m);
-    }
+                                                                        void uiMsg(
+                                                                                UiPipelineStreamDone m) {
+                                                                            ui.pipelineMessage(m);
+                                                                        }
 
-    void uiMsg(UiPipelineToolCall m) {
-        ui.pipelineToolCall(m);
-    }
+                                                                        void uiMsg(
+                                                                                UiPipelineToolCall m) {
+                                                                            ui.pipelineToolCall(m);
+                                                                        }
 
-    void uiMsg(UiPipelineToolResult m) {
-        ui.pipelineToolResult(m);
-    }
+                                                                        void uiMsg(
+                                                                                UiPipelineToolResult m) {
+                                                                            ui.pipelineToolResult(
+                                                                                    m);
+                                                                        }
 
-    void uiStreamChatDone() {
-        ui.streamChatDone();
-    }
+                                                                        void uiStreamChatDone() {
+                                                                            ui.streamChatDone();
+                                                                        }
 
-    void uiPipelineClear() {
-        ui.pipelineClear();
-    }
+                                                                        void uiPipelineClear() {
+                                                                            ui.pipelineClear();
+                                                                        }
 
-    void uiClearChat() {
-        ui.clearChat;
-    }
+                                                                        void uiClearChat() {
+                                                                            ui.clearChat;
+                                                                        }
 
-    void uiAgentBusy() {
-        ui.setReadyStatus(false);
-    }
+                                                                        void uiAgentBusy() {
+                                                                            ui.setReadyStatus(
+                                                                                    false);
+                                                                        }
 
-    void uiAgentReady() {
-        ui.setReadyStatus(true);
-        playNotification();
-    }
+                                                                        void uiAgentReady() {
+                                                                            ui.setReadyStatus(true);
+                                                                                playNotification();
+                                                                        }
 
-    // Termination handshake: final render, async-notify the agent, exit.
-    // Idempotent: the window-close path can observe user-terminated on later
-    // frames before the exit message is processed; only the first call runs
-    // (running flips false and later calls no-op).
-    //
-    // No repeating entry exists anymore, so nothing needs canceling - the
-    // `running` guard at the top of uiTick is what stops the chain.
-    void uiTerminate() {
-        if (!running)
-            return;
-        running = false;
-        ui.render();
-        listener.uiTerminated();
-        sendExit(selfRef.address, ExitReason.userShutdown);
-    }
-}
+                                                                        // Termination handshake: final render, async-notify the agent, exit.
+                                                                        // Idempotent: the window-close path can observe user-terminated on later
+                                                                        // frames before the exit message is processed; only the first call runs
+                                                                        // (running flips false and later calls no-op).
+                                                                        //
+                                                                        // No repeating entry exists anymore, so nothing needs canceling - the
+                                                                        // `running` guard at the top of uiTick is what stops the chain.
+                                                                        void uiTerminate() {
+                                                                            if (!running)
+                                                                                return;
+                                                                                    running = false;
+                                                                                    ui.render();
+                                                                                    listener.uiTerminated();
+                                                                                    sendExit(selfRef.address,
+                                                                                            ExitReason
+                                                                                                .userShutdown);
+                                                                        }
+                                                                    }
 
-struct UiInitHistory {
-    string[] queries;
-}
+                                                                struct UiInitHistory {
+                                                                    string[] queries;
+                                                                }
 
-struct UiChatMessage {
-    string msg;
-    TuiChatMessageType type = TuiChatMessageType_Assistant;
-    size_t nr = 0; // 0 = display-only line (undecorated)
-    MessageTime time = NoProcessingTime();
-}
+                                                                struct UiChatMessage {
+                                                                    string msg; TuiChatMessageType type = TuiChatMessageType_Assistant;
+                                                                        size_t nr = 0; // 0 = display-only line (undecorated)
+                                                                        MessageTime time = NoProcessingTime();
+                                                                }
 
-struct UiChatThinkMessage {
-    string msg;
-    string thinking;
-    TuiChatMessageType type = TuiChatMessageType_Assistant;
-    size_t nr = 0;
-    MessageTime time = NoProcessingTime();
-}
+                                                                struct UiChatThinkMessage {
+                                                                    string msg; string thinking;
+                                                                        TuiChatMessageType type = TuiChatMessageType_Assistant;
+                                                                        size_t nr = 0;
+                                                                        MessageTime time = NoProcessingTime();
+                                                                }
 
-struct UiStreamChatMessage {
-    string msg;
-    string thinking;
-}
+                                                                struct UiStreamChatMessage {
+                                                                    string msg; string thinking;
+                                                                }
 
-struct UiStreamChatDone {
-}
+                                                                struct UiStreamChatDone {
+                                                                }
 
-struct UiFinalAnswer {
-    string msg;
-    size_t nr = 0;
-    MessageTime time = NoProcessingTime();
-}
+                                                                struct UiFinalAnswer {
+                                                                    string msg; size_t nr = 0;
+                                                                        MessageTime time = NoProcessingTime();
+                                                                }
 
-struct UiClearChat {
-}
+                                                                struct UiClearChat {
+                                                                }
 
-/// The UI's phase vocabulary, mirrored from the C side's `model::Phase`
-/// (`cpp_tui/model/status_chips.h`)
-enum TuiPhase {
-    idle = 0,
-    thinking = 1,
-    tooling = 2,
-    writing = 3,
-    waiting = 4,
-    error = 5,
-    offline = 6,
-}
+                                                                /// The UI's phase vocabulary, mirrored from the C side's `model::Phase`
+                                                                /// (`cpp_tui/model/status_chips.h`)
+                                                                enum TuiPhase {
+                                                                    idle = 0, thinking = 1, tooling = 2, writing = 3,
+                                                                        waiting = 4, error = 5,
+                                                                        offline = 6,
+                                                                }
 
-/// The run's status as data (D-STATUS v5): the four facts the now bar's chips
-/// show, plus the phase and the current step. The C++ side formats the numbers
-/// into the chips and never parses them back, so the sentence form is gone -
-/// a value here is what the row says, not text for it to split.
-///
-/// Sender contract (the ABI's, `tui_api.h`): send on every render tick at or
-/// below 20 Hz, one update when a turn starts doing work, one flush at a request
-/// boundary when the window swallowed the newest values, and always the final one
-/// when the turn ends. `phase == offline` is the one value with a consequence
-/// beyond the row: it also drives the thread's offline card and the disabled
-/// composer. A capacity or rate of `0` is *absence* - the row draws the missing
-/// value, never `0` - so an unknown context or a stalled rate is sent as zero,
-/// not as a guess.
-struct UiRuntimeStatus {
-    int phase = TuiPhase.idle;
-    /// The current step: a tool name while tooling, one line.
-    string detail;
-    /// The model context's used/total tokens and the threshold the agent's
-    /// `needCompression` compares the used count with.
-    long contextUsed;
-    long contextMax;
-    long compactAt;
-    /// Generated tokens per second; `0` while none is known.
-    double tokensPerSecond;
-    /// The model display name, `"none"` when no model is configured.
-    string model = "none";
-}
+                                                                /// The run's status as data (D-STATUS v5): the four facts the now bar's chips
+                                                                /// show, plus the phase and the current step. The C++ side formats the numbers
+                                                                /// into the chips and never parses them back, so the sentence form is gone -
+                                                                /// a value here is what the row says, not text for it to split.
+                                                                ///
+                                                                /// Sender contract (the ABI's, `tui_api.h`): send on every render tick at or
+                                                                /// below 20 Hz, one update when a turn starts doing work, one flush at a request
+                                                                /// boundary when the window swallowed the newest values, and always the final one
+                                                                /// when the turn ends. `phase == offline` is the one value with a consequence
+                                                                /// beyond the row: it also drives the thread's offline card and the disabled
+                                                                /// composer. A capacity or rate of `0` is *absence* - the row draws the missing
+                                                                /// value, never `0` - so an unknown context or a stalled rate is sent as zero,
+                                                                /// not as a guess.
+                                                                struct UiRuntimeStatus {
+                                                                    int phase = TuiPhase.idle;
+                                                                        /// The current step: a tool name while tooling, one line.
+                                                                        string detail;
+                                                                        /// The model context's used/total tokens and the threshold the agent's
+                                                                        /// `needCompression` compares the used count with.
+                                                                        long contextUsed;
+                                                                        long contextMax;
+                                                                        long compactAt;
+                                                                        /// Generated tokens per second; `0` while none is known.
+                                                                        double tokensPerSecond;
+                                                                        /// The model display name, `"none"` when no model is configured.
+                                                                        string model = "none";
+                                                                }
 
-struct UiLogFile {
-    bool useFile;
-}
+                                                                struct UiLogFile {
+                                                                    bool useFile;}
 
-struct UiTerminate {
-}
+                                                                    struct UiTerminate {
+                                                                    }
 
-struct UiAgentBusy {
-}
+                                                                    struct UiAgentBusy {
+                                                                    }
 
-struct UiAgentReady {
-}
+                                                                    struct UiAgentReady {
+                                                                    }
 
-struct UiPipelineStreamChatMessage {
-    string agentId;
-    string content;
-    string thinking;
-    string role;
-    double tokensPerSecond;
-    string currentTool;
-    long contextUsed;
-    long contextMax;
-}
+                                                                    struct UiPipelineStreamChatMessage {
+                                                                        string agentId;
+                                                                            string content;
+                                                                            string thinking;
+                                                                            string role;
+                                                                            double tokensPerSecond;
+                                                                            string currentTool;
+                                                                            long contextUsed;
+                                                                            long contextMax;
+                                                                    }
 
-struct UiPipelineStreamDone {
-    string agentId;
-}
+                                                                    struct UiPipelineStreamDone {
+                                                                        string agentId;
+                                                                    }
 
-struct UiPipelineToolCall {
-    string agentId;
-    string name;
-    string arguments;
-    string id;
-}
+                                                                    struct UiPipelineToolCall {
+                                                                        string agentId;
+                                                                            string name;
+                                                                            string arguments;
+                                                                            string id;
+                                                                    }
 
-struct UiPipelineToolResult {
-    string agentId;
-    string name;
-    int ok;
-    string text;
-}
+                                                                    struct UiPipelineToolResult {
+                                                                        string agentId;
+                                                                            string name;
+                                                                            int ok;
+                                                                            string text;
+                                                                    }
 
-struct UiPipelineClear {
-}
+                                                                    struct UiPipelineClear {
+                                                                    }
 
-// Session sidebar snapshot (D -> UI): full ordered list of sessions.
-//
-// `flags` bit 0 = a run is in flight, bit 1 = the user
-// pinned the session.
-struct UiSessionItem {
-    SessionId id;
-    string title;
-    string preview;
-    size_t messageCount;
-    bool isActive;
-    long updatedAtMs; // SessionMeta.updatedAt (unix seconds) * 1000; 0 = unknown
-    int flags;
-}
+                                                                    // Session sidebar snapshot (D -> UI): full ordered list of sessions.
+                                                                    //
+                                                                    // `flags` bit 0 = a run is in flight, bit 1 = the user
+                                                                    // pinned the session.
+                                                                    struct UiSessionItem {
+                                                                        SessionId id;
+                                                                            string title;
+                                                                            string preview;
+                                                                            size_t messageCount;
+                                                                            bool isActive;
+                                                                            long updatedAtMs; // SessionMeta.updatedAt (unix seconds) * 1000; 0 = unknown
+                                                                            int flags;
+                                                                    }
 
-struct UiSessionList {
-    UiSessionItem[] items;
-}
+                                                                    struct UiSessionList {
+                                                                        UiSessionItem[] items;
+                                                                    }
 
-// One dropped-attachment chip outcome (agent -> UI)
-struct UiDropReport {
-    long chipId;
-    int state; // TuiChipStatus_*
-    Path finalPath;
-    string display;
-}
+                                                                    // One dropped-attachment chip outcome (agent -> UI)
+                                                                    struct UiDropReport {
+                                                                        long chipId;
+                                                                            int state; // TuiChipStatus_*
+                                                                            Path finalPath;
+                                                                            string display;
+                                                                    }
