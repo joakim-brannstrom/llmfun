@@ -7,32 +7,39 @@
 # - regexes are single-quoted (double-quoted YAML rejects lone backslashes);
 # - @-leading values and scalars containing ': ' must be quoted.
 
-dataDir: llmfun/data
-memoryArea: llmfun/data/memory
-promptDir: llmfun/config/prompt
-workArea: llmfun/workarea
-agentPrompt: AGENT.md
-activeCodeModelIndex: 0
-warnIfNoApiKey: true
-noMemory: false
+# Every value below that equals the built-in default is COMMENTED OUT: the
+# active
+# lines are the minimally necessary set - what the program cannot start without
+# or what genuinely differs from the defaults. Uncomment to override.
 
-skillPathsUser: []
-skillPathsSystem: []
-maxManifestSkills: 200
-maxAlwaysApplyTokens: 4000
-disableSkills: false
+# Directories and prompt files:
+# dataDir: llmfun/data
+# memoryArea: llmfun/data/memory
+# promptDir: llmfun/config/prompt
+# workArea: llmfun/workarea
+# agentPrompt: AGENT.md
+# activeCodeModelIndex: 0
+# noMemory: false
 
-consolidationInterval: 10
+# Skill loading:
+# skillPathsUser: []
+# skillPathsSystem: []
+# maxManifestSkills: 200
+# maxAlwaysApplyTokens: 4000
+# disableSkills: false
+# warnIfNoApiKey is a per-server key (inside a model's server: block), not a
+# top-level key: a top-level spelling is an unknown-key config warning. The
+# examples below set it where a keyless server would otherwise warn.
 
-toolLimits:
-  readFileMaxLines: 20
-  editFileMaxLines: 80
-  maxDirEntries: 50
-  grepMaxResults: 1000
-  maxSummaryLength: 200
-  maxTopicLength: 100
-  maxTopK: 20
-  maxArgLength: 200
+# toolLimits:
+  # readFileMaxLines: 20
+  # editFileMaxLines: 80
+  # maxDirEntries: 50
+  # grepMaxResults: 1000
+  # maxSummaryLength: 200
+  # maxTopicLength: 100
+  # maxTopK: 20
+  # maxArgLength: 200
   # Filesystem limits for the file tools: an optional per-category regex
   # filter on workarea paths (an accident guard, not a sandbox - bash is not
   # covered). Opt-in: leave the block commented out and nothing changes.
@@ -70,10 +77,10 @@ toolLimits:
 #     facility: user
 
 sandboxConfig:
-  maxOutputBytes: 1048576
+  # maxOutputBytes: 1048576 (default)
   # Every value is a CLI argument string. "0.5" and "60" must stay quoted:
-  # unquoted they would parse as decimal/integer and the config merger would
-  # silently drop the whole defaultOptions map (incl. 06_network isolation).
+  # unquoted they parse as numbers and llmfun silently drops the whole
+  # defaultOptions map (incl. 06_network isolation).
   defaultOptions:
     00_subcommand: ["run"]
     01_cleanup: ["--rm"]
@@ -84,26 +91,29 @@ sandboxConfig:
     06_network: ["--network", "none"]
     entrypoint_shell: ["sh", "-c"]
   systemExecutionEnvironmentsFile: "execution_environments.yaml"
-  userExecutionEnvironmentsFile: ""
+  # userExecutionEnvironmentsFile: ""
 
-ragPrimary:
-  path: llmfun/data/rag.sqlite3
-  description: Primary RAG database (read/write)
+# ragPrimary - path is the default; only the description differs:
+# ragPrimary:
+#   path: llmfun/data/rag.sqlite3
+#   description: Primary RAG database (read/write)
 
-ragSecondary:
-  user_knowledge:
-    - path: /path/to/knowledge.sqlite3
-      description: Read-only user collected knowledge base
+# Optional read-only secondary databases, keyed by a name of your choice:
+# ragSecondary:
+#   user_knowledge:
+#     - path: /path/to/knowledge.sqlite3
+#       description: Read-only user collected knowledge base
 
-toolFilter:
-  include:
-    - '.*'
-  exclude: []
+# toolFilter - include ['.*'] / exclude [] is the effective default:
+# toolFilter:
+#   include:
+#     - '.*'
+#   exclude: []
 
 toolBroker:
   # Kill switch (default false), per model overridable. false treats every
   # registered tool as ungrouped (alwaysOn) and makes discovery inert.
-  enabled: false
+  # enabled: false
   # Named tool groups: the name is the activation key, the description
   # feeds discovery, and a tool may be listed in several groups.
   groups:
@@ -126,7 +136,8 @@ toolBroker:
   # members are ALL in alwaysOn still shows in listToolTags; activating
   # it is a no-op.
   alwaysOn: [taskDone, listToolTags]
-  neverHideTools: [taskDone]   # pool-membership axis, unchanged
+  # neverHideTools defaults to [taskDone]:
+  # neverHideTools: [taskDone]
 
 ragFilter:
   include:
@@ -139,33 +150,65 @@ ragFilter:
     - '.*deprecated.*'
     - '.*\.git.*'
 
-ragConfig:
-  windowOverlapPercent: 50
+# ragConfig:
+  # Window overlap when chunking, in percent (default 50):
+  # windowOverlapPercent: 50
+  # How long in milliseconds a RAG query waits for a locked database before
+  # it gives up. Raise this when several processes share one database file or
+  # the database sits on slow storage and you see "database is locked"
+  # errors; lower it if you prefer failing fast over waiting.
+  # Default 500: enough for the usual single-agent setup, where lock waits
+  # are rare and short.
+  # busyTimeoutMs: 500
+  # Balance between relevance and diversity in semantic search results
+  # (1.0 = most relevant wins, lower values push results apart so one
+  # document cannot fill the whole result list). Tweak below 1.0 when
+  # queries keep returning many near-identical chunks from the same
+  # source; leave at 1.0 when relevance matters more than variety.
+  # Default 1.0: measured A/B on a real database (1200 cases) found no
+  # accuracy gain from lowering it and a recall cost at aggressive
+  # diversity settings, so the neutral default stays.
+  # mmrLambda: 1.0
+  # How many changes (documents added, removed, or replaced) may pile up
+  # before the next automatic cleanup compacts the database file. Lower
+  # it to reclaim disk space / keep queries fast on a heavily changing
+  # database; raise it if compaction is disruptive to you (searches can
+  # briefly stall while it runs). Default 100: compaction is best rare,
+  # and a typical session makes nowhere near this many changes.
+  # autoOptimizeThreshold: 100
+  # How long (minutes) after the agent starts the automatic cleanup
+  # check runs - it compacts the database once if enough changes piled
+  # up, then stays quiet for the rest of the run. Raise it if the
+  # first minutes of a session are latency-critical for you.
+  # Default 15: long enough that normal startup work has settled.
+  # autoOptimizeCheckIntervalMin: 15
 
 # AGENTS.md handling: verbatim/summary treatment of the workarea AGENTS.md,
 # per-model overridable (see doc/agents_md.md for the full contract).
-agentsMd:
-  enabled: true             # complete off switch; overrides everything
-  compression:
-    mode: auto              # auto | full | summary
-    thresholdKb: 20         # kbyte; only for auto; >= 0 (0 = always-summary under auto)
-  ragIndex: true            # index full doc into RAG + emit pointer on summary
+# agentsMd:
+  # enabled: true             # complete off switch; overrides everything
+  # compression:
+  #   mode: auto              # auto | full | summary
+  #   thresholdKb: 20         # kbyte; only for auto; >= 0 (0 = always-summary under auto)
+  # ragIndex: true            # index full doc into RAG + emit pointer on summary
 
 codeModels:
   - server:
       url: http://127.0.0.1:1234
       type: llamaCpp
-      promptUrl: v1/completion
-      chatUrl: v1/chat/completions
-      slotUrl: slots
-      embedUrl: v1/embeddings
+      # Server fields at their defaults:
+      # promptUrl: v1/completion
+      # chatUrl: v1/chat/completions
+      # slotUrl: slots
+      # embedUrl: v1/embeddings
       timeoutSeconds: 3600
-      httpVerbosity: 0
-      verifySslCert: true
-      maxRetries: 3
-      backoffMs: 500
+      # httpVerbosity: 0
+      # verifySslCert: true
+      # maxRetries: 3
+      # backoffMs: 500
+      # apiKeyEnv: ""
       jsonFields: '{"chat_template_kwargs": {"preserve_thinking": true, "enable_thinking": true, "reasoning_effort": "medium"}}'
-      apiKeyEnv: ""
+      warnIfNoApiKey: false
     display: x-high
     modelName: local-model-xyz-high-reason-15b
     temp: 0.6
@@ -183,43 +226,43 @@ codeModels:
 
 # Nudge policy: global defaults (usually all you need)
 # Model stopped generating without calling a tool (needMoreThinking).
-nudges:
-  keepReasoning:
+# nudges:
+  # keepReasoning:
     # enabled: false silences the kind entirely: no nudge is emitted, the
     # strike counter is untouched, and the prompt files are not loaded
     # (loop-safety backstops govern the turn).
-    enabled: true
+    # enabled: true
     # Soft-phase prompt files, resolved through promptDir (same as AGENT.md).
     # Strike s uses entry min(s, len)-1; the last entry repeats.
-    softNudges: [NUDGE_KEEP_REASONING_SOFT.md]
-    softStrikes: 2     # soft nudges on strikes 1..2; the hard phase starts at strike 3
-    hardNudges: [NUDGE_KEEP_REASONING_HARD.md]
+    # softNudges: [NUDGE_KEEP_REASONING_SOFT.md]
+    # softStrikes: 2     # soft nudges on strikes 1..2; the hard phase starts at strike 3
+    # hardNudges: [NUDGE_KEEP_REASONING_HARD.md]
     # Final nudges before the turn fails (agentStuckInLoop). 0 = unlimited
     # (legacy: last hard nudge repeats; loop-safety backstop governs).
-    hardStrikes: 1
-  recovery:            # model asks to continue after a failed/interrupted turn
-    enabled: true
-    softNudges: [NUDGE_RECOVERY_SOFT.md]
-    softStrikes: 2
-    hardNudges: [NUDGE_RECOVERY_HARD.md]
-    hardStrikes: 1
-  compression:        # context-usage advisory (one-shot per compress cycle)
-    enabled: true
+    # hardStrikes: 1
+  # recovery:            # model asks to continue after a failed/interrupted turn
+    # enabled: true
+    # softNudges: [NUDGE_RECOVERY_SOFT.md]
+    # softStrikes: 2
+    # hardNudges: [NUDGE_RECOVERY_HARD.md]
+    # hardStrikes: 1
+  # compression:        # context-usage advisory (one-shot per compress cycle)
+    # enabled: true
     # Trigger fraction, in (0.0, 1.0). A value >= 0.9 only draws a config
     # warning: the one-shot nudge could then never fire (forced compression
     # takes over at 90% anyway).
-    threshold: 0.8
+    # threshold: 0.8
     # Empty/omitted = the shipped NUDGE_COMPRESSION.md.
-    prompt: NUDGE_COMPRESSION.md
-  feedback:            # FeedbackEngine warnings after tool calls (gating only)
-    enabled: true
-    intervalSecs: 900  # seconds between feedback warnings
-    minToolCalls: 50   # tool calls between feedback warnings
+    # prompt: NUDGE_COMPRESSION.md
+  # feedback:            # FeedbackEngine warnings after tool calls (gating only)
+    # enabled: true
+    # intervalSecs: 900  # seconds between feedback warnings
+    # minToolCalls: 50   # tool calls between feedback warnings
 
 dragDrop:
-  destination: dropped
+  # destination: dropped   # where dropped files are attached (default)
   # Backstop only: a converter killed after this long
-  conversionTimeout: "10 minutes"
+  # conversionTimeout: "10 minutes"
   converters:
     - extensions: [".docx", ".doc"]
       command: ["pandoc", "-f", "docx", "-t", "gfm", "@{llmfun_src}", "-o", "@{llmfun_dst}"]
@@ -228,7 +271,7 @@ dragDrop:
 
 # Per-model override (inside a codeModels: entry) REPLACES the whole policy
 # for that model (wholesale): restate every field the model should differ
-# in — fields not restated fall back to struct defaults, NOT to the global
+# in - fields not restated fall back to the built-in defaults, NOT to the global
 # policy above. Omit the block entirely to inherit the global policy.
 #   codeModels:
 #     - display: opus
@@ -242,64 +285,89 @@ summaryModel:
   server:
     url: http://127.0.0.1:1234
     type: llamaCpp
-    promptUrl: v1/completion
-    chatUrl: v1/chat/completions
-    slotUrl: slots
-    embedUrl: v1/embeddings
+    # Server fields at their defaults:
+    # promptUrl: v1/completion
+    # chatUrl: v1/chat/completions
+    # slotUrl: slots
+    # embedUrl: v1/embeddings
     timeoutSeconds: 60
-    httpVerbosity: 0
-    verifySslCert: true
-    maxRetries: 3
-    backoffMs: 500
-    apiKeyEnv: "env variable to read the API key from"
-  name: summary-model
-  prompt: SUMMARY.md
+    # httpVerbosity: 0
+    # verifySslCert: true
+    # maxRetries: 3
+    # backoffMs: 500
+    # apiKeyEnv: ""
+    warnIfNoApiKey: false
+  modelName: summary-model
+  # prompt: SUMMARY.md (default)
   temp: 0.3
   contextSize: 32768
-  contextChunkSize: 32768
+  # contextChunkSize: 32768 (default)
   maxTokens: 4096
-  preserveThinking: false
 
 visionModel:
   server:
     url: http://127.0.0.1:1234
     type: llamaCpp
-    promptUrl: v1/completion
-    chatUrl: v1/chat/completions
-    slotUrl: slots
-    embedUrl: v1/embeddings
+    # Server fields at their defaults:
+    # promptUrl: v1/completion
+    # chatUrl: v1/chat/completions
+    # slotUrl: slots
+    # embedUrl: v1/embeddings
     timeoutSeconds: 60
-    httpVerbosity: 0
-    verifySslCert: true
-    maxRetries: 3
-    backoffMs: 500
-    apiKey: ""
+    # httpVerbosity: 0
+    # verifySslCert: true
+    # maxRetries: 3
+    # backoffMs: 500
+    # apiKeyEnv: ""
+    warnIfNoApiKey: false
   modelName: vision-model
-  systemPrompt: ""
+  # systemPrompt: "" (default)
   temp: 0.3
   contextSize: 32768
   maxTokens: 4096
-  timeoutSecs: 60
+  # timeoutSecs: 60 (default)
 
+# Embedder used by the RAG. Two backends, selected by 'type' - exactly one
+# embedConfig block per config; the other example below stays commented out.
+# Unknown keys (e.g. remote-only fields under type: local) are a config warning.
+# Fields both backends share: modelName, chunkSize (default 512), dimensions,
+# queryPrefix / documentPrefix (asymmetric models only).
 embedConfig:
+  # Remote backend: an OpenAI-compatible /v1/embeddings HTTP endpoint.
   type: remote
   server:
     url: http://127.0.0.1:1234
     type: llamaCpp
+    # embedUrl: v1/embeddings
     timeoutSeconds: 60
-    httpVerbosity: 0
-    verifySslCert: true
-    maxRetries: 3
-    backoffMs: 500
-    apiKey: ""
+    # httpVerbosity: 0
+    # verifySslCert: true
+    # maxRetries: 3
+    # backoffMs: 500
+    # The server has no 'apiKey' key: the key comes from an environment
+    # variable (apiKeyEnv). Leave empty for a local llama.cpp server and
+    # silence the warning with warnIfNoApiKey: false.
+    # apiKeyEnv: ""
+    warnIfNoApiKey: false
   modelName: nomic-embed-text
-  chunkSize: 512
+  # Max tokens per embed call batch (default 512)
+  # chunkSize: 512
   dimensions: 768
-  mode: cpu # local backend only: cpu (default) | mixed | gpu
-  nBatch: 512
-  uBatch: 512
-  onlyCpu: true
-  cpuThreads: 0 # as many as there are cores
-  cpuThreadsBatch: 0 # as many as there are cores
   queryPrefix: "search_query: "
   documentPrefix: "search_document: "
+
+# Local backend (llama.cpp, compiled with application-with-local-model):
+# no server block - the model runs in-process from a gguf file.
+# embedConfig:
+#   type: local
+#   modelPath: /path/to/nomic-embed-text-v2-moe.Q8_0.gguf
+#   modelName: nomic-embed-text-v2-moe
+#   dimensions: 768
+#   chunkSize: 512
+#   mode: cpu # cpu (default) | mixed | gpu
+#   nBatch: 512
+#   uBatch: 512
+#   cpuThreads: 0 # as many as there are cores
+#   cpuThreadsBatch: 0 # as many as there are cores
+#   queryPrefix: "search_query: "
+#   documentPrefix: "search_document: "

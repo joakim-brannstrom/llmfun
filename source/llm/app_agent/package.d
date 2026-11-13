@@ -18,11 +18,13 @@ import llm.app_agent.slash;
 import llm.app_agent.ui;
 import llm.app_config : UserConfig, userToLlmConfig, createRag;
 import llm.chat;
+import llm.common.config : LocalEmbedConfig, RemoteEmbedConfig;
 import llm.config : RagConfig;
 import llm.config;
 import llm.dragdrop : DropOwner, DropReport, DropWorker, makeDropWorkerConfig;
 import llm.metric.monitor : MetricMonitor;
 import llm.query;
+import llm.rag.auto_optimize : AutoOptimizeActor;
 import llm.rag.dialogue_index : DialogueIndex;
 import llm.rag.dialogue_worker : CompletionGate, DiDrained, ReasoningDrainBudget;
 import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
@@ -1174,6 +1176,16 @@ class AppAgentActor : DropOwner {
         import llm.memory_tier : MemoryTierActor;
 
         sys.spawn!MemoryTierActor(app.llmConf, app.rag);
+
+        {
+            // One-shot auto-optimize check
+            auto embedModel = app.llmConf.embedConfig.match!((RemoteEmbedConfig a) => a.modelName,
+                    (LocalEmbedConfig a) => a.modelName);
+            sys.spawn!AutoOptimizeActor(app.llmConf.ragPrimary.path.AbsolutePath,
+                    app.llmConf.ragConfig.autoOptimizeThreshold,
+                    app.llmConf.ragConfig.autoOptimizeCheckIntervalMin, embedModel,
+                    app.llmConf.embedDimensions, app.llmConf.ragConfig.busyTimeout);
+        }
 
         auto dropWorker = sys.spawn!DropWorker(makeDropWorkerConfig(app.llmConf.workArea.AbsolutePath,
                 app.llmConf.dragDrop), TypedAddress!DropOwner(self_.address().lock()));
