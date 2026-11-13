@@ -1,0 +1,11 @@
+
+== int8 A/B summary (topK=10) ==
+recall: mean overlap of the top-k id sets, int8 against float32
+  recall@1   0.941  (17 cases)
+  recall@3   0.941  (17 cases)
+  recall@5   0.953  (17 cases)
+  recall@10  0.912  (17 cases)
+  float: hit@1=13/17 hit@3=16 hit@K=16 MRR=0.843
+  int8: hit@1=12/17 hit@3=16 hit@K=16 MRR=0.814
+  float-hit but int8-miss: 0 of 17 cases
+  mean knn ms: float 1.17, int8 0.58
