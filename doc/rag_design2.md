@@ -53,11 +53,11 @@ Why this matters: the two historical failure modes were (a) the int[] path silen
 
 ## 3. Query Paths
 
-All three take a `database` scope (`"*"` = all) and run across the matched databases in parallel. Constants: `RrfPoolMultiplier = 10`, `RrfK = 10`, `VecWeight = 1.0`, `FtsWeight = 1.0`, `MaxFromSource = 2`.
+All three take a `database` scope (`"*"` = all) and run across the matched databases in parallel. Constants: `RrfPoolMultiplier = 10`, `RrfK = 10`, `VecWeight = 1.0`, `FtsWeight = 1.0`, `MaxFromSource = 2`. The vector KNN additionally carries the fork's hidden `mmr_lambda` argument, bound from `ragConfig.mmrLambda` (default 1.0 — the statement and bindings are then byte-identical to the plain relevance ranking; lower values trade relevance for diversity inside the vec0 KNN).
 
 ### 3.1 `querySemantic` — vector KNN
 
-- SQL: `embedding MATCH :embedding AND k = :limit`, ranked by `row_number() OVER (ORDER BY distance)`; `k = topK` (no pool multiplier — the KNN pool *is* the answer).
+- SQL: `embedding MATCH vec_quantize_int8(vec_f32(:embedding), 'unit') AND k = :limit` — the stored embeddings are quantized int8 (one byte per dimension), so the float32 query vector is converted and quantized inline in the MATCH right-hand side; when `ragConfig.mmrLambda` is below 1.0 the SQL also carries `AND mmr_lambda = :mmr_lambda`. Ranked by `row_number() OVER (ORDER BY distance)`; `k = topK` (no pool multiplier — the KNN pool *is* the answer).
 - D-side: per-database results are merged with `randomizeRanks` (content-hash-seeded tie shuffle, see §4), stable-sorted by rank ascending (lower distance = better), then `takePerSource(topK, 2)`.
 
 ### 3.2 `queryTextSearch` — FTS5
@@ -105,7 +105,9 @@ Known limitation: suffix matching has no path-boundary check (`xauth_token_spec.
 
 ## 6. Index Integrity & Migration Invariants
 
-- **A change to the embedding layout, the chunker, or the prefix logic invalidates every existing database.** Old chunks keep their old embeddings and old texts. Re-index after such a change — the A/B demo for the `ref` bug (Lesson L2) used separate databases for this exact reason.
+- **A change to the embedding layout, the chunker, or the prefix logic invalidates every existing database.** Old chunks keep their old embeddings and old texts. Re-index after such a change — the A/B demo for the `ref` bug (Lesson L2) used separate databases for this exact reason. The embedding layout itself is versioned by `SchemaVersion` in `VersionTbl`; since the int8 change the stored embeddings are quantized one-byte-per-dimension int8 (`vec_quantize_int8(vec, 'unit')` on insert, inline quantization of the float32 query vector in the KNN MATCH).
+- **Schema-version mismatch handling is asymmetric by open mode** (verified behavior, the deployment fact behind the rollout ordering): a read-write open of a version-, dimension- or model-mismatched database wipes and rebuilds it inside a transaction (re-embed from sources — the accepted migration path), while a read-only open of a version- or dimension-mismatched database logs a warning and returns *no database at all* — the database is silently unusable for that instance.
+- **Rollout ordering for schema-bumping releases:** CI must rebuild and republish every published database (running the new binary) BEFORE instances roll to the new build. Where the ordering cannot be held, the unavailability window is accepted explicitly by deployment — the read-only-open failure mode is a clean "no database", not corruption or wrong results. The manual `llmfun rag --optimize` compaction (and the one-shot auto-optimize check) ride the same connection paths and need no extra rollout steps.
 - **A dropped chunk is a warning, not a state.** The index does not record "this document is incomplete"; the warning log is the only signal. If warnings appear, re-index with a model/config whose budget fits.
 - **`add` dedup is content-hash based** (§1.4): unchanged content is never re-embedded, changed content replaces the old rows.
 

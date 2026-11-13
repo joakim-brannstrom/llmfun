@@ -1,6 +1,7 @@
 module llm.config;
 
 import logger = std.logger;
+import core.time : Duration, msecs;
 import std.algorithm : filter, map, sort, among;
 import std.array : array, empty, appender, join;
 import std.conv : to, text;
@@ -29,20 +30,15 @@ immutable ProgramName = "llmfun";
 /// The application version reported in telemetry payloads
 enum appVersion = "1.0.0";
 
-/// AGENTS.md prompt payload handed to the composer. payload empty (or
-/// whitespace-only) = no AGENTS.md treatment (no injection, no instruction).
-/// ragTopic empty = no pointer instruction (ragIndex=false, or full-text
-/// treatment). New fields must be appended at the end: positional
-/// constructions elsewhere rely on the field order.
+// AGENTS.md prompt payload handed to the composer.
+// payload empty (or whitespace-only) = no AGENTS.md treatment (no injection, no instruction).
+// ragTopic empty = no pointer instruction (ragIndex=false, or full-text treatment).
 struct AgentsMdPrompt {
     string payload; /// summary OR verbatim text (see AgentMdState.summary)
     string ragTopic; /// exact RAG topic name (agent_md_<8-hex>); empty = no pointer
 }
 
-/// RAG pointer instruction composed at build time with the exact topic name.
-/// Retires the static AgentMdRagInstruction constant: the pointer now embeds
-/// the checksum-derived topic name (agent_md_<8-hex>) instead of the
-/// inaccurate "'AGENTS.md' source" wording.
+// RAG instruction with exact topic name to use when retrieving the full AGENTS.md source.
 private string composeAgentMdRagPointer(string topic) @safe pure {
     return "For detailed explanations, architecture justifications, or lengthy code "
         ~ "examples, query your RAG knowledge base for topic `"
@@ -60,10 +56,9 @@ enum PathCategory {
 }
 
 struct FilesystemLimits {
-    /// Patterns are compiled case-insensitively (ReFilter uses the "i" flag)
     struct CategoryFilter {
-        string[] include; // empty = match everything (ReFilter semantics)
-        string[] exclude; // exclude wins over include
+        string[] include;
+        string[] exclude;
     }
 
     CategoryFilter read;
@@ -99,11 +94,230 @@ struct RagConfig {
 
     long maxChunksPerTopic;
 
+    /// SQLite busy_timeout in milliseconds
+    long busyTimeoutMs = 500;
+
+    /// The busy_timeout as a Duration, for the type-safe database APIs.
+    Duration busyTimeout() const @safe {
+        return busyTimeoutMs.msecs;
+    }
+
+    /// Write counter threshold that arms the one-shot startup auto-optimize check
+    long autoOptimizeThreshold = 100;
+
+    /// How many minutes after startup the one-shot auto-optimize check inspects
+    /// the write counter against the threshold.
+    long autoOptimizeCheckIntervalMin = 15;
+
+    /// MMR (maximal marginal relevance) lambda applied to the vector-side KNN pool at query time.
+    /// 1.0 disables MMR - the query SQL and bindings are then byte-identical to the plain ranking.
+    /// Lower values trade pure relevance for diversity inside the vec0 KNN.
+    double mmrLambda = 1.0;
+
     invariant {
         assert(windowOverlapPercent >= 0 && windowOverlapPercent <= 99,
                 "windowOverlapPercent must be in range [0, 99], got "
                 ~ windowOverlapPercent.to!string);
+        assert(busyTimeoutMs >= 0, "busyTimeoutMs must be >= 0, got " ~ busyTimeoutMs.to!string);
+        assert(autoOptimizeThreshold >= 0,
+                "autoOptimizeThreshold must be >= 0, got " ~ autoOptimizeThreshold.to!string);
+        assert(autoOptimizeCheckIntervalMin >= 1,
+                "autoOptimizeCheckIntervalMin must be >= 1, got "
+                ~ autoOptimizeCheckIntervalMin.to!string);
+        assert(mmrLambda > 0.0 && mmrLambda <= 1.0,
+                "mmrLambda must be in (0.0, 1.0], got " ~ mmrLambda.to!string);
     }
+}
+
+@("RagConfig busyTimeoutMs parses from YAML and rejects a negative value")
+unittest {
+    import std.algorithm : canFind;
+    import std.conv : to;
+    import std.exception : collectException;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("rag_busytimeout");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+ragConfig:
+  busyTimeoutMs: 1234
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.ragConfig.busyTimeoutMs == 1234,
+            "parse must accept 1234, got " ~ conf.ragConfig.busyTimeoutMs.to!string);
+    assert(conf.busyTimeout.total!"msecs" == 1234, "the accessor must convert to 1234 ms");
+    assert(!collectException(validateConfig(conf)), "busyTimeoutMs 1234 must validate");
+
+    string yamlNeg = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+ragConfig:
+  busyTimeoutMs: -1
+`;
+    // A negative value fails validation: validateConfig throws for it.
+    File(tmpFile, "w").write(yamlNeg);
+    auto confNeg = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    bool threw;
+    string msg;
+    try {
+        validateConfig(confNeg);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for busyTimeoutMs < 0");
+    assert(canFind(msg, "busyTimeoutMs"), "unexpected error message: " ~ msg);
+}
+
+@("RagConfig auto-optimize entries parse from YAML and reject out-of-range values")
+unittest {
+    import std.algorithm : canFind;
+    import std.conv : to;
+    import std.exception : collectException;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("rag_autooptimize_cfg");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+ragConfig:
+  autoOptimizeThreshold: 250
+  autoOptimizeCheckIntervalMin: 5
+  mmrLambda: 0.3
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.ragConfig.autoOptimizeThreshold == 250,
+            "parse must accept 250, got " ~ conf.ragConfig.autoOptimizeThreshold.to!string);
+    assert(conf.ragConfig.autoOptimizeCheckIntervalMin == 5,
+            "parse must accept 5, got " ~ conf.ragConfig.autoOptimizeCheckIntervalMin.to!string);
+    assert(conf.ragConfig.mmrLambda == 0.3,
+            "parse must accept 0.3, got " ~ conf.ragConfig.mmrLambda.to!string);
+    assert(!collectException(validateConfig(conf)), "defaults in range must validate");
+
+    string yamlNeg = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+ragConfig:
+  autoOptimizeThreshold: -1
+`;
+    // A negative threshold fails validation: validateConfig throws for it.
+    File(tmpFile, "w").write(yamlNeg);
+    auto confNeg = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    bool threw;
+    string msg;
+    try {
+        validateConfig(confNeg);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for autoOptimizeThreshold < 0");
+    assert(canFind(msg, "autoOptimizeThreshold"), "unexpected error message: " ~ msg);
+
+    string yamlZeroInterval = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+ragConfig:
+  autoOptimizeCheckIntervalMin: 0
+`;
+    // A zero check interval fails validation: validateConfig throws for it.
+    File(tmpFile, "w").write(yamlZeroInterval);
+    auto confZero = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    threw = false;
+    try {
+        validateConfig(confZero);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for autoOptimizeCheckIntervalMin < 1");
+    assert(canFind(msg, "autoOptimizeCheckIntervalMin"), "unexpected error message: " ~ msg);
+
+    string yamlMmrHigh = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+ragConfig:
+  mmrLambda: 1.5
+`;
+    // An mmrLambda above 1 fails validation: validateConfig throws for it.
+    File(tmpFile, "w").write(yamlMmrHigh);
+    auto confMmr = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    threw = false;
+    try {
+        validateConfig(confMmr);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for mmrLambda > 1");
+    assert(canFind(msg, "mmrLambda"), "unexpected error message: " ~ msg);
+
+    string yamlMmrZero = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+ragConfig:
+  mmrLambda: 0.0
+`;
+    // A zero mmrLambda fails validation: validateConfig throws for it.
+    File(tmpFile, "w").write(yamlMmrZero);
+    auto confMmrZero = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    threw = false;
+    try {
+        validateConfig(confMmrZero);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for mmrLambda <= 0");
+    assert(canFind(msg, "mmrLambda"), "unexpected error message: " ~ msg);
+}
+
+@("RagConfig mmrLambda invariant rejects out-of-range values")
+unittest {
+    import core.exception : AssertError;
+    import std.exception : assertThrown, collectException;
+
+    // D struct invariants are NOT checked on construction; they run when entering
+    // public members, so trigger them through the busyTimeout() accessor.
+    auto bad1 = RagConfig(mmrLambda: 0.0);
+    assertThrown!AssertError(bad1.busyTimeout(), "invariant must reject mmrLambda <= 0");
+    auto bad2 = RagConfig(mmrLambda: -0.5);
+    assertThrown!AssertError(bad2.busyTimeout(), "invariant must reject mmrLambda < 0");
+    auto bad3 = RagConfig(mmrLambda: 1.5);
+    assertThrown!AssertError(bad3.busyTimeout(), "invariant must reject mmrLambda > 1");
+    auto ok1 = RagConfig(mmrLambda: 0.25);
+    assert(!collectException(ok1.busyTimeout()), "0.25 must pass the invariant");
+    auto ok2 = RagConfig(mmrLambda: 1.0);
+    assert(!collectException(ok2.busyTimeout()), "1.0 must pass the invariant");
 }
 
 struct SandboxConfig {
@@ -436,6 +650,11 @@ struct LlmConfig {
     long embedDimensions() const @safe {
         return embedConfig.match!((LocalEmbedConfig a) => a.dimensions,
                 (RemoteEmbedConfig a) => a.dimensions);
+    }
+
+    /// The RAG busy_timeout.
+    Duration busyTimeout() const @safe {
+        return ragConfig.busyTimeout;
     }
 
     /// Return: the currently active code model config (value copy, no mutex needed).
@@ -1834,6 +2053,22 @@ void validateConfig(LlmConfig conf) {
     if (conf.tui.idleParkMs != 0 && (conf.tui.idleParkMs < 4 || conf.tui.idleParkMs > 1000))
         throw new Exception(i"tui.idleParkMs must be 0 or in [4, 1000], got $(conf.tui.idleParkMs)"
                 .text);
+
+    if (conf.ragConfig.busyTimeoutMs < 0)
+        throw new Exception(i"ragConfig.busyTimeoutMs must be >= 0, got $(
+                conf.ragConfig.busyTimeoutMs) ms".text);
+
+    if (conf.ragConfig.autoOptimizeThreshold < 0)
+        throw new Exception(i"ragConfig.autoOptimizeThreshold must be >= 0, got $(
+                conf.ragConfig.autoOptimizeThreshold)".text);
+
+    if (conf.ragConfig.autoOptimizeCheckIntervalMin < 1)
+        throw new Exception(i"ragConfig.autoOptimizeCheckIntervalMin must be >= 1, got $(
+                conf.ragConfig.autoOptimizeCheckIntervalMin) min".text);
+
+    if (conf.ragConfig.mmrLambda <= 0.0 || conf.ragConfig.mmrLambda > 1.0)
+        throw new Exception(i"ragConfig.mmrLambda must be in (0.0, 1.0], got $(
+                conf.ragConfig.mmrLambda)".text);
 
     if (conf.telemetry.syslog.enabled && conf.telemetry.syslog.ident.empty)
         throw new Exception(

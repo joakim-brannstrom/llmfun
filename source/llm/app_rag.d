@@ -34,10 +34,12 @@ int appMain(UserConfig uconf, UserConfig.Rag conf) {
     auto llmConf = readConfig(uconf.config, false, uconf.noCwdConfig, uconf.trustedConfig)
         .userToLlmConfig(conf);
 
-    // Read-only dialogue report: no embedder, local model, or primary RAG
-    // database is needed (session DBs are opened read-only, sources only).
     if (conf.dialogue) {
         return dialogueReport(llmConf);
+    }
+
+    if (conf.optimize) {
+        return runOptimize(llmConf);
     }
 
     auto rag = createRag(llmConf, openSecondary: false);
@@ -537,6 +539,38 @@ int dialogueReport(LlmConfig llmConf) {
     return 0;
 }
 
+/// Run the sqlite-vec optimize command on the primary RAG database only.
+private bool runOptimize(LlmConfig llmConf) {
+    import std.datetime.stopwatch : StopWatch;
+    import llm.common.config : LocalEmbedConfig, RemoteEmbedConfig;
+    import llm.rag.database : Database, optimize, openDatabase;
+    import miniorm : spinSql, SpinSqlTimeout;
+
+    auto dbPath = llmConf.ragPrimary.path.AbsolutePath;
+    auto model = llmConf.embedConfig.match!((RemoteEmbedConfig a) => a.modelName,
+            (LocalEmbedConfig a) => a.modelName);
+    auto dbOpt = openDatabase(dbPath, model, llmConf.embedDimensions, readOnly: false,
+            busyTimeout: llmConf.ragConfig.busyTimeout, mmrLambda: llmConf.ragConfig.mmrLambda);
+    if (!hasValue(dbOpt)) {
+        logger.warningf("rag --optimize: skipping '%s' (cannot be opened read-write)", dbPath);
+        return false;
+    }
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    scope (exit)
+        db.destroy;
+    try {
+        StopWatch sw;
+        sw.start;
+        spinSql!(() => db.db.optimize())(timeout);
+        logger.infof("rag --optimize: optimized '%s' in %s ms", dbPath, sw.peek.total!"msecs");
+    } catch (SpinSqlTimeout e) {
+        logger.errorf("rag --optimize: '%s' still locked after %s of retries - giving up",
+                dbPath, timeout);
+        return false;
+    }
+    return true;
+}
+
 version (unittest) {
     import llm.common.embedder : Embedder, EmbedResult, EmbedError;
     import my.path : AbsolutePath;
@@ -610,12 +644,24 @@ version (unittest) {
         }
     }
 
+    // TODO: remove this, replace with testArea from llm.test_util
     private AbsolutePath makeScratchDir(long line = __LINE__) {
         import std.conv : to;
 
         auto dir = ("llmfun_test/app_rag/" ~ line.to!string).AbsolutePath;
         mkdirRecurse(dir);
         return dir;
+    }
+
+    /// EmbedConfig carrying the TestEmbedder's model and dimensions, for the
+    /// config-driven paths (runOptimize passes them to openDatabase).
+    private EmbedConfig testEmbedConfig() {
+        import llm.common.config : EmbedConfig, LocalEmbedConfig;
+
+        auto local = LocalEmbedConfig.init;
+        local.modelName = "app_rag_test_embedder";
+        local.dimensions = 8;
+        return EmbedConfig(local);
     }
 }
 
@@ -766,4 +812,152 @@ unittest {
     auto conf = LlmConfig.init;
     conf.dialogueDir = Path(dir.toString);
     assert(dialogueReport(conf) == 0);
+}
+
+@("runOptimize optimizes a schema-current database and exits 0")
+unittest {
+    import llm.rag.database : Database, openDatabase;
+    import llm.rag.rag : addToDatabase;
+    import my.path : AbsolutePath, Path;
+    import std.file : rmdirRecurse;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TestEmbedder;
+    auto dbPath = (dir ~ "p.db").AbsolutePath;
+    auto dbOpt = openDatabase(dbPath, emb.modelName(), emb.dimensions());
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    auto cfg = RagConfig.init;
+    size_t nBatchCache;
+    auto res = addToDatabase(db, emb, Document(origin: Origin(Topic("t1")),
+            data: "some indexable text for the optimize pass"), cfg, nBatchCache);
+    assert(res.chunks > 0);
+    db.destroy;
+
+    auto llmConf = LlmConfig.init;
+    llmConf.ragPrimary = RagDatabaseConfig(dbPath.Path, "test primary");
+    llmConf.embedConfig = testEmbedConfig();
+    assert(runOptimize(llmConf), "a schema-current database must be optimized, not skipped");
+}
+
+@("runOptimize wipes and rebuilds a database whose model does not match the configuration")
+unittest {
+    import llm.rag.database : Database, SchemaVersion, openDatabase;
+    import llm.rag.sqlite3_vec : SQLITE_OPEN_READONLY;
+    import miniorm : Miniorm;
+    import my.path : AbsolutePath, Path;
+    import std.file : rmdirRecurse;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto dbPath = (dir ~ "p.db").AbsolutePath;
+    auto dbOpt = openDatabase(dbPath, "test", 8);
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    db.destroy;
+
+    // The configuration names a different model than the database stores.
+    auto llmConf = LlmConfig.init;
+    llmConf.ragPrimary = RagDatabaseConfig(dbPath.Path, "test primary");
+    llmConf.embedConfig = testEmbedConfig();
+    assert(runOptimize(llmConf), "a mismatched database is wiped and rebuilt, not skipped");
+
+    // The wipe/rebuild reset the stored version to the current schema version.
+    auto probe = Miniorm(dbPath.toString, SQLITE_OPEN_READONLY);
+    auto stmt = probe.prepare("SELECT version FROM VersionTbl");
+    foreach (ref r; stmt.get.execute) {
+        assert(r.peek!long(0) == SchemaVersion,
+                "the wipe/rebuild must have reset the schema version");
+    }
+}
+
+@("runOptimize skips a missing database file without crashing")
+unittest {
+    import my.path : Path;
+
+    auto llmConf = LlmConfig.init;
+    llmConf.ragPrimary = RagDatabaseConfig("/nonexistent_optimize_dir/missing.db".Path,
+            "test primary");
+    assert(!runOptimize(llmConf), "a missing database file must be reported as skipped");
+}
+
+@("runOptimize targets only the primary and leaves configured secondaries untouched")
+unittest {
+    import llm.rag.database : Database, openDatabase;
+    import llm.rag.rag : addToDatabase;
+    import llm.rag.sqlite3_vec : SQLITE_OPEN_READONLY;
+    import miniorm : Miniorm;
+    import my.path : AbsolutePath, Path;
+    import std.file : rmdirRecurse;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TestEmbedder;
+
+    // Schema-current primary.
+    auto primaryPath = (dir ~ "p.db").AbsolutePath;
+    auto dbOpt = openDatabase(primaryPath, emb.modelName(), emb.dimensions());
+    assert(dbOpt.hasValue, "openDatabase failed for the primary");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    auto cfg = RagConfig.init;
+    size_t nBatchCache;
+    auto res = addToDatabase(db, emb, Document(origin: Origin(Topic("t1")),
+            data: "some indexable text for the optimize pass"), cfg, nBatchCache);
+    assert(res.chunks > 0);
+    db.destroy;
+
+    // Stale-schema secondary.
+    auto secondaryPath = (dir ~ "s.db").AbsolutePath;
+    dbOpt = openDatabase(secondaryPath, "test", 8);
+    assert(dbOpt.hasValue, "openDatabase failed for the secondary");
+    db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    db.run("UPDATE VersionTbl SET version = 0");
+    db.destroy;
+
+    auto llmConf = LlmConfig.init;
+    llmConf.ragPrimary = RagDatabaseConfig(primaryPath.Path, "test primary");
+    llmConf.ragSecondary["test secondary"] = [
+        RagDatabaseConfig(secondaryPath.Path, "test secondary")
+    ];
+    llmConf.embedConfig = testEmbedConfig();
+
+    assert(runOptimize(llmConf), "the primary is optimized, so nothing is skipped");
+
+    // The untargeted secondary keeps its stale version untouched.
+    auto probe = Miniorm(secondaryPath.toString, SQLITE_OPEN_READONLY);
+    auto stmt = probe.prepare("SELECT version FROM VersionTbl");
+    foreach (ref r; stmt.get.execute) {
+        assert(r.peek!long(0) == 0, "the untargeted secondary must not be optimized or wiped");
+    }
+}
+
+@("runOptimize optimizes a schema-current database with no embeddings")
+unittest {
+    import llm.rag.database : Database, openDatabase;
+    import my.path : AbsolutePath, Path;
+    import std.file : rmdirRecurse;
+
+    auto dir = makeScratchDir();
+    scope (exit)
+        rmdirRecurse(dir);
+
+    auto emb = new TestEmbedder;
+    auto dbPath = (dir ~ "empty.db").AbsolutePath;
+    auto dbOpt = openDatabase(dbPath, emb.modelName(), emb.dimensions());
+    assert(dbOpt.hasValue, "openDatabase failed");
+    auto db = dbOpt.match!((Database d) => d, (None _) => Database.init);
+    db.destroy;
+
+    auto llmConf = LlmConfig.init;
+    llmConf.ragPrimary = RagDatabaseConfig(dbPath.Path, "test primary");
+    llmConf.embedConfig = testEmbedConfig();
+    assert(runOptimize(llmConf),
+            "a schema-current database without embeddings must optimize cleanly");
 }
