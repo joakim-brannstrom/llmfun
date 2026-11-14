@@ -315,9 +315,9 @@ void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
                                 }
 
                                 package {
-                                    string query_; // what D last sent, replayed to the C++ frame on every render tick.
-                                    UiRuntimeStatus runtimeStatus_; // Last header summary computed by addChatMessage
-                                    string lastChatSummary; // Set when the C frame reports user-terminated (GUI window close);
+                                    string query_;  // what D last sent, replayed to the C++ frame on every render tick.
+                                    UiRuntimeStatus runtimeStatus_;  // Last header summary computed by addChatMessage
+                                    string lastChatSummary;  // Set when the C frame reports user-terminated (GUI window close);
                                     // consumed by the actor's postProcess exit handshake.
                                     bool userTerminated_;}
 

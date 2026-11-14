@@ -9,7 +9,7 @@
 namespace llmfun::tui::store {
 
 bool blockDisplayable(const TypedBlock& b) {
-    if (b.kind != 2) // TuiBlockKind_Tool: the only kind the filter ever hides
+    if (b.kind != kBlockKindTool)
         return true;
     for (std::string_view name : kHiddenToolNames)
         if (b.title == name)
@@ -26,6 +26,11 @@ void TypedThreadStore::setTurns(std::vector<TypedTurn> turns, std::vector<TypedB
     turns_ = std::move(turns);
     turnIndex_.clear();
     turnIndex_.reserve(turns_.size());
+    // D owns the uniqueness contract:
+    // a duplicate id in a snapshot would orphan the later turn - `emplace` keeps
+    // the first slot and the later turn's blocks would hang off an unreachable
+    // slot. The emitter's contract guarantees it never happens; the merge paths
+    // (turnUpsert/blockUpsert) are find-guarded and cannot orphan anything.
     for (std::size_t k = 0; k < turns_.size(); ++k)
         turnIndex_.emplace(turns_[k].id, k);
     blocks_.assign(turns_.size(), {});
@@ -41,6 +46,9 @@ void TypedThreadStore::setTurns(std::vector<TypedTurn> turns, std::vector<TypedB
             blockIndex_.emplace_back();
         }
         const std::size_t slot = turnIndex_.at(block.turnId);
+        // Same uniqueness contract for block ids within a turn: a duplicate id
+        // in a snapshot would keep the first slot and silently drop the later
+        // payload from every projection (the index is the only address).
         blockIndex_[slot].emplace(block.id, blocks_[slot].size());
         blocks_[slot].push_back(std::move(block));
     }
@@ -109,9 +117,7 @@ void TypedThreadStore::threadClear() {
     blockIndex_.clear();
 }
 
-std::size_t TypedThreadStore::turnCount() const {
-    return turns_.size();
-}
+std::size_t TypedThreadStore::turnCount() const { return turns_.size(); }
 
 const TypedTurn& TypedThreadStore::turnAt(std::size_t k) const {
     static const TypedTurn empty;
@@ -162,31 +168,27 @@ int stepCount(const TypedThreadStore& store, std::int64_t turnId) {
     bool seenProse = false;
     for (std::size_t k = 0, n = store.blockCount(turnId); k < n; ++k) {
         const TypedBlock& b = store.blockAt(turnId, k);
-        if (!blockDisplayable(b))
-            continue; // hidden = weight 0 (D3): stored, counted nowhere
-        if (b.kind == 1)
-            continue; // Reasoning rides the content message: 0 (D4)
-        if (b.kind == 3)
-            continue; // Answer is counted in its task_done tool block: 0 (D4)
-        if (b.kind == 0) {
+        if (!blockDisplayable(b) || b.kind == kBlockKindReasoning || b.kind == kBlockKindAnswer)
+            continue;
+        if (b.kind == kBlockKindProse) {
             if (!seenProse) {
-                seenProse = true; // the turn-opening user query: 0 (D4, §5)
+                seenProse = true;
                 continue;
             }
-            steps += 1; // response content: 1
+            steps += 1;
             continue;
         }
-        if (b.kind == 4) {
-            steps += 1; // Notice: 1 (D4)
+        if (b.kind == kBlockKindNotice) {
+            steps += 1;
             continue;
         }
-        if (b.kind == 2) {
-            // Tool by status (D4): a settled result carries call + result (2);
+        if (b.kind == kBlockKindTool) {
+            // Tool by status: a settled result carries call + result (2);
             // everything still in flight - or a call the emitter has not
             // stamped yet (status None: work the run started) - carries the
             // call (1). A result-only block arrives settled, so it weights 2
             // and the call's upsert merges into the same slot later.
-            steps += (b.status == 3 || b.status == 4) ? 2 : 1;
+            steps += (b.status == kBlockStatusOk || b.status == kBlockStatusFailed) ? 2 : 1;
             continue;
         }
         steps += 1; // unknown kind: defensive - a surprise counts as work

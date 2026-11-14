@@ -721,18 +721,29 @@ void tuiPipelineClear(TuiState* state);
 
 /* Verbatim contract — v5 thread types (design §4) */
 typedef enum TuiTurnState {
-    TuiTurnState_Running = 0, TuiTurnState_Done = 1, TuiTurnState_Interrupted = 2
+    TuiTurnState_Running = 0,
+    TuiTurnState_Done = 1,
+    TuiTurnState_Interrupted = 2
 } TuiTurnState;
 typedef enum TuiBlockKind {
-    TuiBlockKind_Prose = 0, TuiBlockKind_Reasoning = 1, TuiBlockKind_Tool = 2,
-    TuiBlockKind_Answer = 3, TuiBlockKind_Notice = 4
+    TuiBlockKind_Prose = 0,
+    TuiBlockKind_Reasoning = 1,
+    TuiBlockKind_Tool = 2,
+    TuiBlockKind_Answer = 3,
+    TuiBlockKind_Notice = 4
 } TuiBlockKind;
 typedef enum TuiBlockStatus {
-    TuiBlockStatus_None = 0, TuiBlockStatus_Pending = 1, TuiBlockStatus_Running = 2,
-    TuiBlockStatus_Ok = 3, TuiBlockStatus_Failed = 4, TuiBlockStatus_Cancelled = 5
+    TuiBlockStatus_None = 0,
+    TuiBlockStatus_Pending = 1,
+    TuiBlockStatus_Running = 2,
+    TuiBlockStatus_Ok = 3,
+    TuiBlockStatus_Failed = 4,
+    TuiBlockStatus_Cancelled = 5
 } TuiBlockStatus;
 typedef enum TuiBlockFlags {
-    TuiBlockFlag_Collapsible = 1, TuiBlockFlag_DefaultOpen = 2, TuiBlockFlag_Selectable = 4
+    TuiBlockFlag_Collapsible = 1,
+    TuiBlockFlag_DefaultOpen = 2,
+    TuiBlockFlag_Selectable = 4
 } TuiBlockFlags;
 
 /* id = persisted turnId (0 = unstamped); ordinal = 1-based display position
@@ -769,8 +780,8 @@ typedef struct TuiBlock {
 
 /* Bulk snapshot (replay, session switch): clears the store, then loads the
  * turns and their blocks. Turns in array order. */
-void tuiSetTurns(TuiState* state, const TuiTurn* turns, size_t turnCount,
-                 const TuiBlock* blocks, size_t blockCount);
+void tuiSetTurns(TuiState* state, const TuiTurn* turns, size_t turnCount, const TuiBlock* blocks,
+                 size_t blockCount);
 /* Upsert the only mutating paths: a first upsert creates the slot, later
  * upserts merge in place (keyed by (turnId, id) for blocks). */
 void tuiTurnUpsert(TuiState* state, const TuiTurn* turn);

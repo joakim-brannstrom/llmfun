@@ -840,13 +840,11 @@ void tuiPipelineClear(TuiState* state) {
  * point here is (the v4 ones above set the same precedent).
  */
 
-void tuiSetTurns(TuiState* state, const TuiTurn* turns, size_t turnCount,
-                 const TuiBlock* blocks, size_t blockCount) {
+void tuiSetTurns(TuiState* state, const TuiTurn* turns, size_t turnCount, const TuiBlock* blocks,
+                 size_t blockCount) {
     if (!state || !state->inner)
         return;
-    const auto str = [](String s) {
-        return std::string(s.data ? s.data : "", s.data ? s.len : 0);
-    };
+    const auto str = [](String s) { return std::string(s.data ? s.data : "", s.data ? s.len : 0); };
     std::vector<::llmfun::tui::store::TypedTurn> typedTurns;
     typedTurns.reserve(turnCount);
     for (size_t k = 0; turns && k < turnCount; ++k) {
@@ -897,9 +895,7 @@ void tuiTurnUpsert(TuiState* state, const TuiTurn* turn) {
 void tuiBlockUpsert(TuiState* state, const TuiBlock* block) {
     if (!state || !state->inner || !block)
         return;
-    const auto str = [](String s) {
-        return std::string(s.data ? s.data : "", s.data ? s.len : 0);
-    };
+    const auto str = [](String s) { return std::string(s.data ? s.data : "", s.data ? s.len : 0); };
     ::llmfun::tui::store::TypedBlock nb;
     nb.turnId = block->turnId;
     nb.id = str(block->id);

@@ -9,6 +9,7 @@
 /// comparison.
 #include "thread_store.h"
 
+#include "fnv1a.h"
 #include "tui.h"
 #include "tui_common.h"
 #include "tui_widgets.h"
@@ -917,29 +918,22 @@ void ThreadStoreAdapter::sync() const {
 // silent same.
 static std::uint64_t typedTurnFingerprint(const store::TypedThreadStore& typed,
                                           std::int64_t turnId) {
-    std::uint64_t h = 1469598103934665603ull; // FNV-1a, 64-bit offset basis
-    const auto fold = [&h](std::uint64_t v) {
-        h ^= v;
-        h *= 1099511628211ull; // FNV-1a prime
-    };
-    const auto foldBytes = [&fold](const std::string& s) {
-        for (unsigned char c : s)
-            fold(c);
-        fold(0xff); // the separator a shared prefix/suffix pair needs
-    };
-    fold(static_cast<std::uint64_t>(typed.blockCount(turnId)));
-    for (std::size_t b = 0; b < typed.blockCount(turnId); ++b) {
+    Fnv1a64 h;
+    h.fold(static_cast<std::uint64_t>(typed.blockCount(turnId)));
+    const std::size_t blockN = typed.blockCount(turnId); // hoisted: a bound
+    // re-queried per iteration is a hash lookup per block (the store is a map).
+    for (std::size_t b = 0; b < blockN; ++b) {
         const store::TypedBlock& block = typed.blockAt(turnId, b);
-        foldBytes(block.id);
-        fold(static_cast<std::uint64_t>(block.kind));
-        fold(static_cast<std::uint64_t>(block.status));
-        fold(static_cast<std::uint64_t>(block.flags));
-        foldBytes(block.title);
-        foldBytes(block.meta);
-        foldBytes(block.body);
-        fold(static_cast<std::uint64_t>(block.durationMs));
+        h.foldBytes(block.id);
+        h.fold(static_cast<std::uint64_t>(block.kind));
+        h.fold(static_cast<std::uint64_t>(block.status));
+        h.fold(static_cast<std::uint64_t>(block.flags));
+        h.foldBytes(block.title);
+        h.foldBytes(block.meta);
+        h.foldBytes(block.body);
+        h.fold(static_cast<std::uint64_t>(block.durationMs));
     }
-    return h;
+    return h.value();
 }
 
 // The typed-backed rebuild (v5, task 2): one group per stored turn, one row per
@@ -991,10 +985,9 @@ void ThreadStoreAdapter::syncTyped() const {
         entry.end = 0;   // bodies; the accessors below never touch outputLines
 
         // The blocks: the group's own header row, then one row per displayed
-        // block (a hidden one is stored and counted nowhere - D3), in insertion
-        // order. The wire's block vocabulary maps onto model/block.h's extended
-        // one; a wire kind this build does not know draws as a system notice,
-        // never as a neighbour's row.
+        // block, in insertion order. The wire's block vocabulary maps onto
+        // model/block.h's extended one; a wire kind this build does not know
+        // draws as a system notice, never as a neighbour's row.
         BlockEntry header;
         header.kind = model::BlockKind::WorkGroup;
         header.key = id;
@@ -1004,7 +997,10 @@ void ThreadStoreAdapter::syncTyped() const {
         entry.blocks.push_back(header);
 
         bool seenProse = false;
-        for (std::size_t b = 0; b < typed.blockCount(turn.id); ++b) {
+        // One hash lookup for the bound, not one per iteration (blockCount is a
+        // map probe; the fingerprint loop hoists the same way).
+        const std::size_t blockN = typed.blockCount(turn.id);
+        for (std::size_t b = 0; b < blockN; ++b) {
             const store::TypedBlock& block = typed.blockAt(turn.id, b);
             if (!blockDisplayable(block))
                 continue;
@@ -1012,17 +1008,15 @@ void ThreadStoreAdapter::syncTyped() const {
             row.timingS =
                 block.durationMs != 0 ? static_cast<double>(block.durationMs) / 1000.0 : 0.0;
             row.expandable = true;
-            // Pre-cutover keying (task 6 replaces it): the row's `key` is the
-            // block id's hash - stable per block id, but not injective, so it
-            // keys only v4-shaped sets the typed path does not consult
-            // (`tableSource`, and `thinkingOpen` which `typedRowOpen_` replaces).
+            // Pre-cutover keying: the row's `key` is the
+            // block id's hash - stable per block id, but not injective.
             row.key = std::hash<std::string>{}(block.id);
             row.typedTurnId = turn.id;
             row.typedBlockId = block.id;
             row.typedTitle = block.title;
             row.typedBody = block.body;
             switch (block.kind) {
-            case 0: // TuiBlockKind_Prose: the turn's first prose row is the query
+            case store::kBlockKindProse: // the turn's first prose row is the query
                 if (!seenProse) {
                     seenProse = true;
                     row.typedQuery = true;
@@ -1031,17 +1025,17 @@ void ThreadStoreAdapter::syncTyped() const {
                     row.kind = model::BlockKind::Assistant;
                 }
                 break;
-            case 1: // TuiBlockKind_Reasoning
+            case store::kBlockKindReasoning:
                 row.kind = model::BlockKind::Thinking;
                 row.thinking = true;
                 break;
-            case 2: // TuiBlockKind_Tool: the merged card (call + result, one row)
+            case store::kBlockKindTool: // the merged card (call + result, one row)
                 row.kind = model::BlockKind::ToolStep;
                 break;
-            case 3: // TuiBlockKind_Answer
+            case store::kBlockKindAnswer:
                 row.kind = model::BlockKind::Answer;
                 break;
-            case 4: // TuiBlockKind_Notice
+            case store::kBlockKindNotice:
                 row.kind = model::BlockKind::System;
                 break;
             default:
@@ -1051,29 +1045,26 @@ void ThreadStoreAdapter::syncTyped() const {
             // The row's state comes straight off the wire status (D7 is the
             // emitter's: the store merges, it never enforces a transition).
             switch (block.status) {
-            case 1: // TuiBlockStatus_Pending
+            case store::kBlockStatusPending:
                 row.state = model::BlockState::Pending;
                 break;
-            case 2: // TuiBlockStatus_Running
+            case store::kBlockStatusRunning:
                 row.state = model::BlockState::Running;
                 break;
-            case 3: // TuiBlockStatus_Ok
+            case store::kBlockStatusOk:
                 row.state = model::BlockState::Ok;
                 break;
-            case 4: // TuiBlockStatus_Failed
+            case store::kBlockStatusFailed:
                 row.state = model::BlockState::Failed;
                 break;
-            case 5: // TuiBlockStatus_Cancelled
+            case store::kBlockStatusCancelled:
                 row.state = model::BlockState::Cancelled;
                 break;
-            default: // None (0) or a status this build does not know
-                break; // BlockState::None, the default
+            default:
+                break;
             }
-            // Classified once, at build, like v4's `code` flag: a body that is
-            // one fenced code block is drawn - and copied - as code. A tool
-            // card's body is a transcript, drawn verbatim, so it is exempt.
-            row.code = row.kind != model::BlockKind::ToolStep &&
-                       !ui::fencedCodeOf(block.body).empty();
+            row.code =
+                row.kind != model::BlockKind::ToolStep && !ui::fencedCodeOf(block.body).empty();
             entry.blocks.push_back(row);
         }
         // A rough estimate only: one line per row the group draws. The hint is
@@ -1226,13 +1217,19 @@ bool ThreadStoreAdapter::blockHasTable(size_t k, std::size_t b) const {
     // or streamed *message* row has to pass the verbatim check: a tool transcript is drawn
     // verbatim (a fence inside it would be printed literally), so a TOOL row has nothing to show.
     // That is what stops `s` from setting an invisible bit on such a row.
-    if (!block->thinking && !groups_[k].stream &&
-        source_ == ProjectionSource::V4Messages) {
+    if (!block->thinking && !groups_[k].stream && source_ == ProjectionSource::V4Messages) {
         if (block->message >= chat_->outputLines.size())
             return false;
         if (!renderAsMarkdown(chat_->outputLines[block->message].type))
             return false;
     }
+    // The typed path mirrors that exemption with its own vocabulary: a tool
+    // card is a transcript, drawn verbatim (renderBlockBody's one non-markdown
+    // kind), so a `|` inside it must not offer a table toggle (`s` would set a
+    // tableSource bit nothing reads - views/thread.cpp: a verbatim row never
+    // sets it).
+    if (source_ == ProjectionSource::TypedTurns && block->kind == model::BlockKind::ToolStep)
+        return false;
     const std::string body = blockText(k, b);
     // The renderer's own cheap guards, then the bridge's answer: a body with no pipe cannot hold
     // a table, and a body drawn without a rich context is plain text (nothing to show).
@@ -1389,9 +1386,12 @@ bool ThreadStoreAdapter::blockExpanded(size_t k, std::size_t b) const {
     const Entry& entry = groups_[k];
     if (entry.stream && !block->thinking)
         return true; // the streamed body is always open
-    if (source_ == ProjectionSource::TypedTurns)
-        return typedRowOpen_.count({static_cast<std::int64_t>(entry.view.id),
-                                    block->typedBlockId}) != 0;
+    if (source_ == ProjectionSource::TypedTurns) {
+        if (block->group)
+            return chat_->openWorkGroups.count(entry.view.id) != 0;
+        const auto it = typedRowOpen_.find(static_cast<std::int64_t>(entry.view.id));
+        return it != typedRowOpen_.end() && it->second.count(block->typedBlockId) != 0;
+    }
     if (block->thinking) {
         // Stored and streamed reasoning share one expansion set, keyed by the
         // block's identity; the stream group id is what keeps the two apart.
@@ -1413,12 +1413,18 @@ bool ThreadStoreAdapter::setBlockExpanded(size_t k, std::size_t b, bool open) {
         return false;
     const Entry& entry = groups_[k];
     if (source_ == ProjectionSource::TypedTurns) {
-        // The typed path: rows toggle the adapter's own set (see blockExpanded).
-        std::set<std::string>& target = typedRowOpen_[entry.view.id];
-        if (open)
-            target.insert(block->typedBlockId);
-        else
-            target.erase(block->typedBlockId);
+        if (block->group) {
+            if (open)
+                chat_->openWorkGroups.insert(entry.view.id);
+            else
+                chat_->openWorkGroups.erase(entry.view.id);
+        } else {
+            std::set<std::string>& target = typedRowOpen_[entry.view.id];
+            if (open)
+                target.insert(block->typedBlockId);
+            else
+                target.erase(block->typedBlockId);
+        }
         expandedGroup_ = entry.view.id;
         return open;
     }

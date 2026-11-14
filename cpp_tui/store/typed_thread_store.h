@@ -50,6 +50,19 @@ struct TypedBlock {
 bool blockDisplayable(const TypedBlock& b);
 inline constexpr std::array<std::string_view, 1> kHiddenToolNames{"pipeline_output"};
 
+// The wire's vocabulary
+inline constexpr int kBlockKindProse = 0;       // TuiBlockKind_Prose
+inline constexpr int kBlockKindReasoning = 1;   // TuiBlockKind_Reasoning
+inline constexpr int kBlockKindTool = 2;        // TuiBlockKind_Tool
+inline constexpr int kBlockKindAnswer = 3;      // TuiBlockKind_Answer
+inline constexpr int kBlockKindNotice = 4;      // TuiBlockKind_Notice
+inline constexpr int kBlockStatusNone = 0;      // TuiBlockStatus_None
+inline constexpr int kBlockStatusPending = 1;   // TuiBlockStatus_Pending
+inline constexpr int kBlockStatusRunning = 2;   // TuiBlockStatus_Running
+inline constexpr int kBlockStatusOk = 3;        // TuiBlockStatus_Ok
+inline constexpr int kBlockStatusFailed = 4;    // TuiBlockStatus_Failed
+inline constexpr int kBlockStatusCancelled = 5; // TuiBlockStatus_Cancelled
+
 // Step-count weights (D4), by status — N = the LLM messages the group covers:
 //   Tool: Ok/Failed = 2 (call + result), Pending/Running/Cancelled = 1;
 //   Prose (response content) = 1; Reasoning = 0 (rides the content message);
@@ -76,7 +89,7 @@ public:
     void turnRemove(std::int64_t turnId); // cascades to the turn's blocks (W6)
     void threadClear();
     std::size_t turnCount() const;
-    const TypedTurn& turnAt(std::size_t k) const;   // snapshot/insertion order
+    const TypedTurn& turnAt(std::size_t k) const; // snapshot/insertion order
     std::size_t blockCount(std::int64_t turnId) const;
     const TypedBlock& blockAt(std::int64_t turnId, std::size_t k) const;
     const TypedTurn* turnById(std::int64_t id) const;
@@ -100,10 +113,10 @@ private:
     // so a result for an unknown callId is recorded, never dropped (§7);
     // the real turn's upsert merges into that slot.
     std::vector<TypedTurn> turns_;
-    std::vector<std::vector<TypedBlock>> blocks_; // parallel to turns_
+    std::vector<std::vector<TypedBlock>> blocks_;             // parallel to turns_
     std::unordered_map<std::int64_t, std::size_t> turnIndex_; // turn id -> slot
     std::vector<std::unordered_map<std::string, std::size_t>> blockIndex_;
-                                                  // per turn: block id -> slot
+    // per turn: block id -> slot
     // The mutation counter `version()` serves (bumped by every mutating path;
     // never wraps in practice - a rebuild happens between upserts).
     std::uint64_t version_ = 0;

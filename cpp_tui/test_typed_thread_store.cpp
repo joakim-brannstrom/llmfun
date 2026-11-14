@@ -17,6 +17,7 @@
 
 #include "store/thread_store.h"
 #include "tui.h"
+#include "tui_api.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -91,8 +92,7 @@ int main(int argc, char** argv) {
         TypedThreadStore store;
         store.turnUpsert(turn(7, 1, 0, 2));
         store.blockUpsert(block(7, "call-1", 2, 1, "grep", "call body")); // Pending
-        check(store.turnCount() == 1 && store.blockCount(7) == 1,
-              "first upserts create the slots");
+        check(store.turnCount() == 1 && store.blockCount(7) == 1, "first upserts create the slots");
         store.blockUpsert(block(7, "result-1", 2, 3, "grep", "result body")); // Ok
         check(store.blockCount(7) == 2, "a new callId is a new slot");
         // The merge: the same (turnId, id), the payload overwritten, the
@@ -101,7 +101,8 @@ int main(int argc, char** argv) {
         check(store.blockCount(7) == 2, "a merged block keeps its slot: no third row");
         check(store.blockAt(7, 0).status == 3 && store.blockAt(7, 0).body == "call body v2",
               "the merge overwrote the payload in place");
-        check(store.blockAt(7, 1).id == "result-1", "the merge did not disturb the insertion order");
+        check(store.blockAt(7, 1).id == "result-1",
+              "the merge did not disturb the insertion order");
         // A turn upsert merges too: the slot (and with it any group id derived
         // from the insertion position) stays.
         store.turnUpsert(turn(7, 1, 1, 5));
@@ -111,7 +112,8 @@ int main(int argc, char** argv) {
         // The store merges; it never enforces a transition - D7 is the
         // emitter's, and a settled result re-sent as Pending is merged as-is.
         store.blockUpsert(block(7, "call-1", 2, 1, "grep", "call body v2"));
-        check(store.blockAt(7, 0).status == 1, "the store accepts Ok -> Pending (D7 is the emitter's)");
+        check(store.blockAt(7, 0).status == 1,
+              "the store accepts Ok -> Pending (D7 is the emitter's)");
     }
 
     // --- Batch grouping: insertion order per turn, tool-less batches included ---
@@ -126,7 +128,8 @@ int main(int argc, char** argv) {
         store.blockUpsert(block(11, "11#1-result", 2, 3, "grep", "result body", "11#1"));
         check(store.blockCount(11) == 4, "both batches are stored under the turn");
         check(store.blockAt(11, 0).id == "11#0-think" && store.blockAt(11, 1).id == "11#0-say" &&
-                  store.blockAt(11, 2).id == "11#1-call" && store.blockAt(11, 3).id == "11#1-result",
+                  store.blockAt(11, 2).id == "11#1-call" &&
+                  store.blockAt(11, 3).id == "11#1-result",
               "the blocks keep their upsert order: batch #1 before batch #2");
         check(store.blockAt(11, 0).batchId == "11#0" && store.blockAt(11, 3).batchId == "11#1",
               "the batchId rides the block");
@@ -140,7 +143,8 @@ int main(int argc, char** argv) {
         TypedBlock prose = block(1, "p", 0, 0);
         check(tui::store::blockDisplayable(prose), "non-Tool blocks are always displayable (D3)");
         TypedBlock tool = block(1, "t", 2, 3, "grep");
-        check(tui::store::blockDisplayable(tool), "a Tool block outside the hidden set is displayable");
+        check(tui::store::blockDisplayable(tool),
+              "a Tool block outside the hidden set is displayable");
         tool.title = "pipeline_output";
         check(!tui::store::blockDisplayable(tool), "a Tool block in the hidden set is not (D3)");
 
@@ -170,7 +174,7 @@ int main(int argc, char** argv) {
         store.blockUpsert(block(104, "n", 4, 0, "", "heads up"));
         check(tui::store::stepCount(store, 104) == 1, "a notice weighs 1 (D4)");
 
-        store.turnUpsert(turn(105)); // tools in flight: 1 each
+        store.turnUpsert(turn(105));                             // tools in flight: 1 each
         store.blockUpsert(block(105, "p", 2, 1, "grep", "...")); // Pending
         store.blockUpsert(block(105, "g", 2, 2, "grep", "...")); // Running
         store.blockUpsert(block(105, "c", 2, 5, "grep", "...")); // Cancelled
@@ -178,10 +182,11 @@ int main(int argc, char** argv) {
         check(tui::store::stepCount(store, 105) == 4,
               "Pending/Running/Cancelled/None tools weigh 1 each (D4 + the None gap)");
 
-        store.turnUpsert(turn(106)); // settled tools: 2 each
-        store.blockUpsert(block(106, "ok", 2, 3, "grep", "..."));   // Ok
+        store.turnUpsert(turn(106));                               // settled tools: 2 each
+        store.blockUpsert(block(106, "ok", 2, 3, "grep", "..."));  // Ok
         store.blockUpsert(block(106, "bad", 2, 4, "grep", "...")); // Failed
-        check(tui::store::stepCount(store, 106) == 4, "Ok/Failed tools weigh 2 each: call + result (D4)");
+        check(tui::store::stepCount(store, 106) == 4,
+              "Ok/Failed tools weigh 2 each: call + result (D4)");
 
         store.turnUpsert(turn(107)); // a result-only block (unknown callId)
         store.blockUpsert(block(107, "late-result", 2, 3, "grep", "..."));
@@ -190,9 +195,11 @@ int main(int argc, char** argv) {
 
         store.turnUpsert(turn(108)); // an unknown kind: defensive
         store.blockUpsert(block(108, "odd", 9, 0, "", "mystery"));
-        check(tui::store::stepCount(store, 108) == 1, "an unknown kind weights 1: a surprise counts as work (D4)");
+        check(tui::store::stepCount(store, 108) == 1,
+              "an unknown kind weights 1: a surprise counts as work (D4)");
 
-        check(tui::store::stepCount(store, 999) == 0, "a turn the store does not hold has no steps");
+        check(tui::store::stepCount(store, 999) == 0,
+              "a turn the store does not hold has no steps");
     }
 
     // --- The mutation counter: the adapter's O(1) rebuild guard -----------------
@@ -220,7 +227,8 @@ int main(int argc, char** argv) {
         check(store.turnCount() == static_cast<std::size_t>(live),
               "the store grows past the cap before the evict call");
         store.evictForCapacity(live);
-        check(store.turnCount() == TypedThreadStore::kMaxTurns, "the cap holds after evictForCapacity");
+        check(store.turnCount() == TypedThreadStore::kMaxTurns,
+              "the cap holds after evictForCapacity");
         check(store.turnById(1) == nullptr, "the oldest turn was evicted");
         check(store.blockCount(1) == 0, "the eviction cascaded to its blocks (W6)");
         check(store.turnById(live) != nullptr && store.blockCount(live) == 1,
@@ -264,7 +272,8 @@ int main(int argc, char** argv) {
         store.setTurns(std::move(turns), std::move(blocks));
         check(store.turnCount() == 2 && store.blockCount(1) == 1 && store.blockCount(2) == 1,
               "setTurns rebuilds the store wholesale");
-        check(store.turnAt(0).messageCount == 2, "setTurns replaces a merge-marked turn with the snapshot's payload");
+        check(store.turnAt(0).messageCount == 2,
+              "setTurns replaces a merge-marked turn with the snapshot's payload");
         // A block naming a turn the snapshot does not carry is recorded, not dropped.
         std::vector<TypedBlock> strays{block(99, "s", 0, 0, "", "z")};
         store.setTurns(std::vector<TypedTurn>{turn(1)}, std::move(strays));
@@ -280,19 +289,20 @@ int main(int argc, char** argv) {
         thread.setSource(tui::store::ProjectionSource::TypedTurns);
         state.chat.typedTurns.turnUpsert(turn(42, 1, 1, 3));
         state.chat.typedTurns.blockUpsert(block(42, "q", 0, 0, "", "what is v5?"));
-        state.chat.typedTurns.blockUpsert(
-            block(42, "call-1", 2, 3, "grep", "call body", "", 1500));
+        state.chat.typedTurns.blockUpsert(block(42, "call-1", 2, 3, "grep", "call body", "", 1500));
         state.chat.typedTurns.blockUpsert(block(42, "hid", 2, 3, "pipeline_output", "secret"));
 
         check(thread.groupCount() == 1, "typed: one stored turn is one group");
-        check(thread.groupAt(0).id == 42, "typed: the group id IS the persisted turnId (design §4)");
+        check(thread.groupAt(0).id == 42,
+              "typed: the group id IS the persisted turnId (design §4)");
         check(thread.groupAt(0).kind == tui::store::GroupKind::AssistantWork,
               "typed: the group is a work group");
         check(thread.groupAt(0).oneLineSummary.find("WORK") == 0 &&
                   thread.groupAt(0).oneLineSummary.find("1 step") != std::string::npos,
               "typed: the header announces its step count (the hidden block weighs 0)");
 
-        check(thread.blockCount(0) == 3, "typed: the hidden tool block is stored but not a row (D3)");
+        check(thread.blockCount(0) == 3,
+              "typed: the hidden tool block is stored but not a row (D3)");
         const tui::model::BlockDesc header = thread.blockAt(0, 0);
         check(header.label == "WORK" && !header.hasBody && header.steps == 1,
               "typed: the header row announces the steps and has no body of its own");
@@ -335,6 +345,17 @@ int main(int argc, char** argv) {
         thread.setBlockExpanded(0, 2, false);
         check(!thread.blockExpanded(0, 2), "typed: closing it clears the bit");
 
+        // The header row toggles through the SAME set `setExpanded()` uses, so
+        // the two seams agree on the group header by construction: close it
+        // through the row seam and the group seam reads closed, then reopen.
+        thread.setBlockExpanded(0, 0, false);
+        check(!thread.expanded(42),
+              "typed: the row seam's header toggle lands in the group seam's set");
+        check(thread.setBlockExpanded(0, 0, true),
+              "typed: reopening the header through the row seam reports open");
+        check(thread.blockExpanded(0, 0) && thread.expanded(42),
+              "typed: ...and both seams read the header open again");
+
         // A second adapter bound to the same state answers the same thing where
         // the state is shared: the group header's bit lives in openWorkGroups,
         // which both adapters read through. A row's disclosure lives in the
@@ -348,7 +369,8 @@ int main(int argc, char** argv) {
         check(other.blockAt(0, 2).label == "TOOL" && other.blockAt(0, 2).summary == "grep",
               "typed: ...and the same block view");
         check(other.expanded(42) && !other.blockExpanded(0, 2),
-              "typed: the shared group bit answers through both adapters; a row's disclosure stays per-adapter");
+              "typed: the shared group bit answers through both adapters; a row's disclosure stays "
+              "per-adapter");
     }
 
     // --- A gone turn takes its caches with it -----------------------------------
@@ -362,6 +384,54 @@ int main(int argc, char** argv) {
         check(thread.groupCount() == 1, "typed: the turn is a group");
         state.chat.typedTurns.turnRemove(42);
         check(thread.groupCount() == 0, "typed: the removed turn's group is gone");
+    }
+
+    // --- The five v5 entry points: the C API surface over the same store --------
+    // Full behavioral observation waits for the read-side snapshot API (task 5);
+    // here the surface is exercised and odr-used - a missing definition is a
+    // link error in this binary too - and the inert-argument contract is pinned.
+    {
+        TuiState* state = tuiCreateState();
+        check(state != nullptr, "api: tuiCreateState succeeds for the typed cases");
+
+        auto wstr = [](const char* s) { return String{s, std::strlen(s)}; };
+        TuiTurn wt{};
+        wt.id = 77;
+        wt.ordinal = 1;
+        wt.state = 1;
+        wt.messageCount = 2;
+        wt.reserved = 0;
+        TuiBlock wb{};
+        wb.turnId = 77;
+        wb.id = wstr("call-1");
+        wb.batchId = wstr("");
+        wb.title = wstr("grep");
+        wb.meta = wstr("");
+        wb.body = wstr("call body");
+        wb.durationMs = 1500;
+        wb.tokensIn = 0;
+        wb.tokensOut = 0;
+        wb.kind = 2;   // TuiBlockKind_Tool
+        wb.status = 1; // TuiBlockStatus_Pending
+        tuiSetTurns(state, &wt, 1, &wb, 1);
+        tuiTurnUpsert(state, &wt);
+        tuiBlockUpsert(state, &wb);
+        tuiTurnRemove(state, 77);
+        tuiThreadClear(state);
+        check(true, "api: the five entry points accept a valid state (and link)");
+
+        // The inert-argument contract, same as the v4 entry points: a null
+        // state or a null element is a no-op, never a crash.
+        tuiSetTurns(nullptr, &wt, 1, &wb, 1);
+        tuiSetTurns(state, nullptr, 1, nullptr, 0);
+        tuiTurnUpsert(nullptr, &wt);
+        tuiTurnUpsert(state, nullptr);
+        tuiBlockUpsert(nullptr, &wb);
+        tuiBlockUpsert(state, nullptr);
+        tuiTurnRemove(nullptr, 77);
+        tuiThreadClear(nullptr);
+        check(true, "api: a null state or a null element is an inert no-op");
+        tuiDestroyState(state);
     }
 
     if (g_failures != 0) {

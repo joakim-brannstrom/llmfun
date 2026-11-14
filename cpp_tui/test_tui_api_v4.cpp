@@ -1151,9 +1151,9 @@ void casePipelineLaneFields() {
 // The v5 thread turn/block wire types (task 1, additive): the layout the D side
 // asserts from the other direction (source/llm/tui/package.d). Declare-only in
 // this generation - the store is task 2 - so this case pins the ABI and calls
-// nothing: the five entry points are odr-unused here by design, and a stray call
-// would fail the link, which is the tripwire keeping the header and the task-2
-// definitions in step.
+// nothing. The entry-pointer pins below odr-use the five entry points, so a
+// missing definition still fails the link: the tripwire that keeps the header
+// and the task-2 definitions in step.
 void caseThreadTurnBlockFields() {
     g_where = "case: v5 turn/block layout";
 
@@ -1202,6 +1202,14 @@ void caseThreadTurnBlockFields() {
     static_assert(TuiBlockFlag_Collapsible == 1 && TuiBlockFlag_DefaultOpen == 2 &&
                       TuiBlockFlag_Selectable == 4,
                   "TuiBlockFlags are bit flags");
+
+    // Odr-uses the five v5 entry points without calling them: a missing
+    // definition is a link error, the tripwire the case comment promises.
+    using VoidFn = void (*)();
+    [[maybe_unused]] static const VoidFn v5EntryPins[] = {
+        reinterpret_cast<VoidFn>(&tuiSetTurns), reinterpret_cast<VoidFn>(&tuiTurnUpsert),
+        reinterpret_cast<VoidFn>(&tuiBlockUpsert), reinterpret_cast<VoidFn>(&tuiTurnRemove),
+        reinterpret_cast<VoidFn>(&tuiThreadClear)};
 
     expect(true, "v5 turn/block layout pinned (the static asserts are the case)");
 }

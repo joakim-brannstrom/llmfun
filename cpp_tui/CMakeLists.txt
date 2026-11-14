@@ -118,6 +118,7 @@ add_library(llmfun_tui_lib STATIC
     views/thread.cpp
     views/topbar.cpp
     store/thread_store.cpp
+    store/typed_thread_store.cpp
 )
 
 target_include_directories(llmfun_tui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
