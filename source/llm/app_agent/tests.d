@@ -3424,6 +3424,47 @@ unittest {
             && blocks[6].body == "The answer is 4." && blocks[6].batchId == "1#1");
 }
 
+// STARTUP PROBE (temporary): the session-load path must feed the replay
+// snapshot the same turns the switch path does.
+@("startup_probe")
+unittest {
+    import std.datetime : dur;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_startup_replay");
+    scope (exit)
+        tmpDir.cleanup;
+    auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+    TuiRecordingSink sinkW;
+    auto writer = typedTestApp(store, tmpDir, sinkW);
+    auto f = TypedFixture.make();
+    writer.agent_.chat.add(f.q);
+    writer.agent_.chat.add(f.a3);
+    writer.agent_.chat.add(f.tm);
+    writer.agent_.chat.add(f.tr);
+    writer.agent_.chat.add(f.tr2);
+    writer.chatDirty = true;
+    writer.commitActiveSession();
+    assert(sinkW.setTurnsSnapshots.empty, "commit emits nothing");
+
+    TuiRecordingSink sinkR;
+    auto reader = typedTestApp(store, tmpDir, sinkR);
+    auto sf = orElse(store.load(writer.activeSession.id), SessionFile());
+    assert(sf.meta.id == writer.activeSession.id, "the session file exists");
+    reader.agent_.chat.load(sf.doc);
+    reader.agent_.chat.resetResponseIndex();
+    reader.emitReplayTyped();
+
+    assert(sinkR.setTurnsSnapshots.length == 1, "one startup snapshot");
+    const turns = sinkR.setTurnsSnapshots[0].turns;
+    const blocks = sinkR.setTurnsSnapshots[0].blocks;
+    assert(turns.length == 1, "the persisted turn replays: got " ~ turns.length.text);
+    assert(blocks.length == 7, "got " ~ blocks.length.text);
+}
+
 // NR derivation: the live walk emits the same shapes as the replay (the
 // typed stream updater upserts per tick with stable ids, the step walk
 // merges calls with responses and closes the turn with a Done upsert),

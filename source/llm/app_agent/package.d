@@ -1429,11 +1429,12 @@ class AppAgentActor : DropOwner {
         app.uiMsg = new UiMessenger(new TuiChannelSink(tui_));
         monitor(self_.address(), tui_);
         app.uiMsg.initHistory(app.agent_.getUserQueries.map!(a => a.content).array);
-        app.agent_.setStreamUpdate(app.makeTypedStreamCallback);
-
         // One typed replay snapshot at startup (task 5); the per-message walk
-        // is gone (see activateSession).
+        // is gone (see activateSession). It must run before the stream callback
+        // exists: makeTypedStreamCallback seeds the live-turn context from the
+        // loaded chat's last turn, which the replay would then filter out.
         app.emitReplayTyped();
+        app.agent_.setStreamUpdate(app.makeTypedStreamCallback);
 
         app.sendSessionList();
         app.sendRuntimeStatus(true);
