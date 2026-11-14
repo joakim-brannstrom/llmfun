@@ -225,10 +225,30 @@ void ThreadStoreAdapter::syncTyped() const {
         header.expandable = true;
         entry.blocks.push_back(header);
 
-        bool seenProse = false;
         // One hash lookup for the bound, not one per iteration (blockCount is a
         // map probe; the fingerprint loop hoists the same way).
         const std::size_t blockN = typed.blockCount(turn.id);
+        // the turn's meta-"user" prose. A turn without one falls back to its first prose,
+        // the pre-meta shape. The pipeline's streamed content carries the
+        // agent role as meta instead, so it renders as assistant work inside
+        // the group, never as the turn's query.
+        std::string queryId;
+        std::string firstProseId;
+        bool sawProseMeta = false;
+        for (std::size_t b = 0; b < blockN; ++b) {
+            const store::TypedBlock& block = typed.blockAt(turn.id, b);
+            if (block.kind != store::kBlockKindProse)
+                continue;
+            if (firstProseId.empty())
+                firstProseId = block.id;
+            if (block.meta == "user") {
+                queryId = block.id;
+                break; // the first user-tagged prose wins
+            }
+            sawProseMeta = sawProseMeta || !block.meta.empty();
+        }
+        if (queryId.empty() && !sawProseMeta)
+            queryId = firstProseId; // the pre-meta fallback
         for (std::size_t b = 0; b < blockN; ++b) {
             const store::TypedBlock& block = typed.blockAt(turn.id, b);
             if (!blockDisplayable(block))
@@ -247,9 +267,8 @@ void ThreadStoreAdapter::syncTyped() const {
             row.typedTitle = block.title;
             row.typedBody = block.body;
             switch (block.kind) {
-            case store::kBlockKindProse: // the turn's first prose row is the query
-                if (!seenProse) {
-                    seenProse = true;
+            case store::kBlockKindProse: // the query row vs the streamed assistant content
+                if (block.id == queryId) {
                     row.typedQuery = true;
                     row.kind = model::BlockKind::User;
                 } else {

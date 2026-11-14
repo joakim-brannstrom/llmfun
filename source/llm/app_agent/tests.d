@@ -2915,6 +2915,24 @@ unittest {
             "the content carries no tool decoration: tool traffic rides the structured rows");
 }
 
+@("the pipeline updater closes on the run boundary, not on a batch end") unittest {
+    auto sink = new TuiRecordingSink();
+    auto ui = new UiMessenger(sink);
+    auto updater = new PipelineStreamMessageUpdater(ui, 8192, "model-x");
+    updater.setId("coder");
+
+    // The tool loop fires streamMessageDone after every LLM request: a batch
+    // end must close nothing, or one run becomes one drill-down group per
+    // batch. The close rides runDone, which fires once per run.
+    updater.streamMessageDone();
+    assert(sink.countOf("pipelineStreamDone") == 0,
+            "a batch end is not the run boundary: nothing closes on it");
+
+    updater.runDone();
+    assert(sink.countOf("pipelineStreamDone") == 1,
+            "the run's end closes the agent's turn exactly once");
+}
+
 @("the pipeline emitter sends each step's tool calls and results as structured rows")
 unittest {
     import std.json : parseJSON;

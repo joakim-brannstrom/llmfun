@@ -11,7 +11,7 @@ import std.stdio : writeln;
 import std.sumtype : match;
 
 import llm.types : ServerStat, StreamMessage, StreamToolCall, IStreamCallback,
-    IStepEventEmitter, ProcessResult;
+    IStepEventEmitter, IRunDoneEmitter, ProcessResult;
 import llm.tui;
 import llmfun_tui;
 import my.path : Path;
@@ -558,7 +558,7 @@ void emitStepToolEvents(UiMessenger uiMsg, string agentId, ProcessResult result)
 }
 
 /// Forwards streaming pipeline output to the TUI (per-agent messages).
-class PipelineStreamMessageUpdater : IStreamCallback, IStepEventEmitter {
+class PipelineStreamMessageUpdater : IStreamCallback, IStepEventEmitter, IRunDoneEmitter {
     UiMessenger uiMsg;
     long contextSize;
     string modelName;
@@ -581,6 +581,12 @@ class PipelineStreamMessageUpdater : IStreamCallback, IStepEventEmitter {
     }
 
     override void streamMessageDone() {
+        // Deliberately empty: the tool loop fires this after every batch, and a
+        // batch end is not the run boundary - closing on it split one run into
+        // one drill-down group per batch. The close rides runDone below.
+    }
+
+    override void runDone() {
         uiMsg.pipelineStreamDone(agentId);
     }
 

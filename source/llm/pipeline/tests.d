@@ -524,3 +524,91 @@ unittest {
     assert(equal(log.stepIds, ["nodeA", "nodeB"]),
             "step events carry the running node's id (got " ~ log.stepIds.join(",") ~ ")");
 }
+
+@("a pool-driven run fires the run-done emitter once, with the node's id") unittest {
+    import std.array : join;
+
+    import llm.types : IRunDoneEmitter, IStepEventEmitter, StreamMessage,
+        StreamToolCall, ServerStat;
+
+    // The same seam shape PipelineStreamMessageUpdater has: the run-done ride
+    // is optional (a cast), so the fake implements it to observe the firing.
+    // The clone shares the recorder object, so the appends cross the seam.
+    class DoneLog {
+        string[] doneIds;
+    }
+
+    class DoneRecorder : IStreamCallback, IStepEventEmitter, IRunDoneEmitter {
+        string id;
+        DoneLog log;
+
+        override void setId(string s) {
+            id = s;
+        }
+
+        override void messageUpdate(StreamMessage, StreamToolCall[], ServerStat) {
+        }
+
+        override void streamMessageDone() {
+        }
+
+        override IStreamCallback clone() {
+            auto c = new DoneRecorder;
+            c.id = id;
+            c.log = log;
+            return c;
+        }
+
+        override void stepEvent(ProcessResult) {
+        }
+
+        override void runDone() {
+            log.doneIds ~= id;
+        }
+    }
+
+    class OutputAgent : IBasicAgent {
+        IStreamCallback streamCb;
+        PipelineControlContext ctx;
+
+        override string id() {
+            return "n1";
+        }
+
+        override void setStreamUpdate(IStreamCallback callback) {
+            streamCb = callback;
+        }
+
+        override void addUserQuery(string) {
+        }
+
+        override void addContinueMessage(string) {
+        }
+
+        override void setPipelineContext(PipelineControlContext c) {
+            this.ctx = c;
+        }
+
+        override ProcessResult runToCompletion(void delegate(ProcessResult) step = null,
+                SummaryAgent.ProgressCallback compressCallback = null,
+                bool delegate() interrupt = null) {
+            if (ctx)
+                ctx.setPipelineOutput("done");
+            return ProcessResult.init;
+        }
+    }
+
+    auto log = new DoneLog;
+    auto recorder = new DoneRecorder;
+    recorder.log = log;
+    auto agent = new OutputAgent;
+    auto pipeline = pipelineBuilder().streamCallback(recorder).addNode("n1",
+            agent).startNode("n1").stopNode("n1").build();
+
+    auto result = pipeline.run(null);
+
+    assert(result.allSuccess, "setup: the run succeeded");
+    assert(log.doneIds == ["n1"],
+            "one run-done per run, tagged with the node's own id (got " ~ log.doneIds.join(
+                ",") ~ ")");
+}

@@ -380,6 +380,49 @@ int main(int argc, char** argv) {
               "typed: ...and both seams read the header open again");
     }
 
+    // --- The query row: meta decides, position falls back ------------------------
+    {
+        tui::TuiState state;
+        tui::store::ThreadStoreAdapter thread(state);
+        thread.bind(state);
+        state.chat.typedTurns.turnUpsert(turn(42, 1, 1, 3));
+        // The pipeline's shape: the streamed assistant content is the FIRST
+        // prose, meta carries the agent role, and the tool batches follow.
+        auto content = block(42, "content#0", 0, 0, "", "working on it");
+        content.meta = "assistant";
+        state.chat.typedTurns.blockUpsert(content);
+        state.chat.typedTurns.blockUpsert(
+            block(42, "call-1", 2, 3, "edit_file", "call body", "", 1500));
+
+        check(thread.groupAt(0).oneLineSummary.find("2 steps") != std::string::npos,
+              "typed pipeline: the assistant prose is work, the header counts the settled tool");
+        check(thread.blockAt(0, 1).label == "AGENT" &&
+                  thread.blockAt(0, 1).kind == tui::model::BlockKind::Assistant,
+              "typed pipeline: the streamed assistant prose is an AGENT row, never YOU");
+
+        // The main tab's shape: the query prose carries the meta. It is the
+        // query row wherever it sits in the turn.
+        auto query = block(42, "q", 0, 0, "", "what is v5?");
+        query.meta = "user";
+        state.chat.typedTurns.blockUpsert(query);
+        check(thread.blockAt(0, 1).label == "AGENT",
+              "typed main: the streamed assistant prose stays an AGENT row beside the query");
+        check(thread.blockAt(0, 3).label == "YOU" &&
+                  thread.blockAt(0, 3).kind == tui::model::BlockKind::User,
+              "typed main: the meta-user prose is the query row wherever it sits");
+
+        // A turn with no meta at all keeps the pre-meta shape: the first prose
+        // is the query row.
+        tui::TuiState legacy;
+        tui::store::ThreadStoreAdapter legacyThread(legacy);
+        legacyThread.bind(legacy);
+        legacy.chat.typedTurns.turnUpsert(turn(7, 1, 1, 2));
+        legacy.chat.typedTurns.blockUpsert(block(7, "q", 0, 0, "", "what is v5?"));
+        check(legacyThread.blockAt(0, 1).label == "YOU" &&
+                  legacyThread.blockAt(0, 1).kind == tui::model::BlockKind::User,
+              "typed legacy: a meta-less first prose is still the query row");
+    }
+
     // --- Task 8: the per-group override and the maximal-mode fold ---------------
     {
         tui::TuiState state;

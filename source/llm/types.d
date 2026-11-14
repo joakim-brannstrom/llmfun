@@ -89,6 +89,12 @@ interface IStepEventEmitter {
     void stepEvent(ProcessResult result);
 }
 
+/// What one agent run's completion hands the emitter: fired once per run, after
+/// the agent's last batch.
+interface IRunDoneEmitter {
+    void runDone();
+}
+
 struct ServerStat {
     long startContext;
     long tokenCount;

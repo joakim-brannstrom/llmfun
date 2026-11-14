@@ -19,7 +19,8 @@ import llm.pipeline.graph;
 import llm.rag.rag : RAG;
 import llm.summary_agent : SummaryAgent;
 import llm.tool_call.pipeline : PipelineControlContext;
-import llm.types : IBasicAgent, IAgent, ProcessResult, IStreamCallback, IStepEventEmitter;
+import llm.types : IBasicAgent, IAgent, ProcessResult, IStreamCallback,
+    IStepEventEmitter, IRunDoneEmitter;
 
 public import llm.pipeline.graph;
 
@@ -89,6 +90,11 @@ class PipelineNode : Node {
     void setStepDelegate(void delegate(ProcessResult) cb) {
         stepDelegate_ = cb;
     }
+
+    /// The run-done emitter, stored on the node like the step hook:
+    /// onAgentComplete fires it once per run - the boundary the per-batch
+    /// stream done cannot carry (the tool loop fires one after every batch).
+    IRunDoneEmitter runDoneEmitter_;
 
     string output() @safe pure nothrow const @nogc {
         return ctx.output;
@@ -387,6 +393,14 @@ struct Pipeline {
     private void onAgentComplete(PipelineNode node, ProcessResult result) {
         string statusStr = result.status == ProcessResult.Status.ok ? "ok" : "failure";
         logger.tracef("[pipeline] callback(nodeId='%s') status=%s", node.id, statusStr);
+
+        // The run's UI boundary: the agent's last batch closed, so the
+        // drill-down's open turn settles here, not on a per-batch stream done
+        // (which closed after every LLM request and split one run into one
+        // group per batch). Fired before the interrupted bail-out: the run
+        // completed either way, so its turn closes either way.
+        if (node.runDoneEmitter_ !is null)
+            node.runDoneEmitter_.runDone();
 
         struct PendingTask {
             PipelineNode pn;
@@ -827,6 +841,8 @@ struct PipelineBuilder {
                 n.setStreamUpdate(s);
                 if (auto em = cast(IStepEventEmitter) s)
                     n.setStepDelegate(stepHookFor(em));
+                if (auto re = cast(IRunDoneEmitter) s)
+                    n.runDoneEmitter_ = re;
             }
             g.add(n);
         }
