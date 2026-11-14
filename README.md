@@ -39,6 +39,13 @@ needed even for `--tui` runs — without it the process does not start. See
 `doc/tui_design.md` ("Graphical backend (GLFW + OpenGL3)") for the build and
 packaging details.
 
+sqlite-vec's SIMD kernels are enabled at build time per architecture:
+`-DSQLITE_VEC_ENABLE_AVX` on x86_64/amd64 and `-DSQLITE_VEC_ENABLE_NEON` on
+aarch64/arm64 (NEON is mandatory in the ARMv8-A baseline, so there is no
+pre-feature host to protect). The kernels themselves are selected at run
+time inside sqlite-vec from the one compiled object, so the binary stays
+safe on pre-AVX x86_64 hosts.
+
 ## CLI Commands
 
 llmfun supports four subcommands:
@@ -106,6 +113,8 @@ llmfun rag [options]
 | `--rm` | *none* | Remove files from the RAG index |
 | `--list` | *none* | List all indexed sources |
 | `--sync` | *none* | Synchronize files with the RAG index (add or remove as needed) |
+| `--dialogue` | *none* | Report per-session dialogue history databases (read-only) and exit |
+| `--optimize` | *none* | Run the sqlite-vec optimize compaction on the primary RAG database and exit (see below) |
 | `--dry-run` | *none* | Preview changes without modifying the database |
 | `--path <path>` | *none* | Recursively add all text files from the specified path |
 | `--db <path>` | *none* | RAG database path(s) |
@@ -113,7 +122,37 @@ llmfun rag [options]
 | `--exclude <pattern>` | `-e` | Exclude regex pattern for RAG files (repeatable). Overrides config file |
 | `--local-setup` | *none* | Create the `llmfun/...` directory structure in the current working directory |
 
-**Note**: `--add`, `--rm`, `--list` and `--sync` are mutually exclusive.
+**Note**: `--add`, `--rm`, `--list`, `--sync`, `--dialogue` and `--optimize` are mutually exclusive.
+
+#### Optimize mode (`--optimize`)
+
+```bash
+llmfun rag --optimize
+llmfun rag --optimize --db llmfun/data/rag.sqlite3
+```
+
+Runs the sqlite-vec `optimize` compaction command (rewrites the vec0 shadow
+tables and reclaims freed slots inside non-empty chunks) on the primary RAG
+database and exits. `--db` (optional) restricts the run to one database path;
+without it the configured `ragPrimary` is optimized. Secondary databases are
+never touched: they are CI-published and optimized by the publisher's own
+scheduled run. No embedder or local model is started — the command only needs
+the config file — and the run is logged with its wall-clock duration.
+
+- A missing or unopenable primary is reported with a warning and skipped.
+- The optimize step itself never rebuilds anything (it is plain SQL on the
+  shadow tables). The read-write open that precedes it behaves exactly like
+  every llmfun read-write open: a database whose schema version, embedding
+  dimensions or model does not match the running configuration is wiped and
+  rebuilt from sources by that open (the accepted schema migration path).
+- CI runs this flag during the night: optimize holds the database's exclusive
+  lock while it runs and readers stall behind it (rollback-journal mode over
+  NFS — acceptable in the maintenance window by design).
+- Rollout: when a llmfun release changes the RAG schema, CI must rebuild and
+  republish every published database BEFORE instances roll to the new build —
+  a read-only open of a version-mismatched database silently returns no
+  database (see `doc/rag_design2.md`, "Index Integrity & Migration
+  Invariants").
 
 ### `tool_metrics`
 
@@ -683,11 +722,35 @@ Controls RAG indexing behavior.
 ```yaml
 ragConfig:
   windowOverlapPercent: 50
+  busyTimeoutMs: 500
+  autoOptimizeThreshold: 100
+  autoOptimizeCheckIntervalMin: 15
+  mmrLambda: 1.0
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `windowOverlapPercent` | long | 50 | Sliding window overlap as percentage (0-99). 50 means each chunk overlaps 50% with the previous one. Must be in range [0, 99]. |
+| `busyTimeoutMs` | long | 500 | SQLite busy timeout in milliseconds, applied as `PRAGMA busy_timeout` on every RAG database connection (read-only and read-write). Must be >= 0. Lock waits up to this duration are absorbed inside SQLite before llmfun's own SQL retry layer (30 s ceiling) takes over. |
+| `autoOptimizeThreshold` | long | 100 | Write-counter threshold that arms the one-shot startup auto-optimize check (see below). Must be >= 0. |
+| `autoOptimizeCheckIntervalMin` | long | 15 | Minutes after startup when the one-shot auto-optimize check runs. Must be >= 1. |
+| `mmrLambda` | double | 1.0 | MMR (maximal marginal relevance) lambda for the vector-side KNN pool. 1.0 disables MMR (the query SQL and bindings are then byte-identical to the plain relevance ranking); lower values trade pure relevance for diversity inside the vec0 KNN. Must be in (0.0, 1.0]. |
+
+#### Automatic optimize (one-shot background check)
+
+Agent instances (the `agent` subcommand) arm a single background check one
+`autoOptimizeCheckIntervalMin` after startup: it opens the primary database
+read/write, reads the persisted write counter (a top-level add, remove or
+update counts 1; chunk-level statements do not), and when the counter has
+reached `autoOptimizeThreshold` runs the sqlite-vec `optimize` compaction and
+resets the counter, logging the run duration. The check then terminates — the
+automatic path compacts at most once per process run; further compaction is
+the manual `llmfun rag --optimize` job. The wait is parked in the actor
+framework's delay queue (no thread sleeps through the interval, a query
+before the check is never stalled), and if the instance exits before the
+check fires, the next startup re-checks — nothing is lost. A failed optimize
+leaves the counter, so the next run retries. CI-published (read-only)
+databases are excluded.
 
 ### Tool Filter (`toolFilter`)
 

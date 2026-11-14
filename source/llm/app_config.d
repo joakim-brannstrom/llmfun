@@ -84,6 +84,9 @@ struct UserConfig {
             @(NamedArgument()
                     .Description("Report per-session dialogue history databases (read-only)"))
             bool dialogue;
+            @(NamedArgument()
+                    .Description("Run sqlite-vec optimize on the primary RAG database and exit"))
+            bool optimize;
         }
 
         @(NamedArgument("db").Description("Primary RAG database (read/write)"))
@@ -238,7 +241,8 @@ RAG createRag(LlmConfig conf, bool openSecondary = true) {
             logger.warningf("Unable to create an embedder from the configuration: %s",
                     conf.embedConfig);
         } else {
-            return new RAG(embed, conf.ragPrimary, openSecondary ? conf.getRagSecondary : null);
+            return new RAG(embed, conf.ragPrimary, openSecondary
+                    ? conf.getRagSecondary : null, conf.ragConfig);
         }
     } catch (Exception e) {
         logger.warningf("Failed to create embedder with configured settings: %s", e.msg);
