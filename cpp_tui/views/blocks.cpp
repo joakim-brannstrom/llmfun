@@ -198,6 +198,34 @@ std::string blockHeaderText(const BlockView& block, const BlockDraw& draw, bool 
     const char* label = block.label.empty() ? defaultBlockLabel(block.kind) : block.label.c_str();
     std::string text = label;
     const std::string timing = blockTimingLabel(block.timingS);
+    if (block.kind == BlockKind::Thinking && block.batchTools > 0) {
+        text += separator(textGrid);
+        text += std::to_string(block.batchTools);
+        text += block.batchTools == 1 ? " tool call" : " tool calls";
+    }
+    if (block.kind == BlockKind::ToolStep) {
+        // The tool card's header (F5): `TOOL <name>` while the card streams,
+        // `TOOL <name> · <duration>` once the result lands (W7: exactly when
+        // durationMs != 0 - never a placeholder). Each token field renders
+        // only when non-zero.
+        if (!block.summary.empty()) {
+            text += "  ";
+            text += block.summary;
+        }
+        if (!timing.empty())
+            text += separator(textGrid) + timing;
+        if (block.tokensIn > 0) {
+            text += separator(textGrid);
+            text += ui::formatCount(block.tokensIn);
+            text += " in";
+        }
+        if (block.tokensOut > 0) {
+            text += separator(textGrid);
+            text += ui::formatCount(block.tokensOut);
+            text += " out";
+        }
+        return text;
+    }
     if (!timing.empty())
         text += separator(textGrid) + timing;
     // The live answer's header: the phase word the model's vocabulary gives the
@@ -216,10 +244,10 @@ std::string blockHeaderText(const BlockView& block, const BlockDraw& draw, bool 
         text += std::to_string(block.steps);
         text += block.steps == 1 ? " step" : " steps";
     }
-    // A compact row's second line *is* its summary, and the streaming message's body
-    // is being written under it: neither repeats the preview in the header.
-    if (!draw.expanded && !block.streaming && !blockIsCompactRow(block.kind) &&
-        !block.summary.empty()) {
+    // The tool card's name
+    if (!block.summary.empty() &&
+        (block.kind == BlockKind::ToolStep ||
+         (!draw.expanded && !block.streaming && !blockIsCompactRow(block.kind)))) {
         text += "  ";
         text += block.summary;
     }

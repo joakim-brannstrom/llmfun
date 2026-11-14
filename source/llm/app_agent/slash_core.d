@@ -8,7 +8,6 @@ import std.functional : toDelegate;
 import llm.app_agent; // AgentApp (cyclic package import, same pattern as slash.d)
 import llm.app_agent.slash;
 import llm.utility : clearStopAgent, stopAgent;
-import llmfun_tui; // TuiChatMessageType_* (C binding)
 
 package void registerCoreCommands(ref SlashCommandRegistry registry) {
     auto ignore = registry.register(SlashCommand("help", [],
@@ -39,7 +38,7 @@ private AgentStatus compactHandler(ref AgentApp app, string arg) {
 
 /// `/help`: print the registry's command list into the thread.
 private AgentStatus helpHandler(ref AgentApp app, string arg) {
-    app.sendChatMessage(app.printHelp(), TuiChatMessageType_Assistant);
+    app.sendChatMessage(app.printHelp());
     return AgentStatus.active;
 }
 
@@ -48,8 +47,7 @@ private AgentStatus debugHandler(ref AgentApp app, string arg) {
     app.debugMode = !app.debugMode;
     app.uiMsg.logFile(app.debugMode);
     logger.globalLogLevel = app.debugMode ? logger.LogLevel.trace : logger.LogLevel.info;
-    app.sendChatMessage("Debug output: %s", TuiChatMessageType_Assistant,
-            app.debugMode ? "ON" : "OFF");
+    app.sendChatMessage("Debug output: %s", app.debugMode ? "ON" : "OFF");
     return AgentStatus.active;
 }
 
@@ -59,14 +57,14 @@ private AgentStatus debugHandler(ref AgentApp app, string arg) {
 /// is harmless (cleared before the next runAgent).
 private AgentStatus stopHandler(ref AgentApp app, string arg) {
     stopAgent();
-    app.sendChatMessage("harness: Stop requested", TuiChatMessageType_Assistant);
+    app.sendChatMessage("harness: Stop requested");
     return AgentStatus.active;
 }
 
 /// Instruct the agent to continue working without injecting a user query.
 private AgentStatus continueHandler(ref AgentApp app, string arg) {
     app.continueAgent();
-    app.sendChatMessage("harness: Continue requested", TuiChatMessageType_Assistant);
+    app.sendChatMessage("harness: Continue requested");
     return AgentStatus.active;
 }
 

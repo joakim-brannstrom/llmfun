@@ -773,7 +773,7 @@ unittest {
     // active meta unchanged, list still refreshed.
     auto unknown = SessionId("20260618-153045-ffff");
     app.doSidebarRename(unknown, "New title");
-    assert(sink.lastChatMessage() == "error: Failed to rename session 'ffff'.",
+    assert(sink.lastNoticeBody() == "error: Failed to rename session 'ffff'.",
             "rename-none must emit the error chat message");
     assert(app.activeSession.id == meta.id, "rename-none must keep the active meta");
     assert(app.activeSession.title == meta.title);
@@ -784,7 +784,7 @@ unittest {
     write(buildPath(tmpDir, "20260618-153046-0bad.json"), "{ not json !!!");
     auto corrupt = SessionId("20260618-153046-0bad");
     app.doSidebarRename(corrupt, "New title");
-    assert(sink.lastChatMessage() == "error: Failed to rename session '0bad'.",
+    assert(sink.lastNoticeBody() == "error: Failed to rename session '0bad'.",
             "corrupt-file rename must emit the error chat message");
     assert(app.activeSession.id == meta.id, "corrupt-file rename must keep the active meta");
     assert(sink.countOf("sessionList") == 2,
@@ -1355,11 +1355,10 @@ unittest {
     assert(snap[1].id == c && !snap[1].isActive);
     assert(sink.countOf("sessionList") == 1, "delete-active must refresh the sidebar snapshot");
 
-    // Confirmation chat message on the fallback path (the exact string locks
-    // the user-facing wording). The replayed history went through
-    // chatThinkMessage, so the confirmation is the only recorded chatMessage.
-    assert(sink.chatMessages.length == 1 && sink.chatMessages[0] == "Session deleted: a1b2. Switched to 'T'.",
-            "delete-active must emit the switch confirmation, got: " ~ sink.lastChatMessage());
+    // Confirmation notice on the fallback path (the exact string locks
+    // the user-facing wording; task 5: a chat message is a Notice block).
+    assert(sink.lastNoticeBody() == "Session deleted: a1b2. Switched to 'T'.",
+            "delete-active must emit the switch confirmation, got: " ~ sink.lastNoticeBody());
 }
 
 @("corrupt session files are skipped by listing and the sweep, and switchToSession keeps the current session on load failure")
@@ -1423,7 +1422,7 @@ unittest {
     // switchToSession on the corrupt id: error message, current session kept
     // (the exact string locks the user-facing wording).
     app.switchToSession(corrupt);
-    assert(sink.lastChatMessage() == "error: Cannot load session '20260618-153046-0bad' (not found or corrupt). Staying in current session.",
+    assert(sink.lastNoticeBody() == "error: Cannot load session '20260618-153046-0bad' (not found or corrupt). Staying in current session.",
             "switchToSession must emit the cannot-load error");
     assert(app.activeSession.id == good.id, "a failed load must keep the current session unchanged");
 
@@ -1787,11 +1786,12 @@ unittest {
     assert(got && code == 0, "expected AgentDone(0) from the actor funnel within ~10 s");
 }
 
-// NR derivation: the single shared displayable predicate drives both the
-// ordinal walk and the display decision - live batches are numbered by
-// offset + position over the contiguous history tail, /clear restarts the
-// count at [1], and a session switch replays the other session's own NRs
-// (a measured turn shows the same [NR] and [TIME] as live).
+// NR derivation: the typed walk owns both the display decision and the
+// batching - the step walk merges call+response pairs, the query echo and
+// the nudge emit nothing, a finalAnswer ToolMessage closes the turn with an
+// Answer block, /clear continues the batch index, and a session switch
+// replays the other session's own snapshot (a measured turn replays its
+// original [TIME] in its content block).
 @("NR derivation: predicate, live offset, clear restart, session switch")
 unittest {
     import std.path : buildPath;
@@ -1810,11 +1810,6 @@ unittest {
     auto cfg = testLlmConfig(tmpDir);
     auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
 
-    // 1. Predicate: the four arms, plus the two non-displayable Message cases
-    assert(isDisplayable(Chat.MessageT(Message(Role.assistant, false, "a", null)), cfg));
-    assert(isDisplayable(Chat.MessageT(Message(Role.user, true, "query", null)), cfg));
-    assert(!isDisplayable(Chat.MessageT(Message(Role.user, false, "nudge", null)), cfg));
-    assert(!isDisplayable(Chat.MessageT(Message(Role.system, false, "sys", null)), cfg));
     JSONValue call;
     call["id"] = "c1";
     call["type"] = "function";
@@ -1822,19 +1817,10 @@ unittest {
     fn["name"] = "query_semantic";
     fn["arguments"] = "{}";
     call["function"] = fn;
-    assert(isDisplayable(Chat.MessageT(ToolMessage(null, JSONValue([call]))), cfg));
-    assert(isDisplayable(Chat.MessageT(ToolResponse("ok", "c1", "query_semantic", true)), cfg));
-    assert(!isDisplayable(Chat.MessageT(ToolResponse("done", "c2", "task_done", true)), cfg));
-    assert(!isDisplayable(Chat.MessageT(ToolResponse("out", "c3", "pipeline_output", true)), cfg));
-    assert(isDisplayable(Chat.MessageT(VisionMessage("see", "data:image/png;base64,x")), cfg));
-    assert(displayableCount([
-        Chat.MessageT(Message(Role.system, false, "s", null)),
-        Chat.MessageT(Message(Role.user, false, "n", null)),
-        Chat.MessageT(Message(Role.user, true, "q", null)),
-        Chat.MessageT(Message(Role.assistant, false, "a", null))
-    ], cfg) == 2);
 
-    // 2. Live batch: offset + position; hidden result and nudge consume none
+    // 2. Live batch: the query echo and the nudge emit nothing; the content,
+    //    the tool message's thinking, the merged call/response and the hidden
+    //    response (standalone orphan) all upsert. No Done upsert: no answer.
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
     app.llmConf = cfg;
     app.sessionStore = store;
@@ -1874,20 +1860,22 @@ unittest {
     ];
     app.processResult(result);
 
-    assert(sink.stamps.length == 3, "user query, hidden result and nudge are not displayed live");
-    assert(sink.calls[0].kind == "chatThinkMessage"
-            && sink.calls[0].payload.startsWith("assistant: hello back"));
-    assert(sink.stamps[0].nr == 4); // 2 (offset) + 2nd displayable of the batch (q consumed 3)
-    assert(sink.stamps[0].time.match!((Duration d) { return d == 432.dur!"msecs"; },
-            (NoProcessingTime) { return false; }));
-    assert(sink.stamps[1].nr == 5);
-    assert(sink.stamps[2].nr == 6);
-    assert(sink.stamps[2].time.match!((Duration d) { return d == 42.dur!"msecs"; },
-            (NoProcessingTime) { return false; }));
+    assert(sink.turnUpserts.empty, "no final answer -> the turn stays open");
+    assert(sink.blockUpserts.length == 4,
+            "content, reasoning, merged call and hidden response upsert");
+    assert(sink.blockUpserts[0].id == "content#0"
+            && sink.blockUpserts[0].body == "hello back" && sink.blockUpserts[0].durationMs == 432);
+    assert(sink.blockUpserts[1].id == "reasoning#1"
+            && sink.blockUpserts[1].kind == TuiBlockKind_Reasoning
+            && sink.blockUpserts[1].durationMs == 120);
+    assert(sink.blockUpserts[2].id == "c1"
+            && sink.blockUpserts[2].status == TuiBlockStatus_Ok
+            && sink.blockUpserts[2].durationMs == 42, "call and response merge into one block");
+    assert(sink.blockUpserts[3].id == "c2",
+            "the hidden response emits standalone: the store owns displayability");
 
-    // 3. taskDone finalAnswer carries the same (nr, time) as its tool-call line
-    sink.chatMessages.length = 0;
-    sink.stamps.length = 0;
+    // 3. taskDone finalAnswer: the Answer block closes the turn Done, and the
+    //    call whose response streamed in an earlier step stays unmerged.
     JSONValue sd;
     sd["taskDoneAnswer"] = JSONValue("The answer is 4.");
     auto tm2 = ToolMessage(null, JSONValue([call]), JSONValue.init, sd);
@@ -1897,20 +1885,30 @@ unittest {
     ProcessResult r2;
     r2.chat = [Chat.MessageT(tm2), Chat.MessageT(trh)];
     app.processResult(r2);
-    assert(sink.chatMessages.length == 0); // tool-call line is a think message; hidden result sends nothing
-    assert(sink.stamps.length == 2, "tool-call line and finalAnswer are both recorded");
-    assert(sink.stamps[0].nr == 7 && sink.stamps[1].nr == 7); // same ordinal
-    assert(sink.stamps[1].time == sink.stamps[0].time);
+    assert(sink.blockUpserts.length == 7,
+            "the re-called tool, the hidden response and the answer upsert");
+    assert(sink.blockUpserts[4].id == "c1" && sink.blockUpserts[4].status == TuiBlockStatus_Cancelled,
+            "the response streamed earlier: the call block is not re-merged as Ok");
+    assert(sink.blockUpserts[5].id == "c2", "the hidden response upserts again");
+    assert(sink.blockUpserts[6].id == "answer"
+            && sink.blockUpserts[6].body == "The answer is 4." && sink.blockUpserts[6].durationMs == 555,
+            "the answer carries the ToolMessage's measured time");
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].state == TuiTurnState_Done,
+            "the final answer closes the turn Done");
 
-    // 4. /clear: history truncated to the system prompt -> next is [1]
+    // 4. /clear: history truncated to the system prompt -> the next walk
+    //    continues the same ctx's batch index (the typed store is cleared by
+    //    the slash handler's threadClear, not by chat.clear itself).
     app.agent_.chat.clear;
     ProcessResult r3;
     r3.chat = [Chat.MessageT(Message(Role.assistant, false, "fresh", null))];
     app.processResult(r3);
-    assert(sink.stamps[2].nr == 1);
+    assert(sink.blockUpserts[$ - 1].id == "content#5" && sink.blockUpserts[$ - 1].body == "fresh",
+            "the batch index continues after the clear, got id `" ~ sink.blockUpserts[$ - 1].id
+            ~ "`");
 
-    // 5. Session switch: the other session's own NRs from [1], and a replay
-    //    of a measured turn shows the same [NR] and [TIME] as live
+    // 5. Session switch: the other session's own snapshot from ordinal 1, and
+    //    a measured turn replays the same content with its original [TIME].
     JSONValue doc;
     JSONValue m1;
     m1["role"] = "user";
@@ -1926,22 +1924,27 @@ unittest {
     auto metaB = store.create();
     store.save(metaB.id, metaB, doc); // sibling-test order: persist before activating
     app.switchToSession(metaB.id); // commit A, then load + replay B from scratch
-    assert(sink.stamps[sink.stamps.length - 2].nr == 1); // "what is 2+2?" replayed as [1]
-    assert(sink.stamps[sink.stamps.length - 1].nr == 2);
-    assert(sink.stamps[sink.stamps.length - 1].time.match!((Duration d) {
-            return d == 1200.dur!"msecs";
-        }, (NoProcessingTime) { return false; }));
+    assert(sink.setTurnsSnapshots.length == 1, "one replay snapshot");
+    const turns = sink.setTurnsSnapshots[0].turns;
+    const blocks = sink.setTurnsSnapshots[0].blocks;
+    assert(turns.length == 1 && turns[0].ordinal == 1
+            && turns[0].state == TuiTurnState_Done && turns[0].messageCount == 1,
+            "the answer counts as the turn's one message (the query is not counted)");
+    assert(blocks.length == 2);
+    assert(blocks[0].id == "query" && blocks[0].body == "what is 2+2?");
+    assert(blocks[1].id == "content#0" && blocks[1].body == "4"
+            && blocks[1].durationMs == 1200, "the measured answer replays its 1200 ms");
 }
 
-// The user-query echo is sent from runAgent AFTER the turn-start doCompress.
-// Its NR is the displayable count of the possibly-compressed history - the
-// query's true ordinal, no +1, and a compression that purged displayable
-// prefix messages cannot misnumber it (the count is read after doCompress
-// returns, so any rewrite is reflected).
+// The user-query turn opens AFTER the turn-start doCompress: the turn's
+// ordinal is the next free position (continuing after any replayed or
+// compressed turns), so a compression that purged displayable prefix
+// messages cannot misnumber it - the ordinal is assigned by the typed
+// walk, not derived from a count read after doCompress returns.
 // The isActive() guard keeps the one-shot CLI output byte-stable (the
 // startSetup one-shot branch runs with the default TuiBlockedSink, which is
 // inactive and has no chat line for the prompt today).
-@("runAgent: user-query echo NR is the query's true ordinal")
+@("runAgent: user-query turn opens at the next free ordinal")
 unittest {
     import std.path : buildPath;
     import std.datetime : Duration, dur;
@@ -1976,29 +1979,28 @@ unittest {
     agent.canned = [ProcessResult(status: ProcessResult.Status.networkFailure)];
     app.runAgent("hello");
 
-    // The echo is the first persistent send, numbered 3 - the query's true
-    // ordinal in the persisted history (displayable count AFTER addUserQuery
-    // and the no-op turn-start doCompress), not a pre-derived 2 + 1.
-    assert(sink.stamps.length == 1, "only the echo is persistent for an empty batch");
-    assert(sink.calls[0].kind == "chatMessage" && sink.calls[0].payload == "hello");
-    assert(sink.stamps[0].nr == 3);
-    assert(sink.stamps[0].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }));
+    // The turn opens Running with the query prose block; the empty
+    // (failed) batch emits nothing further and the turn stays open.
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].id == 1
+            && sink.turnUpserts[0].ordinal == 1 && sink.turnUpserts[0].state == TuiTurnState_Running,
+            "the failed turn opens Running at the next free ordinal");
+    assert(sink.blockUpserts.length == 1 && sink.blockUpserts[0].id == "query"
+            && sink.blockUpserts[0].body == "hello", "the query is the turn's first block");
+    assert(sink.setTurnsSnapshots.empty, "the live path sends no setTurns");
     auto msgs = app.agent_.chat.getMessages();
     assert(msgs.length == 4); // system + a1 + a2 + query
     assert(msgs[3].match!((Message m) {
             return m.isUserQuery && m.content == "hello";
         }, (_) => false), "the query is the last persisted entry");
-    assert(displayableCount(msgs, cfg) == 3, "the echo NR equals the persisted ordinal");
 
-    // Slash-consumed query: no persistent echo (query is consumed before the
-    // loop; the unknown-command notice is a display-only nr=0 line).
-    auto stampCount = sink.stamps.length;
+    // Slash-consumed query: no turn opens (the query is consumed before
+    // the loop); the unknown-command notice lands as a Notice block in
+    // the store's newest turn context.
     app.runAgent("/nope");
-    assert(sink.stamps.length == stampCount + 1, "the unknown-command notice is sent");
-    assert(sink.stamps[$ - 1].nr == 0, "a consumed slash query must not be echoed");
-    assert(sink.chatMessages[$ - 1].startsWith("system: Unknown command"));
+    assert(sink.turnUpserts.length == 1, "a consumed slash query must not open a turn");
+    assert(sink.blockUpserts.length == 2 && sink.blockUpserts[1].kind == TuiBlockKind_Notice
+            && sink.blockUpserts[1].body.startsWith("system: Unknown command"),
+            "the unknown-command notice is sent as a Notice block");
 
     // One-shot byte-stability premise: the default sink is inactive, so the
     // startSetup one-shot branch never emits the echo line.
@@ -2108,54 +2110,58 @@ unittest {
     assert(fileMsgs[2]["role"].str == "user" && fileMsgs[2]["content"].str == "hello");
     assert(!hasProcessMs(fileMsgs[2]), "the user query was never measured");
 
-    // Live stamps for the turn: a3 [4], tm [5], tr [6] (q consumes ordinal
-    // 3 but is not displayed live - the echo is the user query's own job).
-    assert(sink.stamps.length == 3, "only the measured turn traffic displays live");
-    assert(sink.stamps.map!(s => s.nr).array == [4, 5, 6], "live turn ordinals");
-    assert(sink.stamps[0].time.match!((Duration d) { return d == 432.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "live a3 time");
-    assert(sink.stamps[1].time.match!((Duration d) { return d == 120.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "live tm time");
-    assert(sink.stamps[2].time.match!((Duration d) { return d == 42.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "live tr time");
+    // Live walk for the turn: a3's content, the tool message's thinking and
+    // the merged call/response upsert (the query echo emits nothing - no
+    // turn-start here, the step walk owns the batch). No final answer, so
+    // the turn stays open (no Done upsert).
+    assert(sink.blockUpserts.length == 3, "content, reasoning and merged call upsert live");
+    assert(sink.blockUpserts[0].id == "content#0"
+            && sink.blockUpserts[0].durationMs == 432, "live a3 time");
+    assert(sink.blockUpserts[1].id == "reasoning#1"
+            && sink.blockUpserts[1].durationMs == 120, "live tm time");
+    assert(sink.blockUpserts[2].id == "c1" && sink.blockUpserts[2].durationMs == 42, "live tr time");
+    assert(sink.turnUpserts.empty && sink.setTurnsSnapshots.empty);
 
-    // Switch away and back: the replay shows the SAME [NR] and [TIME] -
-    // the file content alone determines both (cross-instance property).
-    sink.chatMessages.length = 0;
-    sink.stamps.length = 0;
+    // Switch away and back: the replay shows the SAME merged blocks and
+    // [TIME]s - the file content alone determines both (cross-instance
+    // property). The pre-turn a1/a2 entries carry no turn id, so they
+    // belong to no turn and replay nothing.
+    sink.setTurnsSnapshots.length = 0;
+    sink.blockUpserts.length = 0;
     app.switchToSession(metaB.id);
-    assert(sink.stamps.length == 0, "empty session B replays nothing displayable");
+    assert(sink.setTurnsSnapshots.length == 1 && sink.setTurnsSnapshots[0].turns.empty,
+            "empty session B replays nothing displayable");
     app.switchToSession(metaA.id);
-    // Replay A: a1 [1], a2 [2], q [3] (user query now displayed),
-    // a3 [4] 432 ms, tm [5] 120 ms, tr [6] 42 ms.
-    assert(sink.stamps.length == 6, "all six displayable messages replayed");
-    assert(sink.stamps.map!(s => s.nr).array == [1, 2, 3, 4, 5, 6],
-            "replayed [NR] == live [NR] (persisted-NR property)");
-    assert(sink.stamps[0].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "a1 replays unmeasured");
-    assert(sink.stamps[1].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "a2 replays unmeasured");
-    assert(sink.stamps[2].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "q replays unmeasured");
-    assert(sink.stamps[3].time.match!((Duration d) { return d == 432.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "a3 replays its original 432 ms");
-    assert(sink.stamps[4].time.match!((Duration d) { return d == 120.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "tm replays its original 120 ms");
-    assert(sink.stamps[5].time.match!((Duration d) { return d == 42.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "tr replays its original 42 ms");
+    assert(sink.setTurnsSnapshots.length == 2, "one snapshot per switch");
+    const rturns = sink.setTurnsSnapshots[1].turns;
+    const rblocks = sink.setTurnsSnapshots[1].blocks;
+    assert(rturns.length == 1 && rturns[0].ordinal == 1
+            && rturns[0].state == TuiTurnState_Done && rturns[0].messageCount == 5,
+            "the healed a1/a2 prefix + a3 + the call + the result replay as"
+            ~ " one Done turn, got messageCount " ~ rturns[0].messageCount.to!string);
+    assert(rblocks.length == 6, "healed a1/a2, query, content, reasoning and merged call replay, got "
+            ~ rblocks.length.to!string ~ ": " ~ (rblocks.length
+                ? rblocks.map!(b => b.id).join(",").idup : ""));
+    assert(rblocks[0].id == "content#0" && rblocks[0].body == "a1",
+            "the healed a1 prefix replays inside the turn");
+    assert(rblocks[1].id == "content#1" && rblocks[1].body == "a2",
+            "the healed a2 prefix replays inside the turn");
+    assert(rblocks[2].id == "query" && rblocks[2].body == "hello", "the query replays unmeasured");
+    assert(rblocks[3].id == "content#2" && rblocks[3].durationMs == 432,
+            "a3 replays its original 432 ms");
+    assert(rblocks[4].id == "reasoning#3" && rblocks[4].durationMs == 120,
+            "tm replays its original 120 ms");
+    assert(rblocks[5].id == "c1" && rblocks[5].durationMs == 42, "tr replays its original 42 ms");
 }
 
 // Backward-compat gate: a session file created BEFORE the processMs
-// feature (no save_data.processMs anywhere) must load and replay with
-// contiguous [NR] 1..N and NO [TIME] suffix (NoProcessingTime - unmeasured is
-// distinct from Duration(0)), and a later measured turn must commit WITHOUT
-// giving the legacy messages a processMs key. NR is a pure derivation (the
-// ordinal walk counts displayables), so there is nothing to migrate: if the
-// test exposes a gap, the fix belongs in the layer that causes it.
-@("legacy session files: contiguous NRs, no time suffix, clean round-trip")
+// feature (no save_data.processMs anywhere) must load and replay as typed
+// turns with NO durations (unmeasured is distinct from Duration(0)), and a
+// later measured turn must commit WITHOUT giving the legacy messages a
+// processMs key. Turn ids are healed at load (reconstructTurnIds), so
+// there is nothing to migrate: if the test exposes a gap, the fix belongs
+// in the layer that causes it.
+@("legacy session files: healed turns, no durations, clean round-trip")
 unittest {
     import std.file : readText;
     import std.path : buildPath;
@@ -2202,15 +2208,22 @@ unittest {
 
     app.switchToSession(meta.id); // load + replay the legacy file
 
-    // Contiguous NRs 1..3, ALL unmeasured (NoProcessingTime, not Duration(0)).
-    assert(sink.stamps.length == 3);
-    assert(sink.stamps.map!(s => s.nr).array == [1, 2, 3]);
-    foreach (s; sink.stamps) {
-        assert(s.time.match!((Duration d) { return false; }, (NoProcessingTime) {
-                return true;
-            }), "legacy messages must replay as NoProcessingTime");
-    }
-
+    // Replay of the healed legacy file: one turn carrying the query and the
+    // two unmeasured contents (durationMs 0, not a fabricated duration).
+    assert(sink.setTurnsSnapshots.length == 1);
+    assert(sink.setTurnsSnapshots[0].turns.length == 1
+            && sink.setTurnsSnapshots[0].turns[0].ordinal == 1
+            && sink.setTurnsSnapshots[0].turns[0].state == TuiTurnState_Done,
+            "the healed legacy file replays one Done turn");
+    assert(sink.setTurnsSnapshots[0].blocks.length == 3);
+    assert(sink.setTurnsSnapshots[0].blocks[0].id == "query"
+            && sink.setTurnsSnapshots[0].blocks[0].body == "old question");
+    assert(sink.setTurnsSnapshots[0].blocks[1].id == "content#0"
+            && sink.setTurnsSnapshots[0].blocks[1].body == "old answer one"
+            && sink.setTurnsSnapshots[0].blocks[1].durationMs == 0);
+    assert(sink.setTurnsSnapshots[0].blocks[2].id == "content#1"
+            && sink.setTurnsSnapshots[0].blocks[2].body == "old answer two"
+            && sink.setTurnsSnapshots[0].blocks[2].durationMs == 0);
     // Round-trip: a new measured turn commits the session; the legacy messages
     // must not gain processMs. Mirror the production flow: the agent appends the
     // turn's messages to the chat BEFORE the step hook, so the batch is the
@@ -2224,13 +2237,13 @@ unittest {
     result.chat = [Chat.MessageT(q), Chat.MessageT(a1)];
     app.processResult(result); // commits
 
-    // The measured turn displays live at its true ordinal (5: lu,la1,la2,q,a1)
-    // with its original 250 ms.
-    assert(sink.stamps.length == 4, "the new answer displays live once");
-    assert(sink.stamps[3].nr == 5, "the new answer's ordinal is its history position");
-    assert(sink.stamps[3].time.match!((Duration d) { return d == 250.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "the new answer keeps 250 ms");
-
+    // The measured turn displays live: a1's content block carries its
+    // original 250 ms.
+    assert(sink.blockUpserts.length == 1, "the new answer displays live once");
+    assert(sink.blockUpserts[0].id == "content#0"
+            && sink.blockUpserts[0].body == "new answer"
+            && sink.blockUpserts[0].durationMs == 250, "the new answer keeps 250 ms");
+    assert(sink.turnUpserts.empty, "no final answer -> the turn stays open");
     // Committed file: the legacy messages stayed pre-feature and the new message
     // is the ONLY one with processMs (no 0ms misrepresentation, no invented key).
     auto fileText = readText(buildPath(tmpDir, "chat", meta.id.get ~ ".json"));
@@ -2250,38 +2263,36 @@ unittest {
     assert(nProcessMs == 1, "exactly one message carries processMs (the new one)");
     assert(theValue == 250, "the new message's measured 250 ms round-trips; no 0ms");
 
-    // Mixed-file reload: switch away and back; the
-    // committed legacy+measured file must replay with contiguous NRs 1..5,
-    // legacy messages + query unmeasured, a1 keeping its 250 ms.
-    sink.chatMessages.length = 0;
-    sink.stamps.length = 0;
+    // Mixed-file reload: switch away and back; the committed legacy+measured
+    // file replays as two contiguous turns (the healed legacy turn 1, then
+    // the measured turn 2), legacy contents + query unmeasured, the measured
+    // content keeping its 250 ms.
+    sink.setTurnsSnapshots.length = 0;
     app.switchToSession(throwawayMeta.id);
-    assert(sink.stamps.length == 0, "empty throwaway session replays nothing");
+    assert(sink.setTurnsSnapshots.length == 1 && sink.setTurnsSnapshots[0].turns.empty,
+            "empty throwaway session replays nothing");
     app.switchToSession(meta.id); // reload the mixed committed file
-    assert(sink.stamps.length == 5, "all five displayable messages replayed");
-    assert(sink.stamps.map!(s => s.nr).array == [1, 2, 3, 4, 5],
-            "replayed [NR] contiguous over the mixed file");
-    assert(sink.stamps[0].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "lu replays unmeasured");
-    assert(sink.stamps[1].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "la1 replays unmeasured");
-    assert(sink.stamps[2].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "la2 replays unmeasured");
-    assert(sink.stamps[3].time.match!((Duration d) { return false; }, (NoProcessingTime) {
-            return true;
-        }), "q replays unmeasured");
-    assert(sink.stamps[4].time.match!((Duration d) { return d == 250.dur!"msecs"; },
-            (NoProcessingTime) { return false; }), "a1 replays its original 250 ms");
+    assert(sink.setTurnsSnapshots.length == 2, "one snapshot per switch");
+    const mturns = sink.setTurnsSnapshots[1].turns;
+    const mblocks = sink.setTurnsSnapshots[1].blocks;
+    assert(mturns.length == 2 && mturns[0].ordinal == 1 && mturns[1].ordinal == 2,
+            "replayed ordinals contiguous over the mixed file");
+    assert(mturns[0].state == TuiTurnState_Done && mturns[1].state == TuiTurnState_Done);
+    assert(mblocks.length == 5, "two queries + three contents replay");
+    assert(mblocks[0].id == "query" && mblocks[0].body == "old question");
+    assert(mblocks[1].id == "content#0" && mblocks[1].body == "old answer one"
+            && mblocks[1].durationMs == 0, "la1 replays unmeasured");
+    assert(mblocks[2].id == "content#1" && mblocks[2].body == "old answer two"
+            && mblocks[2].durationMs == 0, "la2 replays unmeasured");
+    assert(mblocks[3].id == "query" && mblocks[3].body == "new question");
+    assert(mblocks[4].id == "content#0" && mblocks[4].body == "new answer"
+            && mblocks[4].durationMs == 250, "a1 replays its original 250 ms");
 }
-// Branch coverage: a failed or interrupted turn produces no displayable
-// content, so it consumes no NR ordinal - and because NR is a pure derivation
-// (recomputed from the persisted history at send time), the NEXT batch
-// continues from the same offset: contiguous, no gap, no duplicate. There is
-// no counter to desynchronize.
-@("error turn: no stamps, next batch continues from the same offset")
+// Branch coverage: a failed turn's empty batch upserts no blocks and opens
+// no turn - the typed emit ctx is created lazily but its batch index does
+// not advance, so the NEXT batch continues from the same batch index:
+// contiguous, no gap, no duplicate. There is no counter to desynchronize.
+@("error turn: no blocks, next batch continues from the same batch index")
 unittest {
     import std.path : buildPath;
     import std.datetime : Duration, dur;
@@ -2315,16 +2326,17 @@ unittest {
     app.commitActiveSession();
 
     // A failed turn: nothing displayable arrives (user query persistence
-    // is runAgent's job, not modeled here). The empty batch must not display
-    // anything and must not advance any ordinal.
+    // is runAgent's job, not modeled here). The empty batch must not
+    // upsert anything.
     ProcessResult failure;
     failure.status = ProcessResult.Status.unknownFailure;
     failure.chat = [];
     app.processResult(failure);
-    assert(sink.stamps.length == 0, "error turn must not display anything");
+    assert(sink.blockUpserts.empty && sink.turnUpserts.empty,
+            "error turn must not display anything");
 
-    // The next batch continues from the SAME offset: a3 is the 4th
-    // displayable in [sys, a1, a2, q, a3]. Mirror the production flow: the
+    // The next batch continues from the SAME batch index: a3 upserts as
+    // the first content block of the walk. Mirror the production flow: the
     // agent appends the turn's messages before the step hook, so the batch
     // is the contiguous tail of the history.
     auto q = Message(Role.user, true, "hello", null);
@@ -2335,10 +2347,10 @@ unittest {
     ProcessResult result;
     result.chat = [Chat.MessageT(q), Chat.MessageT(a3)];
     app.processResult(result);
-    assert(sink.stamps.length == 1);
-    assert(sink.stamps[0].nr == 4, "next batch continues contiguously");
-    assert(sink.stamps[0].time.match!((Duration d) { return d == 432.dur!"msecs"; },
-            (NoProcessingTime) { return false; }));
+    assert(sink.blockUpserts.length == 1);
+    assert(sink.blockUpserts[0].id == "content#0"
+            && sink.blockUpserts[0].body == "hello back" && sink.blockUpserts[0].durationMs == 432,
+            "next batch continues from the same batch index");
 }
 
 version (unittest) {
@@ -2854,7 +2866,11 @@ unittest {
 
     app.doCreateSession();
 
-    assert(sink.chatMessages.length == 0, "a new session must not post a chat turn");
+    assert(sink.blockUpserts.empty && sink.turnUpserts.empty,
+            "a new session must not post a chat turn");
+    assert(sink.setTurnsSnapshots.length == 1 && sink.setTurnsSnapshots[0].turns.empty
+            && sink.setTurnsSnapshots[0].blocks.empty,
+            "the new empty session replays an empty thread");
     assert(store.list().length == 1, "the session was created");
     assert(app.activeSession.id.length > 0, "the new session is active");
 }
@@ -3076,7 +3092,7 @@ unittest {
     assert(app.pendingDeleteId == SessionId.init, "the gate clears pending delete");
     assert(app.llmConf.pinnedChatSessions.length == 0, "a malformed id changes nothing");
     assert(sink.countOf("sessionList") == 0, "a malformed id sends nothing");
-    assert(sink.lastChatMessage().length == 0, "a malformed id is not a user error");
+    assert(sink.lastNoticeBody().length == 0, "a malformed id is not a user error");
 
     // An id that is well-formed but unknown to the store is tolerated the same
     // way (no throw, no crash): the set stays unchanged, nothing is saved or
@@ -3087,7 +3103,7 @@ unittest {
     assert(app.pendingDeleteId == SessionId.init, "the store gate clears pending delete");
     assert(app.llmConf.pinnedChatSessions.length == 0, "an unknown id changes nothing");
     assert(sink.countOf("sessionList") == 0, "an unknown id sends nothing");
-    assert(sink.lastChatMessage().length == 0, "an unknown id is not a user error");
+    assert(sink.lastNoticeBody().length == 0, "an unknown id is not a user error");
 }
 
 @("pin toggle survives a restart: state.json round-trip into a fresh app")
@@ -3222,8 +3238,8 @@ unittest {
     assert(cloneSf.doc["messages"].array[0]["content"].str == "what is 2+2?",
             "the cloned message content is identical");
     assert(readText(originalPath) == originalBytes, "the original file is byte-identical");
-    assert(sink.lastChatMessage().canFind("Session cloned"),
-            "the clone posts a confirmation: got '" ~ sink.lastChatMessage() ~ "'");
+    assert(sink.lastNoticeBody().canFind("Session cloned"),
+            "the clone posts a confirmation: got '" ~ sink.lastNoticeBody() ~ "'");
 }
 
 @("sidebar clone rejects invalid ids and degrades on unknown ids")
@@ -3249,8 +3265,8 @@ unittest {
     // (the same gate doSidebarDelete uses).
     app.doSidebarClone(SessionId("not-an-id"));
     assert(app.pendingDeleteId == SessionId.init, "the gate clears pending delete");
-    assert(sink.lastChatMessage().canFind("Invalid session id"),
-            "a malformed id is a user error: got '" ~ sink.lastChatMessage() ~ "'");
+    assert(sink.lastNoticeBody().canFind("Invalid session id"),
+            "a malformed id is a user error: got '" ~ sink.lastNoticeBody() ~ "'");
     assert(sink.countOf("sessionList") == 0, "a malformed id sends no refresh");
 
     // An unknown (well-formed) id: clone -> none -> error message, active
@@ -3258,7 +3274,7 @@ unittest {
     auto unknown = SessionId("20260618-153045-ffff");
     app.doSidebarClone(unknown);
     assert(app.activeSession.id == meta.id, "clone-none must keep the active session");
-    assert(sink.lastChatMessage() == "error: Failed to clone session 'ffff'.",
+    assert(sink.lastNoticeBody() == "error: Failed to clone session 'ffff'.",
             "clone-none must emit the error chat message");
     assert(store.list().length == 1, "clone-none must not create files");
     assert(sink.countOf("sessionList") == 1, "clone-none must still refresh the sidebar list");
@@ -3561,11 +3577,8 @@ unittest {
 // NR derivation: the console formatter over the typed events reproduces
 // today's console output byte for byte (task 4's golden) - the query echo
 // without a prefix, "Thinking: " lines, "assistant: " content, one tool-call
-// line per batch, result lines with the mark, the answer inside the
-// tool-call message (before the results walk), and notices verbatim. The
-// v4 side of the comparison is what the v4 senders record for the same
-// content (the formatter renders exactly the lines today's console
-// prints; the blocked sink itself stays a no-op until task 5).
+// line per batch, result lines with the mark, the answer after the results
+// walk, and notices verbatim.
 @("console formatter reproduces today's console output from typed events")
 unittest {
     import std.array : join;
@@ -3577,82 +3590,48 @@ unittest {
     import llm.chat;
     import llm.types : ServerStat;
 
-    // 1. The v4 capture: what today's senders record for this content.
-    auto tmpDir = testArea("app_agent_console_v4");
+    auto tmpDir = testArea("app_agent_console_typed");
     scope (exit)
         tmpDir.cleanup;
-    TuiRecordingSink sink4;
-    auto app4 = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink4);
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
 
     auto f = TypedFixture.make();
-    app4.agent_.chat.setSystemPrompt("sys");
-    app4.agent_.chat.add(f.q);
-    app4.agent_.chat.add(f.a3);
-    app4.agent_.chat.add(f.tm);
-    app4.agent_.chat.add(f.tr);
-    app4.agent_.chat.add(f.tr2);
-    app4.sendChatMessage("q", TuiChatMessageType_User); // today's live query echo
-    ProcessResult result4;
-    result4.chat = [
-        Chat.MessageT(f.a3), Chat.MessageT(f.tm), Chat.MessageT(f.tr),
-        Chat.MessageT(f.tr2), Chat.MessageT(f.orphan)
-    ];
-    app4.processResult(result4);
-    app4.sendChatMessage("assistant: Compressing... 1/2 : x", TuiChatMessageType_Assistant);
-
-    // The blocked sink's rendering rules over the recording: chatMessage and
-    // finalAnswer print the payload; chatThinkMessage prints
-    // "Thinking: <thinking>" first (unless the thinking is empty) and then
-    // the message.
-    string[] expected;
-    foreach (c; sink4.calls) {
-        if (c.kind == "chatMessage" || c.kind == "finalAnswer")
-            expected ~= c.payload;
-        else if (c.kind == "chatThinkMessage") {
-            const marker = "\n[thinking] ";
-            const idx = c.payload.indexOf(marker);
-            const thinking = c.payload[idx + marker.length .. $];
-            if (!thinking.empty)
-                expected ~= "Thinking: " ~ thinking;
-            expected ~= c.payload[0 .. idx];
-        }
-    }
-
-    // 2. The typed reproduction: the same content through the typed
-    // emitters, recorded, then replayed through the console formatter.
-    auto tmpDir5 = testArea("app_agent_console_v5");
-    scope (exit)
-        tmpDir5.cleanup;
-    TuiRecordingSink sink5;
-    auto app5 = typedTestApp(new SessionStore(buildPath(tmpDir5, "chat").Path), tmpDir5, sink5);
-
-    app5.agent_.chat.add(f.q);
-    app5.emitTurnStartTyped("q");
-    auto updater = cast(TypedStreamMessageUpdater) app5.makeTypedStreamCallback();
+    app.agent_.chat.add(f.q);
+    app.emitTurnStartTyped("q");
+    auto updater = cast(TypedStreamMessageUpdater) app.makeTypedStreamCallback();
     ServerStat stat;
     updater.messageUpdate(StreamMessage("assistant", "C", "T"), [
         StreamToolCall(toolName: "grep_files", arguments: `{"pattern": "x"}`, id: "c1")
     ], stat);
     updater.messageUpdate(StreamMessage("assistant", "C0", "T0"), [], stat);
     updater.streamMessageDone();
-    ProcessResult result5;
-    result5.chat = [
+    ProcessResult result;
+    result.chat = [
         Chat.MessageT(f.a3), Chat.MessageT(f.tm), Chat.MessageT(f.tr),
         Chat.MessageT(f.tr2), Chat.MessageT(f.orphan)
     ];
-    app5.emitStepTyped(result5);
-    app5.emitNoticeTyped("assistant: Compressing... 1/2 : x");
+    app.emitStepTyped(result);
+    app.emitNoticeTyped("assistant: Compressing... 1/2 : x");
 
     auto fmt = new ConsoleFormatter();
     string[] got;
-    got ~= fmt.onTurnUpsert(sink5.turnUpserts[0]);
-    foreach (b; sink5.blockUpserts)
+    got ~= fmt.onTurnUpsert(sink.turnUpserts[0]);
+    foreach (b; sink.blockUpserts)
         got ~= fmt.onBlockUpsert(b);
-    foreach (t; sink5.turnUpserts[1 .. $])
+    foreach (t; sink.turnUpserts[1 .. $])
         got ~= fmt.onTurnUpsert(t);
 
+    // Today's console lines for this content (task 4's golden, hand-pinned).
+    string[] expected = [
+        "q", "Thinking: T0", "assistant: C0", "Thinking: T1",
+        `tool call: grep_files(pattern="x")` ~ "\nwrite_file()",
+        "The answer is 4.", "tool result ✅: grep_files ok-1",
+        "tool result ❌: write_file bad-2", "assistant: Compressing... 1/2 : x",
+    ];
+
     assert(got == expected,
-            "typed console output must match today's\nv4: " ~ expected.join(
+            "typed console output must match today's\ntoday: " ~ expected.join(
                 "\n") ~ "\nv5: " ~ got.join("\n"));
     assert(got.length == 9, "echo, thinking+content, thinking+call+answer+2 results, notice");
     assert(got[0] == "q", "the live echo is the raw text, no prefix");

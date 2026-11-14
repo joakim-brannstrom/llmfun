@@ -376,7 +376,7 @@ target_link_libraries(test_clear_output_state PRIVATE
 # text/background pair the thread draws reaches 4.5:1 in both profiles, no ImGui
 # colour slot carries a role colour, and the canvas/surface pair stays neutral.
 # Links llmfun_tui_all_lib so the binary sees the real applyTheme() and the real
-# ChatMessageStyle defaults; runs headless (no ncurses, no PTY, no display):
+# token table; runs headless (no ncurses, no PTY, no display):
 #   ./test_theme_contrast [-v]
 add_executable(test_theme_contrast
     test_theme_contrast.cpp

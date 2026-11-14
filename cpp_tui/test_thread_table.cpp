@@ -39,6 +39,8 @@
 
 #include "tui.h" // llmfun::tui: TuiState, tuiRender, the markdown text-mode lifecycle
 
+#include "test/typed_seed.h" // typed turn/block seeding (the v4 message path is gone)
+
 #include "model/block.h"
 #include "model/ui_state.h"
 #include "store/thread_store.h"
@@ -246,26 +248,27 @@ void harnessShutdown(tui::TuiState& state) {
     ImGui::DestroyContext();
 }
 
-/// A fresh thread with one message on a 100x30 grid.
-void setup(tui::TuiState& state, const char* body,
-           tui::ChatMessageType type = tui::ChatMessageType::FinalAnswer) {
+/// A fresh thread with one block on a 100x30 grid: the typed turn's answer row
+/// (or, for `tool`, a lone tool card — the transcript row a merged card draws).
+void setup(tui::TuiState& state, const char* body, bool tool = false) {
     tui::tuiClearOutput(state);
     ImGui::GetIO().DisplaySize = ImVec2(100.0f, 30.0f);
-    tui::ChatMessage m;
-    m.summary = "Answer";
-    m.text = body;
-    m.type = type;
-    // Monotonic id exactly like the C API: the render-group cache is keyed by message ids with
-    // a (0, 0) sentinel, so an id-0 message would be "unchanged" and never grouped.
-    m.id = state.chat.outputLineNextId++;
-    tui::tuiAddOutputLine(state, m);
+    typed_seed::Seeder seed{&state};
+    if (tool) {
+        seed.upsertTurn(1, TuiTurnState_Done, 1);
+        seed.upsertBlock(1, "tool#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, "", body,
+                         "Tool");
+    } else {
+        seed.add(typed_seed::Seeder::Msg::FinalAnswer, body);
+    }
 }
 
-/// The block the one message of `setup()` is drawn as (its stable `BlockId`), so the `s` case
-/// can name the focus the way a click would instead of guessing ids.
+/// The block the one seeded row is drawn as (its stable `BlockId`), so the `s` case
+/// can name the focus the way a click would instead of guessing ids. The typed
+/// group's block 0 is its own WORK header; the content row is block 1.
 model::BlockId firstBlock(tui::TuiState& state) {
     const store::GroupView group = state.threadAdapter.groupAt(0);
-    const model::BlockDesc block = state.threadAdapter.blockAt(0, 0);
+    const model::BlockDesc block = state.threadAdapter.blockAt(0, 1);
     model::BlockId id = block.id();
     if (!id.valid())
         id.group = group.id;
@@ -578,7 +581,11 @@ void checkSourceToggleDeclines() {
     {
         tui::TuiState state;
         state.iniFilename = "";
-        setup(state, kTableBody, tui::ChatMessageType::ToolCall);
+        setup(state, kTableBody, true);
+        // Minimal mode folds a work group's rows behind its header (design §6):
+        // the transcript only draws once the group is open, so this case opens it
+        // the way a click on the header would.
+        state.threadAdapter.setBlockExpanded(0, 0, true);
         Grid grid;
         for (int i = 0; i < 2; ++i)
             grid = frame(state);
@@ -587,9 +594,10 @@ void checkSourceToggleDeclines() {
         check(grid.countCell(kTopLeft) == 0, "a tool transcript is not bridged into a grid");
         check(grid.contains("| Tool | Calls | Time |"), "the transcript is drawn verbatim");
 
-        // The tool row is the work group's second block (block 0 is the group's header).
+        // The tool row is the work group's second block (block 0 is the group's header,
+        // and the seeded tool card is the only content row).
         const model::BlockId id = blockIdAt(state, 0, 1);
-        check(id.valid() && id.kind == model::BlockKind::ToolCall,
+        check(id.valid() && id.kind == model::BlockKind::ToolStep,
               "premise: the focused block is the tool row");
         state.ui.thread.focus = id;
         check(!state.threadAdapter.blockHasTable(0, 1),
@@ -626,7 +634,7 @@ void checkSourceToggleDeclines() {
             std::printf("--- indented table ---\n%s", grid.dump().c_str());
         check(grid.countCell(kTopLeft) == 0, "an indented table stays an indented code block");
         check(grid.contains("| read_file | 3 |"), "and its lines are drawn verbatim");
-        check(!state.threadAdapter.blockHasTable(0, 0),
+        check(!state.threadAdapter.blockHasTable(0, 1),
               "`s` has nothing to offer on an indented code block either");
     }
 }
@@ -661,7 +669,7 @@ void checkNestedTable() {
     const model::BlockId id = firstBlock(state);
     check(id.valid(), "the nested table drew a block to focus");
     state.ui.thread.focus = id;
-    check(state.threadAdapter.blockHasTable(0, 0), "`s` is offered on the nested table");
+    check(state.threadAdapter.blockHasTable(0, 1), "`s` is offered on the nested table");
 
     // The composer holds the keyboard at startup: `Esc` is the chain's blur step.
     frame(state, [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Escape, true); });

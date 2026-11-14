@@ -9,12 +9,12 @@ import std.exception : ifThrown;
 import std.functional : toDelegate;
 import std.string : strip;
 
+import my.optional : hasValue, orElse;
+
 import llm.app_agent; // AgentApp (cyclic package import, same pattern as slash.d)
 import llm.app_agent.slash;
 import llm.session : SessionId, resolveSessionRef;
 import llm.types : ServerStat;
-import llmfun_tui; // TuiChatMessageType_* (C binding)
-import my.optional : hasValue, orElse;
 
 /// Result of deciding a `/delete` command against the pending confirmation
 /// state. Package-visible: the dispatcher-level pending-delete rule and the
@@ -82,13 +82,11 @@ private AgentStatus switchHandler(ref AgentApp app, string arg) {
     auto stripped = arg.strip;
     if (stripped.empty) {
         app.sendChatMessage(
-                "error: /switch requires an argument. Usage: /switch <index|id|title>. Use /sessions to list.",
-                TuiChatMessageType_Assistant);
+                "error: /switch requires an argument. Usage: /switch <index|id|title>. Use /sessions to list.");
     } else {
         auto sessions = app.sessionStore.list();
         if (sessions.empty) {
-            app.sendChatMessage("No sessions available. Use /new to create one.",
-                    TuiChatMessageType_Assistant);
+            app.sendChatMessage("No sessions available. Use /new to create one.");
         } else {
             auto resolved = resolveSessionRef(sessions, stripped);
             if (hasValue(resolved)) {
@@ -96,7 +94,7 @@ private AgentStatus switchHandler(ref AgentApp app, string arg) {
                 app.switchToSession(id);
             } else {
                 app.sendChatMessage("error: Unknown session '%s'. Use /sessions to list available sessions.",
-                        TuiChatMessageType_Assistant, stripped);
+                        stripped);
             }
         }
     }
@@ -108,8 +106,7 @@ private AgentStatus switchHandler(ref AgentApp app, string arg) {
 private AgentStatus renameHandler(ref AgentApp app, string arg) {
     auto stripped = arg.strip;
     if (stripped.empty) {
-        app.sendChatMessage("error: /rename requires a title argument. Usage: /rename <title>.",
-                TuiChatMessageType_Assistant);
+        app.sendChatMessage("error: /rename requires a title argument. Usage: /rename <title>.");
     } else {
         app.doRenameSession(stripped);
     }
@@ -122,8 +119,7 @@ private AgentStatus renameHandler(ref AgentApp app, string arg) {
 private AgentStatus deleteHandler(ref AgentApp app, string arg) {
     auto stripped = arg.strip;
     if (stripped.empty) {
-        app.sendChatMessage("error: /delete requires an index. Usage: /delete <n>.",
-                TuiChatMessageType_Assistant);
+        app.sendChatMessage("error: /delete requires an index. Usage: /delete <n>.");
         app.pendingDeleteId = SessionId.init;
         return AgentStatus.active;
     }
@@ -131,7 +127,7 @@ private AgentStatus deleteHandler(ref AgentApp app, string arg) {
     auto sessions = app.sessionStore.list();
     if (idx < 1 || idx > cast(long) sessions.length) {
         app.sendChatMessage("error: Unknown session index '%s'. Use /sessions to list available sessions.",
-                TuiChatMessageType_Assistant, stripped);
+                stripped);
         app.pendingDeleteId = SessionId.init;
         return AgentStatus.active;
     }
@@ -140,7 +136,6 @@ private AgentStatus deleteHandler(ref AgentApp app, string arg) {
     case PendingDeleteAction.ignore:
         app.pendingDeleteId = resolvedId;
         app.sendChatMessage("Confirm deletion of session '%s' (%s, %s msgs) by repeating /delete %s.",
-                TuiChatMessageType_Assistant,
                 app.shortSessionId(resolvedId), sessions[cast(size_t)(idx - 1)].title,
                 sessions[cast(size_t)(idx - 1)].messageCount, stripped);
         break;
@@ -150,8 +145,8 @@ private AgentStatus deleteHandler(ref AgentApp app, string arg) {
         break;
     case PendingDeleteAction.clear:
         app.pendingDeleteId = SessionId.init;
-        app.sendChatMessage("Deletion cancelled (different session). Repeat /delete <n> to start over.",
-                TuiChatMessageType_Assistant);
+        app.sendChatMessage(
+                "Deletion cancelled (different session). Repeat /delete <n> to start over.");
         break;
     }
     return AgentStatus.active;
@@ -162,14 +157,14 @@ private AgentStatus clearHandler(ref AgentApp app, string arg) {
     // Old /new behavior: explicit in-session wipe. Order matters:
     // clearHistory -> UI clear -> context reset -> pipelineClear -> save.
     app.agent_.clearHistory(); // keeps system prompt at history[0]
-    app.uiMsg.clearChat();
+    app.uiMsg.threadClear();
     app.lastServerStat = ServerStat(startContext: 0); // context resets to 0
     app.uiMsg.pipelineClear();
     // The wipe changed the chat: the commit below must actually write.
     app.chatDirty = true;
     app.commitActiveSession();
     app.sendChatMessage("Cleared chat history in session '%s'.",
-            TuiChatMessageType_Assistant, app.shortSessionId(app.activeSession.id));
+            app.shortSessionId(app.activeSession.id));
     return AgentStatus.active;
 }
 

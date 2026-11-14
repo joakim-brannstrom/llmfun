@@ -119,6 +119,15 @@ void applyLine(ShellPrefs& prefs, std::string_view line) {
         }
         return;
     }
+    if (key == "ThreadMode") {
+        // the two words are the constants' spelling (model/settings.h).
+        // An unknown word keeps the current value, like every other key.
+        if (equalsWord(value, kThreadModeMinimal))
+            prefs.threadMinimal = true;
+        else if (equalsWord(value, kThreadModeMaximal))
+            prefs.threadMinimal = false;
+        return;
+    }
     if (key == "RailOpen" || key == "InspectorOpen") {
         int resolved = kAutoOpen;
         if (equalsWord(value, "auto")) {
@@ -542,6 +551,9 @@ std::string uiConfText(const ShellPrefs& prefs) {
     text += "Version=" + std::to_string(kUiConfVersion) + "\n";
     text += "SendKey=" + std::string(sendKeyWord(prefs.sendKey)) + "\n";
     text += "UiLog=" + std::string(uiLogWord(prefs.rawLog)) + "\n";
+    text +=
+        "ThreadMode=" + std::string(prefs.threadMinimal ? kThreadModeMinimal : kThreadModeMaximal) +
+        "\n";
     text += "RailOpen=" + std::string(triStateWord(prefs.railOpen)) + "\n";
     text += "InspectorOpen=" + std::string(triStateWord(prefs.inspectorOpen)) + "\n";
     text += "InspectorTab=" + std::string(inspectorTabWord(prefs.tab)) + "\n";

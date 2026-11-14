@@ -30,6 +30,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace llmfun::tui::model {
@@ -65,9 +66,6 @@ enum class BlockState {
     Cancelled,
 };
 
-/// The streaming message's reserved key. The stream is not in the message store;
-/// its blocks live in the stream group, and this is their key within that group.
-inline constexpr std::size_t kStreamMessageId = 0;
 /// The stable identity of one block: the group that owns it, the adapter's key
 /// within that group, and the kind (a message can yield a thinking row and a body
 /// row). Never a position: inserting a row in front of a block or changing the
@@ -121,6 +119,15 @@ struct BlockDesc {
     double timingS = 0.0;
     /// A work group's step count, 0 for every other kind.
     int steps = 0;
+    /// A thinking disclosure's meta: the count of the batch's
+    /// tool cards - `Thinking · N tool calls`. 0 = tool-less batch, and the
+    /// disclosure carries no count at all.
+    int batchTools = 0;
+    /// A tool card's token counters: the call's cost as the result
+    /// reported it. Each renders only when non-zero - an absent field is
+    /// honest, a `0` is noise.
+    std::int64_t tokensIn = 0;
+    std::int64_t tokensOut = 0;
     /// Whether the row offers a disclosure, and whether its body is showing now.
     bool expandable = false;
     bool expanded = true;

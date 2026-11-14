@@ -39,6 +39,7 @@ using ui::ColorToken;
 constexpr const char* kIdFontScale = kSettingsRowFontScale;
 constexpr const char* kIdSendKey = kSettingsRowSendKey;
 constexpr const char* kIdRawLog = kSettingsRowRawLog;
+constexpr const char* kIdThreadMode = kSettingsRowThreadMode;
 constexpr const char* kIdBackend = kSettingsRowBackend;
 constexpr const char* kIdUiConf = kSettingsRowUiConf;
 constexpr const char* kIdLogLevel = kSettingsRowLogLevel;
@@ -218,6 +219,21 @@ std::vector<SettingsRow> allRows(const SettingsState& state, const model::ShellP
         row.value =
             model::uiLogWord(std::clamp(prefs.rawLog, model::kRawLogTrace, model::kRawLogError));
         row.note = "what the Raw Log shows when it is opened (info = what a normal run logs)";
+        row.kind = SettingsRowKind::Choice;
+        row.enabled = true;
+        rows.push_back(std::move(row));
+    }
+    {
+        // The thread's render mode (task 8): the same words `uiConfText()`
+        // writes, so the sheet's value and the file's line cannot disagree.
+        SettingsRow row;
+        row.id = kIdThreadMode;
+        row.section = kSettingsSectionBehaviour;
+        row.label = "Thread mode";
+        row.value =
+            model::threadMinimal(prefs) ? model::kThreadModeMinimal : model::kThreadModeMaximal;
+        row.note = "how a run's work draws: minimal folds each batch behind its "
+                   "header; maximal draws every step";
         row.kind = SettingsRowKind::Choice;
         row.enabled = true;
         rows.push_back(std::move(row));
@@ -523,6 +539,10 @@ void activate(SettingsState& state, model::ShellPrefs& prefs, const ui::Metrics&
                 break;
             }
         }
+        return;
+    }
+    if (std::strcmp(row.id, kIdThreadMode) == 0) {
+        model::setThreadMinimal(prefs, !model::threadMinimal(prefs));
         return;
     }
     if (std::strcmp(row.id, kIdCopyInfo) == 0) {

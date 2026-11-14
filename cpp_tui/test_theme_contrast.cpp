@@ -16,8 +16,9 @@
 //   2. no role fill  no ImGui colour slot carries a role colour - neither a
 //                    bit-exact copy nor a same-hue derivative (other alpha or
 //                    brightness), which is how the deleted `*Bg` fills were
-//                    built. Both role sources are the oracle: the six label
-//                    colours the thread still draws and the palette's four token
+//                    built. Both role sources are the oracle: the role tokens
+//                    the thread draws through (`views/blocks.cpp`'s `blockInk`)
+//                    and the palette's four token
 //                    roles. `role.system` shares its hue corridor with the ink
 //                    family by construction; that one carve-out is recorded and
 //                    measured at `kThreadFills`;
@@ -189,12 +190,13 @@ void checkContrast(const std::vector<Pair>& pairs, ImVec4 under, bool grid) {
     }
 }
 
-/// One role foreground, plus whether the same-hue scan applies to it. Both role
-/// sources are live: the thread's labels still come from `ChatMessageStyle`, and
-/// the palette's four roles are what the rest of the UI draws - a fill has to be
-/// clear of either. The token rows carry the *design* RGB, because at the coarse
-/// depths both a fill and `role.system` are flattened to pure greys, where a hue
-/// comparison has nothing left to measure.
+/// One role foreground, plus whether the same-hue scan applies to it. The
+/// thread's role inks are the token table's (`views/blocks.cpp` `blockInk()`
+/// maps a block kind onto `ui::ColorToken`), and the palette's four roles are
+/// what the rest of the UI draws - a fill has to be clear of any of them. The
+/// token rows carry the *design* RGB, because at the coarse depths both a fill
+/// and `role.system` are flattened to pure greys, where a hue comparison has
+/// nothing left to measure.
 struct Role {
     const char* name;
     ImVec4 colour;
@@ -204,25 +206,21 @@ struct Role {
     bool hueScan = true;
 };
 
-/// Every role foreground the header can draw, in one table: the labels, the
+/// Every role foreground the thread can draw, in one table: the labels, the
 /// times and the collapsed previews all use the same role colour, and so does
-/// the rule (a non-text boundary, measured at the same ratio).
-std::vector<Role> roleColors(const llmfun::tui::ChatMessageStyle& s) {
+/// the rule (a non-text boundary, measured at the same ratio). The typed store's
+/// block inks are token colours (`views/blocks.cpp`), so the answer and the
+/// agent prose share `role.agent` and a tool response shares `role.tool`.
+std::vector<Role> roleColors() {
     const llmfun::tui::ui::TokenTable& table = llmfun::tui::ui::tokens();
     const auto fromTable = [&table](llmfun::tui::ui::ColorToken token) {
         return table.rgb[static_cast<int>(token)];
     };
     return {
-        {"role YOU", s.userFg},
-        {"role AGENT", s.assistantFg},
-        {"role TOOL call", s.toolCallFg},
-        {"role TOOL response", s.toolResponseFg},
-        {"role SYSTEM", s.systemFg},
-        {"role ANSWER", s.finalAnswerFg},
-        {"token role.you", fromTable(llmfun::tui::ui::ColorToken::roleYou)},
-        {"token role.agent", fromTable(llmfun::tui::ui::ColorToken::roleAgent)},
-        {"token role.tool", fromTable(llmfun::tui::ui::ColorToken::roleTool)},
-        {"token role.system", fromTable(llmfun::tui::ui::ColorToken::roleSystem),
+        {"role YOU", fromTable(llmfun::tui::ui::ColorToken::roleYou)},
+        {"role AGENT", fromTable(llmfun::tui::ui::ColorToken::roleAgent)},
+        {"role TOOL", fromTable(llmfun::tui::ui::ColorToken::roleTool)},
+        {"role SYSTEM", fromTable(llmfun::tui::ui::ColorToken::roleSystem),
          /*hueScan=*/false},
     };
 }
@@ -346,7 +344,7 @@ void checkThreadFills() {
     }
 }
 
-void runProfile(const char* profile, bool grid, const llmfun::tui::ChatMessageStyle& style) {
+void runProfile(const char* profile, bool grid) {
     if (g_verbose)
         std::fprintf(stderr, "profile %s\n", profile);
 
@@ -357,7 +355,7 @@ void runProfile(const char* profile, bool grid, const llmfun::tui::ChatMessageSt
     const ImVec4 headerHovered = styleColor(ImGuiCol_HeaderHovered);
     const ImVec4 headerActive = styleColor(ImGuiCol_HeaderActive);
 
-    const std::vector<Role> roles = roleColors(style);
+    const std::vector<Role> roles = roleColors();
 
     // 1. Contrast -------------------------------------------------------------
     std::vector<Pair> pairs;
@@ -375,12 +373,11 @@ void runProfile(const char* profile, bool grid, const llmfun::tui::ChatMessageSt
     pairs.push_back({"action label", text, styleColor(ImGuiCol_Button)});
     pairs.push_back({"action label (hovered)", text, styleColor(ImGuiCol_ButtonHovered)});
     pairs.push_back({"action label (active)", text, styleColor(ImGuiCol_ButtonActive)});
-    // The framed disclosure headers (streamed message = role-coloured label,
-    // thinking node and log entries = body text) in all three paint states. A
-    // per-widget `Header` push used to leave Hovered/Active at the stock blue.
-    pairs.push_back({"stream header (rest)", style.assistantFg, header});
-    pairs.push_back({"stream header (hovered)", style.assistantFg, headerHovered});
-    pairs.push_back({"stream header (held)", style.assistantFg, headerActive});
+    // The framed disclosure headers: the label the disclosure actually draws on
+    // the header fill is body text in all three paint states. A per-widget
+    // `Header` push used to leave Hovered/Active at the stock blue. The typed
+    // block's role label is drawn on the thread surface (no framed header), so
+    // the roles' surface pairs above already cover it.
     pairs.push_back({"disclosure label (rest)", text, header});
     pairs.push_back({"disclosure label (hovered)", text, headerHovered});
     pairs.push_back({"disclosure label (held)", text, headerActive});
@@ -457,7 +454,6 @@ int main(int argc, char** argv) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
-    const llmfun::tui::ChatMessageStyle style;
     for (int profile = 0; profile < 2; ++profile) {
         // The flag is what tuiIsTextGrid() reads and what the text backend sets
         // in ImTui_ImplText_Init(); the theme is applied after the backend init
@@ -470,7 +466,7 @@ int main(int argc, char** argv) {
         llmfun::tui::ui::applyTheme(llmfun::tui::ui::ThemeId::Graphite,
                                     profile == 1 ? llmfun::tui::ui::ColorDepth::Ansi256
                                                  : llmfun::tui::ui::ColorDepth::TrueColor);
-        runProfile(profile == 1 ? "text grid" : "pixel", profile == 1, style);
+        runProfile(profile == 1 ? "text grid" : "pixel", profile == 1);
     }
     ImTui_TextEncodingActive = false;
 

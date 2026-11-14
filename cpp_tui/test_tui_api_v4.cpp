@@ -1066,15 +1066,15 @@ void casePipelineLaneFields() {
     // A second tick exercises the update path (the first one registered the lane).
     tuiPipelineAgentUpdate(state, makeStr("coder"), msg);
 
-    // The v4 store keeps the snapshot in the agent's own ChatTab stream slot.
-    expect(state->inner->left.agents.size() == 1, "the v4 store registers the agent once");
-    expect(state->inner->left.agents[0].chat.hasStreamMsg,
-           "the streamed tick fills the agent's stream slot");
-    expect(state->inner->left.agents[0].chat.streamMsg.text == content,
-           "...and the agent's stream text, unchanged");
-    expect(state->inner->left.agents[0].chat.streamMsg.id ==
-               llmfun::tui::ChatTab::StreamChatMessageId,
-           "the stream slot keeps the reserved stream id");
+    // The typed store keeps the tick in the agent's own run turn: the
+    // content-so-far block merges in place (same id every tick), so the newest
+    // tick wins - the typed stream updater's contract, mirrored for the
+    // coarser pipeline payload.
+    expect(state->inner->left.agents.size() == 1, "the typed store registers the agent once");
+    const auto& agentChat = state->inner->left.agents[0].chat;
+    expect(agentChat.typedTurns.turnCount() == 1, "the streamed tick opens the agent's run turn");
+    expect(agentChat.typedTurns.blockCount(agentChat.typedTurns.turnAt(0).id) >= 1,
+           "the streamed tick fills the agent's content block");
 
     // ... and the lane the Agents tab draws carries the count and the tool name as fields. The
     // lane is re-fetched for every assertion: a reference into the vector would dangle - turning a
@@ -1136,14 +1136,13 @@ void casePipelineLaneFields() {
                lane().currentTool == "write_file",
            "tuiPipelineAgentDone keeps the lane's last numbers");
 
-    // The per-step commit: the streaming entry folds into the store and the
-    // slot resets, so the next step's first snapshot starts fresh.
-    expect(state->inner->left.agents[0].chat.outputLines.size() == 1,
-           "Done folds the streaming entry into the store");
-    expect(state->inner->left.agents[0].chat.outputLines.front().text == plainContent,
-           "the folded row carries the last streamed text");
-    expect(!state->inner->left.agents[0].chat.hasStreamMsg,
-           "...and the stream slot is reset for the next step");
+    // The run's close: the typed turn closes Done (no longer live), so the
+    // next step's first upsert opens a fresh turn.
+    expect(state->inner->left.agents[0].chat.typedTurns.turnCount() == 1,
+           "Done keeps the run's single turn in the agent's typed store");
+    expect(state->inner->left.agents[0].chat.typedTurns.turnAt(0).state ==
+               static_cast<std::int32_t>(TuiTurnState_Done),
+           "Done closes the run turn as Done, not live");
 
     tuiDestroyState(state);
 }
@@ -1214,112 +1213,6 @@ void caseThreadTurnBlockFields() {
     expect(true, "v5 turn/block layout pinned (the static asserts are the case)");
 }
 
-// The agent store's tool rows: a call (and its result) appends a tool row to the
-// agent's own ChatTab - before any lane exists, under the 10-row cap, with ids minted from
-// the tab's own counter - and the streaming slot is never touched on the tool paths.
-void caseAgentToolEvents() {
-    g_where = "case: agent store tool events";
-
-    // NULL-safe: no crash, and an empty agent id registers nothing.
-    tuiPipelineAgentToolCall(nullptr, makeStr("x"), TuiToolCallParam{});
-    tuiPipelineAgentToolResult(nullptr, makeStr("x"), TuiToolResultParam{});
-    TuiState* state = tuiCreateState();
-    expect(state != nullptr, "tuiCreateState succeeds");
-    tuiPipelineAgentToolCall(state, String{nullptr, 0}, TuiToolCallParam{});
-    expect(state->inner->left.agents.empty(), "an empty agent id registers no store entry");
-
-    // Upsert-before-lane: a tool event may arrive before the first streamed tick. The
-    // store entry exists on demand; the lane mirror stays untouched (lanes are born
-    // only in mirrorLaneUpdate).
-    TuiToolCallParam call{};
-    call.name = makeStr("read_file");
-    call.arguments = makeStr("{\"path\":\"src/main.d\"}");
-    call.id = makeStr("call-1");
-    tuiPipelineAgentToolCall(state, makeStr("coder"), call);
-    expect(state->inner->left.agents.size() == 1, "the first tool event creates the store entry");
-    expect(state->inner->ui.agents.empty(), "a tool event creates no lane");
-
-    const auto& store = state->inner->left.agents.front();
-    expect(store.agentId == "coder", "the store entry is named after the agent id");
-    expect(store.chat.outputLines.size() == 1, "one row per event");
-    expect(store.chat.outputLines.front().type == llmfun::tui::ChatMessageType::ToolCall,
-           "the call is a tool row");
-    expect(store.chat.outputLines.front().toolName == "read_file", "the tool name crosses");
-    expect(store.chat.outputLines.front().toolArgs == "{\"path\":\"src/main.d\"}",
-           "the arguments cross");
-    expect(store.chat.outputLines.front().id != 0, "the row has an id from the tab's counter");
-    expect(!store.chat.hasStreamMsg, "the tool path never touches the streaming slot");
-
-    // C-02 on the tool path: scribbling over the caller's buffer changes nothing.
-    std::string scribbled = "{\"path\":\"src/main.d\"}";
-    call.arguments = String{scribbled.data(), scribbled.size()};
-    TuiToolCallParam second = call;
-    tuiPipelineAgentToolCall(state, makeStr("coder"), second);
-    scribbled.assign(scribbled.size(), 'x');
-    expect(state->inner->left.agents.front().chat.outputLines.back().toolArgs ==
-               "{\"path\":\"src/main.d\"}",
-           "the arguments were copied during the call, not borrowed");
-    expect(state->inner->left.agents.front().chat.outputLines.size() == 2,
-           "a second event appends a second row");
-
-    // The result row follows the call, fields as sent.
-    TuiToolResultParam result{};
-    result.name = makeStr("read_file");
-    result.ok = 1;
-    result.text = makeStr("12 lines");
-    tuiPipelineAgentToolResult(state, makeStr("coder"), result);
-    expect(state->inner->left.agents.front().chat.outputLines.size() == 3,
-           "the result appends its own row");
-    const auto& last = state->inner->left.agents.front().chat.outputLines.back();
-    expect(last.type == llmfun::tui::ChatMessageType::ToolResponse, "the result is a tool row");
-    expect(last.toolName == "read_file" && last.toolResult == "12 lines" && last.toolOk,
-           "the result's fields cross (name, text, ok)");
-    expect(last.id > state->inner->left.agents.front().chat.outputLines.front().id,
-           "ids are monotonic across rows");
-
-    // The cap kAgentChatMaxMessages: ten rows kept, the oldest dropped. Two
-    // rows are in the list already, so the 9th of the burst drops the call row and the
-    // 12-event burst ends with the last ten rows only.
-    for (int i = 0; i < 12; ++i) {
-        TuiToolResultParam r{};
-        r.name = makeStr("note");
-        r.ok = 0;
-        std::string text = "row " + std::to_string(i);
-        r.text = String{text.data(), text.size()};
-        tuiPipelineAgentToolResult(state, makeStr("coder"), r);
-    }
-    expect(state->inner->left.agents.front().chat.outputLines.size() ==
-               llmfun::tui::kAgentChatMaxMessages,
-           "the store holds at most kAgentChatMaxMessages rows");
-    expect(state->inner->left.agents.front().chat.outputLines.front().toolResult == "row 2",
-           "the oldest rows are the ones dropped");
-    expect(state->inner->left.agents.front().chat.outputLines.back().toolResult == "row 11",
-           "the newest row survives");
-
-    // LRU eviction of a focused agent drops the focus with it (the drill-down must not
-    // show a transcript the store does not have).
-    state->inner->ui.focusedAgent = "coder";
-    PipelineChatMessage msg{};
-    const std::string text = "tick";
-    msg.content = String{text.data(), text.size()};
-    for (int i = 0; i < 16; ++i) {
-        std::string id = "a" + std::to_string(i);
-        msg.role = String{id.data(), id.size()};
-        tuiPipelineAgentUpdate(state, String{id.data(), id.size()}, msg);
-    }
-    expect(state->inner->left.agents.size() == state->inner->left.MaxAgents,
-           "the store stays at capacity");
-    expect(state->inner->ui.focusedAgent.empty(),
-           "an evicted agent takes its transcript with it (the focus is dropped)");
-
-    // Clear forgets the stores and the focus.
-    state->inner->ui.focusedAgent = "a15";
-    tuiPipelineClear(state);
-    expect(state->inner->left.agents.empty() && state->inner->ui.focusedAgent.empty(),
-           "tuiPipelineClear empties the stores and the focus");
-
-    tuiDestroyState(state);
-}
 // The structured log records (task 32, v5): the fields D sends arrive unchanged, a record
 // with no clock is stamped at arrival, the two-string compatibility wrapper maps onto the
 // same store, and the ring is the single bounded store with a dropped counter.
@@ -1770,7 +1663,6 @@ int main(int argc, char** argv) {
     caseSessionRowFields();
     casePipelineLaneFields();
     caseThreadTurnBlockFields();
-    caseAgentToolEvents();
     caseQueryHistory();
     caseCancelFlag();
     caseRuntimeStatus();

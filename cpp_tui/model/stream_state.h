@@ -1,8 +1,8 @@
 /// The live answer's clock and cancel mark.
 ///
 /// Streaming is the one part of the thread that changes while nobody presses anything, so
-/// it needs three facts the message store cannot answer, and they live here together
-/// because they are all readings of one clock:
+/// it needs two facts the store cannot answer, and they live here together
+/// because they are both readings of one clock:
 ///
 ///   * when the answer started (`startedMs`) and how long it has run (`elapsedMs`, frozen
 ///     where the user stopped it) - the clock feeds the top bar and the now bar; the live
@@ -16,29 +16,13 @@
 /// Plain data and free functions, clock-injected: `refreshStreamClock()` is the one writer
 /// and it takes `nowMs`, so `./test_streaming` pins the whole arithmetic with a fake clock
 /// while the frame layer calls it once per frame with its own reading. Nothing here knows
-/// a message, a v4 type or a view - `model/` is a value layer, so the adapter and a view
+/// a store type or a view - `model/` is a value layer, so the adapter and a view
 /// may both read it.
-///
-/// The three counters (`applied`, `coalesced`, `unchanged`) are the *store's* observations
-/// of the update throttle (`tuiUpdateStreamChatMessage`): how many snapshots reached the
-/// store, how many were parked because the window had not elapsed, and how many were
-/// byte-identical to the text already in the store and therefore cost no repaint at all.
-/// Like the adapter's `groupBuilds()`, they exist so a test can prove the throttle instead
-/// of trusting it.
-///
-/// `applied` counts *writes*, not offers: a parked snapshot its frame flushed and the stop's
-/// final write are counted there too, so the three do not partition the offers once a frame (or
-/// a stop) has run - and a check that adds them up only holds inside one window.
 #pragma once
 
 #include <cstdint>
 
 namespace llmfun::tui::model {
-
-/// The stream update window: one snapshot per 33 ms is ~30 fps, and a faster sender is
-/// coalesced rather than dropped (`tuiUpdateStreamChatMessage` parks the newest snapshot and the
-/// frame after the window applies it, so the last text is never lost).
-inline constexpr std::int64_t kStreamUpdateIntervalMs = 33;
 
 /// The word the live answer's row prints when the user stopped the run.
 ///
@@ -62,8 +46,6 @@ struct StreamState {
     /// (an NTP step can move it back), and an elapsed time that shrinks is exactly what a
     /// clock must never print. A frame "before" the last one is read as the same moment.
     std::int64_t lastSeenMs = 0;
-    /// The update window's start: when the store last accepted a snapshot.
-    std::int64_t lastAppliedMs = 0;
     /// The answer's text has begun arriving - the fact that ends the reasoning.
     bool sawText = false;
 
@@ -74,17 +56,12 @@ struct StreamState {
     std::int64_t thinkingElapsedMs = 0;
     bool cancelled = false;
 
-    // Observations (the store's throttle).
-    std::uint64_t applied = 0;
-    std::uint64_t coalesced = 0;
-    std::uint64_t unchanged = 0;
-
     /// Whether a stream has been seen at all (the clock is meaningful).
     bool active() const { return startedMs != 0; }
 };
 
-/// Forget everything: `tuiStreamChatMessageClear`, `tuiClearOutput` and a session switch
-/// come through here (the adapter's `clearStream()`/`reset()`), so the next stream starts
+/// Forget everything: `tuiClearOutput` and a session switch come through here
+/// (the adapter's `reset()`), so the next stream starts
 /// its own clock, uncancelled.
 void resetStreamClock(StreamState& stream);
 

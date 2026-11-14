@@ -1,36 +1,33 @@
-/// The v4 thread store, behind a narrow adapter.
+/// The typed thread store, behind a narrow adapter.
 ///
-/// The v4 payload (`ChatMessage`, `ChatMessageType`, `RenderGroup`) lives in `tui.h`; this
-/// module is the only code that reads it, and `views/` sees `GroupView` and
+/// The typed payload (`TypedTurn`/`TypedBlock`) lives in `typed_thread_store.h`; this
+/// module is the only code that projects it, and `views/` sees `GroupView` and
 /// `model::BlockDesc` instead. That is what lets the thread be *mounted* in the workbench
-/// layout (task 18) without a view naming a v4 type, and what keeps a restyle (tasks 25/26)
-/// a view change while the store keeps working.
+/// layout (task 18) without a view naming a store type, and what keeps a restyle
+/// (tasks 25/26) a view change while the store keeps working.
 ///
-/// What this header may not name: `ChatMessage`, `ChatMessageType`,
-/// `RenderGroup`, `TuiState`'s layout. The aggregate is forward-declared and only
+/// What this header may not name: `TypedThreadStore`'s map internals,
+/// `TuiState`'s layout. The aggregate is forward-declared and only
 /// the implementation sees it, so a view can include this header with no `tui.h`
 /// and no `cpp_tui` include directory.
 ///
-/// Group identity (D-GROUPID, P-Δ4): the adapter assigns its own monotonic id
-/// when a group first appears - never `ChatMessage::id`, never reused within a
-/// session, reset only by `reset()` (clear / session switch). Expansion is one
-/// store, not two: `expanded()/setExpanded()` are the seam a restyled header uses
-/// (task 26), and they read and write the very sets the store keeps
-/// (`ChatTab::outputLineOpen` for a message, `ChatTab::openWorkGroups` for a work
-/// group, both keyed by the group's first message id), so the block model and the
-/// store cannot disagree. That first-appearance moment is also where the
-/// group's one-shot default expansion is applied (`sync()`), so the default is a
-/// property of the group rather than of the frame that drew it - a group revealed
-/// by `Load earlier` looks the way it did when it was new. `commitSeen()` is the
-/// other half: it is what makes a toggle *stick* on a frame that renders only a
-/// window of the thread.
+/// Group identity (D-GROUPID, P-Δ4): the adapter's group id IS the persisted
+/// turn id - never renumbered within a session, reset only by `reset()`
+/// (clear / session switch). Expansion is one store, not two:
+/// `expanded()/setExpanded()` are the seam a restyled header uses (task 26),
+/// and they read and write the very sets the store keeps (`ChatTab::openWorkGroups`
+/// for a work group's fold, keyed by the turn id), so the block model and the
+/// store cannot disagree. A turn is born folded: there is no one-shot default
+/// expansion to seed, and `commitSeen()` is the view's once-per-frame shape
+/// (a deliberate no-op kept so a frame's render contract does not change with
+/// what the fold happens to store).
 ///
 /// Rendering: the workbench draws a group as a list of *blocks* (design
 /// §4.5, task 26). `beginGroup(k, cell)` opens one group's draw in the current
 /// window's flow - the block id scope, the expansion sample and the top row the
 /// height hint is measured from - `blockCount()/blockAt()` describe the rows,
 /// `views::renderBlock()` draws each row's chrome, `renderBlockBody()` draws the
-/// body underneath it (this is the only code that knows how a message body is
+/// body underneath it (this is the only code that knows how a block body is
 /// rendered), and `endGroup(k, cell)` closes the group, latches the toggle and stores
 /// the height it used. `cell` is the box the caller reserved, with `cell.w` as the
 /// content width and `cell.h` the height hint from `measureHint()`.
@@ -57,11 +54,6 @@
 // *this* file first, so it works with and without that path.
 #include "../model/block.h"
 
-// `ui::FenceScanState` travels by value in the streaming cache below. Relative
-// like its neighbour above, and resolved relative to this file first, so it
-// works with and without the `cpp_tui/` include path.
-#include "../ui/markdown.h"
-
 #include "typed_thread_store.h"
 
 namespace llmfun::tui::model {
@@ -80,35 +72,42 @@ struct Rect;
 namespace llmfun::tui::store {
 
 /// What a group is, in the three shapes the thread draws (design §4.4). Not
-/// `llmfun::tui::GroupKind`: that one is the v4 renderer's own enum and stays
-/// behind this header, so a rename of the v4 type cannot reach a view.
+/// `llmfun::tui::GroupKind`: that one is the renderer's own enum and stays
+/// behind this header, so a rename of the renderer type cannot reach a view.
 enum class GroupKind { UserQuery, FinalAnswer, AssistantWork };
+
+/// One group's session-local override of the minimal/maximal mode (design §6,
+/// task 8): a click on one group's header pins THAT group against the mode -
+/// `ForceOpen` draws it maximal-style in minimal mode, `ForceClosed` folds it in
+/// maximal mode. Keyed by the group's persisted turn id (`GroupView::id`), so
+/// an upsert or a rebuild never orphans one; the entry-point layer clears the
+/// map on a session switch and a clear, and a turn's entry dies with the turn.
+enum class GroupOverride { ForceOpen, ForceClosed };
 
 /// One group of the thread, as a view sees it.
 ///
-/// `id` is the adapter's monotonic group id (never reused). `revision` is the
-/// stream update counter for the streaming group and 0 for every other group, so
-/// a consumer can tell "this group changed" from "this group is the same" without
-/// comparing text. `oneLineSummary` is what a collapsed group says in one line,
-/// and `lineCountEstimate` is a *rough* line count (the height hint before the
-/// group was drawn once).
+/// `id` is the group's id - the persisted turn id (never reused). `revision` is
+/// the per-turn change counter bumped when a rebuild observes the turn's blocks
+/// change, so a consumer can tell "this group changed" from "this group is the
+/// same" without comparing text. `oneLineSummary` is what a collapsed group says
+/// in one line, and `lineCountEstimate` is a *rough* line count (the height hint
+/// before the group was drawn once).
+///
+/// `typedTurn` marks a group that projects a typed turn: the minimal
+/// projection folds its work rows behind the header and draws only the turn's
+/// content (D-GROUPID). `ordinal` is that turn's 1-based number - the query row
+/// renders it once, on the row that opened the turn (D11).
 struct GroupView {
     size_t id = 0;
     GroupKind kind = GroupKind::AssistantWork;
     uint64_t revision = 0;
     std::string oneLineSummary;
     int lineCountEstimate = 1;
+    bool typedTurn = false;
+    int ordinal = 0;
 };
 
-/// The only v4-aware class the shell touches.
-///
-/// The two projection sources (task 2): `V4Messages` - today's live path, the
-/// message store of `tui.h` - and `TypedTurns`, the typed v5 store the wire
-/// upserts. Pre-cutover the selector exists so the typed path is test-driven
-/// only; the cutover (task 5) flips the live source and this header loses the
-/// selector and the v4 path. The two never mix: a `ChatTab` is one or the other,
-/// and `setSource()` drops every cache a source switch invalidates.
-enum class ProjectionSource { V4Messages, TypedTurns };
+/// The only store-aware class the shell touches.
 
 class ThreadStoreAdapter {
 public:
@@ -159,25 +158,13 @@ public:
     ThreadStoreAdapter& operator=(ThreadStoreAdapter&&) noexcept {
         groups_.clear();
         indexById_.clear();
-        idByStart_.clear();
-        source_ = ProjectionSource::V4Messages;
         typedRevision_.clear();
         typedFingerprints_.clear();
         typedRowOpen_.clear();
         typedSynced_ = false;
+        syncedTypedVersion_ = 0;
         chat_ = nullptr;
         thread_ = nullptr;
-        nextId_ = 1;
-        streamGroupId_ = 0;
-        streamRevision_ = 0;
-        streamFingerprint_ = 0;
-        synced_ = false;
-        syncedCount_ = 0;
-        syncedFront_ = 0;
-        syncedBack_ = 0;
-        syncedStream_ = 0;
-        streamTextFence_ = {};
-        streamThinkingFence_ = {};
         hintWidth_ = 0.0f;
         hintCompact_ = false;
         expandedGroup_ = 0;
@@ -193,18 +180,17 @@ public:
     /// frame layer's `bind()` makes it true again.
     bool bound() const { return chat_ != nullptr && thread_ != nullptr; }
 
-    void setSource(ProjectionSource source) {
-        if (source_ == source)
-            return;
-        source_ = source;
-        groups_.clear();
-        indexById_.clear();
-        idByStart_.clear();
-        typedRevision_.clear();
-        typedFingerprints_.clear();
-        typedSynced_ = false;
-    }
-    ProjectionSource source() const { return source_; }
+    /// Whether the thread draws in minimal mode (design §6): the tab's own flag
+    /// (`ChatTab::threadMinimalMode`, factory default minimal). Unbound, the
+    /// adapter answers minimal - every default the view draws is the folded one.
+    bool minimalMode() const;
+
+    /// The group's effective mode (design §6, task 8): its session-local
+    /// override first - a pinned group draws against the mode (`GroupOverride`,
+    /// `ChatTab::groupOverrides`, keyed by the persisted turn id) - then the
+    /// mode itself. Unbound, minimal (every default the view draws is the
+    /// folded one). Cheap: one map probe over the drawn window.
+    bool groupMinimal(size_t groupId) const;
 
     /// Groups in the thread, streaming message included as the last one. Cheap:
     /// the group list is rebuilt only when the store changed (append, eviction,
@@ -221,6 +207,11 @@ public:
     /// group is the *last* one while a stream runs, so this is also "index
     /// `storedGroupCount()` exists".
     bool hasStream() const;
+    /// Whether the live answer carries prose / reasoning *right now* - the two
+    /// facts the frame layer's clock derives its phases from (`hasText` ends the
+    /// reasoning, `hasThinking` starts it). False with no live answer.
+    bool streamHasText() const;
+    bool streamHasThinking() const;
     /// The groups the bounded window budgets for: `groupCount()` without the live answer.
     ///
     /// The stream is not part of the window (D-BOUNDS): it is drawn last, after the window,
@@ -230,34 +221,35 @@ public:
 
     // --- the block seam (design §4.5, task 26) ------------------------------
     //
-    // One group is a list of blocks: its own header row, then one row per message,
-    // with a message's thinking disclosure as a block of its own in front of it. The
-    // list is built where the group list is built (`sync()`), so enumeration stays
-    // incremental and a block index is stable for as long as its group is.
+    // One group is a list of blocks: its own header row, then one row per
+    // displayed store block. The list is built where the group list is built
+    // (`sync()`), so enumeration stays incremental and a block index is stable
+    // for as long as its group is.
 
     /// Blocks in group `k` (0 for an index the adapter does not hold).
     ///
-    /// A work group answers 1 + its messages (plus one per thinking disclosure); a
-    /// top-level group answers 1 + a thinking disclosure when the message has one.
+    /// A work group answers 1 + its displayed blocks (a thinking row of its own
+    /// among them); every group's first row is its header.
     std::size_t blockCount(size_t k) const;
 
     /// Block `b` of group `k`, described in the renderer's own vocabulary
     /// (`model::BlockDesc`); a default-constructed descriptor out of range. The
-    /// summary is display text: the store's `"[nr] body [time]"` decoration and any
-    /// state emoji have already been resolved away (the emoji becomes `state`).
+    /// summary is display text: the store's `"[nr] body"` decoration has
+    /// already been resolved into the row's own fields (the ordinal prefix,
+    /// the state).
     model::BlockDesc blockAt(size_t k, std::size_t b) const;
 
-    /// Whether block `b` shows its body. Group and message blocks read the very sets
-    /// the store keeps (`openWorkGroups` / `outputLineOpen`), so a click and a read
+    /// Whether block `b` shows its body. Group and row blocks read the very sets
+    /// the store keeps (`openWorkGroups` / `typedRowOpen_`), so a click and a read
     /// cannot disagree (D-GROUPID); a thinking disclosure is the view's own and lives
-    /// in `UiState` - it has no v4 set to share.
+    /// in `UiState`.
     bool blockExpanded(size_t k, std::size_t b) const;
     /// Flip a block's disclosure; answers the state it now has (false out of range,
     /// and false for a block that does not open at all).
     bool setBlockExpanded(size_t k, std::size_t b, bool open);
 
-    /// The block's body as it would be copied: the message text (the thinking text for
-    /// a thinking block) verbatim. Only the copy path asks for it - a per-frame copy of
+    /// The block's body as it would be copied: the store block's text verbatim.
+    /// Only the copy path asks for it - a per-frame copy of
     /// every body would pay for a feature nobody pressed.
     std::string blockText(size_t k, std::size_t b) const;
 
@@ -287,10 +279,9 @@ public:
     /// `takeExpandedGroup()`) and store the height the group used as the next hint.
     void endGroup(size_t k, const ui::Rect& cell);
 
-    /// Whether the group with this id shows its body. The streaming group is
-    /// always open; a work group follows `openWorkGroups`, a single-message
-    /// group follows `outputLineOpen` - the same state the store
-    /// write, which is why the two cannot drift.
+    /// Whether the group with this id shows its body: the fold is one flag per
+    /// group, `openWorkGroups` keyed by the group's id - the same state the
+    /// store keeps, which is why the two cannot drift.
     bool expanded(size_t id) const;
     void setExpanded(size_t id, bool open);
 
@@ -329,13 +320,6 @@ public:
     size_t groupBuilds() const { return groupBuilds_; }
     size_t entryWalks() const { return entryWalks_; }
 
-    /// Where the streamed answer body's fence scan resumes, as the last stream
-    /// snapshot left it. An observation for the incremental-scan contract:
-    /// while the body only appends the offset only moves forward, and it never
-    /// restarts from zero - a snapshot pays for its appended suffix, not for
-    /// the body the previous snapshots already classified.
-    size_t streamFenceScanOffset() const { return streamTextFence_.scan.scanOffset; }
-
     /// The table bridge itself lives in `ui/table.h` (`bridgeBodyForProfile()`); this class only
     /// asks it in `renderBodyText()`, the one place a markdown body is drawn, so every block row
     /// goes through the same function and no two surfaces can disagree about what a table is.
@@ -346,23 +330,11 @@ public:
     /// never be reused by the next thread.
     void reset();
 
-    /// Forget the in-flight stream's identity. `tuiStreamChatMessageClear()` calls
-    /// this when the store clears the stream: the next stream must get a fresh group
-    /// id (D-GROUPID) and its reasoning starts open again, and the groups are
-    /// rebuilt on the next sync so the old stream row cannot linger for a frame.
-    void clearStream();
-
-    /// Commit the expansion defaults this pass applied: advance the one-shot
-    /// watermark to the newest message, so a frame that drew the thread cannot
-    /// have its work undone by the *next* frame's default seeding.
-    ///
-    /// The defaults themselves are seeded where "new" is decided - `sync()`, at the
-    /// moment a group's id is assigned - so a group revealed later by `Load earlier`
-    /// keeps the default it was born with and a window or a page cannot change the
-    /// answer. This watermark is the other half of the rule: it is what stops the
-    /// render path from re-applying that default over a header the user just
-    /// toggled, i.e. it is the difference between `setExpanded()` sticking and being
-    /// a one-frame no-op. Call it once per frame, after the groups were drawn.
+    /// Commit the expansion defaults this pass applied. The typed fold has no
+    /// defaults left to commit - every turn is born folded and the user's
+    /// toggles are their own writes - so the call is a deliberate no-op kept
+    /// for the view's once-per-frame shape. Call it once per frame, after the
+    /// groups were drawn.
     void commitSeen();
 
     /// How many group draws this adapter has opened - the double-render tripwire
@@ -379,12 +351,9 @@ private:
     struct BlockEntry {
         model::BlockKind kind = model::BlockKind::System;
         model::BlockState state = model::BlockState::None;
-        /// The block's stable identity: the message id, or the group id for a group
-        /// header. Never a position, which a paging window would remap.
+        /// The block's stable identity: the typed block id's hash, or the turn id
+        /// for a group header. Never a position, which a paging window would remap.
         size_t key = 0;
-        /// The message this block belongs to (an index into the v4 store; the
-        /// group's own header names its first message).
-        size_t message = 0;
         double timingS = 0.0;
         int steps = 0;
         bool group = false;    ///< the group's own header row
@@ -394,17 +363,27 @@ private:
         std::int64_t typedTurnId = 0;
         std::string typedBlockId;
         /// The store block's title (the tool name on a Tool row): the typed
-        /// tool card's summary previews it, the way the v4 tool row previews
-        /// `toolName`.
+        /// tool card's summary previews it.
         std::string typedTitle;
         std::string typedBody;
         bool typedQuery = false;
+        /// The typed block's batch id: the response's blocks share it, which is
+        /// how a thinking disclosure counts its batch's tool cards (F5).
+        std::string typedBatchId;
+        /// The batch's tool-card count (F5): filled for a Thinking row by
+        /// counting the Tool rows that share its `typedBatchId`.
+        int batchTools = 0;
+        /// The tool card's token counters (F5), copied from the typed block -
+        /// each renders only when non-zero.
+        std::int64_t tokensIn = 0;
+        std::int64_t tokensOut = 0;
+        /// The typed block's meta (the tool result's one-line summary, D4):
+        /// the maximal card's embedded Result.
+        std::string typedMeta;
     };
 
     struct Entry {
         GroupView view;
-        size_t start = 0; // first message index in the v4 store
-        size_t end = 0;   // exclusive
         bool stream = false;
         std::vector<BlockEntry> blocks;
     };
@@ -422,26 +401,8 @@ private:
 
     // The group cache (mutable: `sync()` runs from the const accessors).
     mutable std::vector<Entry> groups_;
-    /// message id of a group's first message -> the group's id, so an appended
-    /// message extends a group (and keeps its id) instead of renumbering it.
-    mutable std::map<size_t, size_t> idByStart_;
-    mutable size_t nextId_ = 1;
-    /// `openWorkGroups` keys (a work group's first message id) the default - not the
-    /// user - opened because the group was the newest at birth. When a newer stored
-    /// group arrives they close again; a user toggle erases the key, so a group the
-    /// user opened is never closed here.
-    mutable std::set<size_t> autoOpenWorkGroups_;
-    mutable size_t streamGroupId_ = 0;
-    mutable uint64_t streamRevision_ = 0;
-    mutable size_t streamFingerprint_ = 0;
-    mutable bool synced_ = false;
-    mutable size_t syncedCount_ = 0;
-    mutable size_t syncedFront_ = 0;
-    mutable size_t syncedBack_ = 0;
-    mutable uint64_t syncedStream_ = 0;
 
-    // he typed-backed projection
-    ProjectionSource source_ = ProjectionSource::V4Messages;
+    // the typed-backed projection
     mutable bool typedSynced_ = false;
     mutable std::uint64_t syncedTypedVersion_ = 0;
     /// Per-turn change counter for `view.revision` (0 = unchanged since birth),
@@ -454,18 +415,6 @@ private:
 
     /// The typed-backed rebuild (design §4: group id = the persisted turnId).
     void syncTyped() const;
-
-    /// The streamed bodies' cached unclosed-fence answer, one per body (the
-    /// answer text and the reasoning carry independent fences). `scan`
-    /// resumes where the previous snapshot stopped - a snapshot pays for its
-    /// appended suffix only - and `open` is the flag the body draw reads, so a
-    /// frame scans nothing. Both reset when the stream is replaced, not grown.
-    struct StreamFence {
-        ui::FenceScanState scan;
-        bool open = false;
-    };
-    mutable StreamFence streamTextFence_;
-    mutable StreamFence streamThinkingFence_;
 
     /// Height hints used to live here; they are `UiState::thread.hints` now (the
     /// cache is view state, and it must be dropped by a session switch that this

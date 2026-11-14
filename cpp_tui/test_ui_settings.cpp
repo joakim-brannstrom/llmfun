@@ -160,7 +160,8 @@ bool setFileMode(const std::string& path, mode_t mode) { return ::chmod(path.c_s
 bool samePrefs(const ShellPrefs& a, const ShellPrefs& b) {
     return a.sendKey == b.sendKey && a.rawLog == b.rawLog && a.railOpen == b.railOpen &&
            a.inspectorOpen == b.inspectorOpen && a.tab == b.tab && a.windowWidth == b.windowWidth &&
-           a.windowHeight == b.windowHeight && a.fontScaleMain == b.fontScaleMain;
+           a.windowHeight == b.windowHeight && a.fontScaleMain == b.fontScaleMain &&
+           a.threadMinimal == b.threadMinimal;
 }
 
 } // namespace
@@ -216,6 +217,7 @@ int main() {
         CHECK(readText(confOf(dir)) == "Version=2\n"
                                        "SendKey=tab\n"
                                        "UiLog=info\n"
+                                       "ThreadMode=minimal\n"
                                        "RailOpen=auto\n"
                                        "InspectorOpen=auto\n"
                                        "InspectorTab=activity\n"
@@ -230,10 +232,12 @@ int main() {
         prefs.railOpen = 1;
         prefs.inspectorOpen = 0;
         prefs.tab = InspectorTab::Agents;
+        prefs.threadMinimal = false;
         saveUiConf(prefs, iniOf(dir));
         CHECK(readText(confOf(dir)) == "Version=2\n"
                                        "SendKey=none\n"
                                        "UiLog=error\n"
+                                       "ThreadMode=maximal\n"
                                        "RailOpen=1\n"
                                        "InspectorOpen=0\n"
                                        "InspectorTab=agents\n"
@@ -411,6 +415,7 @@ int main() {
         CHECK(uiConfText(fallback) == "Version=2\n"
                                       "SendKey=tab\n"
                                       "UiLog=info\n"
+                                      "ThreadMode=minimal\n"
                                       "RailOpen=auto\n"
                                       "InspectorOpen=auto\n"
                                       "InspectorTab=activity\n"
@@ -652,6 +657,7 @@ int main() {
         const std::string v2Bytes = "Version=2\n"
                                     "SendKey=tab\n"
                                     "UiLog=info\n"
+                                    "ThreadMode=minimal\n"
                                     "RailOpen=auto\n"
                                     "InspectorOpen=auto\n"
                                     "InspectorTab=activity\n"
@@ -865,6 +871,7 @@ int main() {
         CHECK(readText(conf) == "Version=2\n"
                                 "SendKey=tab\n"
                                 "UiLog=error\n"
+                                "ThreadMode=minimal\n"
                                 "RailOpen=auto\n"
                                 "InspectorOpen=auto\n"
                                 "InspectorTab=activity\n"

@@ -31,6 +31,7 @@
 
 #include "model/ui_state.h"
 #include "store/thread_store.h"
+#include "test/typed_seed.h"
 #include "tui.h"
 #include "tui_backend.h"
 #include "tui_settings.h"
@@ -78,53 +79,95 @@ constexpr ImGuiWindowFlags kSurfaceFlags =
     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
 
-/// One committed message of a store, the D side's own summary shape.
-tui::ChatMessage message(size_t id, tui::ChatMessageType type, const std::string& summary,
-                         const std::string& text) {
-    tui::ChatMessage msg;
-    msg.id = id;
-    msg.type = type;
-    msg.summary = summary;
-    msg.text = text;
-    return msg;
-}
-
-/// The coder's store: two committed tool rows (a call and a failed result -
-/// the not-ok variant is part of the drill-down's evidence) and the live
-/// stream entry, the way `tuiPipelineAgentUpdate` / `...ToolCall` /
-/// `...ToolResult` leave them.
+/// The coder's store: two committed tool steps (one Ok, one Failed - the
+/// not-ok variant is part of the drill-down's evidence) and the live run
+/// turn, the way `tuiPipelineAgentUpdate` / `...ToolCall` / `...ToolResult`
+/// leave them.
 tui::AgentStream coderStream() {
     tui::AgentStream stream;
     stream.agentId = "coder";
-    tui::ChatMessage call = message(1, tui::ChatMessageType::ToolCall, "[2] read_file src/app.d",
-                                    "read_file src/app.d");
-    call.toolName = "read_file";
-    call.toolArgs = "src/app.d";
-    tui::ChatMessage result = message(2, tui::ChatMessageType::ToolResponse, "[3] read_file failed",
-                                      "read_file: no such file");
-    result.toolName = "read_file";
-    result.toolResult = "read_file: no such file";
-    result.toolOk = false;
-    stream.chat.outputLines.push_back(call);
-    stream.chat.outputLines.push_back(result);
-    stream.chat.outputLineNextId = 3;
-    stream.chat.streamMsg =
-        message(tui::ChatTab::StreamChatMessageId, tui::ChatMessageType::Assistant, "",
-                "the coder is rewriting the parser");
-    stream.chat.streamMsg.thinking = "the coder is thinking about tokens";
-    stream.chat.hasStreamMsg = true;
+    using llmfun::tui::store::TypedBlock;
+    using llmfun::tui::store::TypedTurn;
+    TypedTurn turn;
+    turn.id = 1;
+    turn.ordinal = 1;
+    turn.state = TuiTurnState_Done;
+    turn.messageCount = 2;
+    stream.chat.typedTurns.turnUpsert(turn);
+    TypedBlock query;
+    query.turnId = 1;
+    query.id = "query";
+    query.batchId = "1#q";
+    query.kind = TuiBlockKind_Prose;
+    query.meta = "user";
+    query.body = "get the parser building";
+    stream.chat.typedTurns.blockUpsert(std::move(query));
+    TypedBlock ok;
+    ok.turnId = 1;
+    ok.id = "call-1";
+    ok.batchId = "1#0";
+    ok.kind = TuiBlockKind_Tool;
+    ok.status = TuiBlockStatus_Ok;
+    ok.flags = TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
+    ok.title = "read_file";
+    ok.meta = "read 120 lines";
+    ok.body = "src/app.d";
+    stream.chat.typedTurns.blockUpsert(std::move(ok));
+    TypedBlock failed;
+    failed.turnId = 1;
+    failed.id = "call-2";
+    failed.batchId = "1#0";
+    failed.kind = TuiBlockKind_Tool;
+    failed.status = TuiBlockStatus_Failed;
+    failed.flags = TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
+    failed.title = "read_file";
+    failed.meta = "no such file";
+    failed.body = "read_file: no such file";
+    stream.chat.typedTurns.blockUpsert(std::move(failed));
+    // The committed group is one the user opened: the work rows show.
+    stream.chat.openWorkGroups.insert(1);
+    // The live run: a Running turn whose reasoning and content are still arriving.
+    TypedTurn live;
+    live.id = 2;
+    live.ordinal = 2;
+    live.state = TuiTurnState_Running;
+    stream.chat.typedTurns.turnUpsert(live);
+    TypedBlock liveQuery;
+    liveQuery.turnId = 2;
+    liveQuery.id = "query";
+    liveQuery.batchId = "2#q";
+    liveQuery.kind = TuiBlockKind_Prose;
+    liveQuery.meta = "user";
+    liveQuery.body = "rewrite the parser";
+    stream.chat.typedTurns.blockUpsert(std::move(liveQuery));
+    TypedBlock thinking;
+    thinking.turnId = 2;
+    thinking.id = "reasoning#0";
+    thinking.batchId = "2#0";
+    thinking.kind = TuiBlockKind_Reasoning;
+    thinking.flags = TuiBlockFlag_Collapsible;
+    thinking.body = "the coder is thinking about tokens";
+    stream.chat.typedTurns.blockUpsert(std::move(thinking));
+    TypedBlock content;
+    content.turnId = 2;
+    content.id = "content#0";
+    content.batchId = "2#0";
+    content.kind = TuiBlockKind_Prose;
+    content.meta = "assistant";
+    content.body = "the coder is rewriting the parser";
+    stream.chat.typedTurns.blockUpsert(std::move(content));
     return stream;
 }
 
-/// The fixture: a ready main thread with one committed message, two lanes and
+/// The fixture: a ready main thread with one committed turn, two lanes and
 /// the coder's store entry.
 tui::TuiState fixtureState() {
     tui::TuiState state;
     state.readyStatus = false;
     state.ui.view = model::ThreadView::Ready;
-    state.chat.outputLines.push_back(message(1, tui::ChatMessageType::Assistant,
-                                             "[1] the main thread's own words [2026-06-18]",
-                                             "the main thread's own words"));
+    typed_seed::Seeder seeder(&state);
+    seeder.add(typed_seed::Seeder::Msg::User, "the main thread's own words");
+    state.ui.view = model::ThreadView::Ready;
     state.ui.agents.push_back(model::AgentLane{});
     state.ui.agents.back().id = "planner";
     state.ui.agents.back().state = model::kAgentStateDone;

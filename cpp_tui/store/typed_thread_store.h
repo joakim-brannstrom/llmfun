@@ -63,6 +63,13 @@ inline constexpr int kBlockStatusOk = 3;        // TuiBlockStatus_Ok
 inline constexpr int kBlockStatusFailed = 4;    // TuiBlockStatus_Failed
 inline constexpr int kBlockStatusCancelled = 5; // TuiBlockStatus_Cancelled
 
+// The wire's turn states (TuiTurnState on the ABI): a turn is Running from the
+// upsert that opens it until the done/stop upsert closes it, and the *running*
+// turn is the live answer the thread window keeps outside its bound.
+inline constexpr int kTurnStateRunning = 0;     // TuiTurnState_Running
+inline constexpr int kTurnStateDone = 1;        // TuiTurnState_Done
+inline constexpr int kTurnStateInterrupted = 2; // TuiTurnState_Interrupted
+
 // Step-count weights (D4), by status — N = the LLM messages the group covers:
 //   Tool: Ok/Failed = 2 (call + result), Pending/Running/Cancelled = 1;
 //   Prose (response content) = 1; Reasoning = 0 (rides the content message);
@@ -96,8 +103,8 @@ public:
     // Whole-turn FIFO eviction (design §4): oldest first, never the live turn
     // (the caller passes the live turn id; live = the newest upserted turn).
     void evictForCapacity(std::int64_t liveTurnId);
-    static constexpr std::size_t kMaxTurns = 1000; // mirrors today's per-tab
-                                                   // MaxChatMessages (tui.h:257)
+    static constexpr std::size_t kMaxTurns = 1000; // the per-tab cap the v4
+                                                   // path carried
     // The mutation counter: bumped by every mutating path (setTurns, turnUpsert,
     // blockUpsert, turnRemove, threadClear, evictForCapacity). The adapter's
     // rebuild guard compares it O(1) per accessor call (design §4.4's

@@ -1,6 +1,6 @@
-/// The v4 thread adapter (thread_store.h owns the contract).
+/// The typed thread adapter (thread_store.h owns the contract).
 ///
-/// This file is the v4-aware half that task 18 moved out of `tui_chat.cpp`: the
+/// This file is the projecting half that task 18 moved out of `tui_chat.cpp`: the
 /// group build and the block model. It draws no thread of its
 /// own - task 41 removed the renderer that did. A view asks `beginGroup()`/
 /// `blockAt()` for a row, draws its chrome with `views::renderBlock()` and its body
@@ -37,26 +37,9 @@
 
 namespace llmfun::tui::store {
 
-/// The v4 renderer's own grouping enum (`llmfun::tui::GroupKind`). Qualifying it
-/// once is what keeps the two same-named enums apart: this file lives inside
-/// `store::`, where the unqualified `GroupKind` is the view-facing one.
-using TuiGroupKind = ::llmfun::tui::GroupKind;
-
-/// The store's message type, under a local name. The block build (task 26) maps it to
-/// a `model::BlockKind`, and the alias keeps that one switch readable without the
-/// ledger counting eight v4 names for it (`tools/gate_ratchet.txt` rows retire, they do
-/// not grow).
-using TuiMessageType = ChatMessageType;
-
 // ---------------------------------------------------------------------------
 // The thread as data: groups, summaries, expansion
 // ---------------------------------------------------------------------------
-
-static bool renderAsMarkdown(const ChatMessageType type) {
-    if (type == ChatMessageType::ToolCall || type == ChatMessageType::ToolResponse)
-        return false;
-    return true;
-}
 
 // One message body: model markdown through the wrapper (ui/markdown.h), verbatim
 // wrapped text when markdown is not wanted (ToolCall/ToolResponse - a transcript,
@@ -100,246 +83,6 @@ static void renderBodyText(std::string_view text, bool asMarkdown = true,
     ui::renderModelText(text, theme, ui::markdownSelectable(m.textGrid));
 }
 
-/// The role label table: one label per message type, the whole header contract
-/// both backends share (YOU, AGENT, TOOL, ANSWER, SYSTEM). No `default:` arm, so
-/// a new `ChatMessageType` shows up as a `-Wswitch` warning instead of silently
-/// rendering as a system notice.
-static const char* roleLabel(ChatMessageType type) {
-    switch (type) {
-    case ChatMessageType::User:
-    case ChatMessageType::Vision:
-        return "YOU";
-    case ChatMessageType::Assistant:
-        return "AGENT";
-    case ChatMessageType::ToolCall:
-    case ChatMessageType::ToolResponse:
-        return "TOOL";
-    case ChatMessageType::FinalAnswer:
-        return "ANSWER";
-    case ChatMessageType::System:
-        return "SYSTEM";
-    case ChatMessageType::Count:
-        break; // sentinel: not a message
-    }
-    return "SYSTEM";
-}
-
-static bool structuredToolRow(const ChatMessage& m) {
-    return !m.toolName.empty() && m.summary.empty() && m.text.empty();
-}
-
-/// The body text of a structured tool row: a call shows its arguments, a result
-/// its output.
-static const std::string& toolRowBody(const ChatMessage& m, model::BlockKind kind) {
-    return kind == model::BlockKind::ToolCall ? m.toolArgs : m.toolResult;
-}
-
-/// A summary as the header needs it: the preview text and the display time.
-struct SummaryParts {
-    std::string_view body;
-    std::string_view time;
-};
-
-static bool isDigits(std::string_view s) {
-    if (s.empty())
-        return false;
-    for (const char c : s)
-        if (c < '0' || c > '9')
-            return false;
-    return true;
-}
-
-/// True for every tier `prettyDuration` produces (my/time.d): "<n>ms",
-/// "<n>.<d>s", "<m>m <s>s", "<h>h <m>m" - numbers with an optional decimal,
-/// each followed by a unit, separated by single spaces. Anything else in a
-/// bracket is message text, not a time.
-static bool isDurationText(std::string_view s) {
-    std::size_t i = 0;
-    while (i < s.size()) {
-        const std::size_t numberStart = i;
-        bool dot = false;
-        while (i < s.size() && ((s[i] >= '0' && s[i] <= '9') || (s[i] == '.' && !dot))) {
-            dot = dot || s[i] == '.';
-            ++i;
-        }
-        if (i == numberStart || s[numberStart] == '.')
-            return false;
-        if (s.compare(i, 2, "ms") == 0) {
-            i += 2;
-        } else if (i < s.size() && (s[i] == 's' || s[i] == 'm' || s[i] == 'h')) {
-            ++i;
-        } else {
-            return false;
-        }
-        if (i < s.size()) {
-            if (s[i] != ' ')
-                return false;
-            ++i;
-        }
-    }
-    return !s.empty();
-}
-
-static SummaryParts splitSummary(const std::string& summary) {
-    SummaryParts parts{summary, {}};
-
-    // "[nr] " - the message number. Dropped: the thread identifies the author
-    // by role label and the number is an internal counter.
-    const std::size_t close = summary.find(']');
-    if (summary.size() > 2 && summary[0] == '[' && close != std::string::npos &&
-        isDigits(std::string_view(summary).substr(1, close - 1))) {
-        std::size_t start = close + 1;
-        while (start < parts.body.size() && parts.body[start] == ' ')
-            ++start;
-        parts.body = parts.body.substr(start);
-
-        // Trailing "[<duration>]", only in the decorated form (the prefix proves
-        // the D side built the string, so a message that merely ends in "]" is
-        // never mistaken for a timed one).
-        if (parts.body.size() > 2 && parts.body.back() == ']') {
-            const std::size_t open = parts.body.rfind('[');
-            if (open != std::string_view::npos && (open == 0 || parts.body[open - 1] == ' ')) {
-                const std::string_view inner =
-                    parts.body.substr(open + 1, parts.body.size() - open - 2);
-                if (isDurationText(inner)) {
-                    parts.time = inner;
-                    parts.body = parts.body.substr(0, open == 0 ? 0 : open - 1);
-                }
-            }
-        }
-    }
-    return parts;
-}
-
-/// The duration a summary's trailing `[<time>]` carries, in seconds - 0 when it
-/// carries none, or when the bracket is message text rather than a time (the same
-/// `isDurationText()` test the header splitter uses, so the two cannot disagree).
-///
-/// A number, not the store's own "1.2s": the block row formats one label for both
-/// profiles from it (task 26), and a test can compare the arithmetic instead of a
-/// spelling.
-double durationSeconds(std::string_view text) {
-    if (!isDurationText(text))
-        return 0.0;
-    double total = 0.0;
-    std::size_t i = 0;
-    while (i < text.size()) {
-        double value = 0.0;
-        bool dot = false;
-        double scale = 1.0;
-        while (i < text.size() && ((text[i] >= '0' && text[i] <= '9') || text[i] == '.')) {
-            if (text[i] == '.')
-                dot = true;
-            else if (dot)
-                // 1.2 is one *and two tenths*: the first digit after the dot is the
-                // tenth, so the scale steps before it is used.
-                value += (text[i] - '0') * (scale /= 10.0);
-            else
-                value = value * 10.0 + (text[i] - '0');
-            ++i;
-        }
-        if (text.compare(i, 2, "ms") == 0) {
-            total += value / 1000.0;
-            i += 2;
-        } else if (i < text.size() && text[i] == 's') {
-            total += value;
-            ++i;
-        } else if (i < text.size() && text[i] == 'm') {
-            total += value * 60.0;
-            ++i;
-        } else if (i < text.size() && text[i] == 'h') {
-            total += value * 3600.0;
-            ++i;
-        } else {
-            return total;
-        }
-        if (i < text.size() && text[i] == ' ')
-            ++i;
-    }
-    return total;
-}
-
-/// A summary without the emoji the D side puts in it (`app_agent/package.d` writes
-/// the tool outcome as "✅" / "❌" inside the summary text).
-///
-/// Task 26's rule is "no emoji in any summary", and D-BLOCK's is "state via glyph +
-/// word": so the marker does not just disappear - `takeStateMarker()` below turns it
-/// into the block's `state` first, and whatever else a summary carries (a model
-/// writing "done ✅" in prose) is dropped here rather than drawn. The ranges are the
-/// ones the task's own check greps for: U+2705, U+274C, the U+1F300-U+1FAFF
-/// pictographs, and the variation selector that selects emoji presentation for the
-/// codepoints that are text by default.
-std::string stripEmoji(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
-    std::size_t i = 0;
-    while (i < text.size()) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        const bool threeByteEmoji = c == 0xE2 && i + 2 < text.size() &&
-                                    ((static_cast<unsigned char>(text[i + 1]) == 0x9C &&
-                                      static_cast<unsigned char>(text[i + 2]) == 0x85) || // ✅
-                                     (static_cast<unsigned char>(text[i + 1]) == 0x9D &&
-                                      static_cast<unsigned char>(text[i + 2]) == 0x8C)); // ❌
-        const bool variationSelector = c == 0xEF && i + 2 < text.size() &&
-                                       static_cast<unsigned char>(text[i + 1]) == 0xB8 &&
-                                       static_cast<unsigned char>(text[i + 2]) == 0x8F; // U+FE0F
-        const bool pictograph =
-            c == 0xF0 && i + 3 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0x9F;
-        if (threeByteEmoji || variationSelector) {
-            i += 3;
-            if (i < text.size() && text[i] == ' ' && !out.empty() && out.back() == ' ')
-                ++i; // the removal would leave a double space
-            continue;
-        }
-        if (pictograph) {
-            i += 4;
-            if (i < text.size() && text[i] == ' ' && !out.empty() && out.back() == ' ')
-                ++i;
-            continue;
-        }
-        out.push_back(text[i]);
-        ++i;
-    }
-    return out;
-}
-
-/// The state a tool result's marker names, with the marker removed from `text`.
-///
-/// The D side writes `tool result ✅ writeFile: 42 lines` (or "❌"), so the outcome is
-/// *in* the summary. It becomes the block's state - which the row draws as the
-/// Ok/Error glyph beside the word - and the summary keeps the rest of the sentence
-/// ("keeps today's text", task 26). Anything else is `None`: a summary without a
-/// marker names no outcome, and guessing one from the text would be a state the store
-/// never asserted.
-model::BlockState takeStateMarker(std::string& text) {
-    model::BlockState state = model::BlockState::None;
-    std::string out;
-    out.reserve(text.size());
-    for (std::size_t i = 0; i < text.size();) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        const bool ok = c == 0xE2 && i + 2 < text.size() &&
-                        static_cast<unsigned char>(text[i + 1]) == 0x9C &&
-                        static_cast<unsigned char>(text[i + 2]) == 0x85; // ✅
-        const bool failed = c == 0xE2 && i + 2 < text.size() &&
-                            static_cast<unsigned char>(text[i + 1]) == 0x9D &&
-                            static_cast<unsigned char>(text[i + 2]) == 0x8C; // ❌
-        if (ok || failed) {
-            if (state == model::BlockState::None)
-                state = ok ? model::BlockState::Ok : model::BlockState::Failed;
-            i += 3;
-            // The marker sits between two spaces ("result ✅ writeFile"); dropping it
-            // and one of them keeps the sentence readable without a double space.
-            if (i < text.size() && text[i] == ' ' && !out.empty() && out.back() == ' ')
-                ++i;
-            continue;
-        }
-        out.push_back(text[i]);
-        ++i;
-    }
-    text = stripEmoji(out);
-    return state;
-}
-
 /// A summary collapsed to one line: every run of blanks (and the newlines a
 /// multi-line tool call carries) becomes one space, so a row can never be widened by
 /// text the header cannot show. The body keeps the original.
@@ -361,217 +104,11 @@ std::string oneLine(std::string_view text) {
     return out;
 }
 
-static bool isAssistantWork(ChatMessageType type) {
-    return type == ChatMessageType::Assistant || type == ChatMessageType::ToolCall ||
-           type == ChatMessageType::ToolResponse || type == ChatMessageType::System;
-}
-
-static bool isTopLevel(ChatMessageType type) {
-    return type == ChatMessageType::User || type == ChatMessageType::Vision ||
-           type == ChatMessageType::FinalAnswer;
-}
-
-static void buildRenderGroups(ChatTab& chat) {
-    if (chat.outputLines.empty()) {
-        chat.renderGroups.clear();
-        return;
-    }
-    if (chat.outputLines.front().id == chat.renderGroupFirstId &&
-        chat.outputLines.back().id == chat.renderGroupLastId) {
-        return;
-    }
-    chat.renderGroups.clear();
-
-    size_t i = 0;
-    while (i < chat.outputLines.size()) {
-        if (isTopLevel(chat.outputLines[i].type)) {
-            TuiGroupKind kind = (chat.outputLines[i].type == ChatMessageType::FinalAnswer)
-                                    ? TuiGroupKind::FinalAnswer
-                                    : TuiGroupKind::UserQuery;
-            chat.renderGroups.push_back({i, i + 1, kind});
-            ++i;
-        } else {
-            size_t start = i;
-            while (i < chat.outputLines.size() && isAssistantWork(chat.outputLines[i].type)) {
-                ++i;
-            }
-            chat.renderGroups.push_back({start, i, TuiGroupKind::AssistantWork});
-        }
-    }
-
-    chat.renderGroupFirstId = chat.outputLines.front().id;
-    chat.renderGroupLastId = chat.outputLines.back().id;
-}
-
 /// Separator between the role label and the time (and before the preview).
 /// The grid stays ASCII: its chrome must not depend on the terminal's locale
 /// (under LC_ALL=C ncurses turns U+00B7 into U+FFFD), while the pixel profile
 /// can afford the middle dot.
 static const char* roleSeparator() { return tuiIsTextGrid() ? " - " : u8" · "; }
-
-/// One message body: the thinking disclosure (when the message has any), the
-/// text - markdown for every role except tool call/result, whose text is
-/// verbatim - and the per-message Copy action. Shared by the top-level and the
-/// work-group path so every role renders through exactly one code path. The
-/// caller owns the PushID, so "Copy" is unique per message.
-
-/// The header text of one message: the role label, "<sep><time>" when the
-/// message carries one, and - while the message is collapsed - the one-line
-/// preview. The preview is what makes a collapsed row say what it is; an
-/// expanded row is a pure role row because its body sits right below.
-static std::string messageHeaderText(const ChatMessage& entry, bool expanded) {
-    const SummaryParts parts = splitSummary(entry.summary);
-    std::string text = roleLabel(entry.type);
-    if (!parts.time.empty()) {
-        text.append(roleSeparator());
-        text.append(parts.time);
-    }
-    if (!expanded && !parts.body.empty()) {
-        text.append("  ");
-        text.append(parts.body);
-    }
-    return text;
-}
-
-/// Writes one message id's expansion state, unconditionally. `seedNewGroup()` is the
-/// caller: it applies a default at the moment a group is born, where the question "is
-/// this message new" is already answered by the group build itself, so a watermark
-/// test would be the wrong question.
-static void applyExpansionDefault(ChatTab& chat, std::size_t id, bool defaultOpen) {
-    if (defaultOpen)
-        chat.outputLineOpen.insert(id);
-    else
-        chat.outputLineOpen.erase(id);
-}
-
-/// Commits one drawing pass: the one-shot expansion watermark moves to the newest
-/// message, because every message that pass drew has had its default applied.
-///
-/// Called once per frame from `ThreadStoreAdapter::commitSeen()`, after the groups
-/// were drawn - otherwise the next frame would re-seed the default over the user's
-/// click. Ids only ever grow, so one high-water id is enough.
-static void commitExpansionDefaults(ChatTab& chat) {
-    if (chat.outputLines.empty())
-        return;
-    chat.expansionDefaultThroughId =
-        std::max(chat.expansionDefaultThroughId, chat.outputLines.back().id);
-}
-
-/// The per-item default inside a work group: the last five steps unfold, everything
-/// older stays collapsed. One rule, one place: the birth seeder, the build-time
-/// seeder and the draw must agree, or a default applied inside the draw changes the
-/// membership the draw path reads as a user toggle.
-static bool workItemDefaultOpen(std::size_t index, std::size_t count) {
-    return (index + 5) > count;
-}
-
-/// A structured tool row (see `structuredToolRow`) is born closed: its second line is
-/// then the tool's name - the one thing the row must always say - and the args or
-/// result wait behind the expand, where the row's body already lives.
-static bool workItemExpansionDefault(const ChatMessage& item, std::size_t index,
-                                     std::size_t count) {
-    return !structuredToolRow(item) && workItemDefaultOpen(index, count);
-}
-
-/// Applies the one-shot expansion defaults of a group that has just appeared.
-///
-/// This is where "new" is decided, and it is a property of the group build rather
-/// than of a frame: an id is assigned exactly once, when the group first exists in
-/// the store, so the default a group is *born* with never depends on which frame,
-/// window or page happens to draw it.
-///
-/// The draw path cannot seed it: a group revealed later by `Load earlier` sits
-/// *below* the watermark, so a per-message seeder is a no-op for it and the group
-/// would come back as a header only.
-static void seedNewGroup(ChatTab& chat, GroupKind kind, std::size_t start, std::size_t end,
-                         bool isNewestGroup, std::size_t count) {
-    if (kind == GroupKind::AssistantWork) {
-        // The items get their default even while the group is collapsed: a
-        // collapsed group is never drawn, so a later expand must not find them all
-        // closed. This seeds them before the group's expansion gate for exactly that
-        // reason, with the same "the last five unfold" rule.
-        for (std::size_t i = start; i < end; ++i)
-            applyExpansionDefault(chat, chat.outputLines[i].id,
-                                  workItemExpansionDefault(chat.outputLines[i], i, count));
-        // Only the newest work group unfolds. `isNewestGroup` means the newest
-        // *group*, which is `gi + 1 == renderGroups.size()` in the v4 body: the
-        // streamed message is not a group, so a work group can be the newest one
-        // while an answer streams.
-        const std::size_t headId = chat.outputLines[start].id;
-        if (isNewestGroup)
-            chat.openWorkGroups.insert(headId);
-        else
-            chat.openWorkGroups.erase(headId);
-        return;
-    }
-    // Top-level message: open while it is inside the newest ten, and always for the
-    // final answer (the run's result is never hidden).
-    const bool defaultOpen =
-        kind == GroupKind::FinalAnswer || static_cast<int>(start) >= static_cast<int>(count) - 10;
-    applyExpansionDefault(chat, chat.outputLines[start].id, defaultOpen);
-}
-
-/// One message: role header row plus, when expanded, its body.
-///
-/// `indentBody` is set by the top-level path only: a message already inside a
-/// work group keeps the group's single indent level, which is what keeps the
-/// body geometry identical to the pre-task layout (and rich_md's table renderer
-/// sensitive to the exact content width - one extra column and a paragraph
-/// above a table is dropped; measured with test_rich_markdown_text case C).
-
-/// A run of assistant work: one group header row (AGENT - N steps) and, while
-/// it is expanded, the messages it contains - each with its own role row and its
-/// own expansion state. The group is not a message: its expansion lives in
-/// ChatTab::openWorkGroups, keyed by the first message id.
-
-/// The streaming message: one always-expanded AGENT row with no time and no
-/// preview (its body updates in place). Not interactive: it is a label, not a
-/// toggle.
-
-namespace {
-
-/// One message's hint: its header row plus the two bodies, at the reference width.
-int estimateMessageLines(const ChatMessage& msg) {
-    return 1 /*header*/ + ui::estimateWrappedLines(msg.text) +
-           ui::estimateWrappedLines(msg.thinking);
-}
-
-/// What changed in the streaming message since the last sync: a fingerprint, not a
-/// text compare (the stream can be re-sent every frame, and `sync()` is called once
-/// per adapter accessor, i.e. ~2 per visible group per frame).
-///
-/// It is a *mutation hint*, and it says so: the sizes, the message type and eight
-/// bytes sampled across the body catch every append (the common case: the text
-/// grows) and a same-length rewrite that touches one of the sampled positions. A
-/// rewrite that keeps the length *and* leaves those bytes alone is not detected -
-/// the price of not hashing (or copying) a body that can be megabytes, on the frame
-/// path. `revision` therefore means "changed, as far as a cheap check can see".
-size_t streamFingerprint(const ChatTab& chat) {
-    const ChatMessage& msg = chat.streamMsg;
-    auto sample = [](const std::string& s, std::size_t at) -> std::size_t {
-        return at < s.size() ? static_cast<unsigned char>(s[at]) : 0u;
-    };
-    const std::size_t mid = msg.text.size() / 2;
-    const std::size_t tail = msg.text.empty() ? 0 : msg.text.size() - 1;
-    return msg.text.size() * 131u + msg.thinking.size() * 17u + msg.summary.size() * 7u +
-           static_cast<std::size_t>(msg.type) * 29u + (chat.hasStreamMsg ? 1u : 0u) +
-           sample(msg.text, 0) * 3u + sample(msg.text, mid) * 5u + sample(msg.text, tail) * 11u +
-           sample(msg.thinking, 0) * 13u;
-}
-
-store::GroupKind toViewKind(TuiGroupKind kind) {
-    switch (kind) {
-    case TuiGroupKind::UserQuery:
-        return store::GroupKind::UserQuery;
-    case TuiGroupKind::FinalAnswer:
-        return store::GroupKind::FinalAnswer;
-    case TuiGroupKind::AssistantWork:
-        break;
-    }
-    return store::GroupKind::AssistantWork;
-}
-
-} // namespace
 
 ThreadStoreAdapter::ThreadStoreAdapter(TuiState& state)
     : chat_(&state.chat), thread_(&state.ui.thread) {}
@@ -601,315 +138,7 @@ void ThreadStoreAdapter::dropChat(const ChatTab* chat) {
         *this = ThreadStoreAdapter();
 }
 
-void ThreadStoreAdapter::sync() const {
-    if (source_ == ProjectionSource::TypedTurns) {
-        syncTyped();
-        return;
-    }
-    // Unbound (the state moved since the last frame): nothing to sync, and every
-    // accessor downstream sees an empty thread instead of a dangling pointer.
-    if (!bound()) {
-        groups_.clear();
-        indexById_.clear();
-        synced_ = false;
-        // The cached stream answers go with the binding: whatever the next
-        // state streams is a body the scans have never seen, and a stale open
-        // flag must not survive the rebind.
-        streamTextFence_ = {};
-        streamThinkingFence_ = {};
-        streamFingerprint_ = 0;
-        return;
-    }
-    // Non-const: a group that has just appeared gets its one-shot expansion
-    // default written into the v4 store below, at the moment its id is assigned
-    // (`seedNewGroup`). That is the same state the draw path writes, and the reason it
-    // happens here is that "new" is a property of the group build, not of the frame
-    // that happens to draw the group.
-    ChatTab& chat = *chat_;
-    const size_t count = chat.outputLines.size();
-    const size_t front = count != 0 ? chat.outputLines.front().id : 0;
-    const size_t back = count != 0 ? chat.outputLines.back().id : 0;
-
-    // The stream's revision is the adapter's own counter: it advances whenever
-    // the stream's content changes, which is what a consumer means by "this
-    // group changed" (a text compare per frame would be the thing to avoid).
-    const size_t fingerprint = streamFingerprint(chat);
-    if (fingerprint != streamFingerprint_) {
-        streamFingerprint_ = fingerprint;
-        // A stream whose group is only now born is a body the scans have never
-        // seen: they start from zero rather than resume. The fingerprint is a
-        // mutation hint, so it cannot tell a replaced body from a grown one;
-        // the assumption is that a stream is replaced only through
-        // clearStream()/reset()/a rebind, and those zero the caches.
-        if (streamGroupId_ == 0) {
-            streamTextFence_ = {};
-            streamThinkingFence_ = {};
-        }
-        ++streamRevision_;
-        // The unclosed-fence classification rides the change key's cadence:
-        // one suffix scan per stream snapshot, never a whole-body rescan and
-        // never a scan per frame. `open` is the answer for the body as it
-        // stands - the scanner's return value - because the body's final line
-        // can already be the fence opener or closer it does not carry yet.
-        streamTextFence_.open = ui::hasUnclosedFence(chat.streamMsg.text, streamTextFence_.scan);
-        streamThinkingFence_.open =
-            ui::hasUnclosedFence(chat.streamMsg.thinking, streamThinkingFence_.scan);
-    }
-
-    if (synced_ && count == syncedCount_ && front == syncedFront_ && back == syncedBack_ &&
-        chat.hasStreamMsg == (streamGroupId_ != 0) && streamRevision_ == syncedStream_)
-        return;
-
-    synced_ = true;
-    syncedCount_ = count;
-    syncedFront_ = front;
-    syncedBack_ = back;
-    syncedStream_ = streamRevision_;
-
-    // One group build for the whole page (`buildRenderGroups`), so a page and a
-    // whole-thread walk cannot disagree about where a group starts. The store's own
-    // cached copy is refreshed too, which keeps the next reader warm for free.
-    buildRenderGroups(*chat_);
-    const std::vector<RenderGroup>& built = chat_->renderGroups;
-
-    std::vector<Entry> groups;
-    groups.reserve(built.size() + 1);
-    std::map<size_t, size_t> ids;
-    for (size_t gi = 0; gi < built.size(); ++gi) {
-        const RenderGroup& group = built[gi];
-        if (group.start >= group.end || group.end > count)
-            continue; // a half-built group is never rendered
-        const size_t startId = chat.outputLines[group.start].id;
-        const GroupKind viewKind = toViewKind(group.kind);
-        size_t id = 0;
-        const auto known = idByStart_.find(startId);
-        const bool fresh = known == idByStart_.end();
-        if (!fresh) {
-            id = known->second; // an appended message extends the group, it does
-                                // not renumber it (D-GROUPID)
-        } else {
-            id = nextId_++;
-            // The one moment this group is new: seed the default it is born with.
-            // Doing it here (instead of in the draw path) is what keeps the answer the
-            // same for a group the window draws now and one `Load earlier` reveals
-            // later.
-            seedNewGroup(chat, viewKind, group.start, group.end,
-                         /*isNewestGroup=*/gi + 1 == built.size(), count);
-            if (viewKind == GroupKind::AssistantWork && gi + 1 == built.size())
-                autoOpenWorkGroups_.insert(startId);
-        }
-        ids.emplace(startId, id);
-
-        Entry entry;
-        entry.view.id = id;
-        entry.view.kind = viewKind;
-        entry.view.revision = 0;
-        entry.start = group.start;
-        entry.end = group.end;
-        if (group.kind == TuiGroupKind::AssistantWork) {
-            const size_t steps = group.end - group.start;
-            entry.view.oneLineSummary = "AGENT";
-            entry.view.oneLineSummary.append(roleSeparator());
-            entry.view.oneLineSummary.append(std::to_string(steps));
-            entry.view.oneLineSummary.append(steps == 1 ? " step" : " steps");
-            int lines = 1;
-            for (size_t i = group.start; i < group.end; ++i)
-                lines += estimateMessageLines(chat.outputLines[i]);
-            entry.view.lineCountEstimate = lines;
-        } else {
-            entry.view.oneLineSummary =
-                messageHeaderText(chat.outputLines[group.start], /*expanded=*/false);
-            entry.view.lineCountEstimate = estimateMessageLines(chat.outputLines[group.start]);
-        }
-        groups.push_back(std::move(entry));
-    }
-
-    // Only the newest stored group's work group unfolds. A group the default opened
-    // closes when a newer stored group (the answer, a new user query, the next run)
-    // arrives; the stream is not a stored group and must not close it. A group the
-    // user opened is not in the auto set and is left alone.
-    if (!groups.empty()) {
-        // `openWorkGroups` is keyed by a work group's first message id, not by the
-        // adapter's group id; the auto set uses the same key.
-        const std::size_t newestStored = chat.outputLines[groups.back().start].id;
-        for (auto it = autoOpenWorkGroups_.begin(); it != autoOpenWorkGroups_.end();) {
-            if (*it == newestStored) {
-                ++it;
-                continue;
-            }
-            chat.openWorkGroups.erase(*it);
-            it = autoOpenWorkGroups_.erase(it);
-        }
-    }
-
-    if (chat.hasStreamMsg) {
-        if (streamGroupId_ == 0) {
-            streamGroupId_ = nextId_++;
-            // The streamed reasoning starts open: seed its identity when the group is
-            // born, the one time it is new. A later toggle is the user's own.
-            thread_->thinkingOpen.insert(model::BlockId{streamGroupId_, model::kStreamMessageId,
-                                                        model::BlockKind::Thinking});
-        }
-        Entry entry;
-        entry.view.id = streamGroupId_;
-        entry.view.kind = GroupKind::AssistantWork;
-        entry.view.revision = streamRevision_;
-        entry.view.oneLineSummary = roleLabel(chat.streamMsg.type);
-        entry.view.lineCountEstimate = estimateMessageLines(chat.streamMsg);
-        entry.start = count; // not a message range: the stream is its own body
-        entry.end = count;
-        entry.stream = true;
-        groups.push_back(std::move(entry));
-    } else {
-        if (streamGroupId_ != 0) {
-            thread_->thinkingOpen.erase(model::BlockId{streamGroupId_, model::kStreamMessageId,
-                                                       model::BlockKind::Thinking});
-            if (thread_->focus.group == streamGroupId_)
-                thread_->focus = {};
-            // The menu opened on one of its rows goes with the rows (task 44): the owner
-            // must name a block that exists, or an open popup survives its block.
-            if (thread_->menuBlockId.group == streamGroupId_)
-                thread_->menuBlockId = {};
-            // The stream ended without a clear (a store the harness wrote directly): its clock
-            // counted an answer that is over, so it goes with the group id (task 38).
-            model::resetStreamClock(thread_->stream);
-        }
-        // The ended stream's fence answers go with it: whatever streams next is
-        // a body the scans have never seen.
-        streamTextFence_ = {};
-        streamThinkingFence_ = {};
-        streamGroupId_ = 0;
-    }
-
-    groups_ = std::move(groups);
-    // The blocks each group draws (design §4.5, task 26): the group's own header row,
-    // then one row per message, with a message's thinking disclosure in front of it.
-    // Built here, with the group list, so `blockAt()` is a copy out of a walked vector
-    // rather than a per-row walk of the store - and a body is classified once (a single
-    // fenced code block is a `Code` block for as long as its text is unchanged).
-    const auto buildBlocks = [&chat](Entry& entry) {
-        entry.blocks.clear();
-        if (entry.stream) {
-            // The streamed message has no id in the store, so its reasoning is a block of
-            // its own exactly like a stored message's (task 26, review Important 1: a
-            // stream that carries only reasoning must not draw an empty row). A windowed
-            // render gives it a row, a focus target and a copy target of its own.
-            if (!chat.streamMsg.thinking.empty()) {
-                BlockEntry think;
-                think.kind = model::BlockKind::Thinking;
-                think.key = model::kStreamMessageId;
-                think.thinking = true;
-                think.expandable = true;
-                entry.blocks.push_back(think);
-            }
-            BlockEntry block;
-            block.kind = model::BlockKind::Assistant;
-            block.key = model::kStreamMessageId;
-            block.expandable = false;
-            entry.blocks.push_back(block);
-            return;
-        }
-        if (entry.view.kind == GroupKind::AssistantWork) {
-            BlockEntry header;
-            header.kind = model::BlockKind::WorkGroup;
-            header.key = entry.view.id;
-            header.message = entry.start;
-            header.steps = static_cast<int>(entry.end - entry.start);
-            header.expandable = true;
-            entry.blocks.push_back(header);
-        }
-        for (std::size_t i = entry.start; i < entry.end; ++i) {
-            const auto& message = chat.outputLines[i];
-            const double timing = durationSeconds(splitSummary(message.summary).time);
-            if (!message.thinking.empty()) {
-                // The disclosure is a row that opens and closes on its own, so it is a
-                // block of its own: one list, one renderer, one focus ring.
-                BlockEntry think;
-                think.kind = model::BlockKind::Thinking;
-                think.key = message.id;
-                think.message = i;
-                think.thinking = true;
-                think.timingS = timing;
-                think.expandable = true;
-                entry.blocks.push_back(think);
-            }
-            BlockEntry block;
-            block.key = message.id;
-            block.message = i;
-            block.timingS = timing;
-            block.expandable = true;
-            switch (message.type) {
-            case TuiMessageType::User:
-            case TuiMessageType::Vision:
-                block.kind = model::BlockKind::User;
-                break;
-            case TuiMessageType::Assistant:
-                block.kind = model::BlockKind::Assistant;
-                break;
-            case TuiMessageType::FinalAnswer:
-                block.kind = model::BlockKind::Answer;
-                break;
-            case TuiMessageType::ToolCall:
-                block.kind = model::BlockKind::ToolCall;
-                break;
-            case TuiMessageType::ToolResponse:
-                block.kind = model::BlockKind::ToolResult;
-                break;
-            case TuiMessageType::System:
-            case TuiMessageType::Count:
-                block.kind = model::BlockKind::System;
-                break;
-            }
-            // A body that is one fenced code block is drawn - and copied - as code; the
-            // role word stays the message's own ("an agent answered with code").
-            //
-            // Classified once, here, so the fence scan sits on the store-change path and
-            // not on the frame path. The change key is `(count, front, back, hasStream,
-            // streamRevision)`: an append, an eviction or a stream update rebuilds, an
-            // in-place *rewrite* of an existing message would not - and its `Code` flag
-            // would go stale while its summary and duration are recomputed per call. The
-            // store never rewrites a message today (a message is appended once), so the
-            // flag is as fresh as the text; anything that starts rewriting has to fold a
-            // text fingerprint into the key.
-            block.code = renderAsMarkdown(message.type) && !ui::fencedCodeOf(message.text).empty();
-            entry.blocks.push_back(block);
-        }
-    };
-    for (Entry& entry : groups_)
-        buildBlocks(entry);
-    idByStart_ = std::move(ids);
-    // group id -> its index, so the lookups below are a map probe instead of a walk
-    // of the whole thread (design §4.4: enumeration is incremental).
-    indexById_.clear();
-    for (std::size_t i = 0; i < groups_.size(); ++i)
-        indexById_.emplace(groups_[i].view.id, i);
-    ++groupBuilds_;
-    // Seed the items of *every* work group while the list is built, not only the
-    // ones of a group that has just been born. A step appended to an existing
-    // group has no other seeder here, and a default applied inside the draw would
-    // change the membership the draw path reads as "the user toggled something":
-    // the follow would be dropped and an anchor armed on every arriving step.
-    // Watermarked, so an id that was seeded (or clicked) earlier is never touched
-    // twice; one rule with `seedNewGroup()` and the draw (`workItemDefaultOpen`).
-    for (const Entry& e : groups_) {
-        if (e.stream || e.view.kind != GroupKind::AssistantWork)
-            continue;
-        for (std::size_t m = e.start; m < e.end; ++m) {
-            const auto& item = chat.outputLines[m]; // `auto`: the ledger counts the v4 type name
-            if (item.id > chat.expansionDefaultThroughId)
-                applyExpansionDefault(chat, item.id, workItemExpansionDefault(item, m, count));
-        }
-    }
-
-    // Hints for groups that are gone would be memory (and an anchor) kept for a
-    // group that no longer exists; ids are never reused, so dropping them cannot
-    // lose a live hint. `UiState::thread.hints` is the cache (design §5.1) - the
-    // adapter only decides which entries are still live, and a session switch clears
-    // it wholesale in `resetForSessionSwitch()`.
-    auto& hints = thread_->hints;
-    for (auto it = hints.begin(); it != hints.end();)
-        it = indexById_.count(it->first) != 0 ? std::next(it) : hints.erase(it);
-}
+void ThreadStoreAdapter::sync() const { syncTyped(); }
 
 // The per-turn change fingerprint: every field that changes what is drawn,
 // folded into one number. A rebuild compares it per turn to bump the turn's
@@ -976,13 +205,13 @@ void ThreadStoreAdapter::syncTyped() const {
         entry.view.id = id;
         entry.view.kind = GroupKind::AssistantWork;
         entry.view.revision = typedRevision_[turn.id];
+        entry.view.typedTurn = true;
+        entry.view.ordinal = turn.ordinal;
         const int steps = stepCount(typed, turn.id);
         entry.view.oneLineSummary = "WORK";
         entry.view.oneLineSummary.append(roleSeparator());
         entry.view.oneLineSummary.append(std::to_string(steps));
         entry.view.oneLineSummary.append(steps == 1 ? " step" : " steps");
-        entry.start = 0; // not a message range: the typed store carries its own
-        entry.end = 0;   // bodies; the accessors below never touch outputLines
 
         // The blocks: the group's own header row, then one row per displayed
         // block, in insertion order. The wire's block vocabulary maps onto
@@ -1013,6 +242,8 @@ void ThreadStoreAdapter::syncTyped() const {
             row.key = std::hash<std::string>{}(block.id);
             row.typedTurnId = turn.id;
             row.typedBlockId = block.id;
+            row.typedBatchId = block.batchId;
+            row.typedMeta = block.meta;
             row.typedTitle = block.title;
             row.typedBody = block.body;
             switch (block.kind) {
@@ -1031,6 +262,8 @@ void ThreadStoreAdapter::syncTyped() const {
                 break;
             case store::kBlockKindTool: // the merged card (call + result, one row)
                 row.kind = model::BlockKind::ToolStep;
+                row.tokensIn = block.tokensIn; // the card's token fields (F5)
+                row.tokensOut = block.tokensOut;
                 break;
             case store::kBlockKindAnswer:
                 row.kind = model::BlockKind::Answer;
@@ -1067,6 +300,18 @@ void ThreadStoreAdapter::syncTyped() const {
                 row.kind != model::BlockKind::ToolStep && !ui::fencedCodeOf(block.body).empty();
             entry.blocks.push_back(row);
         }
+        // The batch's thinking meta (F5): the disclosure names its response's
+        // tool count - "Thinking · N tool calls" - counted over the Tool rows
+        // that share its batch id. A tool-less batch leaves the meta 0, and
+        // the disclosure carries no count.
+        for (BlockEntry& row : entry.blocks) {
+            if (row.kind != model::BlockKind::Thinking)
+                continue;
+            for (const BlockEntry& other : entry.blocks)
+                if (other.kind == model::BlockKind::ToolStep &&
+                    other.typedBatchId == row.typedBatchId)
+                    ++row.batchTools;
+        }
         // A rough estimate only: one line per row the group draws. The hint is
         // replaced by the drawn height after the first draw, exactly like v4's.
         entry.view.lineCountEstimate = std::max(1, static_cast<int>(entry.blocks.size()));
@@ -1091,6 +336,19 @@ void ThreadStoreAdapter::syncTyped() const {
     for (std::size_t i = 0; i < groups_.size(); ++i)
         indexById_.emplace(groups_[i].view.id, i);
     ++groupBuilds_;
+
+    // The hint prune the v4 sync does: a hint for a turn that is gone is memory
+    // kept for a group that no longer exists, and ids are never reused so
+    // dropping it cannot lose a live hint.
+    auto& hints = thread_->hints;
+    for (auto it = hints.begin(); it != hints.end();)
+        it = indexById_.count(it->first) != 0 ? std::next(it) : hints.erase(it);
+    // window counts the stored groups and the view appends the live one after
+    // (D-BOUNDS, the same shape the v4 projection gave the stream group) - and
+    // the frame layer's clock reads `hasStream()` off this mark, so a turn that
+    // has closed stops the clock by the same flag.
+    if (!groups_.empty() && typed.turnAt(typed.turnCount() - 1).state == store::kTurnStateRunning)
+        groups_.back().stream = true;
 }
 
 size_t ThreadStoreAdapter::groupCount() const {
@@ -1114,6 +372,30 @@ size_t ThreadStoreAdapter::storedGroupCount() const {
     sync();
     const size_t total = groups_.size();
     return !groups_.empty() && groups_.back().stream ? total - 1 : total;
+}
+
+bool ThreadStoreAdapter::streamHasText() const {
+    sync();
+    if (groups_.empty() || !groups_.back().stream)
+        return false;
+    // The streamed answer's text: the content block the ticks merge in place
+    // (the turn's second Prose row, an Assistant row) - or the Answer row the
+    // step's completion upserts. Either means the reasoning has ended.
+    for (const BlockEntry& b : groups_.back().blocks)
+        if ((b.kind == model::BlockKind::Answer || b.kind == model::BlockKind::Assistant) &&
+            !b.typedBody.empty())
+            return true;
+    return false;
+}
+
+bool ThreadStoreAdapter::streamHasThinking() const {
+    sync();
+    if (groups_.empty() || !groups_.back().stream)
+        return false;
+    for (const BlockEntry& b : groups_.back().blocks)
+        if (b.kind == model::BlockKind::Thinking && !b.typedBody.empty())
+            return true;
+    return false;
 }
 
 const ThreadStoreAdapter::Entry* ThreadStoreAdapter::entryFor(size_t id) const {
@@ -1144,21 +426,33 @@ size_t ThreadStoreAdapter::takeExpandedGroup() {
     expandedGroup_ = 0;
     return id;
 }
+bool ThreadStoreAdapter::minimalMode() const { return !bound() || chat_->threadMinimalMode; }
+
+bool ThreadStoreAdapter::groupMinimal(size_t groupId) const {
+    if (!bound())
+        return true;
+    // The override first (design §6, task 8): a pinned group draws against the
+    // mode - a maximal batch the user folded stays folded, a minimal batch the
+    // user opened draws maximal-style - and the unpinned groups follow the mode.
+    const auto pinned = chat_->groupOverrides.find(static_cast<long long>(groupId));
+    if (pinned != chat_->groupOverrides.end())
+        return pinned->second == store::GroupOverride::ForceClosed;
+    return chat_->threadMinimalMode;
+}
+
 bool ThreadStoreAdapter::expanded(size_t id) const {
     const Entry* entry = entryFor(id);
     if (entry == nullptr || !bound())
         return false;
-    if (entry->stream)
-        return true;
-    if (source_ == ProjectionSource::TypedTurns)
-        return chat_->openWorkGroups.count(id) != 0;
-    const ChatTab& chat = *chat_;
-    if (entry->start >= chat.outputLines.size())
-        return false;
-    const size_t headId = chat.outputLines[entry->start].id;
-    if (entry->view.kind == GroupKind::AssistantWork)
-        return chat.openWorkGroups.count(headId) != 0;
-    return chat.outputLineOpen.count(headId) != 0;
+    // The per-group override first (task 8): the same answer the group's own
+    // header row draws, so the endGroup latch cannot miss a toggle the draw
+    // performed.
+    const auto pinned = chat_->groupOverrides.find(static_cast<long long>(id));
+    if (pinned != chat_->groupOverrides.end())
+        return pinned->second == GroupOverride::ForceOpen;
+    // The typed live turn is a work group like any other - its fold is the
+    // minimal mode's chips line, never a body.
+    return chat_->openWorkGroups.count(id) != 0;
 }
 
 void ThreadStoreAdapter::setExpanded(size_t id, bool open) {
@@ -1168,25 +462,22 @@ void ThreadStoreAdapter::setExpanded(size_t id, bool open) {
     const auto found = indexById_.find(id);
     if (found == indexById_.end())
         return;
-    const Entry& entry = groups_[found->second];
-    if (source_ == ProjectionSource::TypedTurns) {
+    // The group-level seam writes the same state the block seam writes (task
+    // 8): the per-group override in maximal - a fold a maximal batch cannot
+    // express through the mode, which draws a batch open on its own (F5) - and
+    // `openWorkGroups` in minimal (task 6's mechanism, unchanged).
+    if (chat_->threadMinimalMode) {
         if (open)
             chat_->openWorkGroups.insert(id);
         else
             chat_->openWorkGroups.erase(id);
         return;
     }
-    if (entry.stream || entry.start >= chat_->outputLines.size())
-        return;
-    const size_t headId = chat_->outputLines[entry.start].id;
-    if (entry.view.kind == GroupKind::AssistantWork)
-        autoOpenWorkGroups_.erase(headId); // the user owns this group from now on
-    std::set<size_t>& target =
-        entry.view.kind == GroupKind::AssistantWork ? chat_->openWorkGroups : chat_->outputLineOpen;
+    const long long key = static_cast<long long>(id);
     if (open)
-        target.insert(headId);
+        chat_->groupOverrides.erase(key);
     else
-        target.erase(headId);
+        chat_->groupOverrides[key] = GroupOverride::ForceClosed;
 }
 
 float ThreadStoreAdapter::measureHint(size_t id) const {
@@ -1213,22 +504,11 @@ bool ThreadStoreAdapter::blockHasTable(size_t k, std::size_t b) const {
     const BlockEntry* block = blockEntryAt(k, b);
     if (block == nullptr || !bound() || block->kind == model::BlockKind::WorkGroup)
         return false;
-    // A thinking body is markdown too - it is drawn through the same renderer - so only a stored
-    // or streamed *message* row has to pass the verbatim check: a tool transcript is drawn
-    // verbatim (a fence inside it would be printed literally), so a TOOL row has nothing to show.
-    // That is what stops `s` from setting an invisible bit on such a row.
-    if (!block->thinking && !groups_[k].stream && source_ == ProjectionSource::V4Messages) {
-        if (block->message >= chat_->outputLines.size())
-            return false;
-        if (!renderAsMarkdown(chat_->outputLines[block->message].type))
-            return false;
-    }
-    // The typed path mirrors that exemption with its own vocabulary: a tool
-    // card is a transcript, drawn verbatim (renderBlockBody's one non-markdown
-    // kind), so a `|` inside it must not offer a table toggle (`s` would set a
-    // tableSource bit nothing reads - views/thread.cpp: a verbatim row never
-    // sets it).
-    if (source_ == ProjectionSource::TypedTurns && block->kind == model::BlockKind::ToolStep)
+    // A typed tool card is a transcript, drawn verbatim (renderBlockBody's one
+    // non-markdown kind), so a `|` inside it must not offer a table toggle (`s`
+    // would set a tableSource bit nothing reads - views/thread.cpp: a verbatim
+    // row never sets it).
+    if (block->kind == model::BlockKind::ToolStep)
         return false;
     const std::string body = blockText(k, b);
     // The renderer's own cheap guards, then the bridge's answer: a body with no pipe cannot hold
@@ -1258,7 +538,6 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
     if (block == nullptr || !bound())
         return out;
     const Entry& entry = groups_[k];
-    const ChatTab& chat = *chat_;
 
     out.kind = block->kind;
     out.state = block->state;
@@ -1266,9 +545,11 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
     out.key = block->key;
     out.timingS = block->timingS;
     out.steps = block->steps;
+    out.batchTools = block->batchTools;
+    out.tokensIn = block->tokensIn;
+    out.tokensOut = block->tokensOut;
     out.expandable = block->expandable;
     out.expanded = blockExpanded(k, b);
-    out.streaming = entry.stream;
 
     if (block->kind == model::BlockKind::WorkGroup) {
         // The group's own header: "WORK · N steps" over the rows below it. It has no
@@ -1277,105 +558,37 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
         out.label = "WORK";
         return out;
     }
-    if (source_ == ProjectionSource::TypedTurns) {
-        switch (block->kind) {
-        case model::BlockKind::Thinking:
-            out.label = "Thinking";
-            break;
-        case model::BlockKind::User:
-        case model::BlockKind::Assistant:
-            out.label = block->typedQuery ? "YOU" : "AGENT";
-            break;
-        case model::BlockKind::ToolStep:
-            out.label = "TOOL";
-            out.summary = oneLine(block->typedTitle);
-            break;
-        case model::BlockKind::Answer:
-            out.label = "ANSWER";
-            break;
-        default:
-            out.label = "SYSTEM";
-            break;
-        }
-        if (block->code)
-            out.kind = model::BlockKind::Code; // classified at build, like v4
-        // Every row previews something: a tool card its tool name (set in the
-        // switch), every other row its body's first line.
-        if (block->kind != model::BlockKind::ToolStep)
-            out.summary = oneLine(block->typedBody);
-        out.hasBody = !block->typedBody.empty();
-        return out;
-    }
-    if (entry.stream) {
-        // The streaming message is not in the store, so its rows are drawn from
-        // `chat.streamMsg` and keyed by the reserved stream id; the stream group id
-        // completes their BlockId. The reasoning is its own block (a stream that carries
-        // *only* thinking must still show it). The body row is always present - it is the
-        // stream's stable role row - and has a body only once there is text to draw.
-        const auto& stream = chat.streamMsg;
-        // The stream's timing, derived once per frame by the frame layer: this file
-        // formats nothing and reads no wall clock, so the thinking row's duration
-        // cannot disagree with the elapsed time the now bar shows.
-        const model::StreamState& clock = thread_->stream;
-        if (block->thinking) {
-            out.label = "Thinking";
-            out.hasBody = !stream.thinking.empty();
-            // `Thinking · 3.2 s` once the reasoning has ended, and no number while it is still
-            // reasoning: `thinkingElapsedMs` is 0 until the first character of the answer ends
-            // it, so the row never shows a duration the model has not finished spending.
-            out.timingS = static_cast<double>(clock.thinkingElapsedMs) / 1000.0;
-            return out;
-        }
-        out.hasBody = !stream.text.empty();
-        out.label = roleLabel(stream.type);
-        // `AGENT · writing` / `AGENT · thinking` / `AGENT · cancelled`: the phase
-        // word is the model's vocabulary (`streamPhaseWord`) and is event-driven, so
-        // the header text changes only when the phase does.
-        out.phase = model::streamPhaseWord(clock, !stream.text.empty());
-        return out;
-    }
-    if (block->message >= chat.outputLines.size())
-        return out;
-    const auto& message = chat.outputLines[block->message]; // `auto`: the v4 name stays rare
-    if (block->thinking) {
-        // One row that opens: "Thinking · 1.2 s", dim body. The duration is the
-        // message's - the store keeps one per message, and the reasoning belongs to the
-        // step that produced it.
+    switch (block->kind) {
+    case model::BlockKind::Thinking:
         out.label = "Thinking";
-        out.hasBody = !message.thinking.empty();
-        return out;
+        break;
+    case model::BlockKind::User:
+    case model::BlockKind::Assistant:
+        out.label = block->typedQuery ? "YOU" : "AGENT";
+        break;
+    case model::BlockKind::ToolStep:
+        out.label = "TOOL";
+        out.summary = oneLine(block->typedTitle);
+        break;
+    case model::BlockKind::Answer:
+        out.label = "ANSWER";
+        break;
+    default:
+        out.label = "SYSTEM";
+        break;
     }
-
-    out.label = roleLabel(message.type);
-    const SummaryParts parts = splitSummary(message.summary);
-    std::string preview(parts.body);
-    if (block->kind == model::BlockKind::ToolCall || block->kind == model::BlockKind::ToolResult) {
-        if (structuredToolRow(message)) {
-            // The structured row composes itself: the tool name is the summary, the
-            // args / result text is the body, and the outcome glyph comes from
-            // `toolOk` - a call has no outcome of its own, its result is the next row.
-            out.summary = oneLine(message.toolName);
-            out.hasBody = !toolRowBody(message, block->kind).empty();
-            out.state = block->kind == model::BlockKind::ToolCall
-                            ? model::BlockState::Pending
-                            : (message.toolOk ? model::BlockState::Ok : model::BlockState::Failed);
-            return out;
-        }
-        // The outcome the store wrote into the summary becomes the row's state, and the
-        // summary keeps the rest of the sentence ("keeps today's text").
-        out.state = takeStateMarker(preview);
-        if (out.state == model::BlockState::None && block->kind == model::BlockKind::ToolCall) {
-            // A call has no outcome of its own - its result is the next row - so the row
-            // says what it is: the call those results answer.
-            out.state = model::BlockState::Pending;
-        }
-    } else {
-        preview = stripEmoji(preview);
-    }
-    out.summary = oneLine(preview);
-    out.hasBody = !message.text.empty();
     if (block->code)
-        out.kind = model::BlockKind::Code;
+        out.kind = model::BlockKind::Code; // classified at build, like v4
+    // Every row previews something: a tool card its tool name (set in the
+    // switch), every other row its body's first line. The query row carries
+    // the turn's ordinal (D11): the number the v4 summary put on every
+    // message renders once, on the row that opened the turn.
+    if (block->kind != model::BlockKind::ToolStep) {
+        out.summary = oneLine(block->typedBody);
+        if (block->typedQuery && entry.view.ordinal > 0)
+            out.summary = "[" + std::to_string(entry.view.ordinal) + "] " + out.summary;
+    }
+    out.hasBody = !block->typedBody.empty();
     return out;
 }
 
@@ -1384,27 +597,30 @@ bool ThreadStoreAdapter::blockExpanded(size_t k, std::size_t b) const {
     if (block == nullptr || !bound())
         return false;
     const Entry& entry = groups_[k];
-    if (entry.stream && !block->thinking)
-        return true; // the streamed body is always open
-    if (source_ == ProjectionSource::TypedTurns) {
-        if (block->group)
-            return chat_->openWorkGroups.count(entry.view.id) != 0;
-        const auto it = typedRowOpen_.find(static_cast<std::int64_t>(entry.view.id));
-        return it != typedRowOpen_.end() && it->second.count(block->typedBlockId) != 0;
+    if (block->group) {
+        // The per-group override first (design §6, task 8): a pinned group
+        // draws against the mode - a maximal batch the user folded stays
+        // folded, a minimal batch the user opened (its pin lives in
+        // `openWorkGroups`, task 6) draws maximal-style.
+        const auto pinned = chat_->groupOverrides.find(static_cast<long long>(entry.view.id));
+        if (pinned != chat_->groupOverrides.end())
+            return pinned->second == GroupOverride::ForceOpen;
+        return minimalMode() ? chat_->openWorkGroups.count(entry.view.id) != 0
+                             : true; // F5: a maximal batch draws open, always
     }
-    if (block->thinking) {
-        // Stored and streamed reasoning share one expansion set, keyed by the
-        // block's identity; the stream group id is what keeps the two apart.
-        return thread_->thinkingOpen.count(
-                   model::BlockId{entry.view.id, block->key, model::BlockKind::Thinking}) != 0;
-    }
-    const ChatTab& chat = *chat_;
-    if (block->kind == model::BlockKind::WorkGroup) {
-        if (entry.start >= chat.outputLines.size())
-            return false;
-        return chat.openWorkGroups.count(chat.outputLines[entry.start].id) != 0;
-    }
-    return chat.outputLineOpen.count(block->key) != 0;
+    // An open group renders maximal-style (design §6): every row it owns
+    // draws open, and the per-row set only matters while the group is folded.
+    if (chat_->openWorkGroups.count(entry.view.id) != 0)
+        return true;
+    const auto it = typedRowOpen_.find(static_cast<std::int64_t>(entry.view.id));
+    const bool pinned = it != typedRowOpen_.end() && it->second.count(block->typedBlockId) != 0;
+    // The row's default (F5): maximal mode draws every content row open -
+    // the query, the answer, the tool cards - with only the batch's thinking
+    // disclosure collapsed behind its meta. Minimal mode folds the work rows
+    // behind the group header instead. The set pins AGAINST the default: a
+    // click stores the opposite of what the row would draw on its own.
+    const bool defaultOpen = !minimalMode() && block->kind != model::BlockKind::Thinking;
+    return pinned ? !defaultOpen : defaultOpen;
 }
 
 bool ThreadStoreAdapter::setBlockExpanded(size_t k, std::size_t b, bool open) {
@@ -1412,55 +628,39 @@ bool ThreadStoreAdapter::setBlockExpanded(size_t k, std::size_t b, bool open) {
     if (block == nullptr || !bound() || !block->expandable)
         return false;
     const Entry& entry = groups_[k];
-    if (source_ == ProjectionSource::TypedTurns) {
-        if (block->group) {
+    if (block->group) {
+        // The per-group override (design §6, task 8): the mode's own default
+        // needs no entry - maximal draws a batch open on its own (F5) and
+        // minimal keeps its open groups in `openWorkGroups` (task 6's
+        // mechanism, unchanged) - so the map holds only the pin a click
+        // cannot express through the mode: a maximal batch the user folded.
+        // A click back to the mode's default removes the entry, so the map
+        // never grows a stale row.
+        if (chat_->threadMinimalMode) {
             if (open)
                 chat_->openWorkGroups.insert(entry.view.id);
             else
                 chat_->openWorkGroups.erase(entry.view.id);
         } else {
-            std::set<std::string>& target = typedRowOpen_[entry.view.id];
+            const long long key = static_cast<long long>(entry.view.id);
             if (open)
-                target.insert(block->typedBlockId);
+                chat_->groupOverrides.erase(key);
             else
-                target.erase(block->typedBlockId);
+                chat_->groupOverrides[key] = GroupOverride::ForceClosed;
         }
-        expandedGroup_ = entry.view.id;
-        return open;
-    }
-    const model::BlockId thinkingId{entry.view.id, block->key, model::BlockKind::Thinking};
-    if (entry.stream) {
-        if (!block->thinking)
-            return true; // the streamed body is always open
-        if (open)
-            thread_->thinkingOpen.insert(thinkingId);
-        else
-            thread_->thinkingOpen.erase(thinkingId);
-        // No anchor latch: the view's own report (`BlockResult::toggled`) names the group
-        // to anchor, and `endGroup()` deliberately skips the latch for the stream.
-        return open;
-    }
-    if (block->thinking) {
-        if (open)
-            thread_->thinkingOpen.insert(thinkingId);
-        else
-            thread_->thinkingOpen.erase(thinkingId);
     } else {
-        const ChatTab& chat = *chat_;
-        const bool group = block->kind == model::BlockKind::WorkGroup;
-        if (group && entry.start >= chat.outputLines.size())
-            return false;
-        const size_t key = group ? chat.outputLines[entry.start].id : block->key;
-        if (group)
-            autoOpenWorkGroups_.erase(key); // the user owns this group now
-        std::set<size_t>& target = group ? chat_->openWorkGroups : chat_->outputLineOpen;
-        if (open)
-            target.insert(key);
+        // The per-row pin (F5): the row's own default - maximal draws every
+        // content row open and the thinking disclosure collapsed - is what a
+        // click stores against, so a set that agrees with the default is
+        // erased rather than carried.
+        const bool defaultOpen =
+            !chat_->threadMinimalMode && block->kind != model::BlockKind::Thinking;
+        std::set<std::string>& target = typedRowOpen_[entry.view.id];
+        if (open != defaultOpen)
+            target.insert(block->typedBlockId);
         else
-            target.erase(key);
+            target.erase(block->typedBlockId);
     }
-    // The anchor's answer: the group whose content just changed. `takeExpandedGroup()`
-    // reports it, whatever performed the toggle.
     expandedGroup_ = entry.view.id;
     return open;
 }
@@ -1469,20 +669,7 @@ std::string ThreadStoreAdapter::blockText(size_t k, std::size_t b) const {
     const BlockEntry* block = blockEntryAt(k, b);
     if (block == nullptr || !bound() || block->kind == model::BlockKind::WorkGroup)
         return {};
-    const Entry& entry = groups_[k];
-    if (entry.stream)
-        return block->thinking ? chat_->streamMsg.thinking : chat_->streamMsg.text;
-    if (source_ == ProjectionSource::TypedTurns)
-        return block->typedBody;
-    if (block->message >= chat_->outputLines.size())
-        return {};
-    const auto& message = chat_->outputLines[block->message];
-    if (!block->thinking &&
-        (block->kind == model::BlockKind::ToolCall ||
-         block->kind == model::BlockKind::ToolResult) &&
-        structuredToolRow(message))
-        return toolRowBody(message, block->kind);
-    return block->thinking ? message.thinking : message.text;
+    return block->typedBody;
 }
 
 void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect& cell) {
@@ -1492,39 +679,24 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
     if (!ui::rectMatchesProfile(cell, ui::metricsFor()))
         return;
     const Entry& entry = groups_[k];
-    std::string body;
+    const std::string body = block->typedBody;
     const bool thinking = block->thinking;
-    bool markdown = true;
-    if (entry.stream) {
-        body = block->thinking ? chat_->streamMsg.thinking : chat_->streamMsg.text;
-    } else if (source_ == ProjectionSource::TypedTurns) {
-        body = block->typedBody;
-        markdown = block->kind != model::BlockKind::ToolStep;
-    } else if (block->kind != model::BlockKind::WorkGroup &&
-               block->message < chat_->outputLines.size()) {
-        const auto& message = chat_->outputLines[block->message];
-        if (thinking)
-            body = message.thinking;
-        else if (structuredToolRow(message) && (block->kind == model::BlockKind::ToolCall ||
-                                                block->kind == model::BlockKind::ToolResult))
-            // A structured tool row's body is its args / result text, not `message.text`
-            // (which the real API path leaves empty).
-            body = toolRowBody(message, block->kind);
-        else
-            body = message.text;
-        // A tool row is a transcript, not prose: it is drawn verbatim. Everything else goes
-        // through the markdown wrapper.
-        markdown = renderAsMarkdown(message.type);
-    }
-    if (body.empty())
+    // A tool row is a transcript, not prose: it is drawn verbatim. Everything else goes
+    // through the markdown wrapper.
+    const bool markdown = block->kind != model::BlockKind::ToolStep;
+    // A card's Result can exist without arguments (F5): an empty body does not
+    // end the draw - only a body-less, result-less row paints nothing.
+    const bool hasResult = block->kind == model::BlockKind::ToolStep && !block->typedMeta.empty();
+    if (body.empty() && !hasResult)
         return;
-    // While a streamed markdown body is inside an unclosed fence it draws as
-    // plain text: the half-arrived construct under the fence would flip shapes
-    // from snapshot to snapshot, and the fence's raw lines are what a reader
-    // can hold steady. The flag is the snapshot's cached answer, so this draw
-    // scans nothing; a stored body is classified once and drawn as it is.
-    const bool plainText =
-        entry.stream && markdown && (thinking ? streamThinkingFence_.open : streamTextFence_.open);
+    // The turn's ordinal (D5): the number the v4 summary put on every message
+    // renders ONCE, on the row that opened the turn. The query row draws open
+    // (minimal keeps its content rows out of the fold), so the drawn body carries
+    // it - the collapsed summary line is the same body's first line, and a row
+    // draws one of the two, never both.
+    const std::string drawn = block->typedQuery && entry.view.ordinal > 0
+                                  ? "[" + std::to_string(entry.view.ordinal) + "] " + body
+                                  : body;
     // The table bridge is applied by `renderBodyText()` - the one place
     // a markdown body is drawn - and the block's own `s` toggle is what it needs from here: the
     // source flag names the block by its stable id, so a redraw after a paging change or a
@@ -1532,20 +704,26 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
     const model::BlockId blockId{entry.view.id, block->key, block->kind};
     const bool showTableSource = thread_->tableSource.find(blockId) != thread_->tableSource.end();
 
-    // While the plain-text fallback is active the block's `s` toggle is a
-    // visual no-op: the body is already raw text. A future "the toggle does
-    // nothing" report lands here, not on the toggle.
-    if (plainText)
-        ui::notePlainTextFallback();
     ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x - 1);
-    if (thinking) {
-        // The dim body of a disclosure: `textMid` is the quiet ink that still clears the
-        // contrast bar, and the end mark closes the region the header opened.
+    if (!body.empty()) {
+        if (thinking) {
+            // The dim body of a disclosure: `textMid` is the quiet ink that still clears the
+            // contrast bar, and the end mark closes the region the header opened.
+            ImGui::PushStyleColor(ImGuiCol_Text, ui::color(ui::ColorToken::textMid));
+            renderBodyText(drawn, true, showTableSource);
+            ImGui::PopStyleColor();
+        } else {
+            renderBodyText(drawn, markdown, showTableSource);
+        }
+    }
+    if (block->kind == model::BlockKind::ToolStep && !block->typedMeta.empty()) {
+        // The embedded Result (F5): the merged card carries the call's outcome
+        // under its arguments, dim, open by default - a body row draws only
+        // when the card is open, so closing the card closes the result with it.
+        // The status is the header's glyph, never repeated here.
         ImGui::PushStyleColor(ImGuiCol_Text, ui::color(ui::ColorToken::textMid));
-        renderBodyText(body, !plainText, showTableSource);
+        renderBodyText("RESULT  " + oneLine(block->typedMeta), false, false);
         ImGui::PopStyleColor();
-    } else {
-        renderBodyText(body, markdown && !plainText, showTableSource);
     }
     ImGui::PopTextWrapPos();
 }
@@ -1567,7 +745,7 @@ bool ThreadStoreAdapter::beginGroup(size_t k, const ui::Rect& cell) {
     // a group draw, so a change the caller did not report is still latched (task 25's
     // anchor reads it).
     groupExpandedBefore_ = expanded(entry.view.id);
-    // A row inside an agent group toggles `outputLineOpen` per message, which
+    // A row inside an agent group toggles `typedRowOpen_` per block, which
     // `expanded(groupId)` cannot see (it reads the group's own bit). Any toggle of the
     // shared sets changes the membership of exactly one of them by one, so their
     // combined size is the O(1) signal that covers them. (A thinking disclosure lives
@@ -1576,7 +754,10 @@ bool ThreadStoreAdapter::beginGroup(size_t k, const ui::Rect& cell) {
     // This is only a toggle signal while the draw does not write the sets itself: the
     // one-shot defaults are seeded in `sync()` at build time, so the writes between
     // these two samples are the user's own activations.
-    groupOpenBefore_ = chat_->outputLineOpen.size() + chat_->openWorkGroups.size();
+    std::size_t rowOpen = 0;
+    for (const auto& [id, rows] : typedRowOpen_)
+        rowOpen += rows.size();
+    groupOpenBefore_ = rowOpen + chat_->openWorkGroups.size();
     groupTop_ = ImGui::GetCursorScreenPos().y;
     // One block scope per group, keyed by the adapter's own group id (D-GROUPID:
     // monotonic, never reused, never a frame counter) - rich_md's fragment ids are keyed
@@ -1598,9 +779,11 @@ void ThreadStoreAdapter::endGroup(size_t k, const ui::Rect& cell) {
     // id even when the toggle happened on a row inside it: the anchor can only hold a
     // header row the view knows about, so the group's header is what stays put - the
     // row above the content the user just changed.
-    const std::size_t openAfter = chat_->outputLineOpen.size() + chat_->openWorkGroups.size();
-    if (!entry.stream &&
-        (expanded(entry.view.id) != groupExpandedBefore_ || openAfter != groupOpenBefore_))
+    std::size_t rowOpen = 0;
+    for (const auto& [id, rows] : typedRowOpen_)
+        rowOpen += rows.size();
+    const std::size_t openAfter = rowOpen + chat_->openWorkGroups.size();
+    if (expanded(entry.view.id) != groupExpandedBefore_ || openAfter != groupOpenBefore_)
         expandedGroup_ = entry.view.id;
 
     // The hint is refreshed *after* the draw, which is the only moment the height is
@@ -1640,49 +823,16 @@ void ThreadStoreAdapter::endGroup(size_t k, const ui::Rect& cell) {
 }
 
 void ThreadStoreAdapter::commitSeen() {
-    if (!bound())
-        return;
-    commitExpansionDefaults(*chat_);
-}
-
-void ThreadStoreAdapter::clearStream() {
-    if (streamGroupId_ != 0 && bound()) {
-        thread_->thinkingOpen.erase(
-            model::BlockId{streamGroupId_, model::kStreamMessageId, model::BlockKind::Thinking});
-        // A focus on one of the stream's rows names a block that is gone with the
-        // stream; do not leave `y` consuming a character for a target that no row
-        // can match. The menu's owner (task 44) goes with it: a menu opened on the
-        // answer must not outlive the answer.
-        if (thread_->focus.group == streamGroupId_)
-            thread_->focus = {};
-        if (thread_->menuBlockId.group == streamGroupId_)
-            thread_->menuBlockId = {};
-    }
-    streamGroupId_ = 0;
-    streamRevision_ = 0;
-    streamFingerprint_ = 0;
-    syncedStream_ = 0;
-    // The stream's cached fence answers go with it: the next stream's body is
-    // not a growth of this one, and a fallback flag left behind would draw a
-    // body that no longer holds a fence as raw text.
-    streamTextFence_ = {};
-    streamThinkingFence_ = {};
-    // Clearing the id alone is not enough: sync()'s guard compares `hasStreamMsg`
-    // with `(streamGroupId_ != 0)`, and a clear that has already set both to false
-    // would make the guard skip the rebuild and leave the old stream group drawn.
-    // A forced rebuild drops it and lets the next stream allocate a fresh group id.
-    synced_ = false;
-    // The live answer's clock goes with the stream it was counting: a new stream starts at
-    // 00:00 and uncancelled. `refreshStreamClock()` re-stamps `startedMs` on the new stream's
-    // first sighting.
-    if (bound())
-        model::resetStreamClock(thread_->stream);
+    // The typed fold has no defaults to commit: every turn is born folded and
+    // the user's toggles are their own writes (`setBlockExpanded()` owns the
+    // set), so there is no watermark to advance and nothing the render path
+    // could re-seed over. The call stays: the view's once-per-frame shape
+    // does not change with what the fold happens to store.
 }
 
 void ThreadStoreAdapter::reset() {
     groups_.clear();
     indexById_.clear();
-    idByStart_.clear();
     // The hint cache is view state and lives in `UiState`; a reset comes from a
     // clear or a session switch, and `resetForSessionSwitch()` is called from the
     // same place - but clearing here too keeps "ids are reset" and "hints are reset"
@@ -1698,10 +848,9 @@ void ThreadStoreAdapter::reset() {
     groupTop_ = 0.0f;
     // The thinking disclosures are thread-scoped like the hints: a clear or a session
     // switch replaces the thread, and a disclosure left open would be applied to the
-    // next session's block with the same identity (ids restart at 1). The streamed
-    // reasoning is seeded open again when its new group is born. The table source flags
-    // (task 37) are the same kind of state - the next session's block can be the one the
-    // flag would name - so they go with them.
+    // next session's block with the same identity (ids restart at 1). The table source
+    // flags (task 37) are the same kind of state - the next session's block can be
+    // the one the flag would name - so they go with them.
     if (bound()) {
         thread_->thinkingOpen.clear();
         thread_->tableSource.clear();
@@ -1709,28 +858,11 @@ void ThreadStoreAdapter::reset() {
         // survived would name a block of the *next* thread.
         thread_->menuBlockId = {};
     }
-    nextId_ = 1;
-    autoOpenWorkGroups_.clear();
-    streamGroupId_ = 0;
-    streamRevision_ = 0;
-    streamFingerprint_ = 0;
-    synced_ = false;
-    syncedCount_ = 0;
-    syncedFront_ = 0;
-    syncedBack_ = 0;
-    syncedStream_ = 0;
     typedRevision_.clear();
     typedFingerprints_.clear();
     typedRowOpen_.clear();
     typedSynced_ = false;
-    // The cached fence answers go with the thread: the next stream's body is
-    // not a growth of the one they describe.
-    streamTextFence_ = {};
-    streamThinkingFence_ = {};
-    // The thread is being replaced: the live answer's clock counted an answer of the thread
-    // that is going away (task 38), so the next stream starts its own.
-    if (bound())
-        model::resetStreamClock(thread_->stream);
+    syncedTypedVersion_ = 0;
 }
 
 } // namespace llmfun::tui::store

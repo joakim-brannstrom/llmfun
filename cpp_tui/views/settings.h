@@ -130,6 +130,7 @@ inline constexpr char kSettingsLogLevelNote[] =
 inline constexpr char kSettingsRowFontScale[] = "appearance.fontScale";
 inline constexpr char kSettingsRowSendKey[] = "behaviour.sendKey";
 inline constexpr char kSettingsRowRawLog[] = "behaviour.rawLog";
+inline constexpr char kSettingsRowThreadMode[] = "behaviour.threadMode";
 inline constexpr char kSettingsRowBackend[] = "advanced.backend";
 inline constexpr char kSettingsRowUiConf[] = "advanced.uiConf";
 inline constexpr char kSettingsRowLogLevel[] = "advanced.logLevel";

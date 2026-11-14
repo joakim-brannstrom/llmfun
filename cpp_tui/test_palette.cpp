@@ -46,6 +46,8 @@
 #include "model/ui_state.h"
 #include "tui.h"
 #include "tui_backend.h"
+
+#include "test/typed_seed.h" // typed turn/block seeding (the v4 message path is gone)
 #include "ui/layout.h"
 #include "ui/metrics.h"
 #include "views/palette.h"
@@ -64,6 +66,10 @@
 namespace {
 
 using namespace llmfun::tui;
+// The C surface's handle type shares its name with the C++ state: the using-
+// declaration pins the unqualified `TuiState` to the C++ one (a using-directive
+// would leave it ambiguous with the ABI's `::TuiState`).
+using llmfun::tui::TuiState;
 
 int g_failures = 0;
 int g_frames = 0;
@@ -455,20 +461,13 @@ SessionEntry mkSession(const char* id, const char* title, const char* preview, i
 }
 
 void seedThread() {
-    g_state.chat.outputLines.clear();
-    g_state.chat.outputLineOpen.clear();
-    g_state.chat.expansionDefaultThroughId = 0;
-    g_state.chat.outputLineNextId = 1;
-    // A stream from a previous scenario is state too: it is the *newest* answer as far as the
-    // copy row is concerned, so a scenario that starts "with no answer" has to lose it.
-    g_state.chat.hasStreamMsg = false;
-    g_state.chat.streamMsg = ChatMessage{};
-    g_state.chat.outputLines.push_back(ChatMessage{"[1] show me the palette", "show me the palette",
-                                                   "", ChatMessageType::User,
-                                                   g_state.chat.outputLineNextId++});
-    g_state.chat.outputLines.push_back(ChatMessage{"[2] the palette is open", "final answer body",
-                                                   "", ChatMessageType::FinalAnswer,
-                                                   g_state.chat.outputLineNextId++});
+    // The typed store is the thread now: a clear wipes the turns, then one turn
+    // carries the query and the answer the copy row reads. The query row's
+    // `[1]` ordinal prefix is the projection's (D11).
+    tuiClearOutput(g_state);
+    typed_seed::Seeder seed{&g_state};
+    seed.add(typed_seed::Seeder::Msg::User, "show me the palette");
+    seed.add(typed_seed::Seeder::Msg::FinalAnswer, "final answer body");
 }
 
 /// Fresh state for one scenario: three sessions, one answer, composer empty.
@@ -521,29 +520,26 @@ std::size_t threadHidden(const TuiState& state) {
         .hidden;
 }
 
-/// Replace the thread with `count` user groups (one group each) and let the frame settle.
+/// Replace the thread with `count` user turns (one turn each) and let the frame settle.
 void seedGroups(int count) {
-    g_state.chat.outputLines.clear();
-    g_state.chat.outputLineOpen.clear();
-    g_state.chat.openWorkGroups.clear();
-    g_state.chat.expansionDefaultThroughId = 0;
-    g_state.chat.outputLineNextId = 1;
-    g_state.chat.hasStreamMsg = false;
-    g_state.chat.streamMsg = ChatMessage{};
+    tuiClearOutput(g_state);
+    typed_seed::Seeder seed{&g_state};
     for (int i = 0; i < count; ++i) {
         const std::string text = "question " + std::to_string(i);
-        tuiAddOutputLine(g_state,
-                         ChatMessage{"[" + std::to_string(i) + "] " + text, text, "",
-                                     ChatMessageType::User, g_state.chat.outputLineNextId++});
+        seed.add(typed_seed::Seeder::Msg::User, text);
     }
     idle(2);
 }
 
-/// A live answer: what a stream looks like to the adapter (the store's flag and the message).
+/// A live answer: what a stream looks like on the typed store - a Running turn
+/// whose content block is the answer being written (the store merges the
+/// per-tick upserts in place, so one call is one live edge).
 void startStream() {
-    g_state.chat.streamMsg =
-        ChatMessage{"", "the answer is arriving", "", ChatMessageType::Assistant, 0};
-    g_state.chat.hasStreamMsg = true;
+    // A turn id no stored turn uses: the live run's turn is a new one, never a
+    // merge into a turn a previous seed made (ids are never reused, D-GROUPID).
+    typed_seed::Seeder seed{&g_state, 10000};
+    seed.runStart("q");
+    seed.updateStream("the answer is arriving");
     idle(2);
 }
 
@@ -560,7 +556,9 @@ void scenarioLoadEarlierWindow() {
     // answers what is hidden, and the palette's row reads the same number).
     idle(2);
     const int window = std::max(1, g_state.ui.thread.pageGroups);
-    check(g_state.threadAdapter.groupCount() == 2, "S17: the seeded thread is two groups");
+    // The typed thread is one turn: the query and the answer are one group now
+    // (v4 split them into two).
+    check(g_state.threadAdapter.groupCount() == 1, "S17: the seeded thread is one group");
 
     // Exactly one window of stored groups: nothing older to show.
     seedGroups(window);
@@ -573,20 +571,25 @@ void scenarioLoadEarlierWindow() {
     startStream();
     check(g_state.threadAdapter.groupCount() == static_cast<std::size_t>(window) + 1,
           "S17: the live answer is a group of its own");
+    // D-BOUNDS survived the typed cutover: the live turn is the stream, and
+    // the window counts only the stored groups - the live answer is never a
+    // pageable group, so streaming can still not enable the row by itself.
     check(g_state.threadAdapter.storedGroupCount() == static_cast<std::size_t>(window),
-          "S17: but it is not a stored group");
-    check(threadHidden(g_state) == 0, "S17: and the thread still hides nothing");
+          "S17: and the window counts only the stored groups");
+    check(threadHidden(g_state) == 0, "S17: so the live answer hides nothing");
     row = paletteItem("actions.loadEarlier");
     check(row != nullptr && !row->enabled,
-          "S17: so the row is disabled while an answer streams over a full window");
+          "S17: so the row stays disabled while the answer streams");
 
-    // More than a window of stored groups, still streaming: the number is the stored groups'.
+    // More than a window of stored groups, still streaming: the count is the
+    // stored groups', and the live turn is none of them.
     seedGroups(window + 5);
     startStream();
     const std::size_t stored = g_state.threadAdapter.storedGroupCount();
     const std::size_t hidden = threadHidden(g_state);
     check(stored == static_cast<std::size_t>(window) + 5,
-          "S17: five stored groups more than the window (" + std::to_string(stored) + ")");
+          "S17: five stored groups more than the window, the live one aside (" +
+              std::to_string(stored) + ")");
     check(hidden == 5,
           "S17: the thread hides exactly those five (got " + std::to_string(hidden) + ")");
     row = paletteItem("actions.loadEarlier");
@@ -1056,7 +1059,7 @@ void scenarioActivate() {
     g_state.quitRequested = false;
     frame([](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Enter, false); });
     idle(1);
-    g_state.chat.outputLines.clear();
+    g_state.chat.typedTurns.threadClear();
 }
 
 // S5i: the palette's Quit row shares the chord's confirmation policy. With a
@@ -1129,8 +1132,12 @@ void scenarioKeyboardOwnership() {
 void scenarioLiveFlags() {
     g_phase = "S10 live flags";
     resetClean();
-    // Start without an answer: 'Copy last answer' must be born disabled...
-    g_state.chat.outputLines.pop_back();
+    // Start without an answer: 'Copy last answer' must be born disabled. The
+    // copy row reads the typed store, so the v4 message pop is a reseed without
+    // the answer block.
+    tuiClearOutput(g_state);
+    typed_seed::Seeder seed{&g_state};
+    seed.add(typed_seed::Seeder::Msg::User, "show me the palette");
     idle(1);
     openPalette();
     const views::PaletteItem* copy = paletteItem("actions.copyLastAnswer");
@@ -1138,9 +1145,7 @@ void scenarioLiveFlags() {
           "S10: 'Copy last answer' is disabled while the thread has no answer");
     // ...and must become usable when one arrives *while the panel stays open*,
     // without reopening it (a snapshot-only table would stay disabled).
-    tuiAddOutputLine(g_state,
-                     ChatMessage{"[3] late", "a late answer", "", ChatMessageType::FinalAnswer,
-                                 g_state.chat.outputLineNextId++});
+    seed.add(typed_seed::Seeder::Msg::FinalAnswer, "a late answer");
     idle(1);
     check(copy != nullptr && copy->enabled,
           "S10: 'Copy last answer' turns enabled when an answer arrives");
@@ -1375,9 +1380,10 @@ void scenarioCommandRows() {
 void scenarioCopyBlock() {
     g_phase = "S14 copy last answer";
     resetClean();
-    g_state.chat.outputLines.push_back(ChatMessage{"[3] code", "```\nint x = 1;\n```", "",
-                                                   ChatMessageType::FinalAnswer,
-                                                   g_state.chat.outputLineNextId++});
+    // The seeded answer is replaced, not appended: the merged answer block's id
+    // is stable, so an upsert overwrites it in place.
+    typed_seed::Seeder seed{&g_state};
+    seed.add(typed_seed::Seeder::Msg::FinalAnswer, "```\nint x = 1;\n```");
     idle(2);
     openPalette();
     selectRowById("actions.copyLastAnswer");
@@ -1390,8 +1396,11 @@ void scenarioCopyBlock() {
     g_phase = "S14 copy the streaming body";
     resetClean();
     g_state.readyStatus = false;
-    g_state.chat.hasStreamMsg = true;
-    g_state.chat.streamMsg = ChatMessage{"", "partial answer", "", ChatMessageType::Assistant, 0};
+    // The typed stream: a live turn whose content block is the answer being
+    // written (the store merges the per-tick upserts in place).
+    typed_seed::Seeder stream{&g_state};
+    stream.runStart("q");
+    stream.updateStream("partial answer");
     idle(2);
     openPalette();
     selectRowById("actions.copyLastAnswer");
@@ -1401,14 +1410,16 @@ void scenarioCopyBlock() {
 
     g_phase = "S14 no answer";
     resetClean();
-    g_state.chat.outputLines.pop_back(); // the user query is all that is left
+    // The query-only thread again: no answer block, so the row is disabled.
+    tuiClearOutput(g_state);
+    typed_seed::Seeder noAnswer{&g_state};
+    noAnswer.add(typed_seed::Seeder::Msg::User, "show me the palette");
     idle(2);
     openPalette();
     const views::PaletteItem* copy = paletteItem("actions.copyLastAnswer");
     check(copy != nullptr && !copy->enabled, "S14: with no answer the row is disabled");
     pressKey(ImGuiKey_Escape);
     idle(1);
-    g_state.chat.hasStreamMsg = false;
 }
 
 // S16: the review's two Important findings and the behaviour changes the Minor ones asked for.
@@ -1608,9 +1619,9 @@ std::string paletteGoldenText(const PaletteScene& scene) {
         mkSession("s003-2", "Gamma debug", "", 1),
     };
     state.sessionPanel.activeId = "s001-0";
-    state.chat.outputLines.push_back(
-        ChatMessage{"[1] q", "a", "", ChatMessageType::FinalAnswer, 1});
-    state.chat.outputLineNextId = 2;
+    // One answer-only turn: the palette golden pins the palette, not the thread
+    // behind it - the seed only has to give the copy row something to point at.
+    typed_seed::Seeder{&state}.add(typed_seed::Seeder::Msg::FinalAnswer, "a");
     state.threadAdapter.bind(state);
 
     views::PaletteState p;
@@ -1827,9 +1838,7 @@ int runGui(const std::string& outDir) {
         mkSession("s002-1", "Beta deploy", "deploy the beta build", 5),
     };
     state.sessionPanel.activeId = "s001-0";
-    state.chat.outputLines.push_back(
-        ChatMessage{"[1] q", "a", "", ChatMessageType::FinalAnswer, 1});
-    state.chat.outputLineNextId = 2;
+    typed_seed::Seeder{&state}.add(typed_seed::Seeder::Msg::FinalAnswer, "a");
 
     const std::string iniPath = outDir + "/palette-imgui2.ini";
     std::remove(iniPath.c_str());

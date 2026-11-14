@@ -16,6 +16,7 @@
 #include "store/typed_thread_store.h"
 
 #include "store/thread_store.h"
+#include "test/tui_state_handle.h"
 #include "tui.h"
 #include "tui_api.h"
 
@@ -286,7 +287,6 @@ int main(int argc, char** argv) {
         tui::TuiState state;
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
-        thread.setSource(tui::store::ProjectionSource::TypedTurns);
         state.chat.typedTurns.turnUpsert(turn(42, 1, 1, 3));
         state.chat.typedTurns.blockUpsert(block(42, "q", 0, 0, "", "what is v5?"));
         state.chat.typedTurns.blockUpsert(block(42, "call-1", 2, 3, "grep", "call body", "", 1500));
@@ -298,18 +298,20 @@ int main(int argc, char** argv) {
         check(thread.groupAt(0).kind == tui::store::GroupKind::AssistantWork,
               "typed: the group is a work group");
         check(thread.groupAt(0).oneLineSummary.find("WORK") == 0 &&
-                  thread.groupAt(0).oneLineSummary.find("1 step") != std::string::npos,
-              "typed: the header announces its step count (the hidden block weighs 0)");
+                  thread.groupAt(0).oneLineSummary.find("2 steps") != std::string::npos,
+              "typed: the header announces its step count (the hidden block weighs 0, "
+              "the settled tool carries call + result)");
 
         check(thread.blockCount(0) == 3,
               "typed: the hidden tool block is stored but not a row (D3)");
         const tui::model::BlockDesc header = thread.blockAt(0, 0);
-        check(header.label == "WORK" && !header.hasBody && header.steps == 1,
+        check(header.label == "WORK" && !header.hasBody && header.steps == 2,
               "typed: the header row announces the steps and has no body of its own");
         const tui::model::BlockDesc q = thread.blockAt(0, 1);
         check(q.label == "YOU" && q.kind == tui::model::BlockKind::User,
               "typed: the turn-opening prose is the query row");
-        check(q.summary == "what is v5?" && q.hasBody, "typed: the query previews its body");
+        check(q.summary == "[1] what is v5?" && q.hasBody,
+              "typed: the query previews its body under the turn's ordinal (D11)");
         const tui::model::BlockDesc tool = thread.blockAt(0, 2);
         check(tool.label == "TOOL" && tool.state == tui::model::BlockState::Ok,
               "typed: the merged tool card carries the wire status");
@@ -333,17 +335,38 @@ int main(int argc, char** argv) {
 
         // Expansion: the header shares the v4 work-group set, keyed by the
         // turnId; a row's disclosure lives in the adapter's own set. Nothing is
-        // seeded - task 2's groups are born collapsed.
+        // seeded - task 2's groups are born collapsed, and while the group is
+        // folded a row's bit is its own.
         check(!thread.expanded(42), "typed: a group is born collapsed (task 2 seeds no defaults)");
-        thread.setExpanded(42, true);
-        check(thread.expanded(42), "typed: setExpanded opens the header");
-        check(state.chat.openWorkGroups.count(42) == 1,
-              "typed: the header's bit lives in the shared work-group set, keyed by the turnId");
-        check(!thread.blockExpanded(0, 2), "typed: a tool row is born collapsed");
+        check(!thread.blockExpanded(0, 2),
+              "typed: a tool row is born collapsed (the group is folded)");
         check(thread.setBlockExpanded(0, 2, true), "typed: opening a tool row reports open");
         check(thread.blockExpanded(0, 2), "typed: the row's disclosure took");
         thread.setBlockExpanded(0, 2, false);
         check(!thread.blockExpanded(0, 2), "typed: closing it clears the bit");
+
+        // A second adapter bound to the same state answers the same thing where
+        // the state is shared: the group header's bit lives in openWorkGroups,
+        // which both adapters read through, while a row's disclosure lives in
+        // the adapter's own set - the row seam is per-adapter.
+        tui::store::ThreadStoreAdapter other(state);
+        other.bind(state);
+        check(other.groupCount() == 1 && other.groupAt(0).id == 42,
+              "typed: a second adapter rebuilds the same groups from the store");
+        check(other.blockAt(0, 2).label == "TOOL" && other.blockAt(0, 2).summary == "grep",
+              "typed: ...and the same block view");
+        check(other.expanded(42) == thread.expanded(42) && !other.expanded(42),
+              "typed: the shared group bit answers through both adapters");
+        check(!other.blockExpanded(0, 2), "typed: a row's disclosure stays per-adapter");
+
+        // Opening the group is task 6's minimal rule: every row it owns draws
+        // open, and the shared set makes that true through both adapters.
+        thread.setExpanded(42, true);
+        check(thread.expanded(42) && other.expanded(42), "typed: setExpanded opens the header");
+        check(state.chat.openWorkGroups.count(42) == 1,
+              "typed: the header's bit lives in the shared work-group set, keyed by the turnId");
+        check(thread.blockExpanded(0, 2) && other.blockExpanded(0, 2),
+              "typed: an open group draws the rows it owns open");
 
         // The header row toggles through the SAME set `setExpanded()` uses, so
         // the two seams agree on the group header by construction: close it
@@ -355,22 +378,91 @@ int main(int argc, char** argv) {
               "typed: reopening the header through the row seam reports open");
         check(thread.blockExpanded(0, 0) && thread.expanded(42),
               "typed: ...and both seams read the header open again");
+    }
 
-        // A second adapter bound to the same state answers the same thing where
-        // the state is shared: the group header's bit lives in openWorkGroups,
-        // which both adapters read through. A row's disclosure lives in the
-        // adapter's own set, so the tool row this adapter never opened reads
-        // closed - the row seam is per-adapter until the cutover.
-        tui::store::ThreadStoreAdapter other(state);
-        other.bind(state);
-        other.setSource(tui::store::ProjectionSource::TypedTurns);
-        check(other.groupCount() == 1 && other.groupAt(0).id == 42,
-              "typed: a second adapter rebuilds the same groups from the store");
-        check(other.blockAt(0, 2).label == "TOOL" && other.blockAt(0, 2).summary == "grep",
-              "typed: ...and the same block view");
-        check(other.expanded(42) && !other.blockExpanded(0, 2),
-              "typed: the shared group bit answers through both adapters; a row's disclosure stays "
-              "per-adapter");
+    // --- Task 8: the per-group override and the maximal-mode fold ---------------
+    {
+        tui::TuiState state;
+        tui::store::ThreadStoreAdapter thread(state);
+        thread.bind(state);
+        state.chat.typedTurns.turnUpsert(turn(42, 1, 1, 3));
+        state.chat.typedTurns.blockUpsert(block(42, "q", 0, 0, "", "what is v5?"));
+        state.chat.typedTurns.blockUpsert(block(42, "call-1", 2, 3, "grep", "call body", "", 1500));
+
+        // Maximal mode (the sheet flips the pref, the frame mirrors it here).
+        state.chat.threadMinimalMode = false;
+        check(!thread.groupMinimal(42), "task 8: the unpinned group follows the mode (maximal)");
+        check(thread.blockExpanded(0, 0) && thread.blockExpanded(0, 1),
+              "task 8: a maximal batch draws open on its own (F5)");
+
+        // The fold is the pin maximal cannot express through the mode: a
+        // click pins the group ForceClosed, keyed by the persisted turn id.
+        check(!thread.setBlockExpanded(0, 0, false),
+              "task 8: folding the header in maximal reports closed");
+        check(!thread.blockExpanded(0, 0) && !thread.expanded(42), "task 8: the fold took");
+        check(thread.groupMinimal(42),
+              "task 8: the pinned group draws the task 6 shape (override first, mode second)");
+        check(state.chat.groupOverrides.count(42) == 1 &&
+                  state.chat.groupOverrides.at(42) == tui::store::GroupOverride::ForceClosed,
+              "task 8: the pin lives in the session-local map, keyed by the turnId");
+        check(state.chat.openWorkGroups.count(42) == 0,
+              "task 8: the maximal fold never touches the minimal set");
+
+        // A click back to the mode's own default removes the pin - the map
+        // never grows a stale row.
+        check(thread.setBlockExpanded(0, 0, true),
+              "task 8: reopening the folded header in maximal reports open");
+        check(thread.blockExpanded(0, 0) && state.chat.groupOverrides.count(42) == 0,
+              "task 8: the pin is gone - maximal draws open on its own");
+
+        // The pin survives a mode flip within the session (override first).
+        state.chat.groupOverrides[42] = tui::store::GroupOverride::ForceClosed;
+        state.chat.threadMinimalMode = true;
+        check(!thread.blockExpanded(0, 0) && thread.groupMinimal(42),
+              "task 8: a ForceClosed pin holds the fold across the flip to minimal");
+        state.chat.threadMinimalMode = false;
+        check(!thread.blockExpanded(0, 0) && thread.groupMinimal(42),
+              "task 8: ...and in maximal, where the pin is the only fold");
+
+        // The ForceOpen consult (the enum's other word): a group pinned
+        // ForceOpen draws maximal-style even in minimal mode.
+        state.chat.threadMinimalMode = true;
+        state.chat.groupOverrides[42] = tui::store::GroupOverride::ForceOpen;
+        check(!thread.groupMinimal(42) && thread.blockExpanded(0, 0) && thread.expanded(42),
+              "task 8: a ForceOpen pin draws the group maximal-style in minimal mode");
+        state.chat.groupOverrides.erase(42);
+        check(thread.blockAt(0, 2).kind == tui::model::BlockKind::ToolStep,
+              "task 8: the block views are unchanged by the pin work");
+    }
+
+    // --- Task 8: the entry points reset the pins (§7) ---------------------------
+    {
+        TuiState* state = tuiCreateState();
+        check(state != nullptr && state->inner != nullptr,
+              "task 8: tuiCreateState succeeds for the override cases");
+        auto wstr = [](const char* s) { return String{s, std::strlen(s)}; };
+        TuiTurn wt{};
+        wt.id = 77;
+        wt.ordinal = 1;
+        wt.state = 1;
+        wt.messageCount = 1;
+        TuiBlock wb{};
+        wb.turnId = 77;
+        wb.id = wstr("q");
+        wb.kind = 0;
+        wb.status = 1;
+        tuiSetTurns(state, &wt, 1, &wb, 1);
+        auto& pins = state->inner->chat.groupOverrides;
+        check(pins.empty(), "task 8: a session switch leaves no pin behind");
+        pins[77] = ::llmfun::tui::store::GroupOverride::ForceClosed;
+        // A compression re-emit (turnRemove + re-upsert) drops the turn's pin.
+        tuiTurnRemove(state, 77);
+        check(pins.count(77) == 0, "task 8: the turn's pin dies with the turn");
+        pins[77] = ::llmfun::tui::store::GroupOverride::ForceOpen;
+        tuiThreadClear(state);
+        check(pins.empty(), "task 8: a clear empties the map");
+        tuiSetTurns(state, &wt, 1, &wb, 1);
+        tuiDestroyState(state);
     }
 
     // --- A gone turn takes its caches with it -----------------------------------
@@ -378,7 +470,6 @@ int main(int argc, char** argv) {
         tui::TuiState state;
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
-        thread.setSource(tui::store::ProjectionSource::TypedTurns);
         state.chat.typedTurns.turnUpsert(turn(42));
         state.chat.typedTurns.blockUpsert(block(42, "q", 0, 0, "", "q"));
         check(thread.groupCount() == 1, "typed: the turn is a group");
@@ -432,6 +523,62 @@ int main(int argc, char** argv) {
         tuiThreadClear(nullptr);
         check(true, "api: a null state or a null element is an inert no-op");
         tuiDestroyState(state);
+    }
+
+    // --- The upsert storm + the result-for-unknown-callId merge (task 9, P2-8) ---
+    {
+        tui::TuiState state;
+        tui::store::ThreadStoreAdapter view(state);
+        view.bind(state);
+        TypedThreadStore& store = state.chat.typedTurns;
+        const std::uint64_t vBegin = store.version();
+
+        // A. The upsert storm: thousands of content ticks and call/result
+        // merges leave the store consistent and the render correct. The
+        // no-re-parse/no-re-scan property is structural - every slot stays a
+        // slot (merges never duplicate), the last write wins, and version()
+        // bumps exactly once per mutating call - never a timing gate.
+        store.turnUpsert(turn(900, 1, 0, 0));
+        for (int i = 0; i < 1500; ++i)
+            store.blockUpsert(
+                block(900, "content#0", 0, 0, "assistant", "tick " + std::to_string(i)));
+        for (int i = 0; i < 300; ++i) {
+            store.blockUpsert(block(900, "call-1", 2, 1, "grep", "args")); // Pending
+            store.blockUpsert(
+                block(900, "call-1", 2, 3, "grep", "result " + std::to_string(i))); // merged Ok
+        }
+        check(store.turnCount() == 1 && store.blockCount(900) == 2,
+              "storm: thousands of upserts never duplicate a slot");
+        check(store.blockAt(900, 0).body == "tick 1499",
+              "storm: the streamed tick's last write wins");
+        check(store.blockAt(900, 1).body == "result 299",
+              "storm: the merged call/result's last write wins");
+        check(store.version() - vBegin == 1 + 1500 + 600,
+              "storm: one version bump per mutating call - no hidden re-parse, no rescan");
+        // The render is correct: one group, and its header announces the
+        // settled step count (the first prose is the turn-opening query, so
+        // the ticks weigh 0; the merged Ok tool weighs 2).
+        check(view.groupCount() == 1, "storm: one store turn is one group");
+        check(view.groupAt(0).oneLineSummary.find("WORK") == 0 &&
+                  view.groupAt(0).oneLineSummary.find("2 steps") != std::string::npos,
+              "storm: the group header announces the settled step count");
+
+        // B. A result for an unknown callId (live): the result lands under the
+        // call's id - an implicit slot, never dropped (§7) - then the call's
+        // upsert merges in and ONE settled step renders (Ok status, weight 2).
+        store.blockUpsert(block(77, "call-2", 2, 3, "grep", "the result text"));
+        check(store.turnCount() == 2 && store.blockCount(77) == 1,
+              "storm: a result for an unknown callId is recorded under its callId");
+        check(store.blockAt(77, 0).status == 3,
+              "storm: the result-only block carries its Ok outcome");
+        store.blockUpsert(block(77, "call-2", 2, 3, "grep", "the call arguments"));
+        check(store.blockCount(77) == 1,
+              "storm: the call's upsert merges into the result's slot - one step, never two");
+        check(store.blockAt(77, 0).status == 3 && store.blockAt(77, 0).body == "the call arguments",
+              "storm: the merged step renders Ok with the call's arguments as the body");
+        store.turnUpsert(turn(77, 1, 0, 2));
+        check(tui::store::stepCount(store, 77) == 2,
+              "storm: the merged step weighs 2 (call + result), never a dropped half");
     }
 
     if (g_failures != 0) {

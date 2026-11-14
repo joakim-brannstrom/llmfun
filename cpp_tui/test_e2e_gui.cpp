@@ -32,6 +32,7 @@
 #include "model/ui_state.h"
 #include "store/thread_store.h"
 #include "test/tui_state_handle.h"
+#include "test/typed_seed.h"
 #include "tui.h"
 #include "tui_api.h"
 #include "tui_backend.h"
@@ -84,17 +85,6 @@ constexpr ImGuiWindowFlags kSurfaceFlags =
     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
-
-/// One committed message of a store, the D side's own summary shape.
-tui::ChatMessage message(size_t id, tui::ChatMessageType type, const std::string& summary,
-                         const std::string& text) {
-    tui::ChatMessage msg;
-    msg.id = id;
-    msg.type = type;
-    msg.summary = summary;
-    msg.text = text;
-    return msg;
-}
 
 /// One raw record, the shape the real logger emits (the same fixture epoch the
 /// raw-log harnesses pin).
@@ -351,9 +341,8 @@ int main(int argc, char** argv) {
 
     // The premise: the main thread draws its own conversation, and the run has
     // not spoken yet (the lanes are the pipeline's, not fixtures).
-    state.chat.outputLines.push_back(message(1, tui::ChatMessageType::Assistant,
-                                             "[1] the main thread's own words",
-                                             "the main thread's own words"));
+    typed_seed::Seeder seeder(&state);
+    seeder.add(typed_seed::Seeder::Msg::User, "the main thread's own words");
     frames(2);
     check(state.ui.thread.drawnGroups >= 1, "premise: the main thread draws its group");
     check(state.ui.agents.empty(), "premise: no lanes before the pipeline speaks");
@@ -393,18 +382,21 @@ int main(int argc, char** argv) {
     frames(1);
     {
         const tui::ChatTab* store = storeOf("coder");
-        check(store != nullptr && store->outputLines.size() == 2,
-              "the step's commit and the tool call are the store's first rows");
-        if (store != nullptr && store->outputLines.size() == 2) {
-            check(store->outputLines[0].type == tui::ChatMessageType::Assistant &&
-                      store->outputLines[0].text == "reading the parser end",
-                  "the committed row is the streamed prose");
-            check(store->outputLines[1].type == tui::ChatMessageType::ToolCall &&
-                      store->outputLines[1].toolName == "read_file" &&
-                      store->outputLines[1].toolArgs == "src/app.d",
-                  "the call row carries its structured fields");
-            check(store->outputLines[1].summary.empty() && store->outputLines[1].text.empty(),
-                  "the tool rows stay structured (no duplicated display text)");
+        check(store != nullptr && store->typedTurns.turnCount() == 2,
+              "the step's commit and the tool call are the store's first turns");
+        if (store != nullptr && store->typedTurns.turnCount() == 2) {
+            const auto& done = store->typedTurns.turnAt(0);
+            check(done.state == TuiTurnState_Done && store->typedTurns.blockCount(done.id) == 2 &&
+                      store->typedTurns.blockAt(done.id, 0).kind == TuiBlockKind_Prose &&
+                      store->typedTurns.blockAt(done.id, 0).body == "reading the parser end" &&
+                      store->typedTurns.blockAt(done.id, 1).kind == TuiBlockKind_Reasoning,
+                  "the committed turn carries the streamed prose (and its thinking)");
+            const auto& live = store->typedTurns.turnAt(1);
+            const auto& call = store->typedTurns.blockAt(live.id, 0);
+            check(live.state == TuiTurnState_Running && call.kind == TuiBlockKind_Tool &&
+                      call.status == TuiBlockStatus_Pending && call.title == "read_file" &&
+                      call.body == "src/app.d",
+                  "the call opens the next turn, pending with its arguments");
         }
     }
 
@@ -422,24 +414,32 @@ int main(int argc, char** argv) {
     frames(1);
     {
         const tui::ChatTab* store = storeOf("coder");
-        check(store != nullptr && store->outputLines.size() == 7,
-              "the whole turn is in the store (got " +
-                  std::to_string(store ? store->outputLines.size() : 0) + " rows)");
-        if (store != nullptr && store->outputLines.size() == 7) {
-            const std::vector<tui::ChatMessageType> types = {
-                tui::ChatMessageType::Assistant,   tui::ChatMessageType::ToolCall,
-                tui::ChatMessageType::Assistant,   tui::ChatMessageType::ToolResponse,
-                tui::ChatMessageType::ToolCall,    tui::ChatMessageType::Assistant,
-                tui::ChatMessageType::ToolResponse};
-            bool typesMatch = true;
-            for (std::size_t i = 0; i < types.size(); ++i)
-                typesMatch = typesMatch && store->outputLines[i].type == types[i];
-            check(typesMatch, "the rows keep the run's order (prose, call, prose, result...)");
-            check(store->outputLines[3].toolName == "read_file" && store->outputLines[3].toolOk &&
-                      store->outputLines[3].toolResult == "12 lines",
+        check(store != nullptr && store->typedTurns.turnCount() == 4,
+              "the whole run is in the store (got " +
+                  std::to_string(store ? store->typedTurns.turnCount() : 0) + " turns)");
+        if (store != nullptr && store->typedTurns.turnCount() == 4) {
+            // The event order, turn by turn: the prose commits close their
+            // turns Done; a tool call opens the next turn; a result that rides
+            // after its turn closed lands as its own Ok/Failed card in the
+            // turn the next event opens.
+            const auto& t2 = store->typedTurns.turnAt(1);
+            check(t2.state == TuiTurnState_Done &&
+                      store->typedTurns.blockAt(t2.id, 0).kind == TuiBlockKind_Tool &&
+                      store->typedTurns.blockAt(t2.id, 0).status == TuiBlockStatus_Running &&
+                      store->typedTurns.blockAt(t2.id, 1).kind == TuiBlockKind_Prose &&
+                      store->typedTurns.blockAt(t2.id, 1).body == "writing the fix",
+                  "the call the done closed ahead of its result shows Running, never a fabricated "
+                  "Ok");
+            const auto& t3 = store->typedTurns.turnAt(2);
+            check(t3.state == TuiTurnState_Done &&
+                      store->typedTurns.blockAt(t3.id, 0).status == TuiBlockStatus_Ok &&
+                      store->typedTurns.blockAt(t3.id, 0).meta == "12 lines" &&
+                      store->typedTurns.blockAt(t3.id, 1).title == "write_file",
                   "the answered call states itself ok with its result text");
-            check(store->outputLines[6].toolName == "write_file" && !store->outputLines[6].toolOk &&
-                      store->outputLines[6].toolResult == "disk full",
+            const auto& t4 = store->typedTurns.turnAt(3);
+            check(t4.state == TuiTurnState_Running &&
+                      store->typedTurns.blockAt(t4.id, 0).status == TuiBlockStatus_Failed &&
+                      store->typedTurns.blockAt(t4.id, 0).meta == "disk full",
                   "the failed call states itself failed with its result text");
         }
     }
@@ -481,18 +481,22 @@ int main(int argc, char** argv) {
         check(rows.size() == 4, "the transcript composes the run's four tool rows (got " +
                                     std::to_string(rows.size()) + ")");
         if (rows.size() == 4) {
-            check(rows[0].name == "read_file" && rows[0].state == model::BlockState::Pending &&
+            // The typed cards: a call still in flight shows Running (the
+            // done-close flipped it, its result rides the next event), a
+            // result-only card states its outcome with the result text on the
+            // card's meta line (the body stays the call's arguments).
+            check(rows[0].name == "read_file" && rows[0].state == model::BlockState::Running &&
                       rows[0].body == "src/app.d",
-                  "the call row states itself pending with its arguments");
+                  "the call the done closed ahead of its result shows Running with its arguments");
             check(rows[1].name == "read_file" && rows[1].state == model::BlockState::Ok &&
-                      rows[1].body == "12 lines",
-                  "the answered row states itself ok with its result text");
-            check(rows[2].name == "write_file" && rows[2].state == model::BlockState::Pending &&
+                      rows[1].body.empty(),
+                  "the answered result states itself ok (its text rides the card's meta)");
+            check(rows[2].name == "write_file" && rows[2].state == model::BlockState::Running &&
                       rows[2].body == "out.txt",
-                  "the second call states itself pending too");
+                  "the second call shows Running with its arguments too");
             check(rows[3].name == "write_file" && rows[3].state == model::BlockState::Failed &&
-                      rows[3].body == "disk full",
-                  "the failed row states itself failed with its result text");
+                      rows[3].body.empty(),
+                  "the failed result states itself failed (its text rides the card's meta)");
         }
     }
     capture("e2e-drilldown-late.ppm");
@@ -652,24 +656,35 @@ int main(int argc, char** argv) {
     frames(2); // back to the shell: the surface window the harness drew is gone
 
     // 6. The cap holds when the events keep coming: the store keeps its newest
-    // rows and drops the turn's oldest ones.
-    for (int k = 0; k < 8; ++k) {
+    // turns and evicts the oldest whole ones (W2) - a done turn per call/result
+    // pair here, until the typed cap is passed.
+    for (int k = 0; k < 1005; ++k) {
         agentToolCall("coder", "probe", "note", "probe-call");
-        agentToolResult("coder", "probe", 1, "note");
+        agentDone("coder");
     }
     frames(1);
     {
         const tui::ChatTab* store = storeOf("coder");
-        check(store != nullptr && store->outputLines.size() == tui::kAgentChatMaxMessages,
+        check(store != nullptr &&
+                  store->typedTurns.turnCount() == tui::store::TypedThreadStore::kMaxTurns,
               "the store capped at its limit (got " +
-                  std::to_string(store ? store->outputLines.size() : 0) + ")");
-        if (store != nullptr && store->outputLines.size() == tui::kAgentChatMaxMessages) {
-            check(store->outputLines.front().id == 14,
-                  "the cap dropped the turn's oldest rows (the first kept row is " +
-                      std::to_string(store->outputLines.front().id) + ")");
-            check(store->outputLines.back().type == tui::ChatMessageType::ToolResponse &&
-                      store->outputLines.back().toolName == "probe",
-                  "the newest result row survived the cap");
+                  std::to_string(store ? store->typedTurns.turnCount() : 0) + " turns)");
+        if (store != nullptr &&
+            store->typedTurns.turnCount() == tui::store::TypedThreadStore::kMaxTurns) {
+            // The run's four turns went in first, and the run's live turn (the
+            // failed write's) absorbs the loop's first call - so 1004 more
+            // turns follow, 1008 in all: the cap drops 8, and the first kept
+            // turn is ordinal 9.
+            check(store->typedTurns.turnAt(0).ordinal == 9,
+                  "the cap dropped the oldest turns (the first kept turn is ordinal " +
+                      std::to_string(store->typedTurns.turnAt(0).ordinal) + ")");
+            check(store->typedTurns.turnAt(store->typedTurns.turnCount() - 1).state ==
+                          TuiTurnState_Done &&
+                      store->typedTurns
+                              .blockAt(
+                                  store->typedTurns.turnAt(store->typedTurns.turnCount() - 1).id, 0)
+                              .title == "probe",
+                  "the newest call survived the cap");
         }
         check(state.agentThreadAdapter.bound() && state.ui.agentThread.drawnGroups >= 1,
               "the drill-down still draws the capped store");

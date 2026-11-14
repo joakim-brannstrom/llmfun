@@ -13,21 +13,6 @@ extern "C" {
  * and a plain String struct. No C++ strings, no references, no templates,
  * no C++ namespaces, no function overloading.
  *
- * D interop: D callers import this header directly via extern(C):
- *
- *   extern(C) {
- *       struct String { const(char)* data; size_t len; }
- *       struct ChatMessageParam {
- *           String summary;
- *           String text;
- *           String thinking;
- *           TuiChatMessageType type;
- *       }
- *       struct TuiState {}
- *       void tuiAddChatMessage(TuiState* state, ChatMessageParam param);
- *       // ... etc
- *   }
- *
  * Memory allocator: All strings returned by this API are allocated via
  * malloc (C standard library). Callers MUST free them via String_Free()
  * which uses free(). Do NOT mix allocators — using D's GC or a different
@@ -43,32 +28,14 @@ extern "C" {
  */
 #define TUI_API_VERSION 12
 
-/* TuiChatMessageType — Pure C enum for chat message types.
- * Used to color-code chat message headers in the TUI.
- * Values mirror the C++ ChatMessageType enum in tui.h.
- */
-typedef enum TuiChatMessageType {
-    TuiChatMessageType_User = 0,
-    TuiChatMessageType_Assistant = 1,
-    TuiChatMessageType_ToolCall = 2,
-    TuiChatMessageType_ToolResponse = 3,
-    TuiChatMessageType_Vision = 4,
-    TuiChatMessageType_System = 5,
-    TuiChatMessageType_FinalAnswer = 6,
-    TuiChatMessageType_Count = 7 /* Sentinel — not a valid type */
-} TuiChatMessageType;
-
 /* String — Plain old data struct representing a string slice.
- * No constructors, no destructors, no hidden state. Trivially copyable.
- *
  * Ownership rules:
- *   - String values passed TO mutating API functions (tuiAddOutputLine,
- *     tuiAddChatMessage, etc.) are NOT copied; the caller must ensure the
+ *   - String values passed TO mutating API functions are NOT copied; the caller must ensure the
  *     underlying buffer lives long enough for the call to complete.
- *   - String_New() is an exception: it copies the input buffer via
- *     malloc, so the caller's original buffer can be freed immediately.
- *   - Strings returned FROM this API are heap-allocated (via malloc)
- *     and MUST be freed with String_Free() when no longer needed.
+ *   - String_New() is an exception: it copies the input buffer via malloc, so the caller's
+ *     original buffer can be freed immediately.
+ *   - Strings returned FROM this API are heap-allocated (via malloc) and MUST be
+ *     freed with String_Free() when no longer needed.
  */
 typedef struct String {
     const char* data;
@@ -97,26 +64,6 @@ String String_NewBuf(const char* data, size_t len);
  * The caller should zero the String struct if needed: s.data = NULL; s.len = 0;
  */
 void String_Free(String s);
-
-/* ChatMessageParam - Bundles all parameters for a chat message.
- *
- * Pass by value (trivially copyable). The thinking field is optional
- * and may be {NULL, 0} if no thinking content exists.
- *
- * Example initialization:
- *   ChatMessageParam msg = {
- *       .summary  = String{"User", 4},
- *       .text     = String{"Hello", 5},
- *       .thinking = {NULL, 0},  // no thinking content
- *       .type     = TuiChatMessageType_User,
- *   };
- */
-typedef struct ChatMessageParam {
-    String summary;
-    String text;
-    String thinking;
-    TuiChatMessageType type;
-} ChatMessageParam;
 
 /* PipelineChatMessage - one streaming update for a pipeline agent lane (the Agents tab's
  * per-agent row).
@@ -630,47 +577,6 @@ void tuiAddLogRecord(TuiState* state, const TuiLogRecord* record);
  */
 void tuiAddLogMessageEx(TuiState* state, TuiLogLevel level, String summary, String text);
 
-/* Append a chat message to the scrollable output display area.
- *
- * The output area has a maximum capacity (1000 lines). When exceeded, the
- * oldest lines are evicted first (FIFO). The `param` fields are inbound
- * Strings — their data is copied internally, so the caller's buffers can be
- * freed or reused immediately after this call returns.
- *
- * Null-safe: no-op if state is NULL.
- */
-void tuiAddChatMessage(TuiState* state, ChatMessageParam param);
-
-/* Clear all lines from the output display area.
- *
- * After this call the output area will be empty and self-consistent: any
- * open-group state (collapsed header groups) is reset too, so messages
- * appended afterwards — e.g. replayed after a session switch — render with
- * their header labels, and an in-flight stream message (see
- * tuiUpdateStreamChatMessage / tuiStreamChatMessageClear) is cleared and
- * stops being displayed. The auto-scroll flag is unaffected.
- *
- * Null-safe: no-op if state is NULL.
- */
-void tuiClearChatMessages(TuiState* state);
-
-/* Update the message that display what the LLM is currently producing.
- *
- * Only one such message can be displayed on the assumption that the LLM can
- * only work on one message at a time.
- *
- * The summary and type field in param is ignored
- *
- * Null-safe: no-op if state is NULL.
- */
-void tuiUpdateStreamChatMessage(TuiState* state, ChatMessageParam param);
-
-/* Clear the stream message and stop displaying it.
- *
- * Null-safe: no-op if state is NULL.
- */
-void tuiStreamChatMessageClear(TuiState* state);
-
 /* Update the streaming message for a specific pipeline agent.
  * If agent is not yet registered, it is auto-registered as the latest
  * discovered agent. If MaxPipelineAgents is exceeded, the agent with
@@ -760,7 +666,7 @@ typedef struct TuiTurn {
  * batchId = "<turnId>#<batchIndex>", recomputed deterministically on replay,
  * stable within the turn's lifetime in one process run, not persisted.
  * Tool-less batches (thinking+content only) carry a batchId too.
- * Strings are inbound/non-owning (copied by the UI), same as ChatMessageParam.
+ * Strings are inbound/non-owning (copied by the UI), same as PipelineChatMessage.
  * durationMs 0 = unknown (not rendered); tokensIn/tokensOut 0 = not rendered. */
 typedef struct TuiBlock {
     int64_t turnId;
@@ -916,7 +822,7 @@ int tuiGetAutoScroll(TuiState* state);
 /* Set the auto-scroll flag.
  *
  * Pass 1 to enable, 0 to disable. When enabled, the output area automatically
- * scrolls to the bottom whenever new lines are appended via tuiAddOutputLine().
+ * scrolls to the bottom whenever the typed store's turns change.
  * When disabled, the user's current scroll position is preserved.
  *
  * Null-safe: no-op if state is NULL.
@@ -935,8 +841,7 @@ void tuiReadyStatus(TuiState* state, int ready);
  *
  * `items` is an array of `count` SessionItem structs. The panel copies all
  * inbound strings during the call, so the caller's buffers may be freed or
- * reused immediately after this call returns (same contract as
- * tuiInitQueryHistory / tuiAddChatMessage).
+ * reused immediately after this call returns (same contract as tuiInitQueryHistory).
  *
  * The active id is recomputed from the snapshot (the entry with
  * isActive != 0; at most one such entry is expected - the last one wins

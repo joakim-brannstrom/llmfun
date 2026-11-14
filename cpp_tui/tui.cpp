@@ -382,21 +382,6 @@ std::int64_t queueDropReportedN(const std::string& message) {
 
 } // namespace
 
-void tuiAddOutputLine(TuiState& state, const ChatMessage& msg) {
-    state.chat.outputLines.push_back(msg);
-    if (state.chat.outputLines.size() > state.chat.MaxChatMessages) {
-        // Expansion state is keyed by message id, so the evicted message's entry
-        // has to go with it: the id is never reused, and keeping one entry per
-        // message ever expanded would grow for the whole session (review M2).
-        // A work group whose first message is evicted loses its group key here.
-        const size_t evicted = state.chat.outputLines.front().id;
-        state.chat.outputLineOpen.erase(evicted);
-        state.chat.openWorkGroups.erase(evicted);
-        state.chat.outputLines.pop_front();
-    }
-    tuiStreamChatMessageClear(state);
-}
-
 void tuiAddLogRecord(TuiState& state, const LogRecord& record) {
     const auto bytesOf = [](const LogRecord& r) {
         return r.message.size() + r.detail.size() + r.module.size() + r.function.size() +
@@ -535,12 +520,10 @@ void closeLogArchive(TuiState& state) {
 }
 
 void tuiClearOutput(TuiState& state) {
-    state.chat.outputLines.clear();
-    state.chat.outputLineOpen.clear();
-    state.chat.openWorkGroups.clear();
-    state.chat.expansionDefaultThroughId = 0;
-    tuiStreamChatMessageClear(state);
-    // The workbench's thread state describes messages that just went away: the
+    // The typed store's whole content: the turns AND their blocks (the store's
+    // own clear cascades the blocks), so a replayed thread can never double.
+    state.chat.typedTurns.threadClear();
+    // The workbench's thread state describes turns that just went away: the
     // adapter's group ids must not be reused by the next thread (D-GROUPID), and
     // the paging window, the expansion set and the follow flag are the ones a
     // session switch resets too (a clear owes a catch-up, D-FOLLOW).
@@ -559,118 +542,6 @@ void tuiClearOutput(TuiState& state) {
     state.composer.paste.dismiss();
     state.composer.reloadCaret = std::string::npos;
     state.composer.escapeConsumed = false;
-}
-
-namespace {
-
-/// Whether the stream store may accept a snapshot now (task 38): the window has elapsed since
-/// the last accepted one, or the clock went backwards (a wall-clock jump must not freeze the
-/// live answer until it catches up).
-bool streamWindowElapsed(const TuiState& state, std::int64_t nowMs) {
-    const std::int64_t last = state.ui.thread.stream.lastAppliedMs;
-    if (last == 0 || nowMs < last)
-        return true;
-    return nowMs - last >= model::kStreamUpdateIntervalMs;
-}
-
-/// Store one streamed snapshot and move the clock's window with it: the one place the store,
-/// the window and the counters advance together.
-void storeStreamSnapshot(TuiState& state, const std::string& text, const std::string& thinking,
-                         std::int64_t nowMs) {
-    model::StreamState& stream = state.ui.thread.stream;
-    stream.lastAppliedMs = nowMs;
-    ++stream.applied;
-    // The clock and the cancel mark are derived from the text that is in the store now - not
-    // from a snapshot's arrival, which the throttle may have detached from what is on screen.
-    // A frame derives them again; this keeps the store self-consistent without one.
-    model::refreshStreamClock(stream, /*hasStream=*/true, /*hasText=*/!text.empty(),
-                              /*hasThinking=*/!thinking.empty(), nowMs, state.cancelRequested);
-}
-
-/// Store the parked snapshot. The caller has already decided that its window has elapsed.
-void applyPendingStream(TuiState& state, std::int64_t nowMs) {
-    if (!state.chat.pendingStream)
-        return;
-    state.chat.pendingStream = false;
-    state.chat.streamMsg = state.chat.pendingStreamMsg;
-    state.chat.hasStreamMsg = true;
-    storeStreamSnapshot(state, state.chat.streamMsg.text, state.chat.streamMsg.thinking, nowMs);
-}
-
-/// The frame's flush of the throttle: a snapshot parked inside the window is applied by the
-/// first frame after it, so it is on screen at most one window late and is never lost.
-void flushPendingStream(TuiState& state, std::int64_t nowMs) {
-    if (!streamWindowElapsed(state, nowMs))
-        return;
-    applyPendingStream(state, nowMs);
-}
-
-/// The agent stores' flush: a snapshot a per-agent update parked inside
-/// its throttle window is applied by the first frame after it, the same promise the
-/// main thread's flush makes - the drill-down never trails more than one window
-/// behind the live answer.
-void flushPendingAgentStreams(TuiState& state, std::int64_t nowMs) {
-    for (AgentStream& agent : state.left.agents) {
-        ChatTab& chat = agent.chat;
-        if (!chat.pendingStream)
-            continue;
-        if (agent.streamLastApplyMs != 0 && nowMs >= agent.streamLastApplyMs &&
-            nowMs - agent.streamLastApplyMs < model::kStreamUpdateIntervalMs)
-            continue;
-        chat.streamMsg = chat.pendingStreamMsg;
-        chat.hasStreamMsg = true;
-        chat.pendingStream = false;
-        agent.streamLastApplyMs = nowMs != 0 ? nowMs : 1;
-    }
-}
-
-} // namespace
-
-void tuiUpdateStreamChatMessage(TuiState& state, const ChatMessage& msg) {
-    const std::int64_t nowMs = model::agentClockMs();
-    model::StreamState& stream = state.ui.thread.stream;
-    // A new stream is the one case with no window: the first snapshot of an answer is stored the
-    // moment it arrives, or the thread would keep showing the *previous* answer's group for a
-    // window. `stream.active()` is false for a state that was never cleared, too.
-    const bool fresh = !state.chat.hasStreamMsg && !stream.active();
-    // What the store shows *or* is about to: comparing against the parked snapshot keeps a
-    // resend of it a no-op instead of parking it again.
-    const auto& current =
-        state.chat.pendingStream ? state.chat.pendingStreamMsg : state.chat.streamMsg;
-    if (!fresh && msg.text == current.text && msg.thinking == current.thinking &&
-        msg.summary == current.summary && msg.type == current.type) {
-        // Unchanged text is not a repaint: D's loop re-sends the accumulated message on every
-        // tick, including the ticks that changed nothing at all. (`pendingStream` keeps whatever
-        // is parked: it is newer than, and different from, this one.)
-        ++stream.unchanged;
-        return;
-    }
-    if (fresh || streamWindowElapsed(state, nowMs)) {
-        if (fresh && stream.startedMs == 0)
-            stream.startedMs = nowMs != 0 ? nowMs : 1;
-        state.chat.streamMsg = msg;
-        state.chat.hasStreamMsg = true;
-        storeStreamSnapshot(state, msg.text, msg.thinking, nowMs);
-        return;
-    }
-    // Inside the window: park the newest snapshot. The next frame after the window applies it,
-    // so a burst costs one repaint per window instead of one per tick, and no text is dropped
-    // (each snapshot is the whole message).
-    state.chat.pendingStreamMsg = msg;
-    state.chat.pendingStream = true;
-    ++stream.coalesced;
-}
-
-void tuiStreamChatMessageClear(TuiState& state) {
-    state.chat.streamMsg = {};
-    state.chat.hasStreamMsg = false;
-    // A parked snapshot is text D already committed: the clear is the commit's own handshake and
-    // the stored message carries the same characters, so nothing is lost by dropping it.
-    state.chat.pendingStreamMsg = {};
-    state.chat.pendingStream = false;
-    // The stream is a block identity too: the next stream gets a new group id, and
-    // its reasoning is seeded open when that group is born (task 26, D-GROUPID).
-    state.threadAdapter.clearStream();
 }
 
 void tuiSetRuntimeStatus(TuiState& state, const model::RuntimeStatus& status) {
@@ -874,14 +745,6 @@ bool tuiRender(TuiState& state) {
     // anything reads the queue (the shell's flash derivation and the stack are both below), so the
     // frame that ends an item's life is the frame it stops being drawn.
     model::expireToasts(state.ui, model::agentClockMs());
-
-    // A stream snapshot the update throttle parked: the window has had a frame to elapse, so a
-    // coalesced update lands here - before anything reads the thread, which is what keeps
-    // `revision` and the store the same age on screen.
-    flushPendingStream(state, model::agentClockMs());
-    // The agent stores' parked snapshots flush on the same frame, before anything
-    // reads them (the drill-down draws from the same frame's data).
-    flushPendingAgentStreams(state, model::agentClockMs());
 
     // The metrics seam's input, set for THIS frame and before any window is
     // begun: every GUI length (`ui::metricsFor()`) is derived from the text
@@ -1144,10 +1007,6 @@ void tuiSetReadyStatus(TuiState& state, bool ready) {
 
 void tuiRequestCancel(TuiState& state) {
     debugAssertFrameThread(state);
-    // The stop is the last word on the text: a snapshot the update throttle parked has to reach
-    // the store before the clock freezes (task 38), or the partial answer the user keeps would
-    // be one window short of what D had already sent.
-    applyPendingStream(state, model::agentClockMs());
     // One slot + a latch. The pending flag is the one-shot hand-off to the D
     // loop; the latch keeps the composer in `Stopping` until the run ends, so a
     // second click can never queue a second stop even though the pending flag is

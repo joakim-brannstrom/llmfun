@@ -8,7 +8,7 @@
 //     agents tab -> activity tab -> raw log open/close -> settings change -> quit
 //
 // Everything runs against the shipped code: `tuiRender()` (the frame the D loop drives), the C
-// ABI D links against (`tuiAddChatMessage`, `tuiUpdateStreamChatMessage`,
+// ABI D links against (`tuiTurnUpsert`/`tuiBlockUpsert`/`tuiSetTurns`,
 // `tuiPipelineAgentUpdate`, `tuiAddLogRecord`, `tuiTakeCancel`, `tuiIsSubmitReady`, ...), the
 // keymap dispatcher, the composer's and the palette's own key handling. No step asserts on a
 // fixture the harness built behind the UI's back: a click, a chord or a typed line is what moves
@@ -563,23 +563,103 @@ void setSessions(Harness& h, const std::vector<SessionItem>& items) {
     tuiSetSessionList(h.handle.get(), items.data(), items.size());
 }
 
-void addMessage(Harness& h, TuiChatMessageType type, const std::string& summary,
-                const std::string& text, const std::string& thinking = std::string()) {
-    ChatMessageParam param{};
-    param.summary = makeStr(summary);
-    param.text = makeStr(text);
-    param.thinking = makeStr(thinking);
-    param.type = type;
-    tuiAddChatMessage(h.handle.get(), param);
+/// The typed emitters stand in for D's typed path (task 5): every message the v4
+/// harness appended becomes the turn/block upserts the D-side emitters send -
+/// a query prose block per user message, a content/answer block per assistant
+/// message, and one turn upsert per turn (Running when live, Done on replay).
+static std::int64_t g_turnSeq = 0;    ///< the harness's persisted turn ids
+static std::int64_t g_liveTurnId = 0; ///< the in-flight run's turn (0 = none)
+static int g_liveBatch = 0;           ///< the live turn's batch counter
+
+void upsertTurn(Harness& h, std::int64_t id, int ordinal, int state, int messageCount) {
+    TuiTurn t{};
+    t.id = id;
+    t.ordinal = ordinal;
+    t.state = state;
+    t.messageCount = messageCount;
+    tuiTurnUpsert(h.handle.get(), &t);
 }
 
+void upsertBlock(Harness& h, std::int64_t turnId, const std::string& id, const std::string& batchId,
+                 int kind, int status, const char* meta, const std::string& body) {
+    TuiBlock b{};
+    b.turnId = turnId;
+    b.id = makeStr(id);
+    b.batchId = makeStr(batchId);
+    b.kind = kind;
+    b.status = status;
+    if (meta != nullptr)
+        b.meta = makeStr(meta);
+    b.body = makeStr(body);
+    tuiBlockUpsert(h.handle.get(), &b);
+    String_Free(b.id);
+    String_Free(b.batchId);
+    if (meta != nullptr)
+        String_Free(b.meta);
+    String_Free(b.body);
+}
+
+/// The harness's replay kinds: the three shapes a replayed exchange has (the
+/// v4 message enum they came from died with the cutover).
+enum class Msg { User, Assistant, FinalAnswer };
+
+/// A replayed exchange, exactly what `emitReplayTyped` sends at switch time:
+/// the user's query opens the turn, the assistant's row is the turn's content
+/// block, and the turn lands Done.
+void addMessage(Harness& h, Msg type, const std::string& summary, const std::string& text,
+                const std::string& thinking = std::string()) {
+    (void)summary;
+    (void)thinking;
+    if (type == Msg::User) {
+        const std::int64_t id = ++g_turnSeq;
+        upsertTurn(h, id, static_cast<int>(id), TuiTurnState_Done, 1);
+        upsertBlock(h, id, "query", std::to_string(id) + "#q", TuiBlockKind_Prose,
+                    TuiBlockStatus_None, "user", text);
+        return;
+    }
+    // An assistant row of the newest turn: a content block on a replayed turn
+    // (Done already), or the live turn's streamed batch when one is in flight.
+    const std::int64_t id = g_liveTurnId != 0 ? g_liveTurnId : g_turnSeq;
+    if (type == Msg::FinalAnswer) {
+        const int batch = g_liveTurnId != 0 ? g_liveBatch : 0;
+        upsertBlock(h, id, "answer", std::to_string(id) + "#" + std::to_string(batch),
+                    TuiBlockKind_Answer, TuiBlockStatus_None, nullptr, text);
+        return;
+    }
+    const int batch = g_liveTurnId != 0 ? g_liveBatch : 0;
+    upsertBlock(h, id, "content#" + std::to_string(batch),
+                std::to_string(id) + "#" + std::to_string(batch), TuiBlockKind_Prose,
+                TuiBlockStatus_None, "assistant", text);
+}
+
+/// The live run's start, exactly what `emitTurnStartTyped` sends: the turn
+/// upsert (Running) plus the query prose block.
+void runStart(Harness& h, const std::string& query) {
+    const std::int64_t id = ++g_turnSeq;
+    g_liveTurnId = id;
+    g_liveBatch = 0;
+    upsertTurn(h, id, static_cast<int>(id), TuiTurnState_Running, 0);
+    upsertBlock(h, id, "query", std::to_string(id) + "#q", TuiBlockKind_Prose, TuiBlockStatus_None,
+                "user", query);
+}
+
+/// One stream tick, exactly what the typed stream updater sends: the batch's
+/// content-so-far block, same id/batchId every tick so the store merges in place.
 void updateStream(Harness& h, const std::string& text) {
-    ChatMessageParam param{};
-    param.summary = makeStr("");
-    param.text = makeStr(text);
-    param.thinking = makeStr("");
-    param.type = TuiChatMessageType_Assistant;
-    tuiUpdateStreamChatMessage(h.handle.get(), param);
+    if (g_liveTurnId == 0)
+        return;
+    upsertBlock(h, g_liveTurnId, "content#" + std::to_string(g_liveBatch),
+                std::to_string(g_liveTurnId) + "#" + std::to_string(g_liveBatch),
+                TuiBlockKind_Prose, TuiBlockStatus_None, "assistant", text);
+}
+
+/// D's half of a stop, exactly what `emitStopTyped` sends when no tool call is
+/// in flight: the turn goes Interrupted (the streamed content stays).
+void runStop(Harness& h) {
+    if (g_liveTurnId == 0)
+        return;
+    upsertTurn(h, g_liveTurnId, static_cast<int>(g_liveTurnId), TuiTurnState_Interrupted, 0);
+    g_liveTurnId = 0;
 }
 
 void addLogRecord(Harness& h, TuiLogLevel level, const std::string& message,
@@ -828,9 +908,9 @@ void stepSelectSession(Harness& h) {
         makeSession("20260815-100000-bbbb", "Beta session", "second user preview", 5, 1, 0));
     switched.push_back(makeSession("20260815-100000-cccc", "Gamma session", "", 0, 0, 0));
     setSessions(h, switched);
-    tuiClearChatMessages(h.handle.get());
-    addMessage(h, TuiChatMessageType_User, "[1] build the project", "build the project");
-    addMessage(h, TuiChatMessageType_Assistant, "[2] running the build", "running the build");
+    tuiThreadClear(h.handle.get());
+    addMessage(h, Msg::User, "[1] build the project", "build the project");
+    addMessage(h, Msg::Assistant, "[2] running the build", "running the build");
     h.idle(2);
 
     check(h.core->sessionPanel.activeId == "20260815-100000-bbbb",
@@ -839,7 +919,12 @@ void stepSelectSession(Harness& h) {
           "select: the replayed transcript is the thread's body");
     if (h.text()) {
         check(h.last.hasText("build the project"), "select: the replayed user message is drawn");
-        check(h.last.hasText("running the build"), "select: the replayed work row is drawn");
+        // Minimal mode (task 6) folds the replayed turn's work rows behind the
+        // header: the assistant prose is a work row, so the turn draws as its
+        // header plus the query row - the work row's own text stays folded.
+        check(h.last.hasText("WORK"), "select: the replayed turn's header is drawn");
+        check(!h.last.hasText("running the build"),
+              "select: the replayed work row folds behind the header");
     }
 }
 
@@ -978,16 +1063,29 @@ void stepStream(Harness& h) {
     tuiReadyStatus(h.handle.get(), 0);
     h.idle(1);
 
+    // D's run starts the moment the query is consumed: the turn upsert and the
+    // query block are the emitter's first writes (emitTurnStartTyped).
+    runStart(h, "summarise the plan");
+    h.idle(1);
     updateStream(h, "# Plan\n\n1. read the tree");
     h.idle(1);
     updateStream(h, "# Plan\n\n1. read the tree\n2. make it");
     h.idle(3); // the store's 33 ms window: one frame parks a snapshot, the next applies it
 
-    check(h.core->chat.hasStreamMsg, "stream: the live answer is in the store");
-    check(h.core->ui.thread.stream.active(), "stream: the live answer's clock started");
+    check(h.core->chat.typedTurns.turnCount() == 2, "stream: the live turn is in the store");
+    check(h.core->chat.typedTurns.turnById(2) != nullptr &&
+              h.core->chat.typedTurns.turnById(2)->state == TuiTurnState_Running,
+          "stream: the live turn is Running");
+    check(h.core->chat.typedTurns.blockCount(2) == 2,
+          "stream: the query and the streamed content are the turn's blocks");
     check(!h.core->readyStatus, "stream: the frame knows a run is in flight");
     if (h.text()) {
-        check(h.last.hasText("read the tree"), "stream: the streamed text is drawn");
+        // Minimal mode folds the live turn's work rows too: the streamed prose
+        // is a work row, so while it streams it stays behind the header - the
+        // query row is what carries the turn on screen.
+        check(!h.last.hasText("read the tree"),
+              "stream: the streamed text folds behind the header");
+        check(h.last.hasText("WORK"), "stream: the live turn's header is drawn");
         check(h.last.hasText("Stop"),
               "stream: the composer's action is Stop while a run is active");
     }
@@ -1003,24 +1101,29 @@ void stepStop(Harness& h) {
     check(tuiTakeCancel(h.handle.get()) == 1, "stop: D takes the request (the /stop path)");
     check(tuiTakeCancel(h.handle.get()) == 0, "stop: a second take finds nothing (consume-once)");
 
-    // D's half: the stream ends and the run is ready again; the partial answer is the answer, so
-    // the next step stores it as the run's final message.
-    tuiStreamChatMessageClear(h.handle.get());
+    // D's half: the stream ends and the run is ready again; the interrupted
+    // turn stays Interrupted (emitStopTyped), and the partial answer stays -
+    // the next step upserts it as the run's Answer block.
+    runStop(h);
     tuiReadyStatus(h.handle.get(), 1);
     h.idle(2);
 
     check(!h.core->cancelRequested, "stop: the latch clears when the run ends");
-    check(!h.core->chat.hasStreamMsg, "stop: the live row is gone with the run");
+    check(h.core->chat.typedTurns.turnById(2) != nullptr &&
+              h.core->chat.typedTurns.turnById(2)->state == TuiTurnState_Interrupted,
+          "stop: the interrupted turn stays Interrupted");
 }
 
 /// Step 6 - answer: the run's final message becomes the thread's newest block.
 void stepAnswer(Harness& h) {
     phase("6. answer");
-    addMessage(h, TuiChatMessageType_FinalAnswer, "[4] plan",
-               "the plan is two steps: read, then build");
+    // The answer block rides the live turn (emitStepTyped: the Answer block is
+    // already upserted when the run ends; the turn stays Interrupted).
+    addMessage(h, Msg::FinalAnswer, "[4] plan", "the plan is two steps: read, then build");
     h.idle(2);
 
-    check(h.core->chat.outputLines.size() >= 3, "answer: the answer joined the store");
+    check(h.core->chat.typedTurns.blockCount(2) == 3,
+          "answer: the query, the content and the answer are the turn's blocks");
     check(h.core->ui.view == model::ThreadView::Ready, "answer: the thread is the body again");
     if (h.text()) {
         check(h.last.hasText("read, then build"), "answer: the answer's text is drawn");
@@ -1285,8 +1388,10 @@ void buildGoldenScene(Harness& h) {
     sessions.push_back(makeSession("20260815-100000-cccc", "Gamma session", "", 0, 0, 0));
     setSessions(h, sessions);
 
-    addMessage(h, TuiChatMessageType_User, "[1] build the project", "build the project");
-    addMessage(h, TuiChatMessageType_FinalAnswer, "[2] plan", "read, then build");
+    // One replayed exchange, exactly what `emitReplayTyped` sends: the query
+    // opens the turn, the answer is the turn's Answer block, the turn is Done.
+    addMessage(h, Msg::User, "[1] build the project", "build the project");
+    addMessage(h, Msg::FinalAnswer, "[2] plan", "read, then build");
 }
 
 std::string goldenText(Harness& h, int w, int ht, const char* name = "parity-shell") {
@@ -1554,6 +1659,279 @@ void checkFocusMode(bool update) {
 }
 
 // ---------------------------------------------------------------------------
+// The cross-cutting battery (task 9, design P2-8): every §7 failure mode and
+// §8 scenario, end to end through the typed emitters. Correctness only - no
+// perf gate (the known-red policy): the bounded-cost properties are asserted
+// structurally, on store and window counters, never as a timing gate.
+// ---------------------------------------------------------------------------
+
+/// A tool-call block, exactly what the typed step walk emits: the tool's name
+/// rides `title`, the arguments the body, and the status is the emitter's own
+/// (Pending in flight, Cancelled on a stop, Ok once a result merged in).
+void toolBlock(Harness& h, std::int64_t turnId, const std::string& callId, int status,
+               const std::string& name, const std::string& args) {
+    TuiBlock b{};
+    b.turnId = turnId;
+    b.id = makeStr(callId);
+    b.batchId = makeStr(std::to_string(turnId) + "#0");
+    b.title = makeStr(name);
+    b.body = makeStr(args);
+    b.kind = TuiBlockKind_Tool;
+    b.status = status;
+    b.flags = TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
+    tuiBlockUpsert(h.handle.get(), &b);
+    String_Free(b.id);
+    String_Free(b.batchId);
+    String_Free(b.title);
+    String_Free(b.body);
+}
+
+/// The block named `id` in `turnId`, or nullptr: a scan over one turn's blocks
+/// (the store has no per-block index to ask, and the battery is not the render
+/// hot path).
+const tui::store::TypedBlock* findBlock(const tui::store::TypedThreadStore& store,
+                                        std::int64_t turnId, const std::string& id) {
+    if (store.turnById(turnId) == nullptr)
+        return nullptr;
+    for (std::size_t k = 0; k < store.blockCount(turnId); ++k)
+        if (store.blockAt(turnId, k).id == id)
+            return &store.blockAt(turnId, k);
+    return nullptr;
+}
+
+/// The battery's replay scene: two done exchanges (query, work prose, final
+/// answer), the shape every scenario below re-emits, stops inside, and pages
+/// through.
+void buildBatteryReplay(Harness& h) {
+    addMessage(h, Msg::User, "[1] read the logs", "read the logs");
+    addMessage(h, Msg::Assistant, "[2] reading", "reading the logs now");
+    addMessage(h, Msg::FinalAnswer, "[3] done", "the logs are clean");
+    addMessage(h, Msg::User, "[4] write the summary", "write the summary");
+    addMessage(h, Msg::Assistant, "[5] writing", "writing the summary");
+    addMessage(h, Msg::FinalAnswer, "[6] done", "summary written");
+}
+
+void checkBattery() {
+    phase("battery: replay parity");
+    g_w = 120;
+    g_h = 36;
+    Harness h;
+    harnessInitText(h);
+    buildBatteryReplay(h);
+    h.idle(2);
+    h.pressKey(ImGuiKey_Escape); // release the composer's field: no blinking caret
+    h.idle(1);
+
+    // 1. Replay parity (§8): the same session rendered twice is byte-identical
+    // - the ordinals are part of the bytes - and the expansion/override state
+    // survives the re-render.
+    check(h.core->chat.typedTurns.turnCount() == 2, "battery 1: the replay loaded both turns");
+    check(h.core->chat.typedTurns.turnAt(1).ordinal ==
+              h.core->chat.typedTurns.turnAt(0).ordinal + 1,
+          "battery 1: the ordinal sequence is the array order");
+    const std::string first = goldenText(h, 120, 36, "parity-battery");
+    h.idle(2);
+    const std::string again = goldenText(h, 120, 36, "parity-battery");
+    check(first == again, "battery 1: the same session renders byte-identical twice");
+
+    // The override seam (task 8) in maximal mode: pin the first turn's group
+    // closed - session-local state keyed by the persisted turn id - and check
+    // the pinned fold survives further frames byte-identically.
+    h.core->ui.prefs.threadMinimal = false;
+    h.idle(2); // the frame's mirror applies the mode and drops the stale hints
+    check(!h.core->threadAdapter.minimalMode(),
+          "battery 1: the maximal mirror reached the adapter");
+    check(h.core->threadAdapter.groupCount() == 2, "battery 1: one group per replayed turn");
+    const std::size_t pinned = h.core->threadAdapter.groupAt(0).id;
+    check(!h.core->threadAdapter.groupMinimal(pinned),
+          "battery 1: maximal draws the work group open");
+    h.core->threadAdapter.setExpanded(pinned, false);
+    h.idle(2);
+    check(h.core->threadAdapter.groupMinimal(pinned),
+          "battery 1: the pin folds the group against the mode");
+    check(h.core->chat.groupOverrides.size() == 1,
+          "battery 1: the pin is one session-local override");
+    const std::string pinnedA = goldenText(h, 120, 36, "parity-battery");
+    h.idle(2);
+    check(pinnedA == goldenText(h, 120, 36, "parity-battery"),
+          "battery 1: the pinned fold renders byte-identical on the re-render");
+
+    // 2. Stop mid-batch (§7): the in-flight call goes Cancelled, the partial
+    // answer stays, and nothing is fabricated into an Ok.
+    phase("battery: stop mid-batch");
+    tuiThreadClear(h.handle.get());
+    runStart(h, "watch the batch");
+    const std::int64_t live = g_liveTurnId;
+    updateStream(h, "partial answer so far");
+    toolBlock(h, live, "call-1", TuiBlockStatus_Pending, "read_file", "{\"path\":\"a.log\"}");
+    h.idle(2);
+    check(h.last.hasText("read_file"), "battery 2: the in-flight call is drawn");
+    // D's stop with the call in flight: the call upserts Cancelled, the turn
+    // Interrupted - the streamed content stays, the call never flips to Ok.
+    toolBlock(h, live, "call-1", TuiBlockStatus_Cancelled, "read_file", "{\"path\":\"a.log\"}");
+    runStop(h);
+    h.idle(2);
+    check(g_liveTurnId == 0, "battery 2: no run is live after the stop");
+    const tui::store::TypedTurn* stopped = h.core->chat.typedTurns.turnById(live);
+    check(stopped != nullptr && stopped->state == TuiTurnState_Interrupted,
+          "battery 2: the stopped turn is Interrupted");
+    const tui::store::TypedBlock* call = findBlock(h.core->chat.typedTurns, live, "call-1");
+    check(call != nullptr && call->status == TuiBlockStatus_Cancelled,
+          "battery 2: the in-flight call is Cancelled, never a fabricated Ok");
+    bool anyOk = false;
+    for (std::size_t k = 0; k < h.core->chat.typedTurns.blockCount(live); ++k)
+        anyOk = anyOk || h.core->chat.typedTurns.blockAt(live, k).status == TuiBlockStatus_Ok;
+    check(!anyOk, "battery 2: no block of the stopped turn claims Ok");
+    check(h.last.hasText("partial answer so far"), "battery 2: the partial answer stays");
+
+    // 3. Compression re-emission (§7): the affected turns are removed and
+    // re-emitted as one summary turn, the ordinals recompute, and no stale
+    // group keeps orphaned block ids - the removed turn's pin dies with it
+    // (task 8's tuiTurnRemove).
+    phase("battery: compression re-emission");
+    tuiThreadClear(h.handle.get());
+    buildBatteryReplay(h);
+    h.idle(2);
+    check(h.core->threadAdapter.groupCount() == 2, "battery 3: the rebuilt replay groups");
+    const std::size_t pinned3 = h.core->threadAdapter.groupAt(0).id;
+    h.core->threadAdapter.setExpanded(pinned3, false);
+    h.idle(1);
+    check(h.core->chat.groupOverrides.count(static_cast<long long>(pinned3)) == 1,
+          "battery 3 premise: the first turn's pin is in place");
+    const std::int64_t firstTurn3 = h.core->chat.typedTurns.turnAt(0).id;
+    const std::int64_t secondTurn3 = h.core->chat.typedTurns.turnAt(1).id;
+    tuiTurnRemove(h.handle.get(), firstTurn3);
+    tuiTurnRemove(h.handle.get(), secondTurn3);
+    h.idle(2);
+    check(h.core->chat.typedTurns.turnCount() == 0,
+          "battery 3: the removes cascade (turn + its blocks)");
+    check(!h.last.hasText("read the logs"),
+          "battery 3: the removed turns stop rendering (no stale group)");
+    check(h.core->chat.groupOverrides.empty(),
+          "battery 3: the removed turn's pin died with it (no orphan override)");
+    upsertTurn(h, firstTurn3, 1, TuiTurnState_Done, 1);
+    upsertBlock(h, firstTurn3, "notice", std::to_string(firstTurn3) + "#0", TuiBlockKind_Notice,
+                TuiBlockStatus_None, "system", "earlier context summarized");
+    h.idle(2);
+    check(h.core->chat.typedTurns.turnCount() == 1 &&
+              h.core->chat.typedTurns.turnById(firstTurn3)->ordinal == 1,
+          "battery 3: the summary turn re-emitted with a recomputed ordinal");
+    check(h.core->threadAdapter.groupCount() == 1,
+          "battery 3: the group list follows the re-emission");
+    check(h.last.hasText("earlier context summarized"), "battery 3: the summary renders");
+
+    // 4. The 1000-turn session (§8): the cap evicts oldest-first, the
+    // turn-paged window bounds what renders, and the height hints stay
+    // bounded by the pages drawn - structural bounds, not a timing gate.
+    phase("battery: the 1000-turn session");
+    tuiThreadClear(h.handle.get());
+    for (std::int64_t i = 1; i <= 1002; ++i) {
+        upsertTurn(h, i, static_cast<int>(i), TuiTurnState_Done, 1);
+        upsertBlock(h, i, "query", std::to_string(i) + "#q", TuiBlockKind_Prose,
+                    TuiBlockStatus_None, "user", "q" + std::to_string(i));
+    }
+    check(h.core->chat.typedTurns.turnCount() == 1000,
+          "battery 4: the cap evicted down to kMaxTurns");
+    check(h.core->chat.typedTurns.turnById(1) == nullptr &&
+              h.core->chat.typedTurns.turnById(2) == nullptr,
+          "battery 4: the oldest turns are the evicted ones");
+    check(h.core->chat.typedTurns.turnById(1002) != nullptr,
+          "battery 4: the newest turn survives the eviction");
+    h.idle(2);
+    check(h.core->threadAdapter.groupAt(999).id == 1002,
+          "battery 4: the window's last group is the newest turn");
+    check(h.core->ui.thread.pageGroups == 40, "battery 4: the window is the grid's bounded page");
+    check(h.core->ui.thread.drawnGroups == 40,
+          "battery 4: the first frame draws the bounded page, not the store");
+    check(h.last.hasText("960 more"),
+          "battery 4: the Load earlier row counts what the window hides");
+    // Page in: each press grows the draw by one bounded page, never unboundedly.
+    check(h.clickOn("Load earlier"), "battery 4: the Load earlier row is on screen to click");
+    h.idle(2);
+    check(h.core->ui.earlierGroups == 40, "battery 4: one press is one page in");
+    check(h.core->ui.thread.drawnGroups == 80, "battery 4: the draw grew by exactly one page");
+    check(h.clickOn("Load earlier") && h.clickOn("Load earlier"), "battery 4: the row pages again");
+    h.idle(2);
+    check(h.core->ui.thread.drawnGroups == 160,
+          "battery 4: paging through stays a bounded draw (3 pages, not the store)");
+    check(h.core->ui.thread.hints.size() <= h.core->ui.thread.drawnGroups + 1,
+          "battery 4: the height hints cover the drawn groups only (eviction unchanged)");
+
+    // 5. Session switch mid-run (§8): the in-flight turn belongs to its
+    // session, the switch rebuilds the store from the new session's snapshot,
+    // and the live emitter re-attaches by turnId when its session is back.
+    phase("battery: session switch mid-run");
+    std::vector<SessionItem> alphaLive;
+    alphaLive.push_back(
+        makeSession("20260815-100000-aaaa", "Alpha session", "first user preview", 3, 1, 0));
+    alphaLive.push_back(
+        makeSession("20260815-100000-bbbb", "Beta session", "second user preview", 5, 0, 0));
+    setSessions(h, alphaLive);
+    runStart(h, "live across the switch");
+    const std::int64_t crossLive = g_liveTurnId;
+    updateStream(h, "the live answer before the switch");
+    h.idle(2);
+    // D's half of the switch: the new active session, the thread cleared, the
+    // replayed snapshot. The live emitter is not consulted - its turn belongs
+    // to the session being left.
+    std::vector<SessionItem> betaActive;
+    betaActive.push_back(
+        makeSession("20260815-100000-aaaa", "Alpha session", "first user preview", 3, 0, 0));
+    betaActive.push_back(
+        makeSession("20260815-100000-bbbb", "Beta session", "second user preview", 5, 1, 0));
+    setSessions(h, betaActive);
+    tuiThreadClear(h.handle.get());
+    addMessage(h, Msg::User, "[1] beta's own query", "beta's own query");
+    h.idle(2);
+    check(h.core->chat.typedTurns.turnCount() == 1,
+          "battery 5: the switch rebuilt the store from Beta's snapshot");
+    check(h.core->chat.typedTurns.turnById(crossLive) == nullptr,
+          "battery 5: the in-flight turn belongs to Alpha, not the new session");
+    // Back to Alpha: the snapshot rebuilds (the interrupted live turn replays as
+    // it was recorded), then the live emitter's next tick re-attaches by turnId.
+    setSessions(h, alphaLive);
+    tuiThreadClear(h.handle.get());
+    upsertTurn(h, crossLive, static_cast<int>(crossLive), TuiTurnState_Interrupted, 0);
+    upsertBlock(h, crossLive, "query", std::to_string(crossLive) + "#q", TuiBlockKind_Prose,
+                TuiBlockStatus_None, "user", "live across the switch");
+    h.idle(2);
+    // The re-attach: the same turn id merges in place - one turn, the streamed
+    // content block gains text, the turn is Running again.
+    upsertTurn(h, crossLive, static_cast<int>(crossLive), TuiTurnState_Running, 0);
+    updateStream(h, "the live answer before the switch, and more after it");
+    h.idle(2);
+    const tui::store::TypedTurn* back = h.core->chat.typedTurns.turnById(crossLive);
+    check(back != nullptr && back->state == TuiTurnState_Running,
+          "battery 5: the emitter re-attached by turnId");
+    check(h.core->chat.typedTurns.blockCount(crossLive) == 2,
+          "battery 5: the re-attach merged in place (no duplicate slot)");
+    check(h.last.hasText("and more after it"), "battery 5: the merged content is what renders");
+
+    // 6. Interrupted-turn replay (§7/§8): the snapshot's recorded in-flight call
+    // replays as Cancelled - honestly, never renormalized into an Ok.
+    phase("battery: interrupted-turn replay");
+    toolBlock(h, crossLive, "call-9", TuiBlockStatus_Cancelled, "write_file",
+              "{\"path\":\"b.log\"}");
+    h.idle(2);
+    const tui::store::TypedBlock* replayed =
+        findBlock(h.core->chat.typedTurns, crossLive, "call-9");
+    check(replayed != nullptr && replayed->kind == TuiBlockKind_Tool &&
+              replayed->status == TuiBlockStatus_Cancelled,
+          "battery 6: the interrupted call replays as Cancelled");
+    check(h.last.hasText("write_file"), "battery 6: the replayed call is drawn");
+    bool replayOk = false;
+    for (std::size_t k = 0; k < h.core->chat.typedTurns.blockCount(crossLive); ++k)
+        replayOk =
+            replayOk || h.core->chat.typedTurns.blockAt(crossLive, k).status == TuiBlockStatus_Ok;
+    check(!replayOk, "battery 6: no fabricated Ok anywhere in the replayed turn");
+
+    harnessShutdownText(h);
+    // Leave the shared display size as the harness expects it.
+    g_w = 120;
+    g_h = 36;
+}
+
+// ---------------------------------------------------------------------------
 // The perf gate
 // ---------------------------------------------------------------------------
 
@@ -1579,11 +1957,12 @@ void buildPerfFixture(Harness& h) {
     }
     setSessions(h, sessions);
 
-    for (int i = 0; i < 1000; ++i) {
+    for (int i = 0; i < 1000; i += 2) {
         const std::string body =
             "message " + std::to_string(i) + ": **bold** and a list\n- one\n- two";
-        addMessage(h, i % 10 == 0 ? TuiChatMessageType_User : TuiChatMessageType_Assistant,
-                   "[" + std::to_string(i) + "] seeded", body);
+        addMessage(h, Msg::User, "[" + std::to_string(i + 1) + "] seeded", body);
+        addMessage(h, Msg::Assistant, "[" + std::to_string(i + 2) + "] seeded",
+                   "reply " + std::to_string(i));
     }
     for (int i = 0; i < 5000; ++i) {
         addLogRecord(h, (i % 7 == 0) ? TuiLogLevel_Warn : TuiLogLevel_Info,
@@ -1658,12 +2037,12 @@ PerfRun measureWorkbench(int frames) {
 /// cost still to come.
 constexpr double kBaselineFrameMs = 16.70;
 constexpr double kBaselineOpenMs = 37.0;
-/// The last measurement of this fixture on this harness (task 40): the workbench's own p50
-/// frame time and session open, recorded beside the legacy renderer's numbers on the same run.
-/// The legacy half cannot be measured any more - its renderer is gone (task 41) - so the
-/// workbench's recording is what the gate compares against.
-constexpr double kRecordedFrameMs = 0.53;
-constexpr double kRecordedOpenMs = 8.2;
+/// The last measurement of this fixture on this harness (task 5): the workbench's
+/// own p50 frame time and session open, re-recorded after the typed-store cutover
+/// (the v4 message path and its per-message summaries are gone, so the pre-cutover
+/// task-40 numbers no longer describe this fixture's work).
+constexpr double kRecordedFrameMs = 0.886;
+constexpr double kRecordedOpenMs = 12.694;
 /// The design's allowance: "within 10 % of plan/baseline.md".
 constexpr double kPerfAllowance = 1.10;
 
@@ -1701,7 +2080,7 @@ void checkPerf() {
 
     std::printf("perf: workbench p50 frame %s ms (median of 3), session open %s ms\n",
                 num(workbench.frameMs).c_str(), num(workbench.openMs).c_str());
-    std::printf("perf: recorded  p50 frame %s ms, session open %s ms (pre-removal, task 40)\n",
+    std::printf("perf: recorded  p50 frame %s ms, session open %s ms (typed store, task 5)\n",
                 num(kRecordedFrameMs).c_str(), num(kRecordedOpenMs).c_str());
     std::printf("perf: budget    p50 frame <= %s ms, session open <= %s ms (recorded + 10%%)\n",
                 num(kRecordedFrameMs * kPerfAllowance).c_str(),
@@ -1822,6 +2201,7 @@ int runText(bool update) {
     checkGoldens(update);
     checkNarrowRailPanel(update);
     checkFocusMode(update);
+    checkBattery();
     checkPerf();
     return 0;
 }

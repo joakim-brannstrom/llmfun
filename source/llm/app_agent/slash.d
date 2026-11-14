@@ -18,8 +18,6 @@ import llm.app_agent.slash_pipeline;
 import llm.app_agent.slash_session;
 import llm.app_agent.slash_skills;
 
-import llmfun_tui; // TuiChatMessageType / TuiChatMessageType_Assistant (C++ binding)
-
 /// How a command consumes its argument (drives dispatch + help rendering).
 enum SlashArgMode {
     none,
@@ -214,7 +212,7 @@ struct SlashCommandRegistry {
     private static void unknownCommand(ref AgentApp app, string input) nothrow {
         try {
             app.sendChatMessage("system: Unknown command: '%s'. Type /help for available commands.",
-                    TuiChatMessageType_Assistant, input);
+                    input);
         } catch (Exception e) {
         }
     }

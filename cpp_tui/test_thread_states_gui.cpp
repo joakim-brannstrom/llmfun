@@ -31,6 +31,7 @@
 // (no display / GUI backend init failed / bad arguments).
 
 #include "model/thread_view.h"
+#include "test/typed_seed.h"
 #include "tui.h"
 #include "tui_backend.h"
 #include "tui_settings.h"
@@ -165,6 +166,13 @@ int main(int argc, char** argv) {
     };
 
     // One rail fixture for every state: the state is the only difference.
+    typed_seed::Seeder seed{&state, 1};
+    const auto clearThread = [&]() { // the transcript starts over
+        state.threadAdapter.reset();
+        llmfun::tui::model::resetForSessionSwitch(state.ui);
+        state.chat.typedTurns.threadClear();
+        seed = typed_seed::Seeder(&state, 1);
+    };
     const auto railEntry = [](const char* id, const char* title, const char* preview,
                               std::size_t count, bool active) {
         llmfun::tui::SessionEntry entry;
@@ -184,7 +192,7 @@ int main(int argc, char** argv) {
 
     // --- Empty ---------------------------------------------------------------
     phase("empty");
-    llmfun::tui::tuiClearOutput(state);
+    clearThread();
     state.offline = false;
     state.readyStatus = true;
     const Ppm empty = capture(outDir + "/gui-1280x820-empty.ppm");
@@ -197,7 +205,7 @@ int main(int argc, char** argv) {
     // cannot animate cannot burn a frame budget either.
     phase("loading");
     state.readyStatus = false;
-    llmfun::tui::tuiClearOutput(state);
+    clearThread();
     state.ui.rail.loadingId = "s002-1";
     const Ppm loading = capture(outDir + "/gui-1280x820-loading.ppm");
     std::printf("loading: %dx%d, %zu bytes\n", loading.width, loading.height, loading.rgb.size());
@@ -216,7 +224,7 @@ int main(int argc, char** argv) {
 
     // --- Offline card --------------------------------------------------------
     phase("offline");
-    llmfun::tui::tuiClearOutput(state);
+    clearThread();
     state.offline = true;
     // Two captures of the same state: the card with the disabled composer's
     // tooltip (a nav-focused item reports a hover, which is the documented
@@ -230,12 +238,9 @@ int main(int argc, char** argv) {
 
     // --- Offline with a transcript: the card must not replace it -------------
     phase("offline-with-thread");
-    llmfun::tui::ChatMessage msg;
-    msg.summary = "hello";
-    msg.text = "hello body";
-    msg.type = llmfun::tui::ChatMessageType::User;
-    msg.id = state.chat.outputLineNextId++;
-    llmfun::tui::tuiAddOutputLine(state, msg);
+    clearThread();
+    state.offline = true;
+    seed.add(typed_seed::Seeder::Msg::User, "hello");
     const Ppm withThread = capture(outDir + "/gui-1280x820-offline-thread.ppm");
     std::printf("offline-with-thread: %dx%d, %zu bytes\n", withThread.width, withThread.height,
                 withThread.rgb.size());
@@ -258,40 +263,23 @@ int main(int argc, char** argv) {
     // same list, and the focused block is on purpose - the focus ring and the copy
     // control are part of the anatomy.
     phase("blocks");
-    llmfun::tui::tuiClearOutput(state);
+    clearThread();
     state.offline = false;
     state.readyStatus = true;
-    const auto blockMessage = [](size_t id, llmfun::tui::ChatMessageType type, const char* summary,
-                                 const char* text, const char* thinking) {
-        llmfun::tui::ChatMessage msg;
-        msg.id = id;
-        msg.type = type;
-        msg.summary = summary;
-        msg.text = text;
-        msg.thinking = thinking;
-        return msg;
-    };
-    llmfun::tui::tuiAddOutputLine(state, blockMessage(1, llmfun::tui::ChatMessageType::User,
-                                                      "[1] how do I build it [1.2s]",
-                                                      "how do I build it", ""));
-    llmfun::tui::tuiAddOutputLine(state, blockMessage(2, llmfun::tui::ChatMessageType::FinalAnswer,
-                                                      "[2] run make [3.4s]", "run make", ""));
-    llmfun::tui::tuiAddOutputLine(
-        state, blockMessage(3, llmfun::tui::ChatMessageType::Assistant, "[3] looking around [1.1s]",
-                            "I will list the files", "reasoning about the tree"));
-    llmfun::tui::tuiAddOutputLine(state, blockMessage(4, llmfun::tui::ChatMessageType::ToolCall,
-                                                      "[4] tool call: bash ls [1.2s]",
-                                                      "tool call: bash ls", ""));
-    llmfun::tui::tuiAddOutputLine(
-        state, blockMessage(5, llmfun::tui::ChatMessageType::ToolResponse,
-                            "[5] tool result \xE2\x9C\x85 writeFile: 42 lines [1.3s]",
-                            "tool result writeFile: 42 lines", ""));
-    llmfun::tui::tuiAddOutputLine(state, blockMessage(6, llmfun::tui::ChatMessageType::System,
-                                                      "[6] session resumed [0.4s]",
-                                                      "session resumed", ""));
-    llmfun::tui::tuiAddOutputLine(state, blockMessage(7, llmfun::tui::ChatMessageType::Assistant,
-                                                      "[7] try this [1.0s]",
-                                                      "```\nint main() { return 0; }\n```", ""));
+    // Turn 1: the query, the agent's work (a reasoning row and a merged tool
+    // card) and the final answer. Turn 2: a session notice and an answer that
+    // is one fenced code block. The typed store is what the renderer reads, so
+    // the shapes are the same ones D replays.
+    seed.add(typed_seed::Seeder::Msg::User, "how do I build it");
+    seed.upsertBlock(1, "reasoning#0", "1#0", TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                     "assistant", "reasoning about the tree");
+    seed.upsertBlock(1, "tool#0", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok,
+                     "writeFile: 42 lines", "tool call: bash ls", "bash ls", 1200);
+    seed.add(typed_seed::Seeder::Msg::FinalAnswer, "run make");
+    seed.add(typed_seed::Seeder::Msg::User, "try this");
+    seed.upsertBlock(2, "notice#0", "2#0", TuiBlockKind_Notice, TuiBlockStatus_None, nullptr,
+                     "session resumed");
+    seed.add(typed_seed::Seeder::Msg::Assistant, "```\nint main() { return 0; }\n```");
     // The first group is the user query; focusing its row is a click's outcome without a
     // click (the state is plain data the view reads, and the harness may write it).
     // The first row's block, named the way the view names it: the user query's group,

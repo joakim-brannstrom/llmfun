@@ -13,7 +13,6 @@ import llm.coder : runCoderPipeline;
 import llm.pipeline : prettyPrint;
 import llm.plan : runPlanPipeline;
 import llm.utility : isStopAgentTriggered;
-import llmfun_tui; // TuiChatMessageType_* (C binding)
 
 package void registerPipelineCommands(ref SlashCommandRegistry registry) {
     auto ignore = registry.register(SlashCommand("plan", [], [
@@ -30,11 +29,11 @@ package void registerPipelineCommands(ref SlashCommandRegistry registry) {
 private AgentStatus planHandler(ref AgentApp app, string arg) {
     app.uiMsg.pipelineClear;
     auto q = arg;
-    app.sendChatMessage("assistant: Running plan pipeline: %s", TuiChatMessageType_Assistant, q);
+    app.sendChatMessage("assistant: Running plan pipeline: %s", q);
     auto result = runPlanPipeline(q, app.llmConf, app.rag, app.monitor, () {
         return isStopAgentTriggered;
     }, app.llmConf.toolFilter.to(), app.makePipelineStreamCallback);
-    app.sendChatMessage(prettyPrint(result), TuiChatMessageType_Assistant);
+    app.sendChatMessage(prettyPrint(result));
     return AgentStatus.active;
 }
 
@@ -44,16 +43,15 @@ private AgentStatus planHandler(ref AgentApp app, string arg) {
 private AgentStatus codeHandler(ref AgentApp app, string arg) {
     app.uiMsg.pipelineClear;
     auto q = arg;
-    app.sendChatMessage("assistant: Running coder pipeline: %s", TuiChatMessageType_Assistant, q);
+    app.sendChatMessage("assistant: Running coder pipeline: %s", q);
     auto result = runCoderPipeline(q, app.llmConf, app.rag, app.monitor, () {
         return isStopAgentTriggered;
     }, app.llmConf.toolFilter.to(), app.makePipelineStreamCallback);
     if (result.wasInterrupted) {
-        app.sendChatMessage("assistant: Pipeline interrupted by user.",
-                TuiChatMessageType_Assistant);
+        app.sendChatMessage("assistant: Pipeline interrupted by user.");
         return AgentStatus.active;
     }
-    app.sendChatMessage(i"assistant: $(prettyPrint(result))".text, TuiChatMessageType_Assistant);
+    app.sendChatMessage(i"assistant: $(prettyPrint(result))".text);
     return AgentStatus.active;
 }
 

@@ -12,8 +12,8 @@ import std.sumtype : match;
 
 import llm.types : ServerStat, StreamMessage, StreamToolCall, IStreamCallback,
     IStepEventEmitter, ProcessResult;
-import llm.tui; // Ui* message types (UiChatMessage, UiPipelineClear, ...)
-import llmfun_tui; // TuiChatMessageType (C binding)
+import llm.tui;
+import llmfun_tui;
 import my.path : Path;
 import my.actor.channel : Channel;
 import my.actor.mailbox : TypedAddress;
@@ -29,16 +29,9 @@ interface TuiSink {
     void ready();
     void busy();
     void terminate();
-    void chatMessage(string msg, TuiChatMessageType type, size_t nr, MessageTime time);
-    void chatThinkMessage(string msg, string thinking, TuiChatMessageType type,
-            size_t nr, MessageTime time);
     void runtimeStatus(UiRuntimeStatus status);
-    void finalAnswer(string msg, size_t nr, MessageTime time);
-    void clearChat();
     void logFile(bool useFile);
     void streamRuntimeStatus(UiRuntimeStatus status);
-    void streamChatMessage(string msg, string thinking);
-    void streamChatDone();
     void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
             double tokensPerSecond, string currentTool, long contextUsed, long contextMax);
     void pipelineStreamDone(string agentId);
@@ -81,25 +74,8 @@ class TuiChannelSink : TuiSink {
         ch.uiTerminate();
     }
 
-    override void chatMessage(string msg, TuiChatMessageType type, size_t nr, MessageTime time) {
-        ch.uiMsg(UiChatMessage(msg: msg, type: type, nr: nr, time: time));
-    }
-
-    override void chatThinkMessage(string msg, string thinking,
-            TuiChatMessageType type, size_t nr, MessageTime time) {
-        ch.uiMsg(UiChatThinkMessage(msg: msg, thinking: thinking, type: type, nr: nr, time: time));
-    }
-
     override void runtimeStatus(UiRuntimeStatus status) {
         ch.uiMsg(status);
-    }
-
-    override void finalAnswer(string msg, size_t nr, MessageTime time) {
-        ch.uiMsg(UiFinalAnswer(msg: msg, nr: nr, time: time));
-    }
-
-    override void clearChat() {
-        ch.uiClearChat();
     }
 
     override void logFile(bool useFile) {
@@ -108,14 +84,6 @@ class TuiChannelSink : TuiSink {
 
     override void streamRuntimeStatus(UiRuntimeStatus status) {
         ch.uiMsg(status);
-    }
-
-    override void streamChatMessage(string msg, string thinking) {
-        ch.uiMsg(UiStreamChatMessage(msg, thinking));
-    }
-
-    override void streamChatDone() {
-        ch.uiStreamChatDone();
     }
 
     override void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
@@ -188,37 +156,13 @@ class TuiBlockedSink : TuiSink {
     override void terminate() {
     }
 
-    override void chatMessage(string msg, TuiChatMessageType type, size_t nr, MessageTime time) {
-        writeln(msg);
-    }
-
-    override void chatThinkMessage(string msg, string thinking,
-            TuiChatMessageType type, size_t nr, MessageTime time) {
-        if (!thinking.empty)
-            writeln("Thinking: ", thinking);
-        writeln(msg);
-    }
-
     override void runtimeStatus(UiRuntimeStatus status) {
-    }
-
-    override void finalAnswer(string msg, size_t nr, MessageTime time) {
-        writeln(msg);
-    }
-
-    override void clearChat() {
     }
 
     override void logFile(bool useFile) {
     }
 
     override void streamRuntimeStatus(UiRuntimeStatus status) {
-    }
-
-    override void streamChatMessage(string msg, string thinking) {
-    }
-
-    override void streamChatDone() {
     }
 
     override void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
@@ -248,19 +192,29 @@ class TuiBlockedSink : TuiSink {
 
     private ConsoleFormatter formatter = new ConsoleFormatter;
 
+    /// The blocked console is now the typed formatter's lines (task 5): each
+    /// typed event writes exactly the lines the parity golden pins.
     override void setTurns(UiTurnData[] turns, UiBlockData[] blocks) {
+        foreach (line; formatter.onSetTurns(turns, blocks))
+            writeln(line);
     }
 
     override void turnUpsert(UiTurnData turn) {
+        foreach (line; formatter.onTurnUpsert(turn))
+            writeln(line);
     }
 
     override void blockUpsert(UiBlockData block) {
+        foreach (line; formatter.onBlockUpsert(block))
+            writeln(line);
     }
 
     override void turnRemove(long turnId) {
+        formatter.onTurnRemove(turnId);
     }
 
     override void threadClear() {
+        formatter.onThreadClear();
     }
 }
 
@@ -274,15 +228,6 @@ class TuiRecordingSink : TuiSink {
 
     Call[] calls;
 
-    struct Stamp {
-        size_t nr;
-        MessageTime time;
-    }
-
-    /// chatMessage payloads in call order (most recent last).
-    string[] chatMessages;
-    /// (nr, time) for every persistent send, in call order; includes chatThinkMessage/finalAnswer (chatMessages does not).
-    Stamp[] stamps;
     /// sessionList snapshots in call order; items are copied at record time so later store mutations cannot leak into the recording.
     UiSessionItem[][] sessionLists;
 
@@ -330,8 +275,13 @@ class TuiRecordingSink : TuiSink {
         return n;
     }
 
-    string lastChatMessage() {
-        return chatMessages.length == 0 ? "" : chatMessages[chatMessages.length - 1];
+    /// The last Notice block body (task 5: a chat message IS a Notice block),
+    /// or "" when no notice was sent.
+    string lastNoticeBody() {
+        foreach_reverse (b; blockUpserts)
+            if (b.kind == TuiBlockKind_Notice)
+                return b.body;
+        return "";
     }
 
     UiSessionItem[] lastSessionList() {
@@ -358,29 +308,8 @@ class TuiRecordingSink : TuiSink {
         record("terminate");
     }
 
-    override void chatMessage(string msg, TuiChatMessageType type, size_t nr, MessageTime time) {
-        chatMessages ~= msg;
-        stamps ~= Stamp(nr, time);
-        record("chatMessage", msg);
-    }
-
-    override void chatThinkMessage(string msg, string thinking,
-            TuiChatMessageType type, size_t nr, MessageTime time) {
-        stamps ~= Stamp(nr, time);
-        record("chatThinkMessage", msg ~ "\n[thinking] " ~ thinking);
-    }
-
     override void runtimeStatus(UiRuntimeStatus status) {
         record("runtimeStatus", status.detail);
-    }
-
-    override void finalAnswer(string msg, size_t nr, MessageTime time) {
-        stamps ~= Stamp(nr, time);
-        record("finalAnswer", msg);
-    }
-
-    override void clearChat() {
-        record("clearChat");
     }
 
     override void logFile(bool useFile) {
@@ -389,14 +318,6 @@ class TuiRecordingSink : TuiSink {
 
     override void streamRuntimeStatus(UiRuntimeStatus status) {
         record("streamRuntimeStatus", status.detail);
-    }
-
-    override void streamChatMessage(string msg, string thinking) {
-        record("streamChatMessage", msg);
-    }
-
-    override void streamChatDone() {
-        record("streamChatDone");
     }
 
     override void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
@@ -509,37 +430,8 @@ class UiMessenger {
         sink.terminate();
     }
 
-    void chatMessage(string msg, TuiChatMessageType type) {
-        sink.chatMessage(msg, type, 0, MessageTime(NoProcessingTime()));
-    }
-
-    void chatMessage(string msg, TuiChatMessageType type, size_t nr, MessageTime time) {
-        sink.chatMessage(msg, type, nr, time);
-    }
-
-    void chatThinkMessage(string msg, string thinking, TuiChatMessageType type) {
-        sink.chatThinkMessage(msg, thinking, type, 0, MessageTime(NoProcessingTime()));
-    }
-
-    void chatThinkMessage(string msg, string thinking, TuiChatMessageType type,
-            size_t nr, MessageTime time) {
-        sink.chatThinkMessage(msg, thinking, type, nr, time);
-    }
-
     void runtimeStatus(UiRuntimeStatus status) {
         sink.runtimeStatus(status);
-    }
-
-    void finalAnswer(string msg) {
-        sink.finalAnswer(msg, 0, MessageTime(NoProcessingTime()));
-    }
-
-    void finalAnswer(string msg, size_t nr, MessageTime time) {
-        sink.finalAnswer(msg, nr, time);
-    }
-
-    void clearChat() {
-        sink.clearChat();
     }
 
     void logFile(bool useFile) {
@@ -548,14 +440,6 @@ class UiMessenger {
 
     void streamRuntimeStatus(UiRuntimeStatus status) {
         sink.streamRuntimeStatus(status);
-    }
-
-    void streamChatMessage(string msg, string thinking) {
-        sink.streamChatMessage(msg, thinking);
-    }
-
-    void streamChatDone() {
-        sink.streamChatDone();
     }
 
     void pipelineStreamChatMessage(string agentId, string content, string thinking, string role,
@@ -610,50 +494,6 @@ class UiMessenger {
 
     void threadClear() {
         sink.threadClear();
-    }
-}
-
-/// Forwards streaming model output to the TUI (single-agent queries).
-class StreamMessageUpdater : IStreamCallback {
-    UiMessenger uiMsg;
-    long contextSize;
-    string modelName;
-
-    this(UiMessenger messenger, long contextSize, string modelName)
-    in (messenger !is null, "UiMessenger must not be null") {
-        this.uiMsg = messenger;
-        this.contextSize = contextSize;
-        this.modelName = modelName;
-    }
-
-    override void messageUpdate(StreamMessage msg, StreamToolCall[] tools, ServerStat stat) {
-        uiMsg.streamRuntimeStatus(UiRuntimeStatus(phase: !tools.empty ? TuiPhase.tooling
-                : msg.content.empty ? TuiPhase.thinking : TuiPhase.writing, detail: tools.empty
-                ? null : tools[$ - 1].toolName,
-                contextUsed: stat.context, contextMax: contextSize, compactAt: (contextSize * 9) / 10,
-                tokensPerSecond: stat.predictedPerSecond, model: modelName));
-
-        string content = msg.content;
-        if (!tools.empty) {
-            foreach (tool; tools) {
-                content ~= "\n--- Tool ---\n";
-                content ~= tool.toPrettyString(1000);
-                content ~= "\n\n";
-            }
-        }
-
-        uiMsg.streamChatMessage(content, msg.reasoning);
-    }
-
-    override void streamMessageDone() {
-        uiMsg.streamChatDone();
-    }
-
-    override void setId(string id) {
-    }
-
-    override IStreamCallback clone() {
-        return new StreamMessageUpdater(uiMsg, contextSize, modelName);
     }
 }
 

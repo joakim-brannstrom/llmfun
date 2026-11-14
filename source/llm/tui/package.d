@@ -413,10 +413,7 @@ struct TextUserInterface {
 
     package {
         string query_; // what D last sent, replayed to the C++ frame on every render tick.
-        UiRuntimeStatus runtimeStatus_; // Last header summary computed by addChatMessage
-        // Set when the C frame reports user-terminated (GUI window close);
-        // consumed by the actor's postProcess exit handshake.
-        string lastChatSummary;
+        UiRuntimeStatus runtimeStatus_;
         bool userTerminated_;
     }
 
@@ -431,32 +428,6 @@ struct TextUserInterface {
         // whatever runs after the UI (D-RAWLOG's "and in the shutdown path").
         restoreRawLogLevel();
         tuiDestroyState(tuiState);
-    }
-
-    void addChatMessage(string msg, string thinking, TuiChatMessageType type,
-            size_t nr, MessageTime time) {
-        string summary;
-        if (nr == 0) {
-            summary = shortSummary(msg);
-        } else {
-            auto head = "[" ~ nr.text ~ "]";
-            auto body = shortSummary(msg);
-            auto tail = timeSuffix(time);
-            if (body.empty) {
-                summary = tail.empty ? head : head ~ " " ~ tail;
-            } else {
-                summary = head ~ " " ~ body ~ tail;
-            }
-        }
-        lastChatSummary = summary;
-        auto s = String(summary.ptr, summary.length);
-        auto q = String(msg.ptr, msg.length);
-        auto t = String(thinking.ptr, thinking.length);
-        tuiAddChatMessage(tuiState, ChatMessageParam(s, q, t, type));
-    }
-
-    void clearChat() {
-        tuiClearChatMessages(tuiState);
     }
 
     void setIniFile(Path path) {
@@ -493,18 +464,6 @@ struct TextUserInterface {
     // is for the slash command.
     bool takeCancel() @trusted {
         return tuiTakeCancel(tuiState) != 0;
-    }
-
-    void streamChat(string msg, string thinking) {
-        auto s = String(null, 0);
-        auto q = String(msg.ptr, msg.length);
-        auto t = String(thinking.ptr, thinking.length);
-        tuiUpdateStreamChatMessage(tuiState, ChatMessageParam(s, q, t,
-                TuiChatMessageType_Assistant));
-    }
-
-    void streamChatDone() {
-        tuiStreamChatMessageClear(tuiState);
     }
 
     void pipelineMessage(UiPipelineStreamChatMessage msg) {
@@ -717,22 +676,16 @@ interface TUIListener {
 }
 
 interface TUICommands {
-    void uiMsg(UiChatMessage m);
-    void uiMsg(UiChatThinkMessage m);
-    void uiMsg(UiFinalAnswer m);
     void uiMsg(UiRuntimeStatus m);
     void uiMsg(UiInitHistory m);
     void uiMsg(UiSessionList m);
-    void uiMsg(UiStreamChatMessage m);
     void uiMsg(UiLogFile m);
     void uiMsg(UiPipelineStreamChatMessage m);
     void uiMsg(UiPipelineStreamDone m);
     void uiMsg(UiPipelineToolCall m);
     void uiMsg(UiPipelineToolResult m);
     void uiMsg(UiDropReport m);
-    void uiStreamChatDone();
     void uiPipelineClear();
-    void uiClearChat();
     void uiAgentBusy();
     void uiAgentReady();
     void uiTerminate();
@@ -1071,18 +1024,6 @@ class TextUserInterfaceActor : TUICommands {
         postProcess();
     }
 
-    void uiMsg(UiChatMessage a) {
-        ui.addChatMessage(a.msg, null, a.type, a.nr, a.time);
-    }
-
-    void uiMsg(UiChatThinkMessage a) {
-        ui.addChatMessage(a.msg, a.thinking, a.type, a.nr, a.time);
-    }
-
-    void uiMsg(UiFinalAnswer a) {
-        ui.addChatMessage(a.msg, null, TuiChatMessageType_FinalAnswer, a.nr, a.time);
-    }
-
     void uiMsg(UiRuntimeStatus a) {
         ui.setRuntimeStatus(a);
     }
@@ -1097,10 +1038,6 @@ class TextUserInterfaceActor : TUICommands {
 
     void uiMsg(UiDropReport m) {
         ui.setDropChipStatus(m.chipId, m.state, m.finalPath, m.display);
-    }
-
-    void uiMsg(UiStreamChatMessage m) {
-        ui.streamChat(m.msg, m.thinking);
     }
 
     void uiMsg(UiLogFile a) {
@@ -1149,20 +1086,11 @@ class TextUserInterfaceActor : TUICommands {
         ui.threadClear();
     }
 
-    void uiStreamChatDone() {
-        ui.streamChatDone();
-    }
-
     void uiPipelineClear() {
         ui.pipelineClear();
     }
 
-    void uiClearChat() {
-        ui.clearChat;
-    }
-
     void uiAgentBusy() {
-        ui.setReadyStatus(false);
     }
 
     void uiAgentReady() {
@@ -1189,38 +1117,6 @@ class TextUserInterfaceActor : TUICommands {
 
 struct UiInitHistory {
     string[] queries;
-}
-
-struct UiChatMessage {
-    string msg;
-    TuiChatMessageType type = TuiChatMessageType_Assistant;
-    size_t nr = 0; // 0 = display-only line (undecorated)
-    MessageTime time = NoProcessingTime();
-}
-
-struct UiChatThinkMessage {
-    string msg;
-    string thinking;
-    TuiChatMessageType type = TuiChatMessageType_Assistant;
-    size_t nr = 0;
-    MessageTime time = NoProcessingTime();
-}
-
-struct UiStreamChatMessage {
-    string msg;
-    string thinking;
-}
-
-struct UiStreamChatDone {
-}
-
-struct UiFinalAnswer {
-    string msg;
-    size_t nr = 0;
-    MessageTime time = NoProcessingTime();
-}
-
-struct UiClearChat {
 }
 
 /// The UI's phase vocabulary, mirrored from the C side's `model::Phase`

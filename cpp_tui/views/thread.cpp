@@ -18,6 +18,7 @@
 #include "store/thread_store.h"
 #include "ui/input.h"
 #include "ui/layout.h"
+
 #include "ui/markdown.h"
 #include "ui/metrics.h"
 #include "ui/primitives.h"
@@ -452,6 +453,7 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
     bool blockMenuOpen = false;
     for (const std::size_t index : drawn) {
         const store::GroupView group = thread.groupAt(index);
+        const bool groupMinimal = thread.groupMinimal(group.id);
         const float headerScreenY = ImGui::GetCursorScreenPos().y;
         headerRows.emplace_back(group.id, headerScreenY - ImGui::GetWindowPos().y);
         if (ts.firstGroupId == 0 && headerScreenY >= clipMin.y &&
@@ -474,18 +476,55 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
         // draws each row's chrome and the adapter draws the body under it, which is what
         // keeps markdown in the one translation unit that owns it.
         const std::size_t blocks = thread.blockCount(index);
+        // The rows up front: the chips line draws between the header and the
+        // rows, so the live steps must be known before the first row is drawn -
+        // and the loop below reads the prefetched rows instead of probing the
+        // adapter once per row.
+        std::vector<model::BlockDesc> rows;
+        rows.reserve(blocks);
+        for (std::size_t b = 0; b < blocks; ++b)
+            rows.push_back(thread.blockAt(index, b));
+        // The live steps the chips line names (D11): the tool rows still Running
+        // or Pending. The newest live group is the last one drawn - a turn only
+        // ever starts after every earlier one ended - so only it adds the line.
+        bool liveSteps = false;
+        for (const model::BlockDesc& d : rows)
+            if (d.kind == model::BlockKind::ToolStep &&
+                (d.state == model::BlockState::Running || d.state == model::BlockState::Pending))
+                liveSteps = true;
         for (std::size_t b = 0; b < blocks; ++b) {
-            const model::BlockDesc desc = thread.blockAt(index, b);
+            const model::BlockDesc& desc = rows[b];
             ui::Rect row;
             row.x = ImGui::GetCursorScreenPos().x;
             row.y = ImGui::GetCursorScreenPos().y;
             row.w = std::max(0.0f, ImGui::GetContentRegionAvail().x);
             row.cells = m.textGrid;
+            // The maximal batch's tool cards: each card hangs indented
+            // beneath the batch's thinking disclosure, sharing one left rule -
+            // the indent starts before the row is measured, so the card's own
+            // body narrows with it. Minimal mode keeps the cards at the fold's
+            // edge (they are not drawn there at all).
+            const bool card = !groupMinimal && desc.kind == model::BlockKind::ToolStep;
+            if (card)
+                ImGui::Indent(m.pad2);
             const bool focused = desc.id() == ts.focus;
-            // The block menu's owner (task 44): the one block the state names may submit
+            // The fold (minimal mode)
+            if (groupMinimal && group.typedTurn && !desc.expanded &&
+                desc.kind != model::BlockKind::User && desc.kind != model::BlockKind::Answer &&
+                desc.kind != model::BlockKind::WorkGroup)
+                continue;
+            // The block menu's owner: the one block the state names may submit
             // the popup, so an ImGui id that a transcript reset recycled cannot re-own a
             // menu the user opened on a different message.
-            const BlockDraw draw{desc.expanded, focused, desc.id() == ts.menuBlockId};
+            // Minimal mode opens the turn's content rows (D11): the query and
+            // the answer are what the fold keeps - their bodies draw under
+            // them, the way the v4 message rows always drew. The work rows keep
+            // their own expansion state behind the header.
+            const bool rowOpen =
+                desc.expanded ||
+                (groupMinimal && group.typedTurn &&
+                 (desc.kind == model::BlockKind::User || desc.kind == model::BlockKind::Answer));
+            const BlockDraw draw{rowOpen, focused, desc.id() == ts.menuBlockId};
             row.h = measureBlockHeader(desc, m, draw);
             const BlockResult result = renderBlock(desc, row, m, draw);
             if (result.menuRequested) {
@@ -543,10 +582,48 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
                 thread.renderBlockBody(index, b, body);
                 ImGui::Unindent(m.pad1);
             }
+            if (card) {
+                // The shared left rule (F5): from the card's top to its bottom,
+                // at the x the indent started from - every card's segment lands
+                // on the same vertical, so the batch's cards read as one rail.
+                const float cardBottom = ImGui::GetCursorScreenPos().y;
+                ImGui::Unindent(m.pad2);
+                const float ruleW = std::min(m.textGrid ? 1.0f : 2.0f, row.w);
+                if (ruleW > 0.0f && cardBottom > row.y)
+                    ui::rule(m, ui::Rect{row.x, row.y, ruleW, cardBottom - row.y, m.textGrid},
+                             ui::ColorToken::roleTool);
+            }
             // A collapsed work group hides the rows under its header: the header *is* the
-            // group, and its steps are the rows `blockCount()` reports.
-            if (b == 0 && desc.kind == model::BlockKind::WorkGroup && !desc.expanded)
-                break;
+            // group, and its steps are the rows `blockCount()` reports. Minimal mode
+            // keeps drawing instead: the group's content rows (the query, the answer)
+            // come out from under the fold, its work rows stay behind the header -
+            // and the newest live group names its live steps in one chips line (D11).
+            if (b == 0 && desc.kind == model::BlockKind::WorkGroup && !desc.expanded) {
+                if (!groupMinimal || !group.typedTurn)
+                    break;
+                if (liveSteps && index == drawn.back()) {
+                    float chipX = row.x + m.pad2;
+                    const float chipY = row.y + row.h;
+                    for (const model::BlockDesc& d : rows) {
+                        if (d.kind != model::BlockKind::ToolStep ||
+                            (d.state != model::BlockState::Running &&
+                             d.state != model::BlockState::Pending))
+                            continue;
+                        const std::string chip = "[" + d.summary + "]";
+                        lineAt(m,
+                               ui::Rect{chipX, chipY, std::max(0.0f, row.right() - chipX), m.row,
+                                        m.textGrid},
+                               chipX, chipY, chip.c_str(),
+                               d.state == model::BlockState::Running ? ui::ColorToken::stateOk
+                                                                     : ui::ColorToken::textLow);
+                        chipX += static_cast<float>(ui::displayWidth(chip)) *
+                                     (m.textGrid ? 1.0f : m.gu) +
+                                 m.pad1;
+                    }
+                    // The next row starts under the chips line, not on it.
+                    ImGui::SetCursorScreenPos(ImVec2(row.x, chipY + m.row));
+                }
+            }
         }
         thread.endGroup(index, cell);
     }

@@ -177,9 +177,9 @@ struct HeightHint {
 
 /// The thread's cross-frame view state.
 ///
-/// Expansion is kept by the store itself (`ChatTab::outputLineOpen`,
-/// `ChatTab::openWorkGroups`) and this state only reads it: one store with two readers, so a
-/// click and a read cannot disagree (`UiState` carries the same note).
+/// Expansion is kept by the store itself (`ChatTab::openWorkGroups`,
+/// keyed by the typed store's turn id) and this state only reads it: one store with two readers, so
+/// a click and a read cannot disagree (`UiState` carries the same note).
 ///
 /// This struct holds what the window itself owns: the hint cache (dropped on a
 /// width / row / compact / revision change and on a session switch), the scroll
@@ -279,7 +279,7 @@ struct ThreadState {
 
     /// The live answer's clock and cancel mark.
     ///
-    /// The stream itself is the store's (`ChatTab::hasStreamMsg` + `streamMsg`, one copy the
+    /// The live turn is the store's (`ChatTab::typedTurns`, one copy the
     /// adapter reads), so this carries only what a clock can tell: how long the answer has
     /// run, how long the model reasoned and whether the user stopped it.
     /// `refreshStreamClock()` is the one writer, called by the frame layer once per frame and
@@ -378,8 +378,8 @@ inline std::int64_t agentClockMs() {
 /// by owner: preferences (persisted), the per-frame derivation (`view`,
 /// `offline`), and the thread's view state (`follow`, `earlierGroups`, `thread`).
 ///
-/// Expansion is kept in one store (`ChatTab::outputLineOpen` for a message,
-/// `ChatTab::openWorkGroups` for a work group), reached through
+/// Expansion is kept in one store (`ChatTab::openWorkGroups` for a work group's
+/// fold, keyed by the typed store's turn id), reached through
 /// `store::ThreadStoreAdapter::expanded()/setExpanded()`: one store with two readers,
 /// so a click and a read cannot disagree (`ThreadState` carries the same note).
 struct UiState {

@@ -338,45 +338,21 @@ struct AgentApp {
         return slashCommands_.helpText();
     }
 
-    /// Public plugin seam: send a chat message to the UI.
-    public void sendChatMessage(Args...)(string msg, TuiChatMessageType type, Args args) {
+    /// Public plugin seam: send a chat message to the UI. After the typed
+    /// cutover (task 5) every such message is a Notice block (task 3) - the
+    /// v4 per-message chat row is gone. The body travels verbatim; a Notice
+    /// attaches to the store's newest turn, which is where a notice emitted
+    /// between runs belongs.
+    public void sendChatMessage(Args...)(string msg, Args args) {
         static if (args.length > 0) {
             msg = format(msg, args);
         }
-        uiMsg.chatMessage(msg, type);
-    }
-
-    private void sendChatThinkMessage(Args...)(string msg, string thinking,
-            TuiChatMessageType type, Args args) {
-        static if (args.length > 0) {
-            msg = format(msg, args);
-        }
-        uiMsg.chatThinkMessage(msg, thinking, type);
-    }
-
-    package void sendPersistedChatMessage(Args...)(string msg,
-            TuiChatMessageType type, size_t nr, MessageTime time, Args args) {
-        static if (args.length > 0) {
-            msg = format(msg, args);
-        }
-        uiMsg.chatMessage(msg, type, nr, time);
-    }
-
-    package void sendPersistedChatThinkMessage(Args...)(string msg, string thinking,
-            TuiChatMessageType type, size_t nr, MessageTime time, Args args) {
-        static if (args.length > 0) {
-            msg = format(msg, args);
-        }
-        uiMsg.chatThinkMessage(msg, thinking, type, nr, time);
-    }
-
-    package void sendPersistedFinalAnswer(string msg, size_t nr, MessageTime time) {
-        uiMsg.finalAnswer(msg, nr, time);
+        emitNoticeTyped(msg);
     }
 
     private void progressCallback(size_t currentChunk, size_t totalChunks, string status) {
-        uiMsg.chatMessage(i"assistant: Compressing... $(currentChunk)/$(totalChunks) : $(status)".text,
-                TuiChatMessageType_Assistant);
+        emitNoticeTyped(i"assistant: Compressing... $(currentChunk)/$(totalChunks) : $(status)"
+                .text);
     }
 
     private void sendRuntimeStatus(bool readyState) {
@@ -403,68 +379,17 @@ struct AgentApp {
             chatDirty = true;
             emitCompressionTyped();
         }
-        uiMsg.chatMessage(compressionResultToString(res.compressed, res.originalLength,
-                res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize),
-                TuiChatMessageType_Assistant);
+        emitNoticeTyped(compressionResultToString(res.compressed, res.originalLength,
+                res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize));
         uiMsg.ready;
-    }
-
-    private void processChatMessage(Chat.MessageT m, size_t nr, bool printUser) {
-        m.match!((Message a) {
-            const bool show = isDisplayable(m, llmConf) && (a.role != Role.user || printUser);
-            if (show) {
-                auto msgType = a.role == Role.user ? TuiChatMessageType_User
-                    : TuiChatMessageType_Assistant;
-                this.sendPersistedChatThinkMessage("%s: %s", a.thinking,
-                    msgType, nr, a.processTime(), a.role, a.content);
-            } else {
-                logger.tracef("%s: %s", a.role, a.content);
-            }
-        }, (ToolMessage a) {
-            auto calls = summarizeToolCalls(a.toolCalls, 1000);
-            // join, not %(...): std.format quotes string elements inside a
-            // comprehension, which the console never printed.
-            this.sendPersistedChatThinkMessage("tool call: " ~ calls.join("\n"),
-                a.thinking, TuiChatMessageType_ToolCall, nr, a.processTime());
-            if (a.isFinalAnswer()) {
-                // Same (nr, time) as the tool-call line above: one number per
-                // persistent message.
-                this.sendPersistedFinalAnswer(a.getFinalAnswer(), nr, a.processTime());
-            }
-        }, (ToolResponse a) {
-            if (isDisplayable(m, llmConf)) {
-                this.sendPersistedChatMessage("tool result %s: %-s %s",
-                    TuiChatMessageType_ToolResponse, nr, a.processTime(),
-                    a.success ? "✅" : "❌", a.toolName, summarizeToolResponse(a, 1000));
-            }
-        }, (VisionMessage a) {
-            this.sendPersistedChatMessage("user: %s (with image)",
-                TuiChatMessageType_Assistant, nr, MessageTime(NoProcessingTime()), a.content);
-        });
     }
 
     package void processResult(ProcessResult result) {
         logger.trace(result.status != ProcessResult.Status.ok, result);
         lastServerStat = result.stat;
-        // result.chat (Chat.lastResponses) is the contiguous tail
-        // of the history, so the displayable count of the history before the
-        // batch is the ordinal offset. A user query in the batch was already
-        // echoed with exactly its ordinal (runAgent, after the turn-start
-        // doCompress); printUser: false keeps it out of the live display.
-        auto history = agent_.chat.getMessages();
-        const size_t offset = displayableCount(history[0 .. $ - result.chat.length], llmConf);
-        size_t pos = 0;
-        foreach (m; result.chat) {
-            if (isDisplayable(m, llmConf)) {
-                pos++;
-                this.processChatMessage(m, offset + pos, printUser: false);
-            } else {
-                this.processChatMessage(m, 0, printUser: false);
-            }
-        }
-        // Set the flag HERE, not in processChatMessage - that is shared with
-        // the replay loop in activateSession and must keep the freshly loaded
-        // chat clean (a dirty replay would rewrite the just-loaded file).
+        this.emitStepTyped(result);
+        // Set the flag HERE, not in the emitter - the emitter only draws; the
+        // persisted state changed above it in the run loop.
         if (result.chat.length > 0)
             chatDirty = true;
         commitActiveSession();
@@ -521,7 +446,7 @@ struct AgentApp {
         auto sfOpt = sessionStore.load(id);
         if (!hasValue(sfOpt)) {
             this.sendChatMessage("error: Cannot load session '%s' (not found or corrupt). Staying in current session.",
-                    TuiChatMessageType_Assistant, id);
+                    id);
             return; // keep the current session unchanged
             // Note: no sendSessionList() here - the list refresh happens
             // only on the success path to keep exactly one send per
@@ -548,18 +473,10 @@ struct AgentApp {
         // Status bar must reflect the target session, not the previous one
         lastServerStat = ServerStat(startContext: agent_.chat.approxContextSize);
 
-        uiMsg.clearChat();
+        uiMsg.threadClear();
         uiMsg.pipelineClear();
 
-        size_t pos = 0;
-        foreach (m; agent_.chat.getMessages()) {
-            if (isDisplayable(m, llmConf)) {
-                pos++;
-                this.processChatMessage(m, pos, printUser: true);
-            } else {
-                this.processChatMessage(m, 0, printUser: true);
-            }
-        }
+        this.emitReplayTyped();
 
         if (uiMsg.isActive()) {
             uiMsg.initHistory(agent_.getUserQueries.map!(a => a.content).array);
@@ -634,7 +551,7 @@ struct AgentApp {
         auto sessions = sessionStore.list();
 
         if (sessions.length == 0) {
-            this.sendChatMessage("No sessions found.", TuiChatMessageType_Assistant);
+            this.sendChatMessage("No sessions found.");
             return;
         }
 
@@ -652,7 +569,7 @@ struct AgentApp {
                     i + 1, marker, shortId, s.title, preview, s.messageCount, dateStr));
         }
 
-        this.sendChatMessage(lines[].join("\n"), TuiChatMessageType_Assistant);
+        this.sendChatMessage(lines[].join("\n"));
     }
 
     /** Create a new session and switch to it.
@@ -676,18 +593,17 @@ struct AgentApp {
         if (stripped.empty) {
             // runAgent already rejects empty args; this guards direct callers.
             this.sendChatMessage("error: Rename rejected — empty title, keeping previous title '%s'.",
-                    TuiChatMessageType_Assistant, activeSession.title);
+                    activeSession.title);
             return;
         }
 
         auto result = sessionStore.rename(activeSession.id, stripped);
         if (hasValue(result)) {
             activeSession = orElse(result, SessionMeta());
-            this.sendChatMessage("Session renamed to '%s'.",
-                    TuiChatMessageType_Assistant, activeSession.title);
+            this.sendChatMessage("Session renamed to '%s'.", activeSession.title);
         } else {
             this.sendChatMessage("error: Failed to rename session '%s'.",
-                    TuiChatMessageType_Assistant, shortSessionId(activeSession.id));
+                    shortSessionId(activeSession.id));
         }
         // Mutating callee - the active session's title changed, so the
         // sidebar snapshot is refreshed here (slash /rename is exempt from
@@ -748,11 +664,10 @@ struct AgentApp {
         }
 
         if (wasActive) {
-            this.sendChatMessage("Session deleted: %s. Switched to '%s'%s.", TuiChatMessageType_Assistant,
+            this.sendChatMessage("Session deleted: %s. Switched to '%s'%s.",
                     shortSessionId(id), activeSession.title, createdFresh ? " (new session)" : "");
         } else {
-            this.sendChatMessage("Session deleted: %s",
-                    TuiChatMessageType_Assistant, shortSessionId(id));
+            this.sendChatMessage("Session deleted: %s", shortSessionId(id));
             // No activateSession on this path, so the removed session must
             // leave the sidebar here (the active-delete path refreshes inside
             // activateSession).
@@ -839,14 +754,12 @@ struct AgentApp {
         pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
-                this.sendChatMessage("error: Invalid session id '%s'. Switch rejected.",
-                        TuiChatMessageType_Assistant, id);
+                this.sendChatMessage("error: Invalid session id '%s'. Switch rejected.", id);
                 return;
             }
             switchToSession(id); // sends the refreshed list
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to switch session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to switch session: %s.", e.msg);
         }
     }
 
@@ -858,8 +771,7 @@ struct AgentApp {
         try {
             doCreateSession(); // sends the refreshed list
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to create session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to create session: %s.", e.msg);
         }
     }
 
@@ -873,8 +785,7 @@ struct AgentApp {
         pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
-                this.sendChatMessage("error: Invalid session id '%s'. Rename rejected.",
-                        TuiChatMessageType_Assistant, id);
+                this.sendChatMessage("error: Invalid session id '%s'. Rename rejected.", id);
                 return;
             }
             // Exact mirror of doRenameSession: reject empty/stripped
@@ -882,8 +793,7 @@ struct AgentApp {
             // accepts any non-empty title).
             auto stripped = title.strip;
             if (stripped.length == 0) {
-                this.sendChatMessage("error: Rename rejected — empty title.",
-                        TuiChatMessageType_Assistant);
+                this.sendChatMessage("error: Rename rejected — empty title.");
                 return;
             }
             auto result = sessionStore.rename(id, stripped);
@@ -891,20 +801,16 @@ struct AgentApp {
                 auto newMeta = orElse(result, SessionMeta());
                 if (id == activeSession.id)
                     activeSession = newMeta; // keep the active meta fresh
-                this.sendChatMessage("Session renamed to '%s'.",
-                        TuiChatMessageType_Assistant, newMeta.title);
+                this.sendChatMessage("Session renamed to '%s'.", newMeta.title);
             } else {
-                // Unknown/corrupt id - error message, active meta
-                // unchanged, list still refreshed below.
-                this.sendChatMessage("error: Failed to rename session '%s'.",
-                        TuiChatMessageType_Assistant, shortSessionId(id));
+                // Unknown/corrupt id
+                this.sendChatMessage("error: Failed to rename session '%s'.", shortSessionId(id));
             }
             // The rename goes straight to the store (no sending callee),
             // so this handler sends the refreshed list on both paths.
             sendSessionList();
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to rename session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to rename session: %s.", e.msg);
         }
     }
 
@@ -917,8 +823,7 @@ struct AgentApp {
         pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
-                this.sendChatMessage("error: Invalid session id '%s'. Delete rejected.",
-                        TuiChatMessageType_Assistant, id);
+                this.sendChatMessage("error: Invalid session id '%s'. Delete rejected.", id);
                 return;
             }
             doDeleteSession(id); // sends the refreshed list
@@ -928,8 +833,7 @@ struct AgentApp {
                 savePinsEagerly();
             }
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to delete session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to delete session: %s.", e.msg);
         }
     }
 
@@ -955,26 +859,22 @@ struct AgentApp {
         pendingDeleteId = SessionId.init;
         try {
             if (!isValidId(id)) {
-                this.sendChatMessage("error: Invalid session id '%s'. Clone rejected.",
-                        TuiChatMessageType_Assistant, id);
+                this.sendChatMessage("error: Invalid session id '%s'. Clone rejected.", id);
                 return;
             }
             auto result = sessionStore.clone(id);
             if (hasValue(result)) {
                 auto cloneMeta = orElse(result, SessionMeta());
                 switchToSession(cloneMeta.id); // sends the refreshed list
-                this.sendChatMessage("Session cloned to '%s'.",
-                        TuiChatMessageType_Assistant, shortSessionId(cloneMeta.id));
+                this.sendChatMessage("Session cloned to '%s'.", shortSessionId(cloneMeta.id));
             } else {
                 // Unknown/corrupt id - error message, active session
                 // unchanged, list still refreshed below.
-                this.sendChatMessage("error: Failed to clone session '%s'.",
-                        TuiChatMessageType_Assistant, shortSessionId(id));
+                this.sendChatMessage("error: Failed to clone session '%s'.", shortSessionId(id));
                 sendSessionList();
             }
         } catch (Exception e) {
-            this.sendChatMessage("error: Failed to clone session: %s.",
-                    TuiChatMessageType_Assistant, e.msg);
+            this.sendChatMessage("error: Failed to clone session: %s.", e.msg);
         }
     }
 
@@ -1024,23 +924,22 @@ struct AgentApp {
             this.doCompress(false);
             // User-query echo, sent AFTER the turn-start doCompress: the
             // query (if any) is the last entry in the possibly-compressed
-            // history, so its ordinal is the displayable count of that
-            // history - no +1, and a compression that purged displayable
-            // prefix messages cannot misnumber it.
+            // history, so it is the newest turn in the typed store.
             // isActive() keeps one-shot CLI output byte-stable: the
             // startSetup one-shot branch runs with the default TuiBlockedSink
             // and has no chat line for the prompt today.
             if (!query.empty && uiMsg.isActive())
-                this.sendPersistedChatMessage(query, TuiChatMessageType_User,
-                        displayableCount(agent_.chat.getMessages(), llmConf),
-                        MessageTime(NoProcessingTime()));
+                this.emitTurnStartTyped(query);
+            bool stopped;
             auto result = agent_.runToCompletion(&this.processResult,
                     compressCallback: &this.progressCallback, interrupt: () {
-                return isStopAgentTriggered;
+                stopped = isStopAgentTriggered;
+                return stopped;
             });
+            if (stopped)
+                this.emitStopTyped();
             if (result.status == ProcessResult.Status.agentStuckInLoop) {
-                this.sendChatMessage("harness: Agent forcefully terminated because it got stuck in a loop.\nYou can restart it with /c.\nIf it gets stuck again then the model is stuck in an internal prediction loop. Clear the context (/clear) and run your query again.",
-                        TuiChatMessageType_System);
+                this.sendChatMessage("harness: Agent forcefully terminated because it got stuck in a loop.\nYou can restart it with /c.\nIf it gets stuck again then the model is stuck in an internal prediction loop. Clear the context (/clear) and run your query again.");
             }
         }
 
@@ -1059,11 +958,6 @@ struct AgentApp {
         }
 
         return rval;
-    }
-
-    package IStreamCallback makeStreamCallback() {
-        return new StreamMessageUpdater(uiMsg, agent_.modelContextSize,
-                llmConf.activeModelDisplayName);
     }
 
     package IStreamCallback makePipelineStreamCallback() {
@@ -1248,12 +1142,16 @@ struct AgentApp {
     /// text today's chatMessage line carries (the formatter prints it
     /// verbatim), so console parity holds.
     package void emitNoticeTyped(string notice) {
-        const turnId = agent_.chat.currentTurnId();
+        // A synthetic bare AgentApp (registry tests, some slash error paths)
+        // has no chat to attach the notice to: the notice still emits, into
+        // the no-turn bucket (turn 0). Every real path (live run, one-shot
+        // with a built agent) has a chat, so the notice lands in the
+        // store's newest turn.
+        const turnId = agent_ !is null ? agent_.chat.currentTurnId() : 0;
         noticeSeq_++;
         uiMsg.blockUpsert(makeBlockData(turnId, "notice#" ~ text(noticeSeq_), queryBatchId(turnId),
                 TuiBlockKind_Notice, TuiBlockStatus_None, 0, null, null, notice, 0));
     }
-
     /// Compression re-emission: the typed store is rebuilt from the rewritten
     /// history with ONE setTurns snapshot - removed turns cascade, ordinals are
     /// recomputed (D5), no stale group survives. Safe at the turn-start
@@ -1397,23 +1295,6 @@ struct AgentDone {
     int code;
 }
 
-package bool isDisplayable(Chat.MessageT m, LlmConfig conf) {
-    return m.match!((Message a) {
-        return !a.role.among(Role.user, Role.system) || a.isUserQuery;
-    }, (ToolMessage a) { return true; }, (ToolResponse a) {
-        return !conf.isHiddenTool(a.toolName);
-    }, (VisionMessage a) { return true; });
-}
-
-package size_t displayableCount(Chat.MessageT[] msgs, LlmConfig conf) {
-    size_t n;
-    foreach (ref msg; msgs) {
-        if (isDisplayable(msg, conf))
-            n++;
-    }
-    return n;
-}
-
 class AppAgentActor : DropOwner {
     import my.actor;
     import llm.tui;
@@ -1548,18 +1429,11 @@ class AppAgentActor : DropOwner {
         app.uiMsg = new UiMessenger(new TuiChannelSink(tui_));
         monitor(self_.address(), tui_);
         app.uiMsg.initHistory(app.agent_.getUserQueries.map!(a => a.content).array);
-        app.agent_.setStreamUpdate(app.makeStreamCallback);
+        app.agent_.setStreamUpdate(app.makeTypedStreamCallback);
 
-        // TODO: this same code is copy/pasted. Refactor it into a function
-        size_t pos = 0;
-        foreach (m; app.agent_.chat.getMessages()) {
-            if (isDisplayable(m, app.llmConf)) {
-                pos++;
-                app.processChatMessage(m, pos, printUser: true);
-            } else {
-                app.processChatMessage(m, 0, printUser: true);
-            }
-        }
+        // One typed replay snapshot at startup (task 5); the per-message walk
+        // is gone (see activateSession).
+        app.emitReplayTyped();
 
         app.sendSessionList();
         app.sendRuntimeStatus(true);

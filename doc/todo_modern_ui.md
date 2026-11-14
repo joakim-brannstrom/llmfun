@@ -2026,9 +2026,9 @@ pole; it must not block the rescue.
 6. **Parity tests, dogfood.** Ship only when every current feature has a checked
    equivalent.
 
-The shell consumes a thin adapter over the v4 messages; the v5 thread replaces it later
-without touching the shell. This is the deliberate trade-off for speed: less elegance
-now, no rewrite later.
+ **Delivered:** the typed store is the only renderer; the
+v4 adapter is gone (the thread v5 design). This was the deliberate trade-off for
+speed: less elegance now, no rewrite later.
 
 **Post-MVP track:**
 
@@ -2304,10 +2304,9 @@ plus one week of dogfood ≈ **5.5 weeks to release** (range 5–6.5).
 neutral surfaces, top bar, rail, now bar, Activity/Raw Log, custom TUI table renderer,
 minimal Settings, minimal palette, 1280×820 GUI.
 
-**Deferred to post-MVP:** v5 turns/blocks, run ribbon, tool cards with args/diffs,
-answer card, Context Lens, full inspector tabs, universal search, canvas, minimap,
-semantic zoom, ask/approval, Parchment/Native themes, density, full settings,
-virtualization (pixel-perfect), keymap overhaul.
+**Deferred to post-MVP:**  (delivered by the thread v5 design), Context Lens, full inspector tabs,
+universal search, canvas, minimap, semantic zoom, ask/approval, Parchment/Native
+themes, density, full settings, virtualization (pixel-perfect), keymap overhaul.
 
 ### 9.3 Rollout
 
@@ -2491,12 +2490,12 @@ trust surface are the substance.
 ## Appendix B — v5 header sketch (for review)
 
 ```c
-#define TUI_API_VERSION 5
+#define TUI_API_VERSION 12
 
 typedef struct TuiState TuiState;
 
-// existing v4 functions unchanged: tuiCreateState, tuiInit, tuiRender,
-// tuiBackendNewFrame/Render, tuiDestroyState, tuiAddChatMessage, ...
+// existing functions unchanged: tuiCreateState, tuiInit, tuiRender,
+// tuiBackendNewFrame/Render, tuiDestroyState, ...
 // v5 additions:
 void tuiSetTurns(TuiState*, const TuiTurn*, size_t);
 void tuiTurnUpsert(TuiState*, const TuiTurn*);

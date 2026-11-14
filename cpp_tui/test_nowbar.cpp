@@ -71,6 +71,7 @@
 // `TuiState`: the ABI handle's private shape, shared with the other contract tests (one copy of
 // the layout for all of them).
 #include "test/tui_state_handle.h"
+#include "test/typed_seed.h" // typed turn/block seeding (the v4 message path is gone)
 
 namespace ui = llmfun::tui::ui;
 namespace views = llmfun::tui::views;
@@ -1126,8 +1127,11 @@ std::string goldenText(const Scene& scene) {
     state.readyStatus = !scene.running;
     if (scene.running) {
         state.startProcesssingTime = std::chrono::system_clock::now() - std::chrono::seconds(12);
-        state.chat.hasStreamMsg = true;
-        state.chat.streamMsg.text = "an answer that is still arriving";
+        // The live answer is the typed store's: a Running turn whose content
+        // block carries the prose so far (the same shape a stream tick leaves).
+        typed_seed::Seeder stream{&state};
+        stream.runStart("a question in flight");
+        stream.updateStream("an answer that is still arriving");
     }
     state.ui.offline = scene.offline;
     // The scene's feedback item, raised before the shell derives the row - the frame reads the
