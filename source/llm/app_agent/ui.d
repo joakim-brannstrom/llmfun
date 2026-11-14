@@ -3,6 +3,7 @@
 /// model output to the TUI.
 module llm.app_agent.ui;
 
+import std.algorithm : filter;
 import std.array : empty;
 import std.conv : text;
 import std.json : JSONType, JSONValue, parseJSON;
@@ -46,9 +47,9 @@ interface TuiSink {
     void pipelineToolResult(string agentId, string name, int ok, string text);
     void sessionList(UiSessionItem[] items);
     void initHistory(string[] history);
-    void setTurns(TuiTurn[] turns, TuiBlock[] blocks);
-    void turnUpsert(TuiTurn turn);
-    void blockUpsert(TuiBlock block);
+    void setTurns(UiTurnData[] turns, UiBlockData[] blocks);
+    void turnUpsert(UiTurnData turn);
+    void blockUpsert(UiBlockData block);
     void turnRemove(long turnId);
     void threadClear();
     void dropChipReport(UiDropReport report);
@@ -151,22 +152,16 @@ class TuiChannelSink : TuiSink {
         ch.uiMsg(report);
     }
 
-    override void setTurns(TuiTurn[] turns, TuiBlock[] blocks) {
-        auto turnsCopy = new UiTurnData[turns.length];
-        foreach (i, ref const t; turns)
-            turnsCopy[i] = toTurnData(t);
-        auto blocksCopy = new UiBlockData[blocks.length];
-        foreach (i, ref const b; blocks)
-            blocksCopy[i] = toBlockData(b);
-        ch.uiMsg(UiSetTurns(turnsCopy, blocksCopy));
+    override void setTurns(UiTurnData[] turns, UiBlockData[] blocks) {
+        ch.uiMsg(UiSetTurns(turns, blocks));
     }
 
-    override void turnUpsert(TuiTurn turn) {
-        ch.uiMsg(UiTurnUpsert(toTurnData(turn)));
+    override void turnUpsert(UiTurnData turn) {
+        ch.uiMsg(UiTurnUpsert(turn));
     }
 
-    override void blockUpsert(TuiBlock block) {
-        ch.uiMsg(UiBlockUpsert(toBlockData(block)));
+    override void blockUpsert(UiBlockData block) {
+        ch.uiMsg(UiBlockUpsert(block));
     }
 
     override void turnRemove(long turnId) {
@@ -253,13 +248,13 @@ class TuiBlockedSink : TuiSink {
 
     private ConsoleFormatter formatter = new ConsoleFormatter;
 
-    override void setTurns(TuiTurn[] turns, TuiBlock[] blocks) {
+    override void setTurns(UiTurnData[] turns, UiBlockData[] blocks) {
     }
 
-    override void turnUpsert(TuiTurn turn) {
+    override void turnUpsert(UiTurnData turn) {
     }
 
-    override void blockUpsert(TuiBlock block) {
+    override void blockUpsert(UiBlockData block) {
     }
 
     override void turnRemove(long turnId) {
@@ -459,19 +454,19 @@ class TuiRecordingSink : TuiSink {
     /// turnRemove ids in call order.
     long[] turnRemovals;
 
-    override void setTurns(TuiTurn[] turns, TuiBlock[] blocks) {
-        setTurnsSnapshots ~= TurnSnapshot(toTurnDataAll(turns), toBlockDataAll(blocks));
+    override void setTurns(UiTurnData[] turns, UiBlockData[] blocks) {
+        setTurnsSnapshots ~= TurnSnapshot(turns.dup, blocks.dup);
         record("setTurns", "turns=" ~ turns.length.text ~ " blocks=" ~ blocks.length.text);
     }
 
-    override void turnUpsert(TuiTurn turn) {
-        turnUpserts ~= toTurnData(turn);
+    override void turnUpsert(UiTurnData turn) {
+        turnUpserts ~= turn;
         record("turnUpsert", turn.id.text);
     }
 
-    override void blockUpsert(TuiBlock block) {
-        blockUpserts ~= toBlockData(block);
-        record("blockUpsert", toString(block.id));
+    override void blockUpsert(UiBlockData block) {
+        blockUpserts ~= block;
+        record("blockUpsert", block.id);
     }
 
     override void turnRemove(long turnId) {
@@ -597,15 +592,15 @@ class UiMessenger {
         sink.dropChipReport(report);
     }
 
-    void setTurns(TuiTurn[] turns, TuiBlock[] blocks) {
+    void setTurns(UiTurnData[] turns, UiBlockData[] blocks) {
         sink.setTurns(turns, blocks);
     }
 
-    void turnUpsert(TuiTurn turn) {
+    void turnUpsert(UiTurnData turn) {
         sink.turnUpsert(turn);
     }
 
-    void blockUpsert(TuiBlock block) {
+    void blockUpsert(UiBlockData block) {
         sink.blockUpsert(block);
     }
 
@@ -770,6 +765,11 @@ package immutable string[] kHiddenToolNames = ["pipeline_output"];
 package bool blockDisplayable(UiBlockData b) {
     if (b.kind != TuiBlockKind_Tool)
         return true;
+    // Pending/Running exist only on the live path. The console prints a
+    // call's line only once its result arrived (Ok/Failed) or the turn
+    // ended (Cancelled), so an un-merged live call renders nothing yet.
+    if (b.status == TuiBlockStatus_Pending || b.status == TuiBlockStatus_Running)
+        return false;
     foreach (hidden; kHiddenToolNames)
         if (b.title == hidden)
             return false;
@@ -913,23 +913,20 @@ package final class TypedStreamMessageUpdater : IStreamCallback {
                     TuiBlockKind_Reasoning, TuiBlockStatus_None,
                     TuiBlockFlag_Collapsible, null, null, msg.reasoning, 0));
 
-        foreach (tool; tools) {
-            if (tool.id.empty)
-                continue; // no callId: the block cannot merge with the step walk's upsert, so it would strand as a weight-1 orphan
-            const 
-            body = summarizedCallBody(tool.toolName, tool.arguments);
+        foreach (tool; tools.filter!(a => !a.id.empty)) {
+            const body_ = summarizedCallBody(tool.toolName, tool.arguments);
             uiMsg.blockUpsert(makeBlockData(ctx.turnId, tool.id, ctx.batchId, TuiBlockKind_Tool,
-                    TuiBlockStatus_Pending, kToolBlockFlags, tool.toolName, null, body, 0));
-            ctx.recordLiveCall(tool.id, tool.toolName, body);
+                    TuiBlockStatus_Pending, kToolBlockFlags, tool.toolName, null, body_, 0));
+            ctx.recordLiveCall(tool.id, tool.toolName, body_);
         }
     }
 
     override void streamMessageDone() {
-        // The batch's Pending -> Running flip rides the stream-done (appendix
-        // "States"): re-upsert every call the ticks upserted, status Running.
-        foreach (call; ctx.liveCalls)
+        // The batch's Pending -> Running flip rides the stream-done: re-upsert every call the ticks upserted, status Running.
+        foreach (call; ctx.liveCalls) {
             uiMsg.blockUpsert(makeBlockData(call.turnId, call.id, call.batchId, TuiBlockKind_Tool,
                     TuiBlockStatus_Running, kToolBlockFlags, call.title, null, call.body, 0));
+        }
     }
 
     override void setId(string id) {

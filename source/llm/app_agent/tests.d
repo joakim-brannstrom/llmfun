@@ -33,7 +33,6 @@ import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
 import llm.skill;
 import llm.types : ServerStat, IStreamCallback, StreamMessage, StreamToolCall, ProcessResult;
-import llm.ui : TuiRecordingSink;
 import llm.utility;
 import llmfun_tui;
 
@@ -3311,21 +3310,25 @@ private struct TypedFixture {
     }
 }
 
-private AgentApp typedTestApp(SessionStore store, string dir, out TuiRecordingSink sink) {
-    import std.path : buildPath;
+version (unittest) {
 
-    import llm.agent : Agent;
-    import my.filter : ReFilter;
+    private AgentApp typedTestApp(SessionStore store, string dir, out TuiRecordingSink sink) {
+        import std.path : buildPath;
 
-    auto app = AgentApp(UserConfig.AgentChatConfig.init);
-    app.llmConf = testLlmConfig(dir);
-    app.sessionStore = store;
-    app.agent_ = new Agent("main", app.llmConf, null, null, null, ReFilter.init);
-    sink = new TuiRecordingSink();
-    app.uiMsg = new UiMessenger(sink);
-    app.activeSession = store.create();
-    return app;
-}
+        import llm.agent : Agent;
+        import my.filter : ReFilter;
+
+        auto app = AgentApp(UserConfig.AgentChatConfig.init);
+        app.llmConf = testLlmConfig(dir);
+        app.sessionStore = store;
+        app.agent_ = new Agent("main", app.llmConf, null, null, null, ReFilter.init);
+        sink = new TuiRecordingSink();
+        app.uiMsg = new UiMessenger(sink);
+        app.activeSession = store.create();
+        return app;
+    }
+
+} // version (unittest)
 
 // NR derivation: the replay walk emits ONE setTurns snapshot with
 // already-merged blocks - call and response pair by call id in a pre-pass,
@@ -3376,8 +3379,11 @@ unittest {
             "the tool message's own thinking is the batch's reasoning block");
     assert(blocks[4].id == "c1" && blocks[4].kind == TuiBlockKind_Tool
             && blocks[4].title == "grep_files" && blocks[4].status == TuiBlockStatus_Ok
-            && blocks[4].meta == "ok-1" && blocks[4].body == `grep_files(pattern="x")`
-            && blocks[4].durationMs == 42, "call and response merged, response meta wins");
+            && blocks[4].meta == "ok-1" && blocks[4].body == `grep_files(pattern="x")` && blocks[4].durationMs == 42,
+            "call and response merged, response meta wins: id=" ~ blocks[4].id ~ " title="
+            ~ blocks[4].title ~ " status=" ~ blocks[4].status.text ~ " meta="
+            ~ blocks[4].meta ~ " body=" ~ blocks[4].body ~ " dur="
+            ~ blocks[4].durationMs.text ~ " batch=" ~ blocks[4].batchId);
     assert(blocks[5].id == "c2" && blocks[5].status == TuiBlockStatus_Failed
             && blocks[5].meta == "bad-2" && blocks[5].body == "write_file()");
     assert(blocks[6].id == "answer" && blocks[6].kind == TuiBlockKind_Answer

@@ -154,7 +154,8 @@ private TypedTurns buildTypedTurns(Chat.MessageT[] history) {
                     status = resp.success() ? TuiBlockStatus_Ok : TuiBlockStatus_Failed;
                     callDur = durationMsOf(resp.processTime());
                 }
-                const body_ = idx < calls.length ? calls[idx] : null;
+                // idx is 1-based over arr; summarizeToolCalls entries align with arr.
+                const body_ = idx <= calls.length ? calls[idx - 1] : null;
                 out_.blocks ~= makeBlockData(a.turnId, callId, bid, TuiBlockKind_Tool,
                     status, kToolBlockFlags, name, meta, body_, callDur);
             }
@@ -421,8 +422,10 @@ struct AgentApp {
             }
         }, (ToolMessage a) {
             auto calls = summarizeToolCalls(a.toolCalls, 1000);
-            this.sendPersistedChatThinkMessage("tool call: %(%-s\n%)", a.thinking,
-                TuiChatMessageType_ToolCall, nr, a.processTime(), calls);
+            // join, not %(...): std.format quotes string elements inside a
+            // comprehension, which the console never printed.
+            this.sendPersistedChatThinkMessage("tool call: " ~ calls.join("\n"),
+                a.thinking, TuiChatMessageType_ToolCall, nr, a.processTime());
             if (a.isFinalAnswer()) {
                 // Same (nr, time) as the tool-call line above: one number per
                 // persistent message.
@@ -1068,10 +1071,16 @@ struct AgentApp {
                 llmConf.activeModelDisplayName);
     }
 
-    /// walk the persisted history once and send ONE setTurns
-    /// snapshot with already-merged blocks.
+    /// Walk the in-memory history once and send ONE setTurns
+    /// snapshot with already-merged blocks. A live turn still in flight is
+    /// not persisted yet: the switch replay drops its context, so neither its
+    /// turn nor its blocks enter the snapshot.
     package void emitReplayTyped() {
         auto built = buildTypedTurns(agent_.chat.getMessages());
+        if (typedCtx_ !is null) {
+            built.turns = built.turns.filter!(t => t.id != typedCtx_.turnId).array;
+            built.blocks = built.blocks.filter!(b => b.turnId != typedCtx_.turnId).array;
+        }
         uiMsg.setTurns(built.turns, built.blocks);
         typedEmittedTurnIds_ = built.turns.map!(t => t.id).array;
         typedOrdinalNext_ = cast(int) built.turns.length + 1;
@@ -1089,9 +1098,9 @@ struct AgentApp {
         typedCtx_.ordinal = typedOrdinalNext_++;
         typedCtx_.messageCount = 0;
         typedEmittedTurnIds_ ~= turnId;
-        uiMsg.turnUpsert(toTuiTurn(UiTurnData(turnId, typedCtx_.ordinal, TuiTurnState_Running, 0)));
-        uiMsg.blockUpsert(toTuiBlock(makeBlockData(turnId, "query", queryBatchId(turnId),
-                TuiBlockKind_Prose, TuiBlockStatus_None, 0, null, "user", query, 0)));
+        uiMsg.turnUpsert(UiTurnData(turnId, typedCtx_.ordinal, TuiTurnState_Running, 0));
+        uiMsg.blockUpsert(makeBlockData(turnId, "query", queryBatchId(turnId),
+                TuiBlockKind_Prose, TuiBlockStatus_None, 0, null, "user", query, 0));
     }
 
     /// Live step completion: the step-completion walk emits the batch's final
@@ -1107,11 +1116,23 @@ struct AgentApp {
         }
         auto ctx = typedCtx_;
 
-        // Pair this step's responses with their calls first (the responses
-        // follow the calls in result.chat; adjacency is never assumed).
+        // Pair this step's responses with their calls first. Only
+        // responses whose call is also in this step pair up: a response whose
+        // call streamed in an earlier step is an orphan and emits standalone.
+        bool[string] stepCallIds;
+        foreach (ref msg; result.chat) {
+            msg.match!((ToolMessage a) {
+                foreach (call; a.toolCalls.type == JSONType.array ? a.toolCalls.array : [
+                    ])
+                    stepCallIds[jsonStringAt(call, "id")] = true;
+            }, (_) {});
+        }
         ToolResponse[string] respById;
         foreach (ref msg; result.chat) {
-            msg.match!((ToolResponse a) { respById[a.toolCallId] = a; }, (_) {});
+            msg.match!((ToolResponse a) {
+                if (a.toolCallId in stepCallIds)
+                    respById[a.toolCallId] = a;
+            }, (_) {});
         }
 
         // The final answer's block and the turn's Done close are deferred to
@@ -1131,23 +1152,21 @@ struct AgentApp {
                 const bid = responseBatchId(ctx.turnId, bi);
                 const durMs = durationMsOf(a.processTime());
                 if (!a.thinking.empty)
-                    uiMsg.blockUpsert(toTuiBlock(makeBlockData(ctx.turnId,
-                        reasoningBlockId(bi), bid, TuiBlockKind_Reasoning,
-                        TuiBlockStatus_None, TuiBlockFlag_Collapsible, null,
-                        null, a.thinking, durMs)));
-                uiMsg.blockUpsert(toTuiBlock(makeBlockData(ctx.turnId, contentBlockId(bi), bid,
+                    uiMsg.blockUpsert(makeBlockData(ctx.turnId, reasoningBlockId(bi),
+                        bid, TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                        TuiBlockFlag_Collapsible, null, null, a.thinking, durMs));
+                uiMsg.blockUpsert(makeBlockData(ctx.turnId, contentBlockId(bi), bid,
                     TuiBlockKind_Prose, TuiBlockStatus_None, 0, null,
-                    a.role.to!string, a.content, durMs)));
+                    a.role.to!string, a.content, durMs));
                 ctx.messageCount++;
             }, (ToolMessage a) {
                 const bi = ctx.batchIndex++;
                 const bid = responseBatchId(ctx.turnId, bi);
                 const durMs = durationMsOf(a.processTime());
                 if (!a.thinking.empty)
-                    uiMsg.blockUpsert(toTuiBlock(makeBlockData(ctx.turnId,
-                        reasoningBlockId(bi), bid, TuiBlockKind_Reasoning,
-                        TuiBlockStatus_None, TuiBlockFlag_Collapsible, null,
-                        null, a.thinking, durMs)));
+                    uiMsg.blockUpsert(makeBlockData(ctx.turnId, reasoningBlockId(bi),
+                        bid, TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                        TuiBlockFlag_Collapsible, null, null, a.thinking, durMs));
                 const calls = summarizeToolCalls(a.toolCalls, 1000);
                 const arr = a.toolCalls.type == JSONType.array ? a.toolCalls.array : [
                 ];
@@ -1167,10 +1186,11 @@ struct AgentApp {
                         status = resp.success() ? TuiBlockStatus_Ok : TuiBlockStatus_Failed;
                         callDur = durationMsOf(resp.processTime());
                     }
-                    const body_ = idx < calls.length ? calls[idx] : null;
-                    uiMsg.blockUpsert(toTuiBlock(makeBlockData(a.turnId != 0 ? a.turnId : ctx.turnId,
-                        callId, bid, TuiBlockKind_Tool, status,
-                        kToolBlockFlags, name, meta, body_, callDur)));
+                    // idx is 1-based over arr; summarizeToolCalls entries align with arr.
+                    const body_ = idx <= calls.length ? calls[idx - 1] : null;
+                    uiMsg.blockUpsert(makeBlockData(a.turnId != 0 ? a.turnId : ctx.turnId, callId,
+                        bid, TuiBlockKind_Tool, status, kToolBlockFlags,
+                        name, meta, body_, callDur));
                     ctx.clearLiveCall(callId); // merged: the stream-done flip list shrinks
                 }
                 ctx.messageCount += cast(int) arr.length;
@@ -1190,23 +1210,22 @@ struct AgentApp {
                 // A true orphan (its call streamed in an earlier step): its own
                 // response-only batch, so the next response batch stays separate.
                 const bi = ctx.batchIndex++;
-                uiMsg.blockUpsert(toTuiBlock(makeBlockData(a.turnId != 0 ? a.turnId
+                uiMsg.blockUpsert(makeBlockData(a.turnId != 0 ? a.turnId
                     : ctx.turnId, a.toolCallId, responseBatchId(ctx.turnId, bi), TuiBlockKind_Tool, a.success()
                     ? TuiBlockStatus_Ok : TuiBlockStatus_Failed, kToolBlockFlags, a.toolName,
-                    summarizeToolResponse(a, 1000), null, durationMsOf(a.processTime()))));
+                    summarizeToolResponse(a, 1000), null, durationMsOf(a.processTime())));
             }, (VisionMessage a) {
-                uiMsg.blockUpsert(toTuiBlock(makeBlockData(ctx.turnId,
-                    "vision#" ~ to!string(++ctx.visionSeq), queryBatchId(ctx.turnId),
-                    TuiBlockKind_Prose, TuiBlockStatus_None, 0, null, "user",
-                    a.content ~ " (with image)", 0)));
+                uiMsg.blockUpsert(makeBlockData(ctx.turnId, "vision#" ~ to!string(++ctx.visionSeq),
+                    queryBatchId(ctx.turnId), TuiBlockKind_Prose, TuiBlockStatus_None,
+                    0, null, "user", a.content ~ " (with image)", 0));
             });
         }
 
         if (finalAnswerSeen) {
-            uiMsg.blockUpsert(toTuiBlock(makeBlockData(ctx.turnId, "answer", finalAnswerBatchId, TuiBlockKind_Answer,
-                    TuiBlockStatus_None, 0, null, null, finalAnswerBody, finalAnswerDurMs)));
-            uiMsg.turnUpsert(toTuiTurn(UiTurnData(ctx.turnId, ctx.ordinal,
-                    TuiTurnState_Done, ctx.messageCount)));
+            uiMsg.blockUpsert(makeBlockData(ctx.turnId, "answer", finalAnswerBatchId, TuiBlockKind_Answer,
+                    TuiBlockStatus_None, 0, null, null, finalAnswerBody, finalAnswerDurMs));
+            uiMsg.turnUpsert(UiTurnData(ctx.turnId, ctx.ordinal,
+                    TuiTurnState_Done, ctx.messageCount));
         }
     }
 
@@ -1218,11 +1237,11 @@ struct AgentApp {
         if (ctx is null)
             return;
         foreach (call; ctx.liveCalls)
-            uiMsg.blockUpsert(toTuiBlock(makeBlockData(call.turnId, call.id, call.batchId, TuiBlockKind_Tool,
-                    TuiBlockStatus_Cancelled, kToolBlockFlags, call.title, null, call.body, 0)));
+            uiMsg.blockUpsert(makeBlockData(call.turnId, call.id, call.batchId, TuiBlockKind_Tool,
+                    TuiBlockStatus_Cancelled, kToolBlockFlags, call.title, null, call.body, 0));
         ctx.liveCalls = null;
-        uiMsg.turnUpsert(toTuiTurn(UiTurnData(ctx.turnId, ctx.ordinal,
-                TuiTurnState_Interrupted, ctx.messageCount)));
+        uiMsg.turnUpsert(UiTurnData(ctx.turnId, ctx.ordinal,
+                TuiTurnState_Interrupted, ctx.messageCount));
     }
 
     /// A compression progress notice as a Notice block. The body is the exact
@@ -1231,9 +1250,8 @@ struct AgentApp {
     package void emitNoticeTyped(string notice) {
         const turnId = agent_.chat.currentTurnId();
         noticeSeq_++;
-        uiMsg.blockUpsert(toTuiBlock(makeBlockData(turnId, "notice#" ~ text(noticeSeq_),
-                queryBatchId(turnId), TuiBlockKind_Notice, TuiBlockStatus_None,
-                0, null, null, notice, 0)));
+        uiMsg.blockUpsert(makeBlockData(turnId, "notice#" ~ text(noticeSeq_), queryBatchId(turnId),
+                TuiBlockKind_Notice, TuiBlockStatus_None, 0, null, null, notice, 0));
     }
 
     /// Compression re-emission: the typed store is rebuilt from the rewritten
