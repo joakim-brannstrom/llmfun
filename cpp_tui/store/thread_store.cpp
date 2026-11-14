@@ -467,6 +467,7 @@ void ThreadStoreAdapter::setExpanded(size_t id, bool open) {
     // express through the mode, which draws a batch open on its own (F5) - and
     // `openWorkGroups` in minimal (task 6's mechanism, unchanged).
     if (chat_->threadMinimalMode) {
+        chat_->groupOverrides.erase(static_cast<long long>(id));
         if (open)
             chat_->openWorkGroups.insert(id);
         else
@@ -619,7 +620,8 @@ bool ThreadStoreAdapter::blockExpanded(size_t k, std::size_t b) const {
     // disclosure collapsed behind its meta. Minimal mode folds the work rows
     // behind the group header instead. The set pins AGAINST the default: a
     // click stores the opposite of what the row would draw on its own.
-    const bool defaultOpen = !minimalMode() && block->kind != model::BlockKind::Thinking;
+    const bool defaultOpen =
+        !groupMinimal(entry.view.id) && block->kind != model::BlockKind::Thinking;
     return pinned ? !defaultOpen : defaultOpen;
 }
 
@@ -637,6 +639,7 @@ bool ThreadStoreAdapter::setBlockExpanded(size_t k, std::size_t b, bool open) {
         // A click back to the mode's default removes the entry, so the map
         // never grows a stale row.
         if (chat_->threadMinimalMode) {
+            chat_->groupOverrides.erase(static_cast<long long>(entry.view.id));
             if (open)
                 chat_->openWorkGroups.insert(entry.view.id);
             else
@@ -654,7 +657,7 @@ bool ThreadStoreAdapter::setBlockExpanded(size_t k, std::size_t b, bool open) {
         // click stores against, so a set that agrees with the default is
         // erased rather than carried.
         const bool defaultOpen =
-            !chat_->threadMinimalMode && block->kind != model::BlockKind::Thinking;
+            !groupMinimal(entry.view.id) && block->kind != model::BlockKind::Thinking;
         std::set<std::string>& target = typedRowOpen_[entry.view.id];
         if (open != defaultOpen)
             target.insert(block->typedBlockId);

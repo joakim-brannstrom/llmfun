@@ -433,6 +433,50 @@ int main(int argc, char** argv) {
         state.chat.groupOverrides.erase(42);
         check(thread.blockAt(0, 2).kind == tui::model::BlockKind::ToolStep,
               "task 8: the block views are unchanged by the pin work");
+
+        // Review F1: a ForceClosed pin written in maximal must not swallow a
+        // minimal open click. The pin survives the flip by design - and a
+        // minimal open click now erases it, because a ForceClosed pin is
+        // redundant in minimal (the mode draws the fold on its own). Without
+        // the erase the click reports open yet the group stays folded for
+        // the rest of the session.
+        state.chat.threadMinimalMode = false;
+        state.chat.groupOverrides[42] = tui::store::GroupOverride::ForceClosed;
+        state.chat.threadMinimalMode = true;
+        check(!thread.blockExpanded(0, 0),
+              "task 8 fix: the maximal fold survives the flip into minimal");
+        check(thread.setBlockExpanded(0, 0, true),
+              "task 8 fix: the minimal open click on the stale pin reports open");
+        check(thread.blockExpanded(0, 0) && state.chat.groupOverrides.empty() &&
+                  state.chat.openWorkGroups.count(42) == 1,
+              "task 8 fix: the open erased the pin - the group draws open, the map is clean");
+
+        // The group seam agrees: setExpanded() in minimal also drops the pin.
+        state.chat.openWorkGroups.erase(42);
+        state.chat.groupOverrides[42] = tui::store::GroupOverride::ForceClosed;
+        thread.setExpanded(42, true);
+        check(thread.expanded(42) && state.chat.groupOverrides.empty() &&
+                  state.chat.openWorkGroups.count(42) == 1,
+              "task 8 fix: the group seam's minimal open drops the pin too");
+
+        // ...and the symmetric close: a close click in minimal erases a pin
+        // as well - the mode draws the fold on its own, so nothing survives.
+        state.chat.openWorkGroups.erase(42);
+        state.chat.groupOverrides[42] = tui::store::GroupOverride::ForceOpen;
+        check(!thread.setBlockExpanded(0, 0, false),
+              "task 8 fix: closing a ForceOpen-pinned group in minimal reports closed");
+        check(!thread.blockExpanded(0, 0) && thread.groupMinimal(42) &&
+                  state.chat.groupOverrides.empty(),
+              "task 8 fix: the close erased the pin - the mode owns the fold, the map is clean");
+
+        // Review F2: the row defaults read the group's EFFECTIVE mode, not
+        // the global one - a minimal group pinned open draws the task 7
+        // anatomy, its tool cards open.
+        state.chat.threadMinimalMode = true;
+        state.chat.groupOverrides[42] = tui::store::GroupOverride::ForceOpen;
+        check(thread.blockExpanded(0, 1), "task 8 fix: the pinned group's tool card defaults open "
+                                          "(the row default reads the group's effective mode)");
+        state.chat.groupOverrides.erase(42);
     }
 
     // --- Task 8: the entry points reset the pins (§7) ---------------------------
@@ -453,6 +497,10 @@ int main(int argc, char** argv) {
         wb.status = 1;
         tuiSetTurns(state, &wt, 1, &wb, 1);
         auto& pins = state->inner->chat.groupOverrides;
+        // The clear must run on a map that holds something (review F4): on a
+        // fresh state the empty map would make the assert vacuous.
+        pins[77] = ::llmfun::tui::store::GroupOverride::ForceClosed;
+        tuiSetTurns(state, &wt, 1, &wb, 1);
         check(pins.empty(), "task 8: a session switch leaves no pin behind");
         pins[77] = ::llmfun::tui::store::GroupOverride::ForceClosed;
         // A compression re-emit (turnRemove + re-upsert) drops the turn's pin.
