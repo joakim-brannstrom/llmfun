@@ -51,6 +51,9 @@ struct StreamMessage {
 struct StreamToolCall {
     string toolName;
     string arguments;
+    // The call id the server assigned to this invocation ("" if the server did
+    // not send one).
+    string id;
 
     string toPrettyString(size_t limit) @safe {
         import std.algorithm : min;

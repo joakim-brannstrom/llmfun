@@ -3263,3 +3263,397 @@ unittest {
     assert(store.list().length == 1, "clone-none must not create files");
     assert(sink.countOf("sessionList") == 1, "clone-none must still refresh the sidebar list");
 }
+
+// ---- v5 typed thread turns/blocks (tasks 3-4) -------------------------------
+
+// Shared content for the typed-thread tests: a two-call tool batch (grep_files
+// ok, write_file failed) whose message carries the final answer.
+private struct TypedFixture {
+    Message q;
+    Message a3;
+    ToolMessage tm;
+    ToolResponse tr;
+    ToolResponse tr2;
+    ToolResponse orphan; // pipeline_output result: hidden in v4 AND v5
+
+    static TypedFixture make() {
+        import std.json : JSONValue;
+
+        TypedFixture f;
+        f.q = Message(Role.user, true, "q", null);
+        f.a3 = Message(Role.assistant, false, "C0", null);
+        f.a3.thinking = "T0";
+        f.a3.setProcessTime(MessageTime(100.dur!"msecs"));
+        JSONValue c1;
+        c1["id"] = "c1";
+        c1["type"] = "function";
+        JSONValue fn1;
+        fn1["name"] = "grep_files";
+        fn1["arguments"] = `{"pattern": "x"}`;
+        c1["function"] = fn1;
+        JSONValue c2;
+        c2["id"] = "c2";
+        c2["type"] = "function";
+        JSONValue fn2;
+        fn2["name"] = "write_file";
+        fn2["arguments"] = "{}";
+        c2["function"] = fn2;
+        JSONValue sd;
+        sd["taskDoneAnswer"] = JSONValue("The answer is 4.");
+        f.tm = ToolMessage("T1", JSONValue([c1, c2]), JSONValue.init, sd);
+        f.tm.setProcessTime(MessageTime(120.dur!"msecs"));
+        f.tr = ToolResponse("ok-1", "c1", "grep_files", true);
+        f.tr.setProcessTime(MessageTime(42.dur!"msecs"));
+        f.tr2 = ToolResponse("bad-2", "c2", "write_file", false);
+        f.orphan = ToolResponse("out", "c9", "pipeline_output", true);
+        return f;
+    }
+}
+
+private AgentApp typedTestApp(SessionStore store, string dir, out TuiRecordingSink sink)() {
+    import std.path : buildPath;
+
+    import llm.agent : Agent;
+    import my.filter : ReFilter;
+
+    auto app = AgentApp(UserConfig.AgentChatConfig.init);
+    app.llmConf = testLlmConfig(dir);
+    app.sessionStore = store;
+    app.agent_ = new Agent("main", app.llmConf, null, null, null, ReFilter.init);
+    sink = new TuiRecordingSink();
+    app.uiMsg = new UiMessenger(sink);
+    app.activeSession = store.create();
+    return app;
+}
+
+// NR derivation: the replay walk emits ONE setTurns snapshot with
+// already-merged blocks - call and response pair by call id in a pre-pass,
+// so replay never depends on adjacency; the final answer is the batch's
+// Answer block; ordinals are 1-based turn positions (D5).
+@("typed replay: emitReplayTyped sends the merged snapshot")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_replay");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    auto f = TypedFixture.make();
+    app.agent_.chat.setSystemPrompt("sys");
+    app.agent_.chat.add(f.q);
+    app.agent_.chat.add(f.a3);
+    app.agent_.chat.add(f.tm);
+    app.agent_.chat.add(f.tr);
+    app.agent_.chat.add(f.tr2);
+
+    app.emitReplayTyped();
+
+    assert(sink.setTurnsSnapshots.length == 1, "one setTurns snapshot");
+    assert(sink.turnUpserts.empty && sink.blockUpserts.empty && sink.turnRemovals.empty);
+    const turns = sink.setTurnsSnapshots[0].turns;
+    const blocks = sink.setTurnsSnapshots[0].blocks;
+    assert(turns.length == 1);
+    assert(turns[0].id == 1 && turns[0].ordinal == 1
+            && turns[0].state == TuiTurnState_Done && turns[0].messageCount == 5,
+            "query + response + 2 calls + 2 results");
+    assert(blocks.length == 7);
+    assert(blocks[0].id == "query" && blocks[0].kind == TuiBlockKind_Prose
+            && blocks[0].meta == "user" && blocks[0].body == "q" && blocks[0].batchId == "1#q");
+    assert(blocks[1].id == "reasoning#0"
+            && blocks[1].kind == TuiBlockKind_Reasoning
+            && blocks[1].body == "T0" && blocks[1].batchId == "1#0");
+    assert(blocks[2].id == "content#0" && blocks[2].meta == "assistant"
+            && blocks[2].body == "C0" && blocks[2].durationMs == 100);
+    assert(blocks[3].id == "reasoning#1"
+            && blocks[3].kind == TuiBlockKind_Reasoning && blocks[3].body == "T1" && blocks[3].batchId == "1#1",
+            "the tool message's own thinking is the batch's reasoning block");
+    assert(blocks[4].id == "c1" && blocks[4].kind == TuiBlockKind_Tool
+            && blocks[4].title == "grep_files" && blocks[4].status == TuiBlockStatus_Ok
+            && blocks[4].meta == "ok-1" && blocks[4].body == `grep_files(pattern="x")`
+            && blocks[4].durationMs == 42, "call and response merged, response meta wins");
+    assert(blocks[5].id == "c2" && blocks[5].status == TuiBlockStatus_Failed
+            && blocks[5].meta == "bad-2" && blocks[5].body == "write_file()");
+    assert(blocks[6].id == "answer" && blocks[6].kind == TuiBlockKind_Answer
+            && blocks[6].body == "The answer is 4." && blocks[6].batchId == "1#1");
+}
+
+// NR derivation: the live walk emits the same shapes as the replay (the
+// typed stream updater upserts per tick with stable ids, the step walk
+// merges calls with responses and closes the turn with a Done upsert),
+// and a stop flips the in-flight calls to Cancelled with the turn
+// Interrupted - never a fabricated Ok.
+@("typed live: turn start, stream ticks, step walk, stop")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+    import llm.types : ServerStat;
+
+    auto tmpDir = testArea("app_agent_typed_live");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    auto f = TypedFixture.make();
+    app.agent_.chat.add(f.q);
+    app.emitTurnStartTyped("q");
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].id == 1
+            && sink.turnUpserts[0].ordinal == 1 && sink.turnUpserts[0].state == TuiTurnState_Running);
+    assert(sink.blockUpserts.length == 1 && sink.blockUpserts[0].id == "query"
+            && sink.blockUpserts[0].body == "q");
+
+    auto updater = cast(TypedStreamMessageUpdater) app.makeTypedStreamCallback();
+    assert(updater !is null && updater.ctx !is null);
+    ServerStat stat;
+    updater.messageUpdate(StreamMessage("assistant", "C", "T"),
+            [StreamToolCall(toolName: "grep_files", arguments: `{`, id: "c1")], stat);
+    updater.messageUpdate(StreamMessage("assistant", "C0", "T0"), [], stat);
+    updater.streamMessageDone();
+    // blockUpserts: query, content#0, reasoning#0, c1 pending,
+    // content#0 + reasoning#0 (final tick, same ids), c1 running.
+    assert(sink.blockUpserts.length == 7);
+    assert(sink.blockUpserts[1].id == "content#0" && sink.blockUpserts[1].body == "C");
+    assert(sink.blockUpserts[3].id == "c1" && sink.blockUpserts[3].status == TuiBlockStatus_Pending);
+    assert(sink.blockUpserts[4].id == "content#0" && sink.blockUpserts[4].body == "C0",
+            "the tick upsert replaces in place (same id and batch)");
+    assert(sink.blockUpserts[6].id == "c1" && sink.blockUpserts[6].status == TuiBlockStatus_Running,
+            "stream-done flips the batch's pending calls to Running");
+    assert(sink.turnUpserts.length == 1, "no Done upsert before the step walk");
+
+    ProcessResult result;
+    result.chat = [
+        Chat.MessageT(f.a3), Chat.MessageT(f.tm), Chat.MessageT(f.tr),
+        Chat.MessageT(f.tr2), Chat.MessageT(f.orphan)
+    ];
+    app.emitStepTyped(result);
+    // blockUpserts += reasoning#0, content#0 (step), reasoning#1, c1 merged ok,
+    // c2 merged failed, the hidden orphan, the answer block.
+    assert(sink.blockUpserts.length == 14);
+    assert(sink.blockUpserts[10].id == "c1"
+            && sink.blockUpserts[10].meta == "ok-1" && sink.blockUpserts[10].status == TuiBlockStatus_Ok,
+            "the step walk merges call and response");
+    assert(sink.blockUpserts[11].id == "c2"
+            && sink.blockUpserts[11].meta == "bad-2"
+            && sink.blockUpserts[11].status == TuiBlockStatus_Failed);
+    assert(sink.blockUpserts[12].title == "pipeline_output",
+            "D emits hidden blocks too; the store owns displayability");
+    assert(sink.blockUpserts[13].id == "answer" && sink.blockUpserts[13].body == "The answer is 4.");
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[1].state == TuiTurnState_Done
+            && sink.turnUpserts[1].messageCount == 6,
+            "query + response + 2 calls + 2 results + orphan");
+    assert(sink.setTurnsSnapshots.empty, "the live path sends no setTurns");
+
+    // Stop: a fresh turn, a streaming call, then the interrupt.
+    auto tmpDir3 = testArea("app_agent_typed_live_stop");
+    scope (exit)
+        tmpDir3.cleanup;
+    TuiRecordingSink sink3;
+    auto app3 = typedTestApp(new SessionStore(buildPath(tmpDir3, "chat").Path), tmpDir3, sink3);
+    app3.agent_.chat.add(Message(Role.user, true, "q3", null));
+    app3.emitTurnStartTyped("q3");
+    auto up3 = cast(TypedStreamMessageUpdater) app3.makeTypedStreamCallback();
+    up3.messageUpdate(StreamMessage("assistant", "", ""), [
+        StreamToolCall(toolName: "grep_files", arguments: `{`, id: "c1")
+    ], ServerStat.init);
+    app3.emitStopTyped();
+    assert(sink3.turnUpserts.length == 2 && sink3.turnUpserts[1].state == TuiTurnState_Interrupted);
+    assert(sink3.blockUpserts[$ - 1].id == "c1" && sink3.blockUpserts[$ - 1].status == TuiBlockStatus_Cancelled,
+            "the interrupted call is Cancelled, never a fabricated Ok");
+}
+
+// NR derivation: the compression re-emission is ONE setTurns snapshot over
+// the rewritten history; the live turn's ordinal continues after the
+// replayed turns (D5) and the rebuilt snapshot includes the live turn's
+// query block.
+@("typed compression re-emission: setTurns snapshot recomputes")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_compress");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    auto f = TypedFixture.make();
+    app.agent_.chat.setSystemPrompt("sys");
+    app.agent_.chat.add(f.q);
+    app.agent_.chat.add(f.a3);
+    app.agent_.chat.add(f.tm);
+    app.agent_.chat.add(f.tr);
+    app.agent_.chat.add(f.tr2);
+    app.emitReplayTyped();
+
+    app.agent_.chat.add(Message(Role.user, true, "q2", null));
+    app.emitTurnStartTyped("q2");
+    assert(sink.turnUpserts[$ - 1].ordinal == 2, "the live turn continues after the replayed one");
+
+    app.emitCompressionTyped();
+    assert(sink.setTurnsSnapshots.length == 2);
+    const turns2 = sink.setTurnsSnapshots[1].turns;
+    assert(turns2.length == 2 && turns2[0].ordinal == 1 && turns2[1].id == 2
+            && turns2[1].ordinal == 2, "ordinals recompute over the rewritten history");
+    bool hasQ2;
+    foreach (b; sink.setTurnsSnapshots[1].blocks)
+        if (b.id == "query" && b.body == "q2" && b.turnId == 2)
+            hasQ2 = true;
+    assert(hasQ2, "the live turn's query block is part of the rebuilt snapshot");
+}
+
+// NR derivation: a mid-run switch replays the new session's history as one
+// setTurns snapshot and drops the live emission context - the stale turn's
+// stop is a no-op afterwards and the next live turn's ordinal continues
+// after the replayed turns (D5). Task 5 owns the real re-attach wiring.
+@("typed session switch: replay drops the live context, ordinals continue")
+unittest {
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_switch");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    // A live turn in flight, then the switch: replay over the (fresh,
+    // empty) session's history.
+    app.agent_.chat.add(Message(Role.user, true, "q", null));
+    app.emitTurnStartTyped("q");
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].ordinal == 1);
+
+    app.emitReplayTyped();
+
+    assert(sink.setTurnsSnapshots.length == 1, "the switch sends one snapshot");
+    assert(sink.setTurnsSnapshots[0].turns.empty, "the fresh session holds no turns");
+
+    // The stale live turn is gone: its stop emits nothing.
+    app.emitStopTyped();
+    assert(sink.turnUpserts.length == 1, "the dropped context's stop is a no-op");
+
+    // A new live turn continues after the replayed turns (none here: ordinal 1).
+    app.agent_.chat.add(Message(Role.user, true, "q2", null));
+    app.emitTurnStartTyped("q2");
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[1].ordinal == 1,
+            "the fresh turn re-derives its ordinal from the snapshot");
+}
+
+// NR derivation: the console formatter over the typed events reproduces
+// today's console output byte for byte (task 4's golden) - the query echo
+// without a prefix, "Thinking: " lines, "assistant: " content, one tool-call
+// line per batch, result lines with the mark, the answer inside the
+// tool-call message (before the results walk), and notices verbatim. The
+// v4 side of the comparison is what the v4 senders record for the same
+// content (the formatter renders exactly the lines today's console
+// prints; the blocked sink itself stays a no-op until task 5).
+@("console formatter reproduces today's console output from typed events")
+unittest {
+    import std.array : join;
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+    import std.string : indexOf;
+
+    import llm.chat;
+    import llm.types : ServerStat;
+
+    // 1. The v4 capture: what today's senders record for this content.
+    auto tmpDir = testArea("app_agent_console_v4");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink4;
+    auto app4 = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink4);
+
+    auto f = TypedFixture.make();
+    app4.agent_.chat.setSystemPrompt("sys");
+    app4.agent_.chat.add(f.q);
+    app4.agent_.chat.add(f.a3);
+    app4.agent_.chat.add(f.tm);
+    app4.agent_.chat.add(f.tr);
+    app4.agent_.chat.add(f.tr2);
+    app4.sendChatMessage("q", TuiChatMessageType_User); // today's live query echo
+    ProcessResult result4;
+    result4.chat = [
+        Chat.MessageT(f.a3), Chat.MessageT(f.tm), Chat.MessageT(f.tr),
+        Chat.MessageT(f.tr2), Chat.MessageT(f.orphan)
+    ];
+    app4.processResult(result4);
+    app4.sendChatMessage("assistant: Compressing... 1/2 : x", TuiChatMessageType_Assistant);
+
+    // The blocked sink's rendering rules over the recording: chatMessage and
+    // finalAnswer print the payload; chatThinkMessage prints
+    // "Thinking: <thinking>" first (unless the thinking is empty) and then
+    // the message.
+    string[] expected;
+    foreach (c; sink4.calls) {
+        if (c.kind == "chatMessage" || c.kind == "finalAnswer")
+            expected ~= c.payload;
+        else if (c.kind == "chatThinkMessage") {
+            const marker = "\n[thinking] ";
+            const idx = c.payload.indexOf(marker);
+            const thinking = c.payload[idx + marker.length .. $];
+            if (!thinking.empty)
+                expected ~= "Thinking: " ~ thinking;
+            expected ~= c.payload[0 .. idx];
+        }
+    }
+
+    // 2. The typed reproduction: the same content through the typed
+    // emitters, recorded, then replayed through the console formatter.
+    auto tmpDir5 = testArea("app_agent_console_v5");
+    scope (exit)
+        tmpDir5.cleanup;
+    TuiRecordingSink sink5;
+    auto app5 = typedTestApp(new SessionStore(buildPath(tmpDir5, "chat").Path), tmpDir5, sink5);
+
+    app5.agent_.chat.add(f.q);
+    app5.emitTurnStartTyped("q");
+    auto updater = cast(TypedStreamMessageUpdater) app5.makeTypedStreamCallback();
+    ServerStat stat;
+    updater.messageUpdate(StreamMessage("assistant", "C", "T"), [
+        StreamToolCall(toolName: "grep_files", arguments: `{"pattern": "x"}`, id: "c1")
+    ], stat);
+    updater.messageUpdate(StreamMessage("assistant", "C0", "T0"), [], stat);
+    updater.streamMessageDone();
+    ProcessResult result5;
+    result5.chat = [
+        Chat.MessageT(f.a3), Chat.MessageT(f.tm), Chat.MessageT(f.tr),
+        Chat.MessageT(f.tr2), Chat.MessageT(f.orphan)
+    ];
+    app5.emitStepTyped(result5);
+    app5.emitNoticeTyped("assistant: Compressing... 1/2 : x");
+
+    auto fmt = new ConsoleFormatter();
+    string[] got;
+    got ~= fmt.onTurnUpsert(sink5.turnUpserts[0]);
+    foreach (b; sink5.blockUpserts)
+        got ~= fmt.onBlockUpsert(b);
+    foreach (t; sink5.turnUpserts[1 .. $])
+        got ~= fmt.onTurnUpsert(t);
+
+    assert(got == expected,
+            "typed console output must match today's\nv4: " ~ expected.join(
+                "\n") ~ "\nv5: " ~ got.join("\n"));
+    assert(got.length == 9, "echo, thinking+content, thinking+call+answer+2 results, notice");
+    assert(got[0] == "q", "the live echo is the raw text, no prefix");
+    assert(got[1] == "Thinking: T0" && got[2] == "assistant: C0");
+    assert(got[3] == "Thinking: T1");
+    assert(got[4] == "tool call: grep_files(pattern=\"x\")\nwrite_file()");
+    assert(got[5] == "The answer is 4.", "the answer line rides the tool-call message");
+    assert(got[6] == "tool result ✅: grep_files ok-1");
+    assert(got[7] == "tool result ❌: write_file bad-2");
+    assert(got[8] == "assistant: Compressing... 1/2 : x", "notices print verbatim");
+}

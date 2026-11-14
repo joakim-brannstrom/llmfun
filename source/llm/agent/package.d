@@ -949,7 +949,7 @@ struct StreamResponse {
         }
 
         StreamToolCall toStream() @safe nothrow const {
-            return StreamToolCall(toolName: name, arguments: arguments);
+            return StreamToolCall(toolName: name, arguments: arguments, id: id);
         }
 
         string toPrettyString() @safe nothrow const {

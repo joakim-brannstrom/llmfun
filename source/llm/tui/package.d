@@ -33,6 +33,86 @@ string toString(String s) {
     return r;
 }
 
+// ---- v5 typed thread turn/block conversions --------------------------------
+//
+// The channel crossing carries D-owned strings (UiTurnData/UiBlockData): a
+// TuiBlock's `String` fields borrow caller memory, so they cannot survive the
+// queue hop between the sender thread and the UI actor. The actor converts back
+// to the wire structs with short-lived `String`s at C-call time (the C side
+// copies inbound strings).
+
+// Wire turn -> D-owned turn payload.
+UiTurnData toTurnData(TuiTurn t) {
+    return UiTurnData(t.id, t.ordinal, t.state, t.messageCount);
+}
+
+// D-owned turn payload -> wire turn (no strings in the struct).
+TuiTurn toTuiTurn(UiTurnData t) {
+    TuiTurn r;
+    r.id = t.id;
+    r.ordinal = t.ordinal;
+    r.state = t.state;
+    r.messageCount = t.messageCount;
+    return r;
+}
+
+// Wire block -> D-owned block payload (strings are copied out).
+UiBlockData toBlockData(TuiBlock b) {
+    return UiBlockData(b.turnId, toString(b.id), toString(b.batchId),
+            toString(b.title), toString(b.meta), toString(b.body),
+            b.durationMs, b.tokensIn, b.tokensOut, b.kind, b.status, b.flags);
+}
+
+// D-owned block payload -> wire block (strings borrow the payload's memory;
+// the C side copies them during the call).
+TuiBlock toTuiBlock(UiBlockData b) {
+    TuiBlock r;
+    r.turnId = b.turnId;
+    r.id = toTuiString(b.id);
+    r.batchId = toTuiString(b.batchId);
+    r.title = toTuiString(b.title);
+    r.meta = toTuiString(b.meta);
+    r.body = toTuiString(b.body);
+    r.durationMs = b.durationMs;
+    r.tokensIn = b.tokensIn;
+    r.tokensOut = b.tokensOut;
+    r.kind = b.kind;
+    r.status = b.status;
+    r.flags = b.flags;
+    return r;
+}
+
+// Snapshot conversions for the bulk setTurns call.
+TuiTurn[] toTuiTurns(UiTurnData[] turns) {
+    auto wire = new TuiTurn[turns.length];
+    foreach (i, ref const t; turns)
+        wire[i] = toTuiTurn(t);
+    return wire;
+}
+
+TuiBlock[] toTuiBlocks(UiBlockData[] blocks) {
+    auto wire = new TuiBlock[blocks.length];
+    foreach (i, ref const b; blocks)
+        wire[i] = toTuiBlock(b);
+    return wire;
+}
+
+// Snapshot conversions the other way, for sinks that hand the payloads to the
+// channel/recording paths.
+UiTurnData[] toTurnDataAll(TuiTurn[] turns) {
+    auto out_ = new UiTurnData[turns.length];
+    foreach (i, ref const t; turns)
+        out_[i] = toTurnData(t);
+    return out_;
+}
+
+UiBlockData[] toBlockDataAll(TuiBlock[] blocks) {
+    auto out_ = new UiBlockData[blocks.length];
+    foreach (i, ref const b; blocks)
+        out_[i] = toBlockData(b);
+    return out_;
+}
+
 // Extracts a short summary from a message (strips `#` headers, takes first line up to 100 chars).
 string shortSummary(string msg) nothrow {
     import std.algorithm : until;
@@ -448,28 +528,49 @@ void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
                                                         tuiPipelineClear(tuiState);
                                                     }
 
-                                                    void useUiLogFile(bool useFile) {
-                                                        tuiSetLogging(tuiState, useFile);
+                                                    void setTurns(TuiTurn[] turns, TuiBlock[] blocks) {
+                                                        tuiSetTurns(tuiState, turns.ptr, turns.length,
+                                                                blocks.ptr, blocks.length);
                                                     }
 
-                                                    void setUiAsStdLogger() {
-                                                        logSwap = swapToTuiLogger();
+                                                    void turnUpsert(TuiTurn turn) {
+                                                        tuiTurnUpsert(tuiState, &turn);
                                                     }
 
-                                                    // Raw Log access (`--debug-ui`, task 33). One call before the first frame is all the flag
-                                                    // needs: the C++ frame reads it when it lays out, so the overlay is up on the frame the
-                                                    // window appears - which is what the design means by "starts with the Raw Log open".
-                                                    void setRawLogOpen(bool open) {
-                                                        tuiSetRawLogOpen(tuiState, open ? 1 : 0);
+                                                    void blockUpsert(TuiBlock block) {
+                                                        tuiBlockUpsert(tuiState, &block);
                                                     }
 
-                                                    void syncRawLogLevel() {
-                                                        rawLogLevel.sync(tuiIsRawLogOpen(tuiState) != 0
-                                                                && tuiRawLogFloor(tuiState) == TuiLogLevel_Trace);
+                                                    void turnRemove(long turnId) {
+                                                        tuiTurnRemove(tuiState, turnId);
                                                     }
 
-                                                    void restoreRawLogLevel() {
-                                                        rawLogLevel.restore();}
+                                                    void threadClear() {
+                                                        tuiThreadClear(tuiState);}
+
+                                                        void useUiLogFile(bool useFile) {
+                                                            tuiSetLogging(tuiState, useFile);
+                                                        }
+
+                                                        void setUiAsStdLogger() {
+                                                            logSwap = swapToTuiLogger();
+                                                        }
+
+                                                        // Raw Log access (`--debug-ui`, task 33). One call before the first frame is all the flag
+                                                        // needs: the C++ frame reads it when it lays out, so the overlay is up on the frame the
+                                                        // window appears - which is what the design means by "starts with the Raw Log open".
+                                                        void setRawLogOpen(bool open) {
+                                                            tuiSetRawLogOpen(tuiState, open ? 1 : 0);
+                                                        }
+
+                                                        void syncRawLogLevel() {
+                                                            rawLogLevel.sync(tuiIsRawLogOpen(tuiState) != 0
+                                                                    && tuiRawLogFloor(tuiState) == TuiLogLevel_Trace);
+                                                        }
+
+                                                        void restoreRawLogLevel() {
+                                                            rawLogLevel.restore();
+                                                        }
 
                                                         string userQuery() @safe {
                                                             auto tmp = query_; query_ = null;
@@ -678,6 +779,11 @@ void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
                                                                     void uiAgentBusy();
                                                                     void uiAgentReady();
                                                                     void uiTerminate();
+                                                                    void uiMsg(UiSetTurns m);
+                                                                    void uiMsg(UiTurnUpsert m);
+                                                                    void uiMsg(UiBlockUpsert m);
+                                                                    void uiMsg(UiTurnRemove m);
+                                                                    void uiThreadClear();
                                                             }
 
                                                             // Human-readable TuiBackendKind name for the startup log line.
@@ -1185,6 +1291,37 @@ void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
                                                                                     m);
                                                                         }
 
+                                                                        // v5 typed thread turns/blocks: convert the
+                                                                        // D-owned payloads to the wire structs at
+                                                                        // C-call time (the C side copies inbound
+                                                                        // strings; a `String` cannot outlive the
+                                                                        // payload it borrows).
+                                                                        void uiMsg(UiSetTurns m) {
+                                                                            ui.setTurns(toTuiTurns(m.turns),
+                                                                                    toTuiBlocks(
+                                                                                        m.blocks));
+                                                                        }
+
+                                                                        void uiMsg(UiTurnUpsert m) {
+                                                                            ui.turnUpsert(
+                                                                                    toTuiTurn(
+                                                                                    m.turn));
+                                                                        }
+
+                                                                        void uiMsg(UiBlockUpsert m) {
+                                                                            ui.blockUpsert(
+                                                                                    toTuiBlock(
+                                                                                    m.block));
+                                                                        }
+
+                                                                        void uiMsg(UiTurnRemove m) {
+                                                                            ui.turnRemove(m.turnId);
+                                                                        }
+
+                                                                        void uiThreadClear() {
+                                                                            ui.threadClear();
+                                                                        }
+
                                                                         void uiStreamChatDone() {
                                                                             ui.streamChatDone();
                                                                         }
@@ -1362,4 +1499,46 @@ void tuiLogToTui(ref TuiLogSwap log, TuiState* tuiState) {
                                                                             int state; // TuiChipStatus_*
                                                                             Path finalPath;
                                                                             string display;
+                                                                    }
+
+                                                                    // One turn of the typed thread store.
+                                                                    struct UiTurnData {
+                                                                        long id;  // persisted turnId (0 = unstamped)
+                                                                        int ordinal; // 1-based display position, D-assigned
+                                                                            int state; // TuiTurnState_*
+                                                                            int messageCount; // informational: LLM messages the turn covers
+                                                                    }
+
+                                                                    // One block of the typed thread store.
+                                                                    struct UiBlockData {
+                                                                        long turnId;
+                                                                            string id; // tool callId | "answer" | "query" | "content#<n>" | ...
+                                                                            string batchId; // "<turnId>#<batchIndex>" (per-response groups); "<turnId>#q" for query/vision/notice
+                                                                            string title; // tool block: tool name
+                                                                            string meta; // tool block: result summary
+                                                                            string body; // display body
+                                                                            long durationMs;
+                                                                            long tokensIn;
+                                                                            long tokensOut;
+                                                                            int kind; // TuiBlockKind_*
+                                                                            int status; // TuiBlockStatus_*
+                                                                            int flags; // TuiBlockFlags bits
+                                                                    }
+
+                                                                    // One snapshot of the whole thread: turns + their blocks.
+                                                                    struct UiSetTurns {
+                                                                        UiTurnData[] turns;
+                                                                            UiBlockData[] blocks;
+                                                                    }
+
+                                                                    struct UiTurnUpsert {
+                                                                        UiTurnData turn;
+                                                                    }
+
+                                                                    struct UiBlockUpsert {
+                                                                        UiBlockData block;
+                                                                    }
+
+                                                                    struct UiTurnRemove {
+                                                                        long turnId;
                                                                     }
