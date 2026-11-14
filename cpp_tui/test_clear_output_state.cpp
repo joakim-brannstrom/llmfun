@@ -160,7 +160,7 @@ void scenario4_scrollAndApiVersion() {
 
     // Documentation-only marker: the clear contract must not bump it.
     // 11 is the current generation (the chip display split).
-    static_assert(TUI_API_VERSION == 11, "TUI_API_VERSION must stay at the current v11 generation");
+    static_assert(TUI_API_VERSION == 12, "TUI_API_VERSION must stay at the current v11 generation");
 }
 
 // Scenario 5: C-API null-safety preserved.

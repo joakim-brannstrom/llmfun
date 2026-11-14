@@ -143,7 +143,6 @@ private TypedTurns buildTypedTurns(Chat.MessageT[] history) {
                 const callId = jsonStringAt(call, "id");
                 auto fn = "function" in call;
                 const name = fn !is null ? jsonStringAt(*fn, "name") : null;
-                const body = idx < calls.length ? calls[idx] : null;
                 idx++;
                 if (callId.empty || name.empty)
                     continue; // same skip rule as the v4 call emitter's entries
@@ -155,8 +154,9 @@ private TypedTurns buildTypedTurns(Chat.MessageT[] history) {
                     status = resp.success() ? TuiBlockStatus_Ok : TuiBlockStatus_Failed;
                     callDur = durationMsOf(resp.processTime());
                 }
+                const body_ = idx < calls.length ? calls[idx] : null;
                 out_.blocks ~= makeBlockData(a.turnId, callId, bid, TuiBlockKind_Tool,
-                    status, kToolBlockFlags, name, meta, body, callDur);
+                    status, kToolBlockFlags, name, meta, body_, callDur);
             }
             if (a.isFinalAnswer())
                 out_.blocks ~= makeBlockData(a.turnId, "answer", bid, TuiBlockKind_Answer,
@@ -1156,7 +1156,6 @@ struct AgentApp {
                     const callId = jsonStringAt(call, "id");
                     auto fn = "function" in call;
                     const name = fn !is null ? jsonStringAt(*fn, "name") : null;
-                    const body = idx < calls.length ? calls[idx] : null;
                     idx++;
                     if (callId.empty || name.empty)
                         continue;
@@ -1168,9 +1167,10 @@ struct AgentApp {
                         status = resp.success() ? TuiBlockStatus_Ok : TuiBlockStatus_Failed;
                         callDur = durationMsOf(resp.processTime());
                     }
+                    const body_ = idx < calls.length ? calls[idx] : null;
                     uiMsg.blockUpsert(toTuiBlock(makeBlockData(a.turnId != 0 ? a.turnId : ctx.turnId,
                         callId, bid, TuiBlockKind_Tool, status,
-                        kToolBlockFlags, name, meta, body, callDur)));
+                        kToolBlockFlags, name, meta, body_, callDur)));
                     ctx.clearLiveCall(callId); // merged: the stream-done flip list shrinks
                 }
                 ctx.messageCount += cast(int) arr.length;

@@ -33,6 +33,7 @@ import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
 import llm.skill;
 import llm.types : ServerStat, IStreamCallback, StreamMessage, StreamToolCall, ProcessResult;
+import llm.ui : TuiRecordingSink;
 import llm.utility;
 import llmfun_tui;
 
@@ -3310,7 +3311,7 @@ private struct TypedFixture {
     }
 }
 
-private AgentApp typedTestApp(SessionStore store, string dir, out TuiRecordingSink sink)() {
+private AgentApp typedTestApp(SessionStore store, string dir, out TuiRecordingSink sink) {
     import std.path : buildPath;
 
     import llm.agent : Agent;
