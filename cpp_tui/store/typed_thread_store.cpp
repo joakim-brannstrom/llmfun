@@ -84,9 +84,13 @@ void TypedThreadStore::blockUpsert(TypedBlock block) {
     auto& index = blockIndex_[slot];
     const auto it = index.find(block.id);
     if (it != index.end()) {
-        // Merge in place: the full payload overwrite, the position stays (the
-        // store merges; it never enforces transitions - D7 is the emitter's).
-        blocks_[slot][it->second] = std::move(block);
+        auto& slotBlock = blocks_[slot][it->second];
+        if (block.resultPairs.empty() && block.resultRaw.empty()) {
+            block.resultPairs = std::move(slotBlock.resultPairs);
+            block.resultRaw = std::move(slotBlock.resultRaw);
+            block.resultMore = slotBlock.resultMore;
+        }
+        slotBlock = std::move(block);
         return;
     }
     index.emplace(block.id, blocks_[slot].size());

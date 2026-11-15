@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace llmfun::tui::store {
@@ -35,6 +36,12 @@ struct TypedBlock {
     std::string id, batchId, title, meta, body;
     int kind = 0, status = 0, flags = 0;
     std::int64_t durationMs = 0, tokensIn = 0, tokensOut = 0;
+    std::vector<std::pair<std::string, std::string>> resultPairs;
+    // The packed resultRaw fallback when the result is not an unpackable JSON object.
+    std::string resultRaw;
+    // resultMore is the pairs past the sender's cap, kept verbatim so the
+    // renderer can draw the "... K more"
+    std::uint32_t resultMore = 0;
 };
 
 // Displayability (D3/D10): ONE predicate, shared by weights, thread rendering,

@@ -56,16 +56,23 @@ TuiTurn toTuiTurn(UiTurnData t) {
     return r;
 }
 
-// Wire block -> D-owned block payload (strings are copied out).
 UiBlockData toBlockData(TuiBlock b) {
+    string[] resultKeys, resultValues;
+    if (b.resultCount > 0 && b.resultKeys !is null && b.resultValues !is null) {
+        foreach (i; 0 .. b.resultCount) {
+            resultKeys ~= toString(cast(String) b.resultKeys[i]);
+            resultValues ~= toString(cast(String) b.resultValues[i]);
+        }
+    }
     return UiBlockData(b.turnId, toString(b.id), toString(b.batchId),
             toString(b.title), toString(b.meta), toString(b.body),
-            b.durationMs, b.tokensIn, b.tokensOut, b.kind, b.status, b.flags);
+            b.durationMs, b.tokensIn, b.tokensOut, b.kind, b.status, b.flags,
+            resultKeys, resultValues, toString(b.resultRaw), b.resultCount, b.resultMore);
 }
 
-// D-owned block payload -> wire block (strings borrow the payload's memory;
-// the C side copies them during the call).
 TuiBlock toTuiBlock(UiBlockData b) {
+    assert(b.resultKeys.length == b.resultValues.length,
+            "UiBlockData result pair arrays must be the same length");
     TuiBlock r;
     r.turnId = b.turnId;
     r.id = toTuiString(b.id);
@@ -79,10 +86,20 @@ TuiBlock toTuiBlock(UiBlockData b) {
     r.kind = b.kind;
     r.status = b.status;
     r.flags = b.flags;
+    String[] keyViews;
+    String[] valueViews;
+    foreach (i, const k; b.resultKeys)
+        keyViews ~= toTuiString(k);
+    foreach (i, const v; b.resultValues)
+        valueViews ~= toTuiString(v);
+    r.resultKeys = keyViews.ptr;
+    r.resultValues = valueViews.ptr;
+    r.resultRaw = toTuiString(b.resultRaw);
+    r.resultCount = cast(uint) b.resultKeys.length;
+    r.resultMore = b.resultMore;
     return r;
 }
 
-// Snapshot conversions for the bulk setTurns call.
 TuiTurn[] toTuiTurns(UiTurnData[] turns) {
     auto wire = new TuiTurn[turns.length];
     foreach (i, ref const t; turns)
@@ -92,7 +109,7 @@ TuiTurn[] toTuiTurns(UiTurnData[] turns) {
 
 TuiBlock[] toTuiBlocks(UiBlockData[] blocks) {
     auto wire = new TuiBlock[blocks.length];
-    foreach (i, ref const b; blocks)
+    foreach (i, ref b; blocks)
         wire[i] = toTuiBlock(b);
     return wire;
 }
@@ -108,7 +125,7 @@ UiTurnData[] toTurnDataAll(TuiTurn[] turns) {
 
 UiBlockData[] toBlockDataAll(TuiBlock[] blocks) {
     auto out_ = new UiBlockData[blocks.length];
-    foreach (i, ref const b; blocks)
+    foreach (i, ref b; blocks)
         out_[i] = toBlockData(b);
     return out_;
 }
@@ -1090,11 +1107,16 @@ class TextUserInterfaceActor : TUICommands {
         ui.pipelineClear();
     }
 
+    package bool agentReady_ = true;
+
     void uiAgentBusy() {
+        agentReady_ = false;
+        ui.setReadyStatus(agentReady_);
     }
 
     void uiAgentReady() {
-        ui.setReadyStatus(true);
+        agentReady_ = true;
+        ui.setReadyStatus(agentReady_);
         playNotification();
     }
 
@@ -1252,6 +1274,11 @@ struct UiBlockData {
     int kind; // TuiBlockKind_*
     int status; // TuiBlockStatus_*
     int flags; // TuiBlockFlags bits
+    string[] resultKeys;
+    string[] resultValues;
+    string resultRaw;
+    uint resultCount; // informational: the sender's pair count (== resultKeys.length when set)
+    uint resultMore; // pairs past the sender's cap, 0 when under
 }
 
 // One snapshot of the whole thread: turns + their blocks.

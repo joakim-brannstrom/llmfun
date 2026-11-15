@@ -870,6 +870,10 @@ void tuiSetTurns(TuiState* state, const TuiTurn* turns, size_t turnCount, const 
         nb.durationMs = b.durationMs;
         nb.tokensIn = b.tokensIn;
         nb.tokensOut = b.tokensOut;
+        for (uint32_t p = 0; b.resultKeys && b.resultValues && p < b.resultCount; ++p)
+            nb.resultPairs.emplace_back(str(b.resultKeys[p]), str(b.resultValues[p]));
+        nb.resultRaw = str(b.resultRaw);
+        nb.resultMore = b.resultMore;
         typedBlocks.push_back(std::move(nb));
     }
     state->inner->chat.typedTurns.setTurns(std::move(typedTurns), std::move(typedBlocks));
@@ -887,9 +891,6 @@ void tuiTurnUpsert(TuiState* state, const TuiTurn* turn) {
     t.state = turn->state;
     t.messageCount = turn->messageCount;
     state->inner->chat.typedTurns.turnUpsert(t);
-    // The eviction rides the turn upsert (W2): a block upsert never evicts,
-    // so the call it lands in cannot fight an eviction of the turn it is
-    // writing into.
     state->inner->chat.typedTurns.evictForCapacity(turn->id);
 }
 
@@ -910,6 +911,10 @@ void tuiBlockUpsert(TuiState* state, const TuiBlock* block) {
     nb.durationMs = block->durationMs;
     nb.tokensIn = block->tokensIn;
     nb.tokensOut = block->tokensOut;
+    for (uint32_t p = 0; block->resultKeys && block->resultValues && p < block->resultCount; ++p)
+        nb.resultPairs.emplace_back(str(block->resultKeys[p]), str(block->resultValues[p]));
+    nb.resultRaw = str(block->resultRaw);
+    nb.resultMore = block->resultMore;
     state->inner->chat.typedTurns.blockUpsert(std::move(nb));
 }
 

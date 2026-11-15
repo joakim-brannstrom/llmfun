@@ -1026,7 +1026,7 @@ void casePipelineLaneFields() {
     static_assert(sizeof(PipelineChatMessage::contextUsed) == 8 &&
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
-    static_assert(TUI_API_VERSION == 12,
+    static_assert(TUI_API_VERSION == 13,
                   "the lane contract changed; bump one version per ABI event");
     static_assert(sizeof(SessionItem) == 80, "SessionItem is unaffected by the lane fields");
 
@@ -1156,8 +1156,8 @@ void casePipelineLaneFields() {
 void caseThreadTurnBlockFields() {
     g_where = "case: v5 turn/block layout";
 
-    static_assert(TUI_API_VERSION == 12,
-                  "this case pins the v5 generation (v12); bump one version per ABI event");
+    static_assert(TUI_API_VERSION == 13,
+                  "this case pins the current generation (v13); bump one version per ABI event");
 
     // TuiTurn: int64 + 4x int32 = 24 bytes on the 64-bit ABI, no padding.
     static_assert(sizeof(TuiTurn) == 24, "TuiTurn is 24 bytes on the 64-bit ABI");
@@ -1167,9 +1167,10 @@ void caseThreadTurnBlockFields() {
     static_assert(offsetof(TuiTurn, messageCount) == 16, "messageCount sits at offset 16");
     static_assert(offsetof(TuiTurn, reserved) == 20, "reserved sits at offset 20");
 
-    // TuiBlock: turnId + five 16-byte Strings + three int64 + 4x int32 = 128
-    // bytes, aligned like String (8), no padding beyond the tail.
-    static_assert(sizeof(TuiBlock) == 128, "TuiBlock is 128 bytes on the 64-bit ABI");
+    // TuiBlock: turnId + five 16-byte Strings + three int64 + 4x int32 + the
+    // result transport (two pointers + one 16-byte String + three uint32 with a
+    // 4-byte tail pad) = 176 bytes, aligned like String (8).
+    static_assert(sizeof(TuiBlock) == 176, "TuiBlock is 176 bytes on the 64-bit ABI");
     static_assert(alignof(TuiBlock) == 8, "TuiBlock's alignment is String's 8");
     static_assert(offsetof(TuiBlock, turnId) == 0, "turnId sits at offset 0");
     static_assert(offsetof(TuiBlock, id) == 8, "id sits at offset 8");
@@ -1184,6 +1185,12 @@ void caseThreadTurnBlockFields() {
     static_assert(offsetof(TuiBlock, status) == 116, "status sits at offset 116");
     static_assert(offsetof(TuiBlock, flags) == 120, "flags sits at offset 120");
     static_assert(offsetof(TuiBlock, reserved) == 124, "reserved sits at offset 124");
+    static_assert(offsetof(TuiBlock, resultKeys) == 128, "resultKeys sits at offset 128");
+    static_assert(offsetof(TuiBlock, resultValues) == 136, "resultValues sits at offset 136");
+    static_assert(offsetof(TuiBlock, resultRaw) == 144, "resultRaw sits at offset 144");
+    static_assert(offsetof(TuiBlock, resultCount) == 160, "resultCount sits at offset 160");
+    static_assert(offsetof(TuiBlock, resultMore) == 164, "resultMore sits at offset 164");
+    static_assert(offsetof(TuiBlock, resultReserved) == 168, "resultReserved sits at offset 168");
 
     // The v5 vocabulary: values are the wire contract (the D emitter and the
     // typed store both switch on them), so a renumbering is an ABI event.
@@ -1654,8 +1661,8 @@ int main(int argc, char** argv) {
             (void)std::remove("llmfun_ui_log.txt");
     });
 
-    static_assert(TUI_API_VERSION == 12,
-                  "this contract test pins the current API generation (v12)");
+    static_assert(TUI_API_VERSION == 13,
+                  "this contract test pins the current API generation (v13)");
 
     caseNoneStateInert();
     caseLogRecords();

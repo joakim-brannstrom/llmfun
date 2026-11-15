@@ -30,6 +30,9 @@ private AgentStatus planHandler(ref AgentApp app, string arg) {
     app.uiMsg.pipelineClear;
     auto q = arg;
     app.sendChatMessage("assistant: Running plan pipeline: %s", q);
+    app.agentBusy();
+    scope (exit)
+        app.agentReady();
     auto result = runPlanPipeline(q, app.llmConf, app.rag, app.monitor, () {
         return isStopAgentTriggered;
     }, app.llmConf.toolFilter.to(), app.makePipelineStreamCallback);
@@ -44,6 +47,9 @@ private AgentStatus codeHandler(ref AgentApp app, string arg) {
     app.uiMsg.pipelineClear;
     auto q = arg;
     app.sendChatMessage("assistant: Running coder pipeline: %s", q);
+    app.agentBusy();
+    scope (exit)
+        app.agentReady();
     auto result = runCoderPipeline(q, app.llmConf, app.rag, app.monitor, () {
         return isStopAgentTriggered;
     }, app.llmConf.toolFilter.to(), app.makePipelineStreamCallback);

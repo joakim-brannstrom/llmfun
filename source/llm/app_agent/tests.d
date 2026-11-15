@@ -2449,6 +2449,156 @@ unittest {
     app.rag = null; // release app's reference so the TestArea owns the RAG
 }
 
+version (unittest) {
+
+    /// Compress seam for the bracket tests: force the result (and optionally a
+    /// throw) instead of the real summarizer.
+    private class CannedCompressAgent : CannedAgent {
+        import llm.summary_agent : SummaryAgent;
+
+        SummaryAgent.CompressResult cannedCompress;
+        bool throwInCompress;
+
+        this(string name, LlmConfig llmConf) {
+            super(name, llmConf);
+        }
+
+        override SummaryAgent.CompressResult compress(double threshold = 0.9,
+                bool force = false, SummaryAgent.ProgressCallback callback = null) {
+            if (throwInCompress)
+                throw new Exception("simulated compression failure");
+            return cannedCompress;
+        }
+    }
+
+    @("agentBusy/agentReady: one crossing per bracket pair, nesting absorbed")
+    unittest {
+        auto sink = new TuiRecordingSink();
+        auto app = AgentApp(UserConfig.AgentChatConfig.init);
+        app.uiMsg = new UiMessenger(sink);
+
+        assert(!app.runInFlight, "the app starts idle");
+        app.agentBusy();
+        assert(app.runInFlight, "the outer open raises the in-flight flag");
+        app.agentBusy();
+        assert(sink.countOf("busy") == 1, "a nested open must not cross a second busy");
+        app.agentReady();
+        assert(app.runInFlight, "a nested close must not restore ready mid-run");
+        assert(sink.countOf("ready") == 0, "the composer stays busy through the nested close");
+        app.agentReady();
+        assert(!app.runInFlight, "the outermost close clears the flag");
+        assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+                "one busy and one ready cross per bracket pair");
+
+        // Unbalanced close: a stray ready with no open bracket is a no-op (no
+        // negative depth, no crossing).
+        app.agentReady();
+        assert(!app.runInFlight && sink.countOf("ready") == 1, "a stray close does not cross");
+    }
+
+    @("doCompress brackets its run: busy before, ready after, flag restored")
+    unittest {
+        auto tmpDir = testArea("app_agent_compress_bracket");
+        scope (exit)
+            tmpDir.cleanup;
+
+        auto cfg = testLlmConfig(tmpDir);
+        auto store = new SessionStore(tmpDir.Path);
+
+        auto app = AgentApp(UserConfig.AgentChatConfig.init);
+        app.llmConf = cfg;
+        app.sessionStore = store;
+        auto agent = new CannedCompressAgent("main", cfg);
+        agent.cannedCompress.compressed = true;
+        app.agent_ = agent;
+        auto sink = new TuiRecordingSink();
+        app.uiMsg = new UiMessenger(sink);
+        app.activeSession = store.create();
+        clearStopAgent();
+
+        app.doCompress(true);
+
+        assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+                "the compression run is bracketed by exactly one busy and one ready");
+        assert(sink.calls[0].kind == "busy", "busy crosses before the compression");
+        assert(sink.calls[$ - 1].kind == "ready", "ready crosses after the compression notice");
+        assert(!app.runInFlight, "the in-flight flag is restored after the bracket");
+    }
+
+    @("doCompress unwinding: a thrown compression restores ready")
+    unittest {
+        auto tmpDir = testArea("app_agent_compress_throw");
+        scope (exit)
+            tmpDir.cleanup;
+
+        auto cfg = testLlmConfig(tmpDir);
+        auto store = new SessionStore(tmpDir.Path);
+
+        auto app = AgentApp(UserConfig.AgentChatConfig.init);
+        app.llmConf = cfg;
+        app.sessionStore = store;
+        auto agent = new CannedCompressAgent("main", cfg);
+        agent.throwInCompress = true;
+        app.agent_ = agent;
+        auto sink = new TuiRecordingSink();
+        app.uiMsg = new UiMessenger(sink);
+        app.activeSession = store.create();
+        clearStopAgent();
+
+        auto thrown = collectException(app.doCompress(true));
+
+        assert(thrown !is null, "the simulated compression failure propagates");
+        assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+                "unwinding out of the run restores ready exactly once");
+        assert(!app.runInFlight, "the in-flight flag is restored by the unwinding");
+    }
+
+    @("userQuery brackets the turn: busy first, ready last, snapshots stamped")
+    unittest {
+        import std.path : buildPath;
+
+        auto tmpDir = testArea("app_agent_query_bracket");
+        scope (exit)
+            tmpDir.cleanup;
+
+        auto cfg = testLlmConfig(tmpDir);
+        auto store = new SessionStore(buildPath(tmpDir, "chat").Path);
+
+        auto actor = new AppAgentActor(UserConfig.init,
+                UserConfig.AgentChatConfig.init, null, WeakAddress.init);
+        ref app = actor.app;
+        app.llmConf = cfg;
+        app.sessionStore = store;
+        auto agent = new CannedAgent("main", cfg);
+        agent.canned = [
+            ProcessResult(status: ProcessResult.Status.networkFailure)
+        ];
+        app.agent_ = agent;
+        auto sink = new TuiRecordingSink();
+        app.uiMsg = new UiMessenger(sink);
+        app.activeSession = store.create();
+        clearStopAgent();
+        app.agent_.chat.setSystemPrompt("sys");
+
+        actor.userQuery("hello");
+
+        assert(sink.countOf("busy") == 1 && sink.countOf("ready") == 1,
+                "the turn is bracketed by exactly one busy and one ready");
+        assert(sink.calls[0].kind == "busy", "busy crosses before the turn's work");
+        assert(sink.calls[$ - 3 .. $].map!(c => c.kind).array == [
+            "ready", "sessionList", "runtimeStatus"
+        ], "ready crosses after the run, before the settled end-of-run sends");
+        assert(!app.runInFlight, "the in-flight flag is restored after the turn");
+        // The pre-run snapshot carries the running bit; the end-of-run snapshot
+        // clears it.
+        assert((sink.sessionLists[0][0].flags & 1) == 1,
+                "the pre-run sidebar snapshot stamps the active row running");
+        assert((sink.lastSessionList()[0].flags & 1) == 0,
+                "the end-of-run snapshot clears the running bit");
+    }
+
+}
+
 @("the agent prompt file carries the drag&drop attachment marker line") unittest {
     import std.file : write;
     import std.path : buildPath;
@@ -2482,13 +2632,13 @@ unittest {
     auto app = AgentApp(UserConfig.AgentChatConfig.init);
     wireRebuildTestApp(app, td);
 
-    app.agentRunInFlight_ = true;
+    app.runInFlight = true;
     app.rebuildSystemPrompt();
     assert(app.agentMdRebuildPending_, "the rebuild is parked");
     assert(app.systemPrompt_.empty, "no prompt is composed while in flight");
     assert(app.rag.db.getSources.length == 0, "no AGENTS.md processing ran");
 
-    app.agentRunInFlight_ = false;
+    app.runInFlight = false;
     app.rebuildSystemPrompt();
     assert(!app.agentMdRebuildPending_, "the parked rebuild is applied");
     assert(app.systemPrompt_.canFind(fixtureAgentsMdText),
@@ -2818,9 +2968,9 @@ unittest {
             "setup: model A's full treatment injects the AGENTS.md payload");
 
     // Park a rebuild the way the in-flight guard does: the production safe
-    // point (runAgent's post-run block) clears the in-flight flag and calls
-    // rebuildSystemPrompt; the guard itself only parks.
-    app.agentRunInFlight_ = true;
+    // point (runAgent's post-run block) calls rebuildSystemPrompt; the
+    // guard itself only parks.
+    app.runInFlight = true;
     assert(app.slashCommands_.execute(app, "/model model-b") == AgentStatus.active,
             "/model must dispatch as an in-session command");
     assert(app.agentMdRebuildPending_, "the rebuild is parked while the run is in flight");
@@ -2829,7 +2979,7 @@ unittest {
             "model A's payload is still applied while the rebuild is parked");
 
     // The next safe point applies the parked rebuild.
-    app.agentRunInFlight_ = false;
+    app.runInFlight = false;
     app.rebuildSystemPrompt();
     assert(!app.agentMdRebuildPending_, "the parked rebuild is applied");
     assert(!app.systemPrompt_.canFind(fixtureAgentsMdText),

@@ -215,8 +215,6 @@ struct AgentApp {
 
         // From LlmConfig so model switch and /refresh-agent-md honor the config
         bool noCwdConfig_;
-        // gates the deferral in rebuildSystemPrompt
-        bool agentRunInFlight_;
         // Injectable AGENTS.md location for rebuildSystemPrompt: empty
         // resolves to the process CWD's AGENTS.md (production); tests point it
         // at a fixture file so they never depend on the repo's real AGENTS.md.
@@ -225,13 +223,38 @@ struct AgentApp {
         // the next safe point after the run completes.
         bool agentMdRebuildPending_;
 
-        // TODO: merge, if possible, agentRunInFlight_ and runInFlight
+        // The app-side half of "a run is in flight", true for the whole bracket of a
+        // turn entry point
         bool runInFlight;
 
-        private TypedEmitContext typedCtx_;
-        private int typedOrdinalNext_ = 1;
-        private long[] typedEmittedTurnIds_;
-        private long noticeSeq_;
+        // nesting depth of open run brackets: the turn-start compression and
+        // the /plan / /code pipelines bracket runs that can sit inside a query
+        // bracket, so the ready edge only crosses at the outermost close.
+        int runBracketDepth_;
+
+        // The busy edge, bracketing one turn entry point's run. The ready flag
+        // clears on the first (outermost) open and sets on the last close; the
+        // crossing carries the messenger's busy/ready message so the composer
+        // follows the real run span. Unwinding closes the bracket (scope-exit),
+        // keeping the flag and the composer consistent on thrown runs.
+        void agentBusy() {
+            if (runBracketDepth_++ == 0) {
+                runInFlight = true;
+                uiMsg.busy();
+            }
+        }
+
+        void agentReady() {
+            if (runBracketDepth_ > 0 && --runBracketDepth_ == 0) {
+                runInFlight = false;
+                uiMsg.ready();
+            }
+        }
+
+        TypedEmitContext typedCtx_;
+        int typedOrdinalNext_ = 1;
+        long[] typedEmittedTurnIds_;
+        long noticeSeq_;
     }
 
     private bool oneShotQuery;
@@ -370,7 +393,9 @@ struct AgentApp {
         agent_.setCompressionCheckpointSessionId(activeSession.id.get);
         logger.tracef("compression checkpoint session id: %s", activeSession.id.get);
         const ctxUsed = agent_.stat.context;
-        uiMsg.busy;
+        agentBusy();
+        scope (exit)
+            agentReady();
         auto res = agent_.compress(force: force, callback: &this.progressCallback);
         // A compression that actually rewrote history (summarized or purged
         // entries change the message list) makes the chat dirty; a no-op
@@ -381,7 +406,6 @@ struct AgentApp {
         }
         emitNoticeTyped(compressionResultToString(res.compressed, res.originalLength,
                 res.newLength, res.keptXCount, res.keptXTokens, ctxUsed, res.newContextSize));
-        uiMsg.ready;
     }
 
     package void processResult(ProcessResult result) {
@@ -918,9 +942,6 @@ struct AgentApp {
         }
 
         if (runAgentLoop) {
-            agentRunInFlight_ = true;
-            scope (exit)
-                agentRunInFlight_ = false; // the loop is done: next safe point
             this.doCompress(false);
             // User-query echo, sent AFTER the turn-start doCompress: the
             // query (if any) is the last entry in the possibly-compressed
@@ -943,16 +964,16 @@ struct AgentApp {
             }
         }
 
-        // TODO: considering where agentRunInFlight_ is set I do not think
-        // there is ever a case where it is true in this if-statement.
-        // A rebuild requested while a run was in flight is applied here,
-        // at the next safe point after the run completes (the scope (exit)
-        // above has already cleared the in-flight flag). In production the
-        // pending flag can only be set through the in-flight guard inside
-        // rebuildSystemPrompt - slash commands dispatch exclusively from the
-        // branch above (between runs, one mailbox message at a time), so the
-        // guard is defensive; tests take it by setting the flags directly.
-        if (agentMdRebuildPending_ && !agentRunInFlight_) {
+        // A rebuild requested anywhere inside the userQuery/one-shot bracket
+        // is applied here, at the post-run safe point: the run bracket spans
+        // slash dispatch (userQuery opens it before runAgent), so a /model or
+        // /skills rebuild genuinely defers. The deferral is consumed later in
+        // this same runAgent call - before any next model call could start -
+        // so a command that only rebuilds is safe; a future command that both
+        // rebuilds at dispatch and forces the loop would run the loop on the
+        // stale prompt, which is the hazard to keep an eye on. Tests take the
+        // guard by setting the flags directly.
+        if (agentMdRebuildPending_) {
             agentMdRebuildPending_ = false;
             rebuildSystemPrompt();
         }
@@ -1224,17 +1245,17 @@ struct AgentApp {
     /// Rebuild the system prompt for the active model: resolve its effective
     /// AgentsMd config, reprocess AGENTS.md, recompose, re-apply. Safe while an
     /// agent run is in flight: the rebuild is DEFERRED (pending flag), applied
-    /// at the next safe point after the run completes, so setSystemPrompt
-    /// never rewrites history[0] under a running loop.
+    /// at the next safe point after the run completes.
     ///
-    /// Reachability note: in production the guard below is DEFENSIVE ONLY.
-    /// Slash commands dispatch exclusively from runAgent's slash branch, which
-    /// runs between agent runs (the single-threaded AppAgentActor mailbox
-    /// handles one userQuery at a time), so /model can never execute while
-    /// runToCompletion is on the stack. The guard is exercised by tests that
-    /// set agentRunInFlight_ directly.
+    /// Reachability note: the guard below really fires for a rebuild requested
+    /// inside the run bracket - userQuery opens the bracket before runAgent and
+    /// slash dispatch happens inside it, so /model and /skills rebuilds defer to
+    /// runAgent's post-run safe point (consumed in the same runAgent call,
+    /// before any next model call). A rebuild requested outside any bracket
+    /// applies immediately. Tests exercise the guard by setting runInFlight
+    /// directly.
     package void rebuildSystemPrompt(bool forceRefresh = false) {
-        if (agentRunInFlight_) {
+        if (runInFlight) {
             agentMdRebuildPending_ = true;
             return;
         }
@@ -1299,9 +1320,10 @@ class AppAgentActor : DropOwner {
     import my.actor;
     import llm.tui;
 
+    package AgentApp app;
+
     private {
         ActorRef self_;
-        AgentApp app;
         UserConfig uconf;
         System* sys;
         WeakAddress supervisor;
@@ -1395,6 +1417,9 @@ class AppAgentActor : DropOwner {
         app.setupSession();
         app.oneShotQuery = !app.conf_.prompt.empty;
         if (app.oneShotQuery) {
+            app.agentBusy();
+            scope (exit)
+                app.agentReady();
             app.runAgent(app.conf_.prompt);
             // explicit, before AgentDone (startExit -> finishExit)
             startExit(0, ExitReason.userShutdown);
@@ -1443,34 +1468,22 @@ class AppAgentActor : DropOwner {
     void userQuery(string s) {
         auto query = s.strip;
         if (!query.empty) {
-            app.uiMsg.busy();
-            // The snapshot that carries the running flag (task 24): `runInFlight` is the
-            // actor's own run state, so every send while `runAgent` is on the stack says
-            // "running" and no caller has to remember it. The end-of-run send below clears
-            // it for the same reason - one owner, two boundaries.
-            //
-            // Ordering: this snapshot is taken before `runAgent()` appends the user's
-            // message, so its `messageCount`/`preview` are the previous turn's. The flag is
-            // what it is for; the end-of-run snapshot carries the fresh counts. The
-            // alternative - a send inside `runAgent()` after the append - would be a second
-            // list send on the same path, which the single-send rule above guards.
-            app.runInFlight = true;
-            app.sendSessionList();
-            clearStopAgent();
-            app.sendRuntimeStatus(false);
-            final switch (app.runAgent(query)) {
-            case AgentStatus.active:
-                break;
-            case AgentStatus.terminate:
-                app.uiMsg.terminate();
-                break;
+            {
+                app.agentBusy();
+                scope (exit)
+                    app.agentReady();
+                app.sendSessionList();
+                clearStopAgent();
+                app.sendRuntimeStatus(false);
+                final switch (app.runAgent(query)) {
+                case AgentStatus.active:
+                    break;
+                case AgentStatus.terminate:
+                    app.uiMsg.terminate();
+                    break;
+                }
             }
-            app.uiMsg.ready();
-            app.runInFlight = false;
             app.sendSessionList();
-            // uiAgentReady only clears the busy flag (Thinking indicator,
-            // session-panel gating); without this call the status bar keeps
-            // the last "Busy" text, so set the ready text explicitly.
             app.sendRuntimeStatus(true);
         }
     }

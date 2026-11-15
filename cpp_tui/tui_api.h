@@ -26,7 +26,7 @@ extern "C" {
 /* TUI_API_VERSION - API generation marker. Documentation only: no runtime
  * behavior depends on it.
  */
-#define TUI_API_VERSION 12
+#define TUI_API_VERSION 13
 
 /* String — Plain old data struct representing a string slice.
  * Ownership rules:
@@ -682,6 +682,20 @@ typedef struct TuiBlock {
     int32_t status;
     int32_t flags;
     int32_t reserved;
+    /* RESULT pair transport (tool kind only). Parallel vectors, same length,
+     * sorted by key byte-wise ascending; duplicate keys collapse last-wins;
+     * values pre-truncated at 200 codepoints (UTF-8-safe) by the sender;
+     * at most 100 pairs (resultMore = pairs past the cap, 0 when under).
+     * resultRaw: packed fallback when the result is not an unpackable JSON
+     * object (array, non-JSON, zero-pair object) - pairs stay empty and
+     * resultRaw carries the one-line string rendered as-is. Strings are
+     * inbound/non-owning, copied by the UI like every other TuiBlock string. */
+    const String* resultKeys;
+    const String* resultValues;
+    String resultRaw;
+    uint32_t resultCount;
+    uint32_t resultMore;
+    uint32_t resultReserved;
 } TuiBlock;
 
 /* Bulk snapshot (replay, session switch): clears the store, then loads the

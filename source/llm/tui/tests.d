@@ -248,6 +248,23 @@ unittest {
     f.teardown();
 }
 
+@("TUI actor: uiAgentBusy clears the ready flag")
+unittest {
+    auto f = new TuiDriveFixture();
+
+    // The busy half of the edge is the regression this pins: an entry
+    // point's busy() must leave the ready flag cleared (the composer
+    // flips to Stop), and the ready half restores it. Driven through
+    // the actor's real C state: setReadyStatus crosses on the same
+    // call the flag flips.
+    assert(f.actor.agentReady_, "the actor starts ready");
+    f.actor.uiAgentBusy();
+    assert(!f.actor.agentReady_, "busy clears the ready flag (composer shows Stop)");
+    f.actor.uiAgentReady();
+    assert(f.actor.agentReady_, "ready sets the flag again (composer shows Send)");
+    f.teardown();
+}
+
 @("TUI actor: /stop handling")
 unittest {
     auto f = new TuiDriveFixture();

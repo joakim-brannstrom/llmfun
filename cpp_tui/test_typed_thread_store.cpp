@@ -672,6 +672,57 @@ int main(int argc, char** argv) {
               "storm: the merged step weighs 2 (call + result), never a dropped half");
     }
 
+    // --- The v13 result pair transport: the store's merge-by-presence ---
+    {
+        TypedThreadStore store;
+        store.turnUpsert(turn(50, 1, 0, 1));
+        TypedBlock withPairs = block(50, "call-1", 2, 3, "grep", "the result text");
+        withPairs.resultPairs = {{"path", "a.txt"}, {"status", "ok"}};
+        withPairs.resultRaw = "{\"path\":\"a.txt\",\"status\":\"ok\"}";
+        store.blockUpsert(withPairs);
+        check(store.blockAt(50, 0).resultPairs.size() == 2 &&
+                  store.blockAt(50, 0).resultPairs[0].first == "path" &&
+                  store.blockAt(50, 0).resultPairs[0].second == "a.txt" &&
+                  store.blockAt(50, 0).resultPairs[1].first == "status" &&
+                  store.blockAt(50, 0).resultPairs[1].second == "ok" &&
+                  store.blockAt(50, 0).resultRaw == "{\"path\":\"a.txt\",\"status\":\"ok\"}" &&
+                  store.blockAt(50, 0).resultMore == 0,
+              "transport: an upsert carrying a pair set stores pairs and raw verbatim");
+
+        // A later upsert with its own pair set replaces the result fields
+        // together - never half old, half new, and the more-count flips
+        // with them.
+        TypedBlock reResult = block(50, "call-1", 2, 3, "grep", "the result text v2");
+        reResult.resultPairs = {{"status", "failed"}};
+        reResult.resultRaw = "{\"status\":\"failed\"}";
+        reResult.resultMore = 7;
+        store.blockUpsert(reResult);
+        check(store.blockAt(50, 0).resultPairs.size() == 1 &&
+                  store.blockAt(50, 0).resultPairs[0].first == "status" &&
+                  store.blockAt(50, 0).resultPairs[0].second == "failed" &&
+                  store.blockAt(50, 0).resultRaw == "{\"status\":\"failed\"}" &&
+                  store.blockAt(50, 0).resultMore == 7,
+              "transport: a pair-carrying merge replaces all result fields together");
+
+        // A pair-less upsert (a call payload re-emit) merges the regular
+        // payload but keeps what the slot already holds - it must not clear
+        // a result that already landed, more-count included.
+        store.blockUpsert(block(50, "call-1", 2, 3, "grep", "the call arguments"));
+        check(store.blockAt(50, 0).body == "the call arguments",
+              "transport: the pair-less merge still overwrites the regular payload");
+        check(store.blockAt(50, 0).resultPairs.size() == 1 &&
+                  store.blockAt(50, 0).resultPairs[0].second == "failed" &&
+                  store.blockAt(50, 0).resultRaw == "{\"status\":\"failed\"}" &&
+                  store.blockAt(50, 0).resultMore == 7,
+              "transport: the pair-less merge preserves the existing pair set");
+
+        // A pair-less first upsert simply leaves the transport empty (the
+        // pending call before its result lands).
+        store.blockUpsert(block(50, "call-2", 2, 1, "sed", "args"));
+        check(store.blockAt(50, 1).resultPairs.empty() && store.blockAt(50, 1).resultRaw.empty(),
+              "transport: a pending call starts with an empty transport");
+    }
+
     if (g_failures != 0) {
         std::fprintf(stderr, "%d of %d checks failed\n", g_failures, g_checks);
         return 1;
