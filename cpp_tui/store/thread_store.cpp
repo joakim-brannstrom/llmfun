@@ -616,8 +616,9 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
     if (block->code)
         out.kind = model::BlockKind::Code; // classified at build, like v4
     // Every row previews something: a tool card its tool name (set in the
-    // switch), every other row its body's first line.
-    if (block->kind != model::BlockKind::ToolStep)
+    // switch), every other row its body's first line. Thinking has no preview:
+    // its label is the count only and its open body is the full text (D3).
+    if (block->kind != model::BlockKind::ToolStep && block->kind != model::BlockKind::Thinking)
         out.summary = oneLine(block->typedBody);
     // A card's body room is the args text OR its RESULT rows: an
     // empty-args card with a result still opens onto the result lines, so

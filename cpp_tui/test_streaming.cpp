@@ -670,8 +670,8 @@ void checkHeader() {
     phase("header");
     Fixture fixture;
     fixture.stream("", "Let me think", kT0);
-    check(headerOf(fixture, 2) == "Thinking  Let me think",
-          "a reasoning row's header carries its preview while it streams (got '" +
+    check(headerOf(fixture, 2) == "Thinking",
+          "a reasoning row's header is the bare word while it streams (got '" +
               headerOf(fixture, 2) + "')");
     check(headerOf(fixture, 0) == "WORK - 1 step",
           "and the live turn's header is the work group's (got '" + headerOf(fixture, 0) + "')");
@@ -679,13 +679,13 @@ void checkHeader() {
     // The answer's text arrives: the reasoning row holds still (D stamps the duration
     // at completion), and seconds passing move nothing.
     fixture.stream("The answer", "Let me think", kT0 + 12000);
-    check(headerOf(fixture, 2) == "Thinking  Let me think",
+    check(headerOf(fixture, 2) == "Thinking",
           "the reasoning row holds still while the answer streams (got '" + headerOf(fixture, 2) +
               "')");
     fixture.tick(kT0 + 13000);
     fixture.tick(kT0 + 14000);
     fixture.tick(kT0 + 15000);
-    check(headerOf(fixture, 2) == "Thinking  Let me think",
+    check(headerOf(fixture, 2) == "Thinking",
           "and holds still across three seconds of ticking (flicker-free)");
 
     // A stop closes the turn; the group is stored (the thread's only group) and keeps
