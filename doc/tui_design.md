@@ -129,40 +129,39 @@ The TUI supports seven message types, each with distinct color coding. See `Chat
 
 Messages can contain collapsible **thinking/reasoning** content (the `thinking` field in `ChatMessageParam`), displayed as expandable sections within the message.
 
-### Message header decoration ([NR] + [TIME])
+### Message header decoration ([TIME])
 
-Persistent chat messages render a decorated header: `[NR] <summary>`
-plus a ` [TIME]` suffix when a processing time was measured.
+The thread's rows draw a header of `LABEL · <timing>`: the row's label
+(`YOU`, `AGENT`, `TOOL`, the batch group's word) plus a timing suffix when
+a processing time was measured.
 
-- **NR** is the message's 1-based ordinal among the session's
-  displayed persistent messages. It is **not stored** — it is a pure
-  function of the persisted session file (the displayable predicate
-  over the history) and is derived at send time (live turn, user
-  echo) and at replay time (session switch, startup) on the AppAgent
-  actor thread. `/clear` (session `clear()`) restarts numbering at
-  [1]. Any instance loading the same file replays the same NRs
-  (cross-instance comparable).
+- **No ordinal.** The v4 draft decorated persistent messages with a
+  1-based `[NR]` derived at send and replay time on the AppAgent actor
+  thread. The v6 cutover dropped it: the number had to be recomputed on
+  every send, every replay and on every instance that loaded the file,
+  and the typed turn already carries a stable id — the persisted
+  `turnId` (`0` = unstamped), with `messageCount` informational. Nothing
+  on the wire or in the render recomputes a display number any more.
 - **TIME** is measured only where the work happened: the LLM-call
   `Duration` for assistant/tool-call lines, the per-call tool
   execution `Duration` for tool results. In memory it is
   `MessageTime = SumType!(Duration, NoProcessingTime)`; it persists
   as a millisecond number under `save_data.processMs` (absent key =
   `NoProcessingTime` — never a `0ms` misrepresentation). Unmeasured
-  messages render **no suffix** (there is no unknown-time glyph); a
+  messages render **no timing** (there is no unknown-time glyph); a
   corrupt negative stored value is treated the same (traced, no
-  suffix).
+  timing).
 - Formatting is `my.time.prettyDuration` (mylib,
   `vendor/mylib/source/my/time.d`): `<1s` → `NNNms`, `<60s` → `S.Ds`
-  (one decimal, truncated), `<1h` → `Mm Ss`, else `Hh Mm`.
-- **Display-only lines are undecorated** (nr = 0 → bare summary):
-  help text, compression/session-operation notices, plugin sends
-  through the unchanged public `sendChatMessage` seam.
-- **One-shot CLI is undecorated**: `TuiBlockedSink` accepts but
-  ignores `(nr, time)` — byte-stable output (OQ3).
-- No C/C++ change: `TUI_API_VERSION` stays 4. The C++ header widget
-  ID embeds the monotonic `entry.id`, so it is stable across frames
-  despite the now-decorated summary; Copy copies the raw message
-  text, not the decorated header.
+  (one decimal, truncated), `<1h` → `Mm Ss`, else `Hh Mm`. The C++
+  render consumes the block's `durationMs` (`0` = unknown, never a
+  placeholder) and formats it with `blockTimingLabel`.
+- **Display-only lines carry no timing**: help text,
+  compression/session-operation notices, plugin sends through the
+  unchanged public `sendChatMessage` seam — none of them were measured.
+- **One-shot CLI is undecorated**: `TuiBlockedSink` drops the UI
+  traffic (`isActive` is `false`) and the output is the typed
+  formatter's lines — byte-stable.
 
 ### Markdown Support
 
@@ -654,29 +653,46 @@ above 10000 are clamped to 10000 (mirrors `validateConfig`), and positive
 sub-40 caps are raised to 40 by the C API. (The cap is text-backend only:
 GUI runs ignore it.)
 
-### API Version History
+### Typed Thread Store (the v6 cutover)
 
-`TUI_API_VERSION` is a **documentation marker only** — no runtime behavior
-depends on it (the contract tests pin its current value with `static_assert`
-so a bump stays deliberate); the changelog lives in the `tui_api.h` header
-comment. The generations so far:
+The typed turn/block model the thread draws from since the v6 cutover
+(`TUI_API_VERSION` 13 → 14):
 
-1. original API: `String`, `ChatMessageParam`, `TuiState` + `TuiScreen`,
-   `tuiInit()` + `tuiShutdown(screen)`.
-2. session sidebar: `SessionItem`, `TuiSessionActionType`, `SessionAction`,
-   `tuiSetSessionList`, `tuiIsSessionActionReady`, `tuiGetSessionAction`.
-3. max width: `tuiSetMaxWidth` (cap the rendered width in columns;
-   0 = unlimited).
-4. single handle: `TuiBackendMode`/`TuiBackendKind`, `tuiInit(state, mode)`,
-   per-state frame calls (`tuiBackendNewFrame/Render(state)`), None-safe
-   `tuiRender`, `tuiBackendActive`, `tuiBackendNote`, destroy-tears-down;
-   `TuiScreen` + `tuiShutdown` removed.
-5. workbench MVP (the `--ui=workbench|legacy` shell): `tuiSetUiGeneration`,
-   `tuiRequestCancel`/`tuiTakeCancel`, `SessionItem.updatedAtMs`/`flags`
-   (appended, task 24), `TuiLogRecord` + `tuiAddLogRecord` (task 32),
-   `TuiRuntimeStatus` + `tuiSetRuntimeStatus` (task 39), and
-   `tuiSetRawLogOpen`/`tuiIsRawLogOpen` (task 33). One generation for the whole
-   MVP; a later symbol lands inside v5 without re-bumping.
+- `TuiTurn` is `{int64_t id, int32_t state, int32_t messageCount,
+  int32_t reserved}`: the id is the persisted `turnId` (`0` = unstamped),
+  `state` is `Running|Done|Interrupted`, `messageCount` is informational
+  (the LLM messages the turn covers). No display ordinal: the v5 draft's
+  1-based `ordinal` was dropped with the cutover.
+- `TuiBlock` is keyed by `(turnId, id)`; the id is the tool callId,
+  `answer`, or a batch-scoped id (`content#<n>`); the `batchId` is
+  `<turnId>#<batchIndex>` for per-response groups (`<turnId>#q` for
+  query/vision/notice), recomputed deterministically on replay, stable
+  within the turn's lifetime in one process run, never persisted.
+- **RESULT pair transport** (tool kind): `resultKeys`/`resultValues` are
+  parallel same-length vectors, sorted by key byte-wise ascending;
+  duplicate keys collapse last-wins; values are pre-truncated at 200
+  codepoints (UTF-8-safe) by the sender; at most 100 pairs and
+  `resultMore` counts the pairs past that cap (0 when under).
+  `resultRaw` is the packed fallback when the result is not an
+  unpackable JSON object (array, non-JSON, zero-pair object): the pairs
+  stay empty and the one-line string renders as-is. The pairs ride the
+  block's upsert — the UI merges in place, so a later pair-less re-emit
+  of the same block keeps the pairs it already holds.
+- Functions: `tuiSetTurns` (bulk snapshot for replay and session switch:
+  clears the store, then loads the turns and their blocks),
+  `tuiTurnUpsert`/`tuiBlockUpsert` (the only mutating paths: a first
+  upsert creates the slot, later upserts merge in place), `tuiTurnRemove`
+  (removes the turn AND cascades to the turn's blocks — no per-block
+  remove).
+- The busy edge is real: D clears the ready flag when a run starts
+  (`uiAgentBusy`) and sets it back when the run ends (`uiAgentReady`).
+  Every entry point brackets its run — the main query, a compression,
+  `/plan`, `/code`, the one-shot runs — and a nesting counter keeps the
+  flag across nested brackets, so the at-most-one-run assumption the
+  v5 plan made is enforced, not assumed. The composer's `Send`/`Stop`
+  flip is driven by that crossing.
+- Pinned by `test_typed_thread_store` and the parity core loop's
+  batteries (upsert storm, unknown-callId result, busy-edge matrix).
 
 ---
 

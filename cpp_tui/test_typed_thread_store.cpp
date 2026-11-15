@@ -720,6 +720,26 @@ int main(int argc, char** argv) {
         store.blockUpsert(block(50, "call-2", 2, 1, "sed", "args"));
         check(store.blockAt(50, 1).resultPairs.empty() && store.blockAt(50, 1).resultRaw.empty(),
               "transport: a pending call starts with an empty transport");
+        // The storm variant: a pair-carrying upsert repeated per tick replaces
+        // the transport together every time - the pair set is part of the
+        // merged block and never grows per frame.
+        const std::uint64_t vPairs = store.version();
+        for (int i = 0; i < 300; ++i) {
+            TypedBlock tick = block(50, "call-1", 2, 3, "grep", "result " + std::to_string(i));
+            tick.resultPairs = {{"path", "a.txt"}, {"status", "ok"}};
+            tick.resultRaw = "{\"path\":\"a.txt\",\"status\":\"ok\"}";
+            tick.resultMore = 3;
+            store.blockUpsert(tick);
+        }
+        check(store.blockAt(50, 0).resultPairs.size() == 2 &&
+                  store.blockAt(50, 0).resultPairs[0].first == "path" &&
+                  store.blockAt(50, 0).resultPairs[0].second == "a.txt" &&
+                  store.blockAt(50, 0).resultPairs[1].second == "ok" &&
+                  store.blockAt(50, 0).resultRaw == "{\"path\":\"a.txt\",\"status\":\"ok\"}" &&
+                  store.blockAt(50, 0).resultMore == 3,
+              "storm: a pair-carrying upsert repeated per tick never grows the pair set");
+        check(store.version() - vPairs == 300,
+              "storm: one version bump per pair-carrying upsert - no rescan");
     }
 
     // Turn order. Live turns order by the store's insertion order; replayed

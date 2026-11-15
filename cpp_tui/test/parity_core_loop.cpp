@@ -1666,9 +1666,14 @@ void checkFocusMode(bool update) {
 
 /// A tool-call block, exactly what the typed step walk emits: the tool's name
 /// rides `title`, the arguments the body, and the status is the emitter's own
-/// (Pending in flight, Cancelled on a stop, Ok once a result merged in).
+/// (Pending in flight, Cancelled on a stop, Ok once a result merged in). The
+/// optional RESULT transport - the parallel key/value arrays, the packed
+/// fallback and the more-count - rides the same upsert, all copied during the
+/// call.
 void toolBlock(Harness& h, std::int64_t turnId, const std::string& callId, int status,
-               const std::string& name, const std::string& args) {
+               const std::string& name, const std::string& args,
+               const std::vector<std::pair<std::string, std::string>>& resultPairs = {},
+               const std::string& resultRaw = std::string(), std::uint32_t resultMore = 0) {
     TuiBlock b{};
     b.turnId = turnId;
     b.id = makeStr(callId);
@@ -1678,11 +1683,27 @@ void toolBlock(Harness& h, std::int64_t turnId, const std::string& callId, int s
     b.kind = TuiBlockKind_Tool;
     b.status = status;
     b.flags = TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
+    std::vector<String> keys;
+    std::vector<String> values;
+    for (const auto& kv : resultPairs) {
+        keys.push_back(makeStr(kv.first));
+        values.push_back(makeStr(kv.second));
+    }
+    b.resultKeys = keys.empty() ? nullptr : keys.data();
+    b.resultValues = values.empty() ? nullptr : values.data();
+    b.resultCount = static_cast<std::uint32_t>(keys.size());
+    b.resultRaw = makeStr(resultRaw);
+    b.resultMore = resultMore;
     tuiBlockUpsert(h.handle.get(), &b);
     String_Free(b.id);
     String_Free(b.batchId);
     String_Free(b.title);
     String_Free(b.body);
+    for (auto s : keys)
+        String_Free(s);
+    for (auto s : values)
+        String_Free(s);
+    String_Free(b.resultRaw);
 }
 
 /// The block named `id` in `turnId`, or nullptr: a scan over one turn's blocks
@@ -1721,7 +1742,7 @@ void checkBattery() {
     h.pressKey(ImGuiKey_Escape); // release the composer's field: no blinking caret
     h.idle(1);
 
-    // 1. Replay parity (§8): the same session rendered twice is byte-identical
+    // 1. Replay parity: the same session rendered twice is byte-identical
     // - the persisted ids are part of the bytes - and the expansion/override
     // state survives the re-render.
     check(h.core->chat.typedTurns.turnCount() == 2, "battery 1: the replay loaded both turns");
@@ -1781,6 +1802,13 @@ void checkBattery() {
         anyOk = anyOk || h.core->chat.typedTurns.blockAt(live, k).status == TuiBlockStatus_Ok;
     check(!anyOk, "battery 2: no block of the stopped turn claims Ok");
     check(h.last.hasText("partial answer so far"), "battery 2: the partial answer stays");
+    // The run bracket is exception-safe: the unwinding fired ready, so the
+    // composer is back to Send once the stopped run ends.
+    tuiReadyStatus(h.handle.get(), 1);
+    h.idle(2);
+    check(h.core->readyStatus, "battery 2: the unwinding restored the ready flag");
+    if (h.text())
+        check(h.last.hasText("Send"), "battery 2: Send is restored once the run ends");
 
     // 3. Compression re-emission (§7): the affected turns are removed and
     // re-emitted as one summary turn, and no stale
@@ -1819,7 +1847,7 @@ void checkBattery() {
           "battery 3: the group list follows the re-emission");
     check(h.last.hasText("earlier context summarized"), "battery 3: the summary renders");
 
-    // 4. The 1000-turn session (§8): the cap evicts oldest-first, the
+    // 4. The 1000-turn session: the cap evicts oldest-first, the
     // turn-paged window bounds what renders, and the height hints stay
     // bounded by the pages drawn - structural bounds, not a timing gate.
     phase("battery: the 1000-turn session");
@@ -1856,7 +1884,7 @@ void checkBattery() {
     check(h.core->ui.thread.hints.size() <= h.core->ui.thread.drawnGroups + 1,
           "battery 4: the height hints cover the drawn groups only (eviction unchanged)");
 
-    // 5. Session switch mid-run (§8): the in-flight turn belongs to its
+    // 5. Session switch mid-run: the in-flight turn belongs to its
     // session, the switch rebuilds the store from the new session's snapshot,
     // and the live emitter re-attaches by turnId when its session is back.
     phase("battery: session switch mid-run");
@@ -1867,6 +1895,8 @@ void checkBattery() {
         makeSession("20260815-100000-bbbb", "Beta session", "second user preview", 5, 0, 0));
     setSessions(h, alphaLive);
     runStart(h, "live across the switch");
+    tuiReadyStatus(h.handle.get(), 0); // the run's busy crossing: the flag belongs to the run
+    h.idle(1);
     const std::int64_t crossLive = g_liveTurnId;
     updateStream(h, "the live answer before the switch");
     h.idle(2);
@@ -1905,6 +1935,25 @@ void checkBattery() {
     check(h.core->chat.typedTurns.blockCount(crossLive) == 2,
           "battery 5: the re-attach merged in place (no duplicate slot)");
     check(h.last.hasText("and more after it"), "battery 5: the merged content is what renders");
+    // The ready flag belongs to the RUN, not the session: the busy crossing
+    // fired at the run's start, the switch did not touch it, and the
+    // composer's Stop stays shown until the run ends - a stop targets the run
+    // in flight regardless of the session shown.
+    check(!h.core->readyStatus, "battery 5: the busy flag survived the session switch");
+    if (h.text())
+        check(h.last.hasText("Stop"), "battery 5: Stop stays shown while the run is in flight");
+    h.pressKey(ImGuiKey_Escape);
+    h.idle(1);
+    check(h.core->cancelRequested, "battery 5: Esc still asks the run in flight to stop");
+    check(tuiTakeCancel(h.handle.get()) == 1,
+          "battery 5: the stop targets the run regardless of the session shown");
+    runStop(h);
+    tuiReadyStatus(h.handle.get(), 1);
+    h.idle(2);
+    check(!h.core->cancelRequested, "battery 5: the latch clears when the run ends");
+    check(h.core->readyStatus, "battery 5: ready is restored when the run ends");
+    if (h.text())
+        check(h.last.hasText("Send"), "battery 5: Send is back once the run ends");
 
     // 6. Interrupted-turn replay (§7/§8): the snapshot's recorded in-flight call
     // replays as Cancelled - honestly, never renormalized into an Ok.
@@ -1923,6 +1972,86 @@ void checkBattery() {
         replayOk =
             replayOk || h.core->chat.typedTurns.blockAt(crossLive, k).status == TuiBlockStatus_Ok;
     check(!replayOk, "battery 6: no fabricated Ok anywhere in the replayed turn");
+    // 7. The upsert storm: a live run's burst - every tick upserts the
+    // same ids, the store merges in place, and the pair set is part of the
+    // merged block - it never grows per frame.
+    phase("battery: the upsert storm");
+    tuiThreadClear(h.handle.get());
+    runStart(h, "storm the store");
+    const std::int64_t stormTurn = g_liveTurnId;
+    toolBlock(h, stormTurn, "storm-call", TuiBlockStatus_Pending, "grep", "the storm args",
+              {{"status", "running"}});
+    const std::uint64_t stormVersion = h.core->chat.typedTurns.version();
+    for (int tick = 0; tick < 200; ++tick)
+        updateStream(h, "storm tick " + std::to_string(tick));
+    h.idle(2);
+    check(h.core->chat.typedTurns.blockCount(stormTurn) == 3,
+          "battery 7: the storm merges into its three blocks, never a slot per frame");
+    const tui::store::TypedBlock* streamed =
+        findBlock(h.core->chat.typedTurns, stormTurn, "content#0");
+    check(streamed != nullptr && streamed->body == "storm tick 199",
+          "battery 7: the streamed tick's last write wins");
+    const tui::store::TypedBlock* stormed =
+        findBlock(h.core->chat.typedTurns, stormTurn, "storm-call");
+    check(stormed != nullptr && stormed->resultPairs.size() == 1 &&
+              stormed->resultPairs[0].first == "status" &&
+              stormed->resultPairs[0].second == "running",
+          "battery 7: the pair set is part of the merged block");
+    check(h.core->chat.typedTurns.version() - stormVersion == 200,
+          "battery 7: one version bump per mutating call - no per-frame rescan");
+    // The call's own pair-less re-emit (the args re-walk) merges the payload
+    // and keeps what the slot already holds.
+    toolBlock(h, stormTurn, "storm-call", TuiBlockStatus_Ok, "grep", "the storm args");
+    h.idle(1);
+    const tui::store::TypedBlock* reEmitted =
+        findBlock(h.core->chat.typedTurns, stormTurn, "storm-call");
+    check(reEmitted != nullptr && reEmitted->status == TuiBlockStatus_Ok &&
+              reEmitted->resultPairs.size() == 1 && reEmitted->resultPairs[0].second == "running",
+          "battery 7: the call's pair-less re-emit keeps the pair set");
+
+    // 8. The unknown-callId result: the result upsert records the pair
+    // set under its callId, then the call lands and merges - the pair set
+    // rides the same upsert, and the merged step renders it.
+    phase("battery: the unknown-callId result");
+    toolBlock(h, stormTurn, "late-call", TuiBlockStatus_Ok, "write_file", "the late result",
+              {{"path", "t.log"}, {"status", "ok"}}, "{\"path\":\"t.log\",\"status\":\"ok\"}");
+    const tui::store::TypedBlock* landed =
+        findBlock(h.core->chat.typedTurns, stormTurn, "late-call");
+    check(landed != nullptr && landed->resultPairs.size() == 2 &&
+              landed->resultPairs[0].first == "path",
+          "battery 8: the result upsert records the pair set under its callId");
+    toolBlock(h, stormTurn, "late-call", TuiBlockStatus_Ok, "write_file", "{\"path\":\"t.log\"}");
+    const tui::store::TypedBlock* mergedCall =
+        findBlock(h.core->chat.typedTurns, stormTurn, "late-call");
+    check(mergedCall != nullptr && mergedCall->body == "{\"path\":\"t.log\"}" &&
+              mergedCall->resultPairs.size() == 2,
+          "battery 8: the call's upsert merges and the pair set rides along");
+    h.core->ui.prefs.threadMinimal = false;
+    h.idle(2);
+    check(h.last.hasText("RESULT path = t.log"), "battery 8: the merged pair set renders");
+
+    // 9. The busy-edge battery: the composer reacts to the real ready
+    // crossing - Stop while the run is in flight, Send once it ends. The
+    // per-entry-point firing is pinned by the D-side bracket tests.
+    phase("battery: the busy-edge matrix");
+    const char* entryPoints[] = {"the main query", "the compression run", "the /plan pipeline",
+                                 "the /code pipeline", "the one-shot run"};
+    for (const char* entry : entryPoints) {
+        tuiReadyStatus(h.handle.get(), 0);
+        h.idle(1);
+        check(!h.core->readyStatus,
+              std::string("battery 9 [") + entry + "]: the busy crossing cleared the ready flag");
+        if (h.text())
+            check(h.last.hasText("Stop"), std::string("battery 9 [") + entry +
+                                              "]: the composer is Stop while the run is in flight");
+        tuiReadyStatus(h.handle.get(), 1);
+        h.idle(1);
+        check(h.core->readyStatus,
+              std::string("battery 9 [") + entry + "]: the ready crossing restored the flag");
+        if (h.text())
+            check(h.last.hasText("Send"), std::string("battery 9 [") + entry +
+                                              "]: the composer is back to Send once the run ends");
+    }
 
     harnessShutdownText(h);
     // Leave the shared display size as the harness expects it.

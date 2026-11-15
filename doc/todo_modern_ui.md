@@ -287,7 +287,7 @@ it produced, what it cost, and what it still needs from you.
 │ / Search…             │ YOU · 09:41                           │ CONTEXT                │
 │                       │ what would a modern UI look like?     │ 42k / 128k             │
 │ PINNED                │                                       │ ▓▓▓▓▓▓░░░░             │
-│  ● Plan: …            │ ✓ 12.4s · 6 tools · 1 file · 3 sources│ compact at 115k        │
+│  ● Plan: …            │ WORK - 6 steps · 12.4s                │ compact at 115k        │
 │ TODAY                 │ ┌ WORK ────────────────────────┐      │                        │
 │  Fix parser           │ │ ✓ read_file   tui_chat.cpp   │      │ TOOLS          6       │
 │  RAG redesign         │ │ ✓ executeCommand  dub test   │      │ read_file     ×3       │
@@ -322,11 +322,11 @@ it produced, what it cost, and what it still needs from you.
 │ SESSIONS                 │ ASK  09:41                                         │ CONTEXT                    │
 │ / search…                │ what would a modern UI look like?                  │ 42k / 128k                 │
 │ ▸ Fix the parser         │                                                    │ ██████░░░░                 │
-│ ▸ RAG redesign           │ ✓ 12.4s · 6 tools · 1 file · 3 sources             │ compact at 115k            │
-│ ● Plan: modern UI        │ ▾ WORK                                             │                            │
-│ ▸ Windows build          │   ✓ read_file       tui_chat.cpp    240ms          │ TOOLS          6           │
-│ ──────────────────────── │   ✓ executeCommand  dub test       9.1s            │ read_file     ×3           │
-│ PINNED                   │   ✓ writeFile       docs/ui.md       12ms          │ executeCommand ×1          │
+│ ▸ RAG redesign           │                                                    │ compact at 115k            │
+│ ● Plan: modern UI        │ ▾ WORK - 6 steps · 12.4s                           │                            │
+│ ▸ Windows build          │   TOOL  read_file       tui_chat.cpp    240ms      │ TOOLS          6           │
+│ ──────────────────────── │   TOOL  executeCommand  dub test       9.1s        │ read_file     ×3           │
+│ PINNED                   │   TOOL  writeFile       docs/ui.md       12ms      │ executeCommand ×1          │
 │ ▸ Memory tiers           │                                                    │ writeFile     ×1           │
 │ TODAY                    │ ANSWER                                             │                            │
 │ ▸ MCP server docs        │ The shell is three regions: a rail                 │ SOURCES        3           │
@@ -617,9 +617,9 @@ as colour cartoons in the GUI's text font).
 | Meaning | Unicode | ASCII | Used in |
 |---|---|---|---|
 | Collapsed / expand | `▸` `▾` | `>` `v` | Disclosures, tree rows |
-| Success | `✓` | `+` | Tool card, run ribbon |
-| Error | `✕` | `x` | Tool card, error card |
-| Running | `◐ ◓ ◑ ◒` | bar, slash, dash, backslash | Now bar, tool card, session dot |
+| Success | `✓` | `+` | Toast, mission strip |
+| Error | `✕` | `x` | Toast, severity mark |
+| Running | `◐ ◓ ◑ ◒` | bar, slash, dash, backslash | Now bar, lane rows, session dot |
 | Tool | `◆` | `*` | Block label, inspector tab |
 | File | `▤` | `=` | Diff/file cards, sources |
 | Terminal | `▶` | `>` | Command cards |
@@ -727,10 +727,10 @@ The thread is a list of turns. A turn is the unit of rendering, paging and navig
 ▌ YOU   09:41
   what would a modern UI look like?
 
-  ✓ 12.4s · 6 tools · 1 file · 3 sources          ← Run ribbon
-  ▾ WORK                                           ← collapsed by default when done
-    ✓ read_file       tui_chat.cpp      240 ms
-    ✓ executeCommand  dub test          9.1 s
+  WORK - 6 steps · 12.4s                           ← Run ribbon
+  ▾ WORK                                           ← a maximal batch draws open (F5); a click pins it closed
+    TOOL  read_file       tui_chat.cpp      240 ms
+    TOOL  executeCommand  dub test          9.1 s
   ANSWER
   The shell is three regions…
 
@@ -771,20 +771,28 @@ Tool call and tool result are **one card**, not two chat messages.
 
 ```
 ┌ WORK ────────────────────────────────────────────────── 3 tools ─┐
-│ ✓ read_file          tui_chat.cpp                240 ms      │
-│ ✓ executeCommand     dub test                    9.1 s       │
-│ ✕ writeFile          docs/ui.md                  12 ms       │
-│   └ permission denied: workarea is read-only      [retry]    │
+│ TOOL  read_file       tui_chat.cpp                    240 ms     │
+│ TOOL  executeCommand  dub test                        9.1 s      │
+│ TOOL  writeFile  FAIL docs/ui.md                      12 ms      │
+│   └ permission denied: workarea is read-only    [retry]          │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Tool card anatomy:** status glyph · tool name (medium) · primary argument (one line,
-monospace) · duration (right) · result summary (second line, dim) · actions (hover/focus:
-copy, open in canvas, retry on error).
+**Tool card anatomy:** the `TOOL  <tool name>` header (medium ink; `· <duration>`
+once the result lands — nothing while it streams, never a placeholder) · the
+args body verbatim (monospace) · the dim `RESULT` lines while the card is open
+(`<key> = <value>` per pair, the one-line fallback, `... K more` when the sender
+capped the pair set) · actions (hover/focus: copy, open in canvas, retry on
+error). The status is the header's word, never a glyph in the body, and the
+header carries no token counts.
 
-- Running: spinner + the current phase if known (`connecting`, `streaming`, `waiting`).
-- Success: `✓` + `state.ok` glyph only; no green background.
-- Error: `✕` + `state.danger` glyph + message + `[retry]`; the card stays expanded.
+- Running: the card is open on the args body; the header is `TOOL  <name>` with
+  no duration yet.
+- Success: the result lands and the header grows `· <duration>` (exactly when
+  `durationMs != 0`).
+- Error: a red `FAIL` word with its own ink in the row, never in the header
+  text; the message and `[retry]` stay; the card stays expanded.
+- Cancelled: header-only — a cancelled card carries no pairs and no raw.
 - Long results: collapsed to 3 lines with `show all (n lines)`; full text in the canvas.
 - `writeFile` / edit tools with a diff: show `+42 −7` and a one-line snippet; opening
   shows the diff card.
@@ -793,8 +801,9 @@ copy, open in canvas, retry on error).
 - Args are rendered from JSON (`StreamToolCall.arguments`) as `key=value` chips when short,
   or a `json` code block when long — never `toPrettyString` glued into prose.
 - TUI: the card is a bordered block only when expanded; collapsed cards are single rows
-  (`✓ read_file  tui_chat.cpp  240ms`). Borders are 1-cell `┌─┐` when expanded, because a
-  full card per tool would cost too many rows.
+  (`TOOL  read_file  tui_chat.cpp - 240 ms`). Borders are 1-cell `┌─┐` when expanded, because a
+  full card per tool would cost too many rows. The `RESULT` lines draw only while the
+  card is open, so closing the card closes the result with it.
 
 ### 5.7 Reasoning disclosure
 
@@ -882,8 +891,14 @@ implementation; it is not a rich_md option.
   stop following and show a `Jump to latest ↓` pill (GUI) / a `↓ latest` hint in the now
   bar (TUI). `End` returns. (Follow flag: task 13a; pill and hint: tasks 25/28.)
 - The composer's Send button morphs into **Stop** (a quiet `accent.quiet` fill with
-  `state.danger` text — not a red flood). `Esc` cancels. A cancelled turn keeps its
-  partial answer with a `cancelled` marker — work is never silently discarded.
+  `state.danger` text — not a red flood). The flip is the real edge: Send becomes
+  Stop when a run starts and back when it ends, driven by D's
+  `agentBusy`/`agentReady` crossing (a nesting counter keeps the flag across
+  nested brackets), so **every entry point flips it** — the main query, a
+  compression, `/plan`, `/code` and the one-shot runs. `Esc` asks the run in
+  flight to stop, and the stop targets the run regardless of the session shown.
+  A cancelled turn keeps its partial answer with a `cancelled` marker — work is
+  never silently discarded.
 - First-token latency: after 300 ms show `Thinking…` with a spinner; after 2 s add
   `still waiting on the model` and the model name. No fake progress bars.
 
@@ -1669,120 +1684,9 @@ search all become functions of fields instead of string archaeology.
 
 ### 8.2 The model (C ABI, v5)
 
-```c
-typedef enum TuiBlockKind {
-    TuiBlockKind_Prose     = 0,  // markdown body
-    TuiBlockKind_Reasoning = 1,  // thinking, collapsed
-    TuiBlockKind_Tool      = 2,  // call + result merged by callId
-    TuiBlockKind_Code      = 3,
-    TuiBlockKind_Diff      = 4,
-    TuiBlockKind_Error     = 5,
-    TuiBlockKind_Notice    = 6,
-    TuiBlockKind_Ask       = 7,  // agent -> user question
-    TuiBlockKind_Approval  = 8,  // permission request
-    TuiBlockKind_Table     = 9,  // GFM table source; TUI text grid, GUI native
+user: I removed unnecessary details in this chapter that are readable from the code.
 
-typedef enum TuiBlockStatus {
-    TuiBlockStatus_Pending = 0, TuiBlockStatus_Running = 1, TuiBlockStatus_Ok = 2,
-    TuiBlockStatus_Error = 3, TuiBlockStatus_Cancelled = 4,
-} TuiBlockStatus;
 
-typedef enum TuiRunState {
-    TuiRunState_Queued = 0, TuiRunState_Running = 1, TuiRunState_WaitingUser = 2,
-    TuiRunState_Done = 3, TuiRunState_Failed = 4, TuiRunState_Cancelled = 5,
-} TuiRunState;
-
-typedef struct TuiBlock {
-    TuiBlockKind   kind;
-    TuiBlockStatus status;
-    uint32_t       flags;        // TuiBlockFlag_DefaultOpen | _Collapsible | _Selectable
-    String         id;           // stable within the turn (tool callId, "answer", ...)
-    String         title;        // "read_file", "ANSWER", "Thinking"
-    String         meta;         // one-line summary / primary argument
-    String         body;         // markdown, diff, output (owned copy)
-    String         artifactId;   // canvas handle (path or blob id), optional
-    int64_t        startedAtMs;  // epoch ms, 0 = unknown
-    int64_t        durationMs;   // -1 = unknown
-    int64_t        tokensIn, tokensOut;
-} TuiBlock;
-
-typedef struct TuiTurn {
-    String        id;            // stable turn id
-    uint64_t      ordinal;       // 1-based display ordinal (#12)
-    TuiRunState   state;
-    int64_t       createdAtMs;
-    int64_t       durationMs;
-    String        title;         // first user line, for the rail/minimap
-    String        model;
-    int64_t       contextUsed, contextMax;
-    int64_t       tokensIn, tokensOut;
-    TuiBlock*     blocks;
-    size_t        blockCount;
-} TuiTurn;
-
-typedef struct TuiRuntimeStatus {
-    int32_t  phase;              // idle|thinking|tooling|writing|waiting|error
-    String   detail;             // current tool / model, one line
-    int64_t  contextUsed, contextMax;
-    int64_t  compactAt;
-    double   tokensPerSecond;
-    int64_t  elapsedMs;
-    int32_t  pendingQuestions;
-} TuiRuntimeStatus;
-
-typedef struct TuiSessionInfo {
-    String  id, title, preview, model;
-    int64_t createdAtMs, updatedAtMs; // D converts SessionMeta's unix seconds
-    int64_t messageCount;
-    int32_t flags;               // active | running | unread | pinned
-} TuiSessionInfo;
-
-typedef struct TuiCommandInfo {
-    String  name, aliases, usage, description; // aliases comma-separated
-    int32_t argMode, group;
-} TuiCommandInfo;
-
-typedef enum TuiLogLevel {
-    TuiLogLevel_Trace = 0, TuiLogLevel_Debug = 1, TuiLogLevel_Info = 2,
-    TuiLogLevel_Warn = 3, TuiLogLevel_Error = 4,
-} TuiLogLevel;
-
-typedef struct TuiLogRecord {
-    int64_t     timestampMs;
-    TuiLogLevel level;
-    String      module;      // LogEntry.moduleName
-    String      file;        // LogEntry.file
-    String      function;    // funcName
-    int32_t     line;        // source line
-    String      message;     // unformatted message
-} TuiLogRecord;
-```
-
-Functions (all additive; v4 stays):
-
-```c
-// Bulk snapshot on session switch / replay (one copy, not N events).
-void tuiSetTurns(TuiState*, const TuiTurn* turns, size_t count);
-// Live updates: idempotent, keyed by id; bodies are copied.
-void tuiTurnUpsert(TuiState*, const TuiTurn* turn);
-void tuiBlockUpsert(TuiState*, String turnId, const TuiBlock* block);
-void tuiTurnRemove(TuiState*, String turnId);
-void tuiThreadClear(TuiState*);
-
-void tuiSetRuntimeStatus(TuiState*, const TuiRuntimeStatus*);
-
-void tuiSetSessions(TuiState*, const TuiSessionInfo* items, size_t count);
-void tuiSetCommands(TuiState*, const TuiCommandInfo* items, size_t count);
-void tuiLogAppend(TuiState*, const TuiLogRecord*); // structured; UI splits Activity/Raw
-
-// Inspector snapshots (optional; each may be absent).
-void tuiSetSources(TuiState*, String turnId, const TuiSource* items, size_t count);
-void tuiSetMemoryPeek(TuiState*, String turnId, const TuiMemoryItem* items, size_t count);
-void tuiSetAgents(TuiState*, const TuiAgentInfo* items, size_t count);
-
-// UI -> D actions (one queue, typed).
-int  tuiPollAction(TuiState*, TuiUiAction* out); // 1 = got one; caller frees strings
-```
 
 Design notes:
 
@@ -1797,7 +1701,8 @@ Design notes:
   traffic.
 - **Numbers, not formatted strings.** `contextUsed/Max`, `tokensPerSecond`, `durationMs`,
   `tokensIn/Out` are fields. The UI formats them (`38.1 tok/s`, `12.4 s`, `42k/128k`).
-- **No pre-baked emoji or prefixes.** Success is `TuiBlockStatus_Ok`, rendered as `✓`.
+- **No pre-baked emoji or prefixes.** Success is `TuiBlockStatus_Ok` — the
+  status is the block header's word, never a glyph in the body.
 - **Logs are records, not strings.** `TuiLogger` currently formats
   `"%s - %s: %s [%s:%d]"` (`llm/tui/package.d`); v5 forwards the `LogEntry` fields
   (`logLevel`, `msg`, `moduleName`, `funcName`, `file`, `line`, `timestamp`) as
@@ -1832,28 +1737,7 @@ reported by this build" rather than fabricating it. Honesty beats a pretty empty
 
 ### 8.4 UI -> D actions
 
-```c
-typedef enum TuiUiActionType {
-    TuiUiAction_None = 0,
-    TuiUiAction_Submit,          // text = query
-    TuiUiAction_CancelRun,       // id = turn id (empty = current)
-    TuiUiAction_RetryTurn,       // id = turn id
-    TuiUiAction_AnswerQuestion,  // id = question id, text/index = answer
-    TuiUiAction_Approval,        // id = request id, index = allow/always/deny
-    TuiUiAction_SessionSelect, TuiUiAction_SessionNew, TuiUiAction_SessionRename,
-    TuiUiAction_SessionDelete, TuiUiAction_SessionPin,
-    TuiUiAction_Command,         // text = slash command line
-    TuiUiAction_OpenArtifact,    // text = artifact id (local file: handled in UI; blob: D)
-    TuiUiAction_SetModel, TuiUiAction_SetTheme,
-} TuiUiActionType;
-
-typedef struct TuiUiAction {
-    TuiUiActionType type;
-    String id;
-    String text;
-    int32_t index;
-} TuiUiAction;
-```
+user: I removed unnecessary details from the document that are available in the source code.
 
 The D actor polls at most one action per frame (as today with `pollSessionAction`),
 forwards it to the agent thread, and the agent thread executes it through the same
@@ -2388,7 +2272,11 @@ canvas (keep tool detail inline), Parchment. What never to cut from the MVP: any
 These are the decisions the implementation plan follows.
 
 1. **Pinning sessions:** persisted in `state.json` (`pinnedChatSessions`) and the row menu / `p` rail key toggle it.
-2. **Message ordinals:** show `#12` dim in the turn meta only; never in the header.
+2. **Message ordinals:** dropped. The v6 cutover removed the 1-based display
+   ordinal — the number had to be recomputed at send time, at replay time and
+   on every instance that loaded the file, and the typed turn already carries
+   the stable persisted `turnId`. The header and the turn meta carry no
+   number.
 3. **Ctrl+C:** change to copy/cancel and move quit to `Ctrl+Q`, with a one-time hint.
    This is post-MVP; the TUI form needs raw mode (§8.12). The MVP keeps Ctrl+C quit.
 4. **Session titles:** derive from the first user message, as today. An agent-proposed

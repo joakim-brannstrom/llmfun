@@ -1,11 +1,3 @@
-/// The thread region (views/thread.h owns the contract).
-///
-/// What this file does *not* do: draw a message. It asks the v4 adapter how many
-/// groups there are, which one sits where and how tall it expects to be, and then
-/// hands each visible group back to the adapter to draw in the current window's
-/// flow. The adapter is the only v4-aware code here (D-ADAPTER); the renderer it
-/// used to feed is gone (task 41), so what it owns now is the store walk and the
-/// block model.
 #include "views/thread.h"
 
 #include "views/blocks.h"
