@@ -527,8 +527,8 @@ void checkThrottle() {
           "300 ticks merge into one rebuild of the group (got " +
               std::to_string(fast.state.threadAdapter.groupBuilds() - buildsBefore) + ")");
     const size_t group = fast.streamGroupIndex();
-    check(fast.state.threadAdapter.blockCount(group) == 3,
-          "the storm still leaves the turn one query and one content block (got " +
+    check(fast.state.threadAdapter.blockCount(group) == 2,
+          "the storm still leaves the turn its header and one content block (got " +
               std::to_string(fast.state.threadAdapter.blockCount(group)) + ")");
     check(grid.contains("chunk 300"), "the drawn body is the newest tick");
 
@@ -670,22 +670,22 @@ void checkHeader() {
     phase("header");
     Fixture fixture;
     fixture.stream("", "Let me think", kT0);
-    check(headerOf(fixture, 3) == "Thinking  Let me think",
+    check(headerOf(fixture, 2) == "Thinking  Let me think",
           "a reasoning row's header carries its preview while it streams (got '" +
-              headerOf(fixture, 3) + "')");
+              headerOf(fixture, 2) + "')");
     check(headerOf(fixture, 0) == "WORK - 1 step",
           "and the live turn's header is the work group's (got '" + headerOf(fixture, 0) + "')");
 
     // The answer's text arrives: the reasoning row holds still (D stamps the duration
     // at completion), and seconds passing move nothing.
     fixture.stream("The answer", "Let me think", kT0 + 12000);
-    check(headerOf(fixture, 3) == "Thinking  Let me think",
-          "the reasoning row holds still while the answer streams (got '" + headerOf(fixture, 3) +
+    check(headerOf(fixture, 2) == "Thinking  Let me think",
+          "the reasoning row holds still while the answer streams (got '" + headerOf(fixture, 2) +
               "')");
     fixture.tick(kT0 + 13000);
     fixture.tick(kT0 + 14000);
     fixture.tick(kT0 + 15000);
-    check(headerOf(fixture, 3) == "Thinking  Let me think",
+    check(headerOf(fixture, 2) == "Thinking  Let me think",
           "and holds still across three seconds of ticking (flicker-free)");
 
     // A stop closes the turn; the group is stored (the thread's only group) and keeps
@@ -695,9 +695,9 @@ void checkHeader() {
     check(fixture.state.threadAdapter.blockAt(group, 0).label == "WORK",
           "the stored turn keeps its work header (got '" +
               fixture.state.threadAdapter.blockAt(group, 0).label + "')");
-    check(fixture.state.threadAdapter.blockAt(group, 3).label == "Thinking",
+    check(fixture.state.threadAdapter.blockAt(group, 2).label == "Thinking",
           "and the reasoning row's header, still unstamped (got '" +
-              fixture.state.threadAdapter.blockAt(group, 3).label + "')");
+              fixture.state.threadAdapter.blockAt(group, 2).label + "')");
 
     // The header is the block's, so a completed block keeps its own shape: the Answer
     // block D stamps at completion prints its duration.
@@ -705,7 +705,7 @@ void checkHeader() {
     stored.seed.upsertTurn(1, TuiTurnState_Done, 1);
     stored.seed.upsertBlock(1, "answer", "1#0", TuiBlockKind_Answer, TuiBlockStatus_None, nullptr,
                             "done", nullptr, 2500);
-    const model::BlockDesc desc = stored.state.threadAdapter.blockAt(0, 1);
+    const model::BlockDesc desc = stored.state.threadAdapter.blockAt(0, store::kAnswerRow);
     check(views::blockHeaderText(desc, views::BlockDraw{true, false}, true) == "ANSWER - 2.5 s",
           "a stamped answer block's header is its duration (got '" +
               views::blockHeaderText(desc, views::BlockDraw{true, false}, true) + "')");
@@ -713,7 +713,7 @@ void checkHeader() {
     // A stamped reasoning keeps its duration too.
     stored.seed.upsertBlock(1, "reasoning#0", "1#0", TuiBlockKind_Reasoning, TuiBlockStatus_None,
                             nullptr, "the reasoning", nullptr, 2500);
-    const model::BlockDesc reasoning = stored.state.threadAdapter.blockAt(0, 2);
+    const model::BlockDesc reasoning = stored.state.threadAdapter.blockAt(0, 1);
     check(reasoning.kind == model::BlockKind::Thinking, "a turn's reasoning is its own block");
     check(views::blockHeaderText(reasoning, views::BlockDraw{true, false}, true) ==
               "Thinking - 2.5 s",

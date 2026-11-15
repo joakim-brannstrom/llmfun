@@ -462,8 +462,8 @@ SessionEntry mkSession(const char* id, const char* title, const char* preview, i
 
 void seedThread() {
     // The typed store is the thread now: a clear wipes the turns, then one turn
-    // carries the query and the answer the copy row reads. The query row's
-    // `[1]` ordinal prefix is the projection's (D11).
+    // carries the query and the answer the copy row reads. The query row renders
+    // with no number prefix.
     tuiClearOutput(g_state);
     typed_seed::Seeder seed{&g_state};
     seed.add(typed_seed::Seeder::Msg::User, "show me the palette");
@@ -1397,8 +1397,11 @@ void scenarioCopyBlock() {
     resetClean();
     g_state.readyStatus = false;
     // The typed stream: a live turn whose content block is the answer being
-    // written (the store merges the per-tick upserts in place).
-    typed_seed::Seeder stream{&g_state};
+    // written (the store merges the per-tick upserts in place). The live turn is
+    // a NEW id - `resetClean` reseeds turn 1 with a stamped answer, and a run
+    // never merges into a turn a previous seed made (ids are never reused,
+    // D-GROUPID; the same rule `startStream` follows).
+    typed_seed::Seeder stream{&g_state, 10000};
     stream.runStart("q");
     stream.updateStream("partial answer");
     idle(2);

@@ -41,7 +41,7 @@ void TypedThreadStore::setTurns(std::vector<TypedTurn> turns, std::vector<TypedB
             // an implicit empty turn (same rule as blockUpsert) instead of
             // silently dropping it.
             turnIndex_.emplace(block.turnId, turns_.size());
-            turns_.push_back(TypedTurn{block.turnId, 0, 0, 0});
+            turns_.push_back(TypedTurn{block.turnId, 0, 0});
             blocks_.emplace_back();
             blockIndex_.emplace_back();
         }
@@ -76,7 +76,7 @@ void TypedThreadStore::blockUpsert(TypedBlock block) {
         // can beat its turn's snapshot): an implicit empty turn slot keeps the
         // block addressable until the real turn merges into the slot.
         turnIndex_.emplace(block.turnId, turns_.size());
-        turns_.push_back(TypedTurn{block.turnId, 0, 0, 0});
+        turns_.push_back(TypedTurn{block.turnId, 0, 0});
         blocks_.emplace_back();
         blockIndex_.emplace_back();
     }

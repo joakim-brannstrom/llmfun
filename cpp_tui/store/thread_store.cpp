@@ -206,7 +206,6 @@ void ThreadStoreAdapter::syncTyped() const {
         entry.view.kind = GroupKind::AssistantWork;
         entry.view.revision = typedRevision_[turn.id];
         entry.view.typedTurn = true;
-        entry.view.ordinal = turn.ordinal;
         const int steps = stepCount(typed, turn.id);
         entry.view.oneLineSummary = "WORK";
         entry.view.oneLineSummary.append(roleSeparator());
@@ -317,7 +316,19 @@ void ThreadStoreAdapter::syncTyped() const {
             }
             row.code =
                 row.kind != model::BlockKind::ToolStep && !ui::fencedCodeOf(block.body).empty();
-            entry.blocks.push_back(row);
+            // The query and the answer project as turn-level rows outside
+            // the group - the query draws above the header, the answer after it;
+            // the group's row list carries only work rows. The store is untouched - this is
+            // projection only.
+            if (row.kind == model::BlockKind::User) {
+                entry.queryRow = std::move(row);
+                entry.hasQuery = true;
+            } else if (row.kind == model::BlockKind::Answer) {
+                entry.answerRow = std::move(row);
+                entry.hasAnswer = true;
+            } else {
+                entry.blocks.push_back(std::move(row));
+            }
         }
         // The batch's thinking meta (F5): the disclosure names its response's
         // tool count - "Thinking · N tool calls" - counted over the Tool rows
@@ -334,6 +345,7 @@ void ThreadStoreAdapter::syncTyped() const {
         // A rough estimate only: one line per row the group draws. The hint is
         // replaced by the drawn height after the first draw, exactly like v4's.
         entry.view.lineCountEstimate = std::max(1, static_cast<int>(entry.blocks.size()));
+        entry.view.hasAnswer = entry.hasAnswer; // the copy-row stamp reads this
         groups.push_back(std::move(entry));
     }
 
@@ -540,7 +552,13 @@ bool ThreadStoreAdapter::blockHasTable(size_t k, std::size_t b) const {
 const ThreadStoreAdapter::BlockEntry* ThreadStoreAdapter::blockEntryAt(size_t k,
                                                                        std::size_t b) const {
     sync();
-    if (k >= groups_.size() || b >= groups_[k].blocks.size())
+    if (k >= groups_.size())
+        return nullptr;
+    if (b == kQueryRow)
+        return groups_[k].hasQuery ? &groups_[k].queryRow : nullptr;
+    if (b == kAnswerRow)
+        return groups_[k].hasAnswer ? &groups_[k].answerRow : nullptr;
+    if (b >= groups_[k].blocks.size())
         return nullptr;
     return &groups_[k].blocks[b];
 }
@@ -600,14 +618,9 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
     if (block->code)
         out.kind = model::BlockKind::Code; // classified at build, like v4
     // Every row previews something: a tool card its tool name (set in the
-    // switch), every other row its body's first line. The query row carries
-    // the turn's ordinal (D11): the number the v4 summary put on every
-    // message renders once, on the row that opened the turn.
-    if (block->kind != model::BlockKind::ToolStep) {
+    // switch), every other row its body's first line.
+    if (block->kind != model::BlockKind::ToolStep)
         out.summary = oneLine(block->typedBody);
-        if (block->typedQuery && entry.view.ordinal > 0)
-            out.summary = "[" + std::to_string(entry.view.ordinal) + "] " + out.summary;
-    }
     out.hasBody = !block->typedBody.empty();
     return out;
 }
@@ -711,14 +724,10 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
     const bool hasResult = block->kind == model::BlockKind::ToolStep && !block->typedMeta.empty();
     if (body.empty() && !hasResult)
         return;
-    // The turn's ordinal (D5): the number the v4 summary put on every message
-    // renders ONCE, on the row that opened the turn. The query row draws open
-    // (minimal keeps its content rows out of the fold), so the drawn body carries
-    // it - the collapsed summary line is the same body's first line, and a row
-    // draws one of the two, never both.
-    const std::string drawn = block->typedQuery && entry.view.ordinal > 0
-                                  ? "[" + std::to_string(entry.view.ordinal) + "] " + body
-                                  : body;
+    // The drawn body: the body's text verbatim. The query row draws open (the
+    // fold keeps the turn's content rows), so the drawn body is the same text
+    // the collapsed summary previews - a row draws one of the two, never both.
+    const std::string drawn = body;
     // The table bridge is applied by `renderBodyText()` - the one place
     // a markdown body is drawn - and the block's own `s` toggle is what it needs from here: the
     // source flag names the block by its stable id, so a redraw after a paging change or a

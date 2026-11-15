@@ -26,7 +26,7 @@ extern "C" {
 /* TUI_API_VERSION - API generation marker. Documentation only: no runtime
  * behavior depends on it.
  */
-#define TUI_API_VERSION 13
+#define TUI_API_VERSION 14
 
 /* String — Plain old data struct representing a string slice.
  * Ownership rules:
@@ -652,11 +652,9 @@ typedef enum TuiBlockFlags {
     TuiBlockFlag_Selectable = 4
 } TuiBlockFlags;
 
-/* id = persisted turnId (0 = unstamped); ordinal = 1-based display position
- * among displayed turns, D-assigned; messageCount informational. */
+/* id = persisted turnId (0 = unstamped); state; messageCount informational. */
 typedef struct TuiTurn {
     int64_t id;
-    int32_t ordinal;
     int32_t state;
     int32_t messageCount;
     int32_t reserved;

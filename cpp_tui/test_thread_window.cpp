@@ -205,11 +205,14 @@ int main(int argc, char** argv) {
         const size_t oldest = thread.groupAt(0).id;
         check(thread.groupAt(0).kind == tui::store::GroupKind::AssistantWork,
               "adapter: every stored turn reports a work group (the typed shape)");
-        check(thread.blockCount(0) == 3, "adapter: a turn is its header, its query and its answer");
-        check(thread.blockAt(0, 1).kind == llmfun::tui::model::BlockKind::User,
-              "adapter: the turn's first prose block is its query");
-        check(thread.blockAt(0, 2).kind == llmfun::tui::model::BlockKind::Answer,
-              "adapter: ...and its last is the run's result");
+        check(thread.blockCount(0) == 1, "adapter: a turn with no work rows is its header alone");
+        check(thread.blockAt(0, 0).kind == llmfun::tui::model::BlockKind::WorkGroup,
+              "adapter: the group's one row is its header");
+        check(thread.blockAt(0, tui::store::kQueryRow).kind == llmfun::tui::model::BlockKind::User,
+              "adapter: the query surfaces through the turn-level sentinel");
+        check(thread.blockAt(0, tui::store::kAnswerRow).kind ==
+                  llmfun::tui::model::BlockKind::Answer,
+              "adapter: ...and the answer through its own");
         // The typed fold is one flag per turn and nothing else: every turn is
         // born folded, the answer included (the minimal mode's chips line is the
         // fold's face, never a hidden body).

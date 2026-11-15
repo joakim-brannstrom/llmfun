@@ -27,7 +27,6 @@ class TypedThreadStore;
 
 struct TypedTurn {
     std::int64_t id = 0;
-    int ordinal = 0;
     int state = 0;
     int messageCount = 0;
 };
@@ -114,17 +113,15 @@ public:
                                                    // path carried
     // The mutation counter: bumped by every mutating path (setTurns, turnUpsert,
     // blockUpsert, turnRemove, threadClear, evictForCapacity). The adapter's
-    // rebuild guard compares it O(1) per accessor call (design §4.4's
-    // incremental enumeration - the v4 guard's store-shape key serves the same
-    // job on the message store), so an unchanged store rebuilds nothing.
+    // rebuild guard compares it O(1) per accessor call, so an unchanged store rebuilds nothing.
     std::uint64_t version() const { return version_; }
 
 private:
     // Turns in insertion order, blocks per turn in insertion order, both with
     // O(1) indices. An upsert looks the slot up and overwrites it; nothing
-    // walks the vectors (design §7). A block upsert for a turn that does not
-    // exist yet creates an implicit empty turn slot (id = turnId, ordinal 0)
-    // so a result for an unknown callId is recorded, never dropped (§7);
+    // walks the vectors. A block upsert for a turn that does not
+    // exist yet creates an implicit empty turn slot (id = turnId) so a result
+    // for an unknown callId is recorded, never dropped.
     // the real turn's upsert merges into that slot.
     std::vector<TypedTurn> turns_;
     std::vector<std::vector<TypedBlock>> blocks_;             // parallel to turns_

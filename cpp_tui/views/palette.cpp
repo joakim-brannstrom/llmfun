@@ -185,13 +185,28 @@ bool blockIsAnswerRole(const model::BlockDesc& block) {
 bool lastAnswerBlock(const TuiState& state, std::size_t& group, std::size_t& block) {
     const std::size_t groups = state.threadAdapter.groupCount();
     for (std::size_t k = groups; k > 0; --k) {
+        // The turn-level rows first: the ANSWER closes the turn (it is the
+        // group's last row), so newest-first scans it before the work rows. The
+        // query sentinel is a User row the role test skips - addressed so the
+        // walk covers every row the view draws, the way the turn owns them.
+        const std::size_t sentinels[] = {store::kAnswerRow, store::kQueryRow};
+        for (const std::size_t sentinel : sentinels) {
+            const model::BlockDesc desc = state.threadAdapter.blockAt(k - 1, sentinel);
+            if (!blockIsAnswerRole(desc))
+                continue;
+            // A row with no body is not copyable: the streamed row is the exception, because
+            // its body is the text being written (an empty stream is an answer still arriving).
+            if (desc.hasBody || desc.streaming) {
+                group = k - 1;
+                block = sentinel;
+                return true;
+            }
+        }
         const std::size_t blocks = state.threadAdapter.blockCount(k - 1);
         for (std::size_t b = blocks; b > 0; --b) {
             const model::BlockDesc desc = state.threadAdapter.blockAt(k - 1, b - 1);
             if (!blockIsAnswerRole(desc))
                 continue;
-            // A row with no body is not copyable: the streamed row is the exception, because
-            // its body is the text being written (an empty stream is an answer still arriving).
             if (desc.hasBody || desc.streaming) {
                 group = k - 1;
                 block = b - 1;
@@ -209,19 +224,22 @@ bool hasAnswerToCopy(const TuiState& state) {
     return lastAnswerBlock(state, group, block);
 }
 
-/// A cheap stamp of the thread's *shape*: the group count, the newest group's id and its block
-/// count. `groupAt()` and `blockCount()` are probes (no store walk, no block descriptors), which is
-/// what makes this affordable on the per-frame flag refresh.
+/// A cheap stamp of the thread's *shape*: the group count, the newest group's id, its block
+/// count and whether its Answer row exists. `groupAt()` and `blockCount()` are probes (no store
+/// walk, no block descriptors), which is what makes this affordable on the per-frame flag refresh.
 ///
 /// The id is in the stamp because an ended stream and its answer can leave both counts unchanged
 /// (one group replaces another, one block replaces one), and that transition is exactly when the
-/// answer appears.
+/// answer appears. The Answer flag is in the stamp for the same reason one level down: the
+/// query-first anatomy hangs the answer on the `kAnswerRow` sentinel, which moves no count at
+/// all - the flag is the only thing that moves when the answer arrives on a finished turn.
 std::size_t threadShape(const TuiState& state) {
     const std::size_t groups = state.threadAdapter.groupCount();
     std::size_t stamp = groups;
     if (groups > 0) {
         stamp = stamp * 1000003u + state.threadAdapter.groupAt(groups - 1).id;
         stamp = stamp * 1000003u + state.threadAdapter.blockCount(groups - 1);
+        stamp = stamp * 1000003u + (state.threadAdapter.groupAt(groups - 1).hasAnswer ? 1u : 0u);
     }
     return stamp;
 }

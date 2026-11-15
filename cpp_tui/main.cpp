@@ -227,7 +227,6 @@ int main(int argc, char** argv) {
         const std::string turn = std::to_string(turnId);
         TuiTurn t{};
         t.id = turnId;
-        t.ordinal = static_cast<std::int32_t>(turnId);
         t.state = TuiTurnState_Done;
         t.messageCount = 1;
         tuiTurnUpsert(state, &t);
@@ -380,7 +379,6 @@ int main(int argc, char** argv) {
                     submitTurnSeq++;
                     TuiTurn t{};
                     t.id = static_cast<std::int64_t>(seedMessages + 100 + submitTurnSeq);
-                    t.ordinal = static_cast<std::int32_t>(t.id);
                     t.state = TuiTurnState_Running;
                     tuiTurnUpsert(state, &t);
                     TuiBlock b{};

@@ -6,8 +6,8 @@
 /// One `Seeder` per test: `add()` appends a message to the newest turn (a
 /// `User` message opens one), `runStart`/`updateStream`/`runStop` drive a live
 /// run the way `emitTurnStartTyped`/the stream updater/`emitStopTyped` do, and
-/// `tool` hangs a merged tool card off the live batch. Every turn is 1-based
-/// ordinal = seed order, the display position D assigns on replay.
+/// `tool` hangs a merged tool card off the live batch. Turns order by seed
+/// order - the store's insertion order is the turn sequence.
 #pragma once
 
 #include "../tui_api.h"
@@ -43,7 +43,6 @@ struct Seeder {
     void upsertTurn(std::int64_t id, int state, int messageCount) {
         TuiTurn t{};
         t.id = id;
-        t.ordinal = static_cast<std::int32_t>(id);
         t.state = state;
         t.messageCount = messageCount;
         tuiTurnUpsert(&handle, &t);

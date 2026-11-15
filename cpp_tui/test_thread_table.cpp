@@ -264,11 +264,14 @@ void setup(tui::TuiState& state, const char* body, bool tool = false) {
 }
 
 /// The block the one seeded row is drawn as (its stable `BlockId`), so the `s` case
-/// can name the focus the way a click would instead of guessing ids. The typed
-/// group's block 0 is its own WORK header; the content row is block 1.
+/// can name the focus the way a click would instead of guessing ids. A tool card
+/// is the typed group's work row 1 (block 0 is the WORK header); an answer is the
+/// turn-level ANSWER row behind its sentinel.
 model::BlockId firstBlock(tui::TuiState& state) {
     const store::GroupView group = state.threadAdapter.groupAt(0);
-    const model::BlockDesc block = state.threadAdapter.blockAt(0, 1);
+    model::BlockDesc block = state.threadAdapter.blockAt(0, 1);
+    if (block.group == 0)
+        block = state.threadAdapter.blockAt(0, store::kAnswerRow);
     model::BlockId id = block.id();
     if (!id.valid())
         id.group = group.id;
@@ -634,7 +637,7 @@ void checkSourceToggleDeclines() {
             std::printf("--- indented table ---\n%s", grid.dump().c_str());
         check(grid.countCell(kTopLeft) == 0, "an indented table stays an indented code block");
         check(grid.contains("| read_file | 3 |"), "and its lines are drawn verbatim");
-        check(!state.threadAdapter.blockHasTable(0, 1),
+        check(!state.threadAdapter.blockHasTable(0, store::kAnswerRow),
               "`s` has nothing to offer on an indented code block either");
     }
 }
@@ -669,7 +672,8 @@ void checkNestedTable() {
     const model::BlockId id = firstBlock(state);
     check(id.valid(), "the nested table drew a block to focus");
     state.ui.thread.focus = id;
-    check(state.threadAdapter.blockHasTable(0, 1), "`s` is offered on the nested table");
+    check(state.threadAdapter.blockHasTable(0, store::kAnswerRow),
+          "`s` is offered on the nested table");
 
     // The composer holds the keyboard at startup: `Esc` is the chain's blur step.
     frame(state, [](ImGuiIO& io) { io.AddKeyEvent(ImGuiKey_Escape, true); });

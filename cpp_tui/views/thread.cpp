@@ -454,13 +454,6 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
     for (const std::size_t index : drawn) {
         const store::GroupView group = thread.groupAt(index);
         const bool groupMinimal = thread.groupMinimal(group.id);
-        const float headerScreenY = ImGui::GetCursorScreenPos().y;
-        headerRows.emplace_back(group.id, headerScreenY - ImGui::GetWindowPos().y);
-        if (ts.firstGroupId == 0 && headerScreenY >= clipMin.y &&
-            headerScreenY + m.row <= clipMax.y) {
-            ts.firstGroupId = group.id;
-            ts.firstGroupY = headerScreenY;
-        }
         // The cell is what the caller reserves for the group: its width is the content
         // width and its height the adapter's own expectation. The hint is a hint - the
         // group is drawn in full even when it is taller.
@@ -478,12 +471,24 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
         const std::size_t blocks = thread.blockCount(index);
         // The rows up front: the chips line draws between the header and the
         // rows, so the live steps must be known before the first row is drawn -
-        // and the loop below reads the prefetched rows instead of probing the
-        // adapter once per row.
+        // and the work loop below reads the prefetched rows instead of probing
+        // the adapter once per row.
+        //
+        // D1: the query opens the turn above the WORK header and the answer
+        // closes it after the group - both are turn-level rows, addressed
+        // through the sentinels; a turn without one answers an empty descriptor
+        // (group == 0) and draws nothing. F1: the WORK header renders only
+        // while the group has work rows - an empty group (the adapter's list
+        // always carries the header itself, so one entry) renders headerless
+        // and the turn's rows stand alone.
+        const model::BlockDesc queryRow = thread.blockAt(index, store::kQueryRow);
+        const model::BlockDesc answerRow = thread.blockAt(index, store::kAnswerRow);
+        const bool hasWorkRows = blocks >= 2;
         std::vector<model::BlockDesc> rows;
         rows.reserve(blocks);
-        for (std::size_t b = 0; b < blocks; ++b)
-            rows.push_back(thread.blockAt(index, b));
+        if (hasWorkRows)
+            for (std::size_t b = 0; b < blocks; ++b)
+                rows.push_back(thread.blockAt(index, b));
         // The live steps the chips line names (D11): the tool rows still Running
         // or Pending. The newest live group is the last one drawn - a turn only
         // ever starts after every earlier one ended - so only it adds the line.
@@ -492,8 +497,12 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
             if (d.kind == model::BlockKind::ToolStep &&
                 (d.state == model::BlockState::Running || d.state == model::BlockState::Pending))
                 liveSteps = true;
-        for (std::size_t b = 0; b < blocks; ++b) {
-            const model::BlockDesc& desc = rows[b];
+        // One draw for every row the turn owns - the query, the work rows, the
+        // answer - so the turn's anatomy shares the one chrome/body path. `b` is
+        // the row's adapter address: a work row's list index, a turn-level row's
+        // sentinel. The bool is the work list's fold answer: false stops the
+        // loop after the collapsed header the caller just drew.
+        const auto drawRow = [&](const model::BlockDesc& desc, std::size_t b) -> bool {
             ui::Rect row;
             row.x = ImGui::GetCursorScreenPos().x;
             row.y = ImGui::GetCursorScreenPos().y;
@@ -508,11 +517,14 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
             if (card)
                 ImGui::Indent(m.pad2);
             const bool focused = desc.id() == ts.focus;
-            // The fold (minimal mode)
+            // The fold (minimal mode): a work row the fold hides returns without
+            // drawing - the loop's caller keeps going (this row simply paints
+            // nothing). The turn-level rows never land here: they are what the
+            // fold keeps.
             if (groupMinimal && group.typedTurn && !desc.expanded &&
                 desc.kind != model::BlockKind::User && desc.kind != model::BlockKind::Answer &&
                 desc.kind != model::BlockKind::WorkGroup)
-                continue;
+                return true;
             // The block menu's owner: the one block the state names may submit
             // the popup, so an ImGui id that a transcript reset recycled cannot re-own a
             // menu the user opened on a different message.
@@ -595,12 +607,13 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
             }
             // A collapsed work group hides the rows under its header: the header *is* the
             // group, and its steps are the rows `blockCount()` reports. Minimal mode
-            // keeps drawing instead: the group's content rows (the query, the answer)
-            // come out from under the fold, its work rows stay behind the header -
-            // and the newest live group names its live steps in one chips line (D11).
+            // keeps drawing instead: the turn's rows (the query, the answer) stand
+            // outside the fold - drawn before and after the loop - its work rows
+            // stay behind the header, and the newest live group names its live
+            // steps in one chips line.
             if (b == 0 && desc.kind == model::BlockKind::WorkGroup && !desc.expanded) {
                 if (!groupMinimal || !group.typedTurn)
-                    break;
+                    return false; // the fold: the work rows after the header draw nothing
                 if (liveSteps && index == drawn.back()) {
                     float chipX = row.x + m.pad2;
                     const float chipY = row.y + row.h;
@@ -624,7 +637,32 @@ void renderThreadBody(model::UiState& ui, store::ThreadStoreAdapter& thread, mod
                     ImGui::SetCursorScreenPos(ImVec2(row.x, chipY + m.row));
                 }
             }
+            return true; // the work list draws on
+        };
+        // The query row opens the turn, above the WORK header.
+        if (queryRow.group != 0)
+            drawRow(queryRow, store::kQueryRow);
+        // The header rows the anchor follows are sampled as the group is
+        // drawn - after the query row, so the anchor compares the header's
+        // drawn row, not a position the query's height moves. A group with
+        // no work rows draws no header and records nothing: the cursor then
+        // sits on the next group's query row, which is not a header row.
+        if (hasWorkRows) {
+            const float headerScreenY = ImGui::GetCursorScreenPos().y;
+            headerRows.emplace_back(group.id, headerScreenY - ImGui::GetWindowPos().y);
+            if (ts.firstGroupId == 0 && headerScreenY >= clipMin.y &&
+                headerScreenY + m.row <= clipMax.y) {
+                ts.firstGroupId = group.id;
+                ts.firstGroupY = headerScreenY;
+            }
         }
+        if (hasWorkRows)
+            for (std::size_t b = 0; b < blocks; ++b)
+                if (!drawRow(rows[b], b))
+                    break;
+        // D1: the answer closes the turn, after the group's rows.
+        if (answerRow.group != 0)
+            drawRow(answerRow, store::kAnswerRow);
         thread.endGroup(index, cell);
     }
     ts.drawnGroups = drawn.size();

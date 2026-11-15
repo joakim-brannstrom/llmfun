@@ -1907,18 +1907,25 @@ unittest {
             "the batch index continues after the clear, got id `" ~ sink.blockUpserts[$ - 1].id
             ~ "`");
 
-    // 5. Session switch: the other session's own snapshot from ordinal 1, and
-    //    a measured turn replays the same content with its original [TIME].
+    // 5. Session switch: the other session's own snapshot replayed from
+    //    scratch, and a measured turn replays the same content with its
+    //    original [TIME]. The doc stamps turn_id like a real persisted
+    //    session (unstamped entries belong to no turn and emit nothing):
+    //    the snapshot's turn id is the history's own turn_id passthrough.
     JSONValue doc;
     JSONValue m1;
     m1["role"] = "user";
     m1["content"] = "what is 2+2?";
-    m1["save_data"] = JSONValue(["user": JSONValue(true)]);
+    m1["save_data"] = JSONValue([
+        "user": JSONValue(true),
+        "turn_id": JSONValue(1L)
+    ]);
     JSONValue m2;
     m2["role"] = "assistant";
     m2["content"] = "4";
     JSONValue sd2;
     sd2["processMs"] = JSONValue(1200);
+    sd2["turn_id"] = JSONValue(1L);
     m2["save_data"] = sd2;
     doc["messages"] = JSONValue([m1, m2]);
     auto metaB = store.create();
@@ -1927,9 +1934,8 @@ unittest {
     assert(sink.setTurnsSnapshots.length == 1, "one replay snapshot");
     const turns = sink.setTurnsSnapshots[0].turns;
     const blocks = sink.setTurnsSnapshots[0].blocks;
-    assert(turns.length == 1 && turns[0].ordinal == 1
-            && turns[0].state == TuiTurnState_Done && turns[0].messageCount == 1,
-            "the answer counts as the turn's one message (the query is not counted)");
+    assert(turns.length == 1 && turns[0].id == 1
+            && turns[0].state == TuiTurnState_Done && turns[0].messageCount == 1, "the id is the history's own turn_id; the answer counts as the turn's one message (the query is not counted)");
     assert(blocks.length == 2);
     assert(blocks[0].id == "query" && blocks[0].body == "what is 2+2?");
     assert(blocks[1].id == "content#0" && blocks[1].body == "4"
@@ -1937,14 +1943,14 @@ unittest {
 }
 
 // The user-query turn opens AFTER the turn-start doCompress: the turn's
-// ordinal is the next free position (continuing after any replayed or
-// compressed turns), so a compression that purged displayable prefix
-// messages cannot misnumber it - the ordinal is assigned by the typed
+// id comes from the typed walk's own sequence (continuing after any
+// replayed or compressed turns), so a compression that purged displayable
+// prefix messages cannot disturb it - the id is assigned by the typed
 // walk, not derived from a count read after doCompress returns.
 // The isActive() guard keeps the one-shot CLI output byte-stable (the
 // startSetup one-shot branch runs with the default TuiBlockedSink, which is
 // inactive and has no chat line for the prompt today).
-@("runAgent: user-query turn opens at the next free ordinal")
+@("runAgent: user-query turn opens with the typed walk's own id")
 unittest {
     import std.path : buildPath;
     import std.datetime : Duration, dur;
@@ -1969,10 +1975,12 @@ unittest {
     app.activeSession = store.create();
     clearStopAgent();
 
-    // Non-displayable: consumes no ordinal. Set first: setSystemPrompt
+    // Non-displayable: seeds no turn. Set first: setSystemPrompt
     // replaces history[0] (it would clobber the first seeded message).
     app.agent_.chat.setSystemPrompt("sys");
-    // Two prior displayable messages: the query lands at ordinal 3.
+    // Two prior displayable messages: the live turn is still the walk's
+    // id 1 - turn ids are the typed walk's own sequence, not history
+    // positions.
     app.agent_.chat.add(Message(Role.assistant, false, "a1", null));
     app.agent_.chat.add(Message(Role.assistant, false, "a2", null));
 
@@ -1981,9 +1989,8 @@ unittest {
 
     // The turn opens Running with the query prose block; the empty
     // (failed) batch emits nothing further and the turn stays open.
-    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].id == 1
-            && sink.turnUpserts[0].ordinal == 1 && sink.turnUpserts[0].state == TuiTurnState_Running,
-            "the failed turn opens Running at the next free ordinal");
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].id == 1 && sink.turnUpserts[0].state == TuiTurnState_Running,
+            "the failed turn opens Running with the typed walk's first id");
     assert(sink.blockUpserts.length == 1 && sink.blockUpserts[0].id == "query"
             && sink.blockUpserts[0].body == "hello", "the query is the turn's first block");
     assert(sink.setTurnsSnapshots.empty, "the live path sends no setTurns");
@@ -2011,7 +2018,7 @@ unittest {
 // Persistence gate: processMs through the REAL persistence path -
 // commit -> file -> load -> replay. The committed session file carries
 // processMs for every measured message (system stripped at commit), and a
-// session switch replays the same [NR] (the ordinal in the history - never
+// session switch replays the same [NR] (the NR in the history - never
 // renumbered) and the original [TIME] for measured messages; unmeasured
 // messages replay as NoProcessingTime (no suffix downstream).
 @("replay after session switch: same [NR] and original [TIME] as live")
@@ -2135,7 +2142,7 @@ unittest {
     assert(sink.setTurnsSnapshots.length == 2, "one snapshot per switch");
     const rturns = sink.setTurnsSnapshots[1].turns;
     const rblocks = sink.setTurnsSnapshots[1].blocks;
-    assert(rturns.length == 1 && rturns[0].ordinal == 1
+    assert(rturns.length == 1 && rturns[0].id == 1
             && rturns[0].state == TuiTurnState_Done && rturns[0].messageCount == 5,
             "the healed a1/a2 prefix + a3 + the call + the result replay as"
             ~ " one Done turn, got messageCount " ~ rturns[0].messageCount.to!string);
@@ -2212,7 +2219,7 @@ unittest {
     // two unmeasured contents (durationMs 0, not a fabricated duration).
     assert(sink.setTurnsSnapshots.length == 1);
     assert(sink.setTurnsSnapshots[0].turns.length == 1
-            && sink.setTurnsSnapshots[0].turns[0].ordinal == 1
+            && sink.setTurnsSnapshots[0].turns[0].id == 1
             && sink.setTurnsSnapshots[0].turns[0].state == TuiTurnState_Done,
             "the healed legacy file replays one Done turn");
     assert(sink.setTurnsSnapshots[0].blocks.length == 3);
@@ -2275,8 +2282,8 @@ unittest {
     assert(sink.setTurnsSnapshots.length == 2, "one snapshot per switch");
     const mturns = sink.setTurnsSnapshots[1].turns;
     const mblocks = sink.setTurnsSnapshots[1].blocks;
-    assert(mturns.length == 2 && mturns[0].ordinal == 1 && mturns[1].ordinal == 2,
-            "replayed ordinals contiguous over the mixed file");
+    assert(mturns.length == 2 && mturns[0].id == 1 && mturns[1].id == 2,
+            "replayed turn ids contiguous over the mixed file");
     assert(mturns[0].state == TuiTurnState_Done && mturns[1].state == TuiTurnState_Done);
     assert(mblocks.length == 5, "two queries + three contents replay");
     assert(mblocks[0].id == "query" && mblocks[0].body == "old question");
@@ -3517,7 +3524,7 @@ version (unittest) {
 // NR derivation: the replay walk emits ONE setTurns snapshot with
 // already-merged blocks - call and response pair by call id in a pre-pass,
 // so replay never depends on adjacency; the final answer is the batch's
-// Answer block; ordinals are 1-based turn positions (D5).
+// Answer block. Turn ids are the walk's own 1-based sequence.
 @("typed replay: emitReplayTyped sends the merged snapshot")
 unittest {
     import std.datetime : dur;
@@ -3547,9 +3554,8 @@ unittest {
     const turns = sink.setTurnsSnapshots[0].turns;
     const blocks = sink.setTurnsSnapshots[0].blocks;
     assert(turns.length == 1);
-    assert(turns[0].id == 1 && turns[0].ordinal == 1
-            && turns[0].state == TuiTurnState_Done && turns[0].messageCount == 5,
-            "query + response + 2 calls + 2 results");
+    assert(turns[0].id == 1 && turns[0].state == TuiTurnState_Done
+            && turns[0].messageCount == 5, "query + response + 2 calls + 2 results");
     assert(blocks.length == 7);
     assert(blocks[0].id == "query" && blocks[0].kind == TuiBlockKind_Prose
             && blocks[0].meta == "user" && blocks[0].body == "q" && blocks[0].batchId == "1#q");
@@ -3639,7 +3645,7 @@ unittest {
     app.agent_.chat.add(f.q);
     app.emitTurnStartTyped("q");
     assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].id == 1
-            && sink.turnUpserts[0].ordinal == 1 && sink.turnUpserts[0].state == TuiTurnState_Running);
+            && sink.turnUpserts[0].state == TuiTurnState_Running);
     assert(sink.blockUpserts.length == 1 && sink.blockUpserts[0].id == "query"
             && sink.blockUpserts[0].body == "q");
 
@@ -3702,11 +3708,305 @@ unittest {
             "the interrupted call is Cancelled, never a fabricated Ok");
 }
 
+// The RESULT pair payload: a JSON-object result unpacks to the byte-wise sorted,
+// capped pair set; anything else keeps the pairs empty and carries the one-line
+// fallback string instead.
+@("typed result pairs: shapes through the replay snapshot")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_pairs_shapes");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    JSONValue[string] calls;
+    foreach (id; ["c1", "c2", "c3"]) {
+        JSONValue c;
+        c["id"] = id;
+        c["type"] = "function";
+        JSONValue fn;
+        fn["name"] = "t_" ~ id;
+        fn["arguments"] = "{}";
+        c["function"] = fn;
+        calls[id] = c;
+    }
+    auto tm = ToolMessage("", JSONValue([calls["c1"], calls["c2"], calls["c3"]]));
+    app.agent_.chat.add(Message(Role.user, true, "q", null));
+    app.agent_.chat.add(tm);
+    app.agent_.chat.add(ToolResponse(`{"cmd": "ls -R", "n": 3, "nested": {"a": [1, 2]}}`,
+            "c1", "t_c1", true));
+    app.agent_.chat.add(ToolResponse(`[1, 2]`, "c2", "t_c2", true));
+    app.agent_.chat.add(ToolResponse("plain text,  two spaces", "c3", "t_c3", false));
+
+    app.emitReplayTyped();
+
+    const blocks = sink.setTurnsSnapshots[0].blocks;
+    assert(blocks.length == 4, blocks.length.text);
+    const c1Block = blocks[1];
+    const c2Block = blocks[2];
+    const c3Block = blocks[3];
+    // The flat object walks one level: nested containers stringify as compact
+    // JSON, scalars as text, keys byte-wise sorted.
+    assert(c1Block.resultKeys == ["cmd", "n", "nested"], c1Block.resultKeys.text);
+    assert(c1Block.resultValues == ["ls -R", "3", `{"a":[1,2]}`], c1Block.resultValues.text);
+    assert(c1Block.resultCount == 3 && c1Block.resultMore == 0 && c1Block.resultRaw.empty);
+    // The array result keeps the fallback: the pretty payload collapsed to one line.
+    assert(c2Block.resultKeys.empty && c2Block.resultValues.empty && c2Block.resultMore == 0);
+    assert(c2Block.resultRaw == "[ 1, 2 ]", c2Block.resultRaw);
+    // The non-JSON payload keeps the fallback: the raw payload collapsed.
+    assert(c3Block.resultKeys.empty && c3Block.resultMore == 0);
+    assert(c3Block.resultRaw == "plain text, two spaces", c3Block.resultRaw);
+}
+
+@("typed result pairs: byte-wise sort pin, duplicate keys last-wins, zero-pair object")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_pairs_sort");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    JSONValue c1, c2, c3;
+    c1["id"] = "c1";
+    c1["type"] = "function";
+    JSONValue fn1;
+    fn1["name"] = "t1";
+    fn1["arguments"] = "{}";
+    c1["function"] = fn1;
+    c2["id"] = "c2";
+    c2["type"] = "function";
+    JSONValue fn2;
+    fn2["name"] = "t2";
+    fn2["arguments"] = "{}";
+    c2["function"] = fn2;
+    c3["id"] = "c3";
+    c3["type"] = "function";
+    JSONValue fn3;
+    fn3["name"] = "t3";
+    fn3["arguments"] = "{}";
+    c3["function"] = fn3;
+    auto tm = ToolMessage("", JSONValue([c1, c2, c3]));
+    app.agent_.chat.add(Message(Role.user, true, "q", null));
+    app.agent_.chat.add(tm);
+    // "Z" (0x5A) sorts before "a" (0x61): byte order is not alpha order.
+    app.agent_.chat.add(ToolResponse(`{"Z": "1", "a": "2"}`, "c1", "t1", true));
+    // std.json's duplicate-key parse keeps the last value.
+    app.agent_.chat.add(ToolResponse(`{"k": "first", "k": "second"}`, "c2", "t2", true));
+    // The zero-pair object keeps the fallback too.
+    app.agent_.chat.add(ToolResponse(`{}`, "c3", "t3", true));
+
+    app.emitReplayTyped();
+
+    const blocks = sink.setTurnsSnapshots[0].blocks;
+    assert(blocks.length == 4, blocks.length.text);
+    const c1Block = blocks[1];
+    const c2Block = blocks[2];
+    const c3Block = blocks[3];
+    assert(c1Block.resultKeys == ["Z", "a"], c1Block.resultKeys.text);
+    assert(c1Block.resultValues == ["1", "2"], c1Block.resultValues.text);
+    assert(c2Block.resultKeys == ["k"] && c2Block.resultValues == ["second"],
+            "duplicate keys keep the last value: " ~ c2Block.resultValues.text);
+    assert(c3Block.resultKeys.empty && c3Block.resultRaw == "{}", c3Block.resultRaw);
+}
+
+@("typed result pairs: the pair and value caps")
+unittest {
+    import std.array : replicate;
+    import std.conv : text;
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_pairs_caps");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    JSONValue[] calls;
+    foreach (i; 0 .. 101) {
+        JSONValue c;
+        c["id"] = text("c", i);
+        c["type"] = "function";
+        JSONValue fn;
+        fn["name"] = "t";
+        fn["arguments"] = "{}";
+        c["function"] = fn;
+        calls ~= c;
+    }
+    app.agent_.chat.add(Message(Role.user, true, "q", null));
+    app.agent_.chat.add(ToolMessage("", JSONValue(calls)));
+    JSONValue[string] big;
+    foreach (i; 0 .. 101)
+        big[text("k", i)] = JSONValue("v");
+    app.agent_.chat.add(ToolResponse(JSONValue(big).toString, "c0", "t", true));
+    // A value at exactly 200 codepoints truncates nothing.
+    app.agent_.chat.add(ToolResponse(JSONValue([
+                "exact": JSONValue("x".replicate(200))
+    ]).toString, "c1", "t", true));
+    // One codepoint over cuts to 200, and a multibyte character at the cut
+    // stays whole.
+    app.agent_.chat.add(ToolResponse(JSONValue([
+                "over": JSONValue("x".replicate(201))
+    ]).toString, "c2", "t", true));
+    app.agent_.chat.add(ToolResponse(
+            JSONValue(["cut": JSONValue("a".replicate(199) ~ "é" ~ "b")]).toString,
+            "c3", "t", true));
+    app.agent_.chat.add(ToolResponse(JSONValue([
+                "all": JSONValue("é".replicate(201))
+    ]).toString, "c4", "t", true));
+
+    app.emitReplayTyped();
+
+    foreach (b; sink.setTurnsSnapshots[0].blocks) {
+        if (b.id == "c0") {
+            assert(b.resultCount == 100 && b.resultMore == 1, text(b.resultCount,
+                    " + ", b.resultMore));
+            assert(b.resultKeys.length == 100 && b.resultValues.length == 100);
+        } else if (b.id == "c1") {
+            assert(b.resultValues == ["x".replicate(200)],
+                    "a 200-codepoint value truncates nothing: " ~ b.resultValues[0].length.text);
+        } else if (b.id == "c2") {
+            assert(b.resultValues == ["x".replicate(200)]);
+        } else if (b.id == "c3") {
+            assert(b.resultValues == ["a".replicate(199) ~ "é"],
+                    "the multibyte character at the cut stays whole: " ~ b.resultValues[0]);
+        } else if (b.id == "c4") {
+            assert(b.resultValues == ["é".replicate(200)]);
+        }
+    }
+}
+
+@(
+        "typed result pairs: replay/live parity, cancelled carries none, the orphan's pairs ride the merge")
+unittest {
+    import std.datetime : dur;
+    import std.json : JSONValue;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_pairs_parity");
+    scope (exit)
+        tmpDir.cleanup;
+
+    JSONValue c1, c2;
+    c1["id"] = "c1";
+    c1["type"] = "function";
+    JSONValue fn1;
+    fn1["name"] = "t1";
+    fn1["arguments"] = "{}";
+    c1["function"] = fn1;
+    c2["id"] = "c2";
+    c2["type"] = "function";
+    JSONValue fn2;
+    fn2["name"] = "t2";
+    fn2["arguments"] = "{}";
+    c2["function"] = fn2;
+    auto tm = ToolMessage("", JSONValue([c1, c2]));
+    auto tr1 = ToolResponse(`{"x": "1"}`, "c1", "t1", true);
+
+    // Replay: c1 merges its result, c2 stays cancelled (no stored response).
+    {
+        TuiRecordingSink sink;
+        auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "replay").Path), tmpDir, sink);
+        app.agent_.chat.add(Message(Role.user, true, "q", null));
+        app.agent_.chat.add(tm);
+        app.agent_.chat.add(tr1);
+        app.emitReplayTyped();
+
+        const blocks = sink.setTurnsSnapshots[0].blocks;
+        assert(blocks.length == 3, blocks.length.text);
+        assert(blocks[1].id == "c1" && blocks[1].status == TuiBlockStatus_Ok);
+        assert(blocks[1].resultKeys == ["x"] && blocks[1].resultValues == ["1"]);
+        assert(blocks[1].resultRaw.empty && blocks[1].resultMore == 0);
+        assert(blocks[2].id == "c2" && blocks[2].status == TuiBlockStatus_Cancelled);
+        assert(blocks[2].resultKeys.empty && blocks[2].resultValues.empty
+                && blocks[2].resultRaw.empty && blocks[2].resultMore == 0,
+                "a cancelled call carries no pair set and no resultRaw");
+    }
+
+    // Live: the same step through the emitter produces the identical pair set.
+    {
+        TuiRecordingSink sink;
+        auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "live").Path), tmpDir, sink);
+        app.emitTurnStartTyped("q");
+        ProcessResult result;
+        result.chat = [Chat.MessageT(tm), Chat.MessageT(tr1)];
+        app.emitStepTyped(result);
+
+        // The LAST upsert per id is the merged state (the step walk re-upserts).
+        bool c1Seen, c2Seen;
+        foreach_reverse (b; sink.blockUpserts) {
+            if (!c1Seen && b.id == "c1") {
+                c1Seen = true;
+                assert(b.status == TuiBlockStatus_Ok);
+                assert(b.resultKeys == ["x"] && b.resultValues == ["1"],
+                        "the live walk emits the replay walk's pair set");
+                assert(b.resultRaw.empty && b.resultMore == 0);
+            }
+            if (!c2Seen && b.id == "c2") {
+                c2Seen = true;
+                assert(b.status == TuiBlockStatus_Cancelled
+                        && b.resultKeys.empty && b.resultRaw.empty);
+            }
+        }
+        assert(c1Seen && c2Seen);
+    }
+
+    // The unknown-callId result: its pair set rides the orphan upsert, and the
+    // call-lands upsert carries both-empty pairs so the store merge keeps them.
+    {
+        TuiRecordingSink sink;
+        auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "orphan").Path), tmpDir, sink);
+        app.emitTurnStartTyped("q");
+        ProcessResult orphanStep;
+        orphanStep.chat = [
+            Chat.MessageT(ToolResponse(`{"o": "9"}`, "c9", "t9", true))
+        ];
+        app.emitStepTyped(orphanStep);
+        assert(sink.blockUpserts[$ - 1].id == "c9"
+                && sink.blockUpserts[$ - 1].status == TuiBlockStatus_Ok);
+        assert(sink.blockUpserts[$ - 1].resultKeys == ["o"] && sink.blockUpserts[$ - 1].resultValues == [
+            "9"
+        ], "the orphan result's pair set rides its own upsert");
+
+        JSONValue c9;
+        c9["id"] = "c9";
+        c9["type"] = "function";
+        JSONValue fn9;
+        fn9["name"] = "t9";
+        fn9["arguments"] = "{}";
+        c9["function"] = fn9;
+        ProcessResult callStep;
+        callStep.chat = [Chat.MessageT(ToolMessage("", JSONValue([c9])))];
+        app.emitStepTyped(callStep);
+        assert(sink.blockUpserts[$ - 1].id == "c9"
+                && sink.blockUpserts[$ - 1].status == TuiBlockStatus_Cancelled);
+        assert(sink.blockUpserts[$ - 1].resultKeys.empty && sink.blockUpserts[$ - 1].resultRaw.empty,
+                "the call-lands upsert stays both-empty so the store merge keeps the pairs");
+    }
+}
+
 // NR derivation: the compression re-emission is ONE setTurns snapshot over
-// the rewritten history; the live turn's ordinal continues after the
-// replayed turns (D5) and the rebuilt snapshot includes the live turn's
+// the rewritten history. The live turn keeps its walk-assigned id, and
+// the rebuilt snapshot includes the live turn's
 // query block.
-@("typed compression re-emission: setTurns snapshot recomputes")
+@("typed compression re-emission: setTurns snapshot rebuilds")
 unittest {
     import std.datetime : dur;
     import std.json : JSONValue;
@@ -3731,13 +4031,13 @@ unittest {
 
     app.agent_.chat.add(Message(Role.user, true, "q2", null));
     app.emitTurnStartTyped("q2");
-    assert(sink.turnUpserts[$ - 1].ordinal == 2, "the live turn continues after the replayed one");
+    assert(sink.turnUpserts[$ - 1].id == 2, "the live turn continues after the replayed one");
 
     app.emitCompressionTyped();
     assert(sink.setTurnsSnapshots.length == 2);
     const turns2 = sink.setTurnsSnapshots[1].turns;
-    assert(turns2.length == 2 && turns2[0].ordinal == 1 && turns2[1].id == 2
-            && turns2[1].ordinal == 2, "ordinals recompute over the rewritten history");
+    assert(turns2.length == 2 && turns2[0].id == 1 && turns2[1].id == 2,
+            "the rebuilt snapshot keeps the walk's turn ids over the rewritten history");
     bool hasQ2;
     foreach (b; sink.setTurnsSnapshots[1].blocks)
         if (b.id == "query" && b.body == "q2" && b.turnId == 2)
@@ -3747,9 +4047,9 @@ unittest {
 
 // NR derivation: a mid-run switch replays the new session's history as one
 // setTurns snapshot and drops the live emission context - the stale turn's
-// stop is a no-op afterwards and the next live turn's ordinal continues
-// after the replayed turns (D5). Task 5 owns the real re-attach wiring.
-@("typed session switch: replay drops the live context, ordinals continue")
+// stop is a no-op afterwards and the next live turn's id comes fresh from
+// the walk's own sequence.
+@("typed session switch: replay drops the live context, the chat's ids continue")
 unittest {
     import std.path : buildPath;
 
@@ -3765,7 +4065,7 @@ unittest {
     // empty) session's history.
     app.agent_.chat.add(Message(Role.user, true, "q", null));
     app.emitTurnStartTyped("q");
-    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].ordinal == 1);
+    assert(sink.turnUpserts.length == 1 && sink.turnUpserts[0].id == 1);
 
     app.emitReplayTyped();
 
@@ -3776,11 +4076,16 @@ unittest {
     app.emitStopTyped();
     assert(sink.turnUpserts.length == 1, "the dropped context's stop is a no-op");
 
-    // A new live turn continues after the replayed turns (none here: ordinal 1).
+    // A new live turn continues the chat's own id sequence: the id is the
+    // chat's per-session counter (currentTurnId), not snapshot-derived. It is
+    // 2 here because this test bypasses the real switch's chat reload: a real
+    // reload makes the fresh session's first live turn id 1. The dropped live
+    // turn's id is gone with its context.
     app.agent_.chat.add(Message(Role.user, true, "q2", null));
     app.emitTurnStartTyped("q2");
-    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[1].ordinal == 1,
-            "the fresh turn re-derives its ordinal from the snapshot");
+    assert(sink.turnUpserts.length == 2 && sink.turnUpserts[1].id == 2 && sink.turnUpserts[1].state == TuiTurnState_Running,
+            "the fresh turn continues the chat's own id sequence, got id `"
+            ~ sink.turnUpserts[1].id.to!string ~ "`");
 }
 
 // NR derivation: the console formatter over the typed events reproduces

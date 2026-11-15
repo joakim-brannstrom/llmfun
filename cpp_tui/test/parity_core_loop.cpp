@@ -571,10 +571,9 @@ static std::int64_t g_turnSeq = 0;    ///< the harness's persisted turn ids
 static std::int64_t g_liveTurnId = 0; ///< the in-flight run's turn (0 = none)
 static int g_liveBatch = 0;           ///< the live turn's batch counter
 
-void upsertTurn(Harness& h, std::int64_t id, int ordinal, int state, int messageCount) {
+void upsertTurn(Harness& h, std::int64_t id, int state, int messageCount) {
     TuiTurn t{};
     t.id = id;
-    t.ordinal = ordinal;
     t.state = state;
     t.messageCount = messageCount;
     tuiTurnUpsert(h.handle.get(), &t);
@@ -612,7 +611,7 @@ void addMessage(Harness& h, Msg type, const std::string& summary, const std::str
     (void)thinking;
     if (type == Msg::User) {
         const std::int64_t id = ++g_turnSeq;
-        upsertTurn(h, id, static_cast<int>(id), TuiTurnState_Done, 1);
+        upsertTurn(h, id, TuiTurnState_Done, 1);
         upsertBlock(h, id, "query", std::to_string(id) + "#q", TuiBlockKind_Prose,
                     TuiBlockStatus_None, "user", text);
         return;
@@ -638,7 +637,7 @@ void runStart(Harness& h, const std::string& query) {
     const std::int64_t id = ++g_turnSeq;
     g_liveTurnId = id;
     g_liveBatch = 0;
-    upsertTurn(h, id, static_cast<int>(id), TuiTurnState_Running, 0);
+    upsertTurn(h, id, TuiTurnState_Running, 0);
     upsertBlock(h, id, "query", std::to_string(id) + "#q", TuiBlockKind_Prose, TuiBlockStatus_None,
                 "user", query);
 }
@@ -658,7 +657,7 @@ void updateStream(Harness& h, const std::string& text) {
 void runStop(Harness& h) {
     if (g_liveTurnId == 0)
         return;
-    upsertTurn(h, g_liveTurnId, static_cast<int>(g_liveTurnId), TuiTurnState_Interrupted, 0);
+    upsertTurn(h, g_liveTurnId, TuiTurnState_Interrupted, 0);
     g_liveTurnId = 0;
 }
 
@@ -1723,12 +1722,11 @@ void checkBattery() {
     h.idle(1);
 
     // 1. Replay parity (§8): the same session rendered twice is byte-identical
-    // - the ordinals are part of the bytes - and the expansion/override state
-    // survives the re-render.
+    // - the persisted ids are part of the bytes - and the expansion/override
+    // state survives the re-render.
     check(h.core->chat.typedTurns.turnCount() == 2, "battery 1: the replay loaded both turns");
-    check(h.core->chat.typedTurns.turnAt(1).ordinal ==
-              h.core->chat.typedTurns.turnAt(0).ordinal + 1,
-          "battery 1: the ordinal sequence is the array order");
+    check(h.core->chat.typedTurns.turnAt(1).id == h.core->chat.typedTurns.turnAt(0).id + 1,
+          "battery 1: the replay's turn ids run in array order");
     const std::string first = goldenText(h, 120, 36, "parity-battery");
     h.idle(2);
     const std::string again = goldenText(h, 120, 36, "parity-battery");
@@ -1785,7 +1783,7 @@ void checkBattery() {
     check(h.last.hasText("partial answer so far"), "battery 2: the partial answer stays");
 
     // 3. Compression re-emission (§7): the affected turns are removed and
-    // re-emitted as one summary turn, the ordinals recompute, and no stale
+    // re-emitted as one summary turn, and no stale
     // group keeps orphaned block ids - the removed turn's pin dies with it
     // (task 8's tuiTurnRemove).
     phase("battery: compression re-emission");
@@ -1809,13 +1807,14 @@ void checkBattery() {
           "battery 3: the removed turns stop rendering (no stale group)");
     check(h.core->chat.groupOverrides.empty(),
           "battery 3: the removed turn's pin died with it (no orphan override)");
-    upsertTurn(h, firstTurn3, 1, TuiTurnState_Done, 1);
+    upsertTurn(h, firstTurn3, TuiTurnState_Done, 1);
     upsertBlock(h, firstTurn3, "notice", std::to_string(firstTurn3) + "#0", TuiBlockKind_Notice,
                 TuiBlockStatus_None, "system", "earlier context summarized");
     h.idle(2);
     check(h.core->chat.typedTurns.turnCount() == 1 &&
-              h.core->chat.typedTurns.turnById(firstTurn3)->ordinal == 1,
-          "battery 3: the summary turn re-emitted with a recomputed ordinal");
+              h.core->chat.typedTurns.turnById(firstTurn3) != nullptr &&
+              h.core->chat.typedTurns.turnById(firstTurn3)->state == TuiTurnState_Done,
+          "battery 3: the summary turn re-emitted");
     check(h.core->threadAdapter.groupCount() == 1,
           "battery 3: the group list follows the re-emission");
     check(h.last.hasText("earlier context summarized"), "battery 3: the summary renders");
@@ -1826,7 +1825,7 @@ void checkBattery() {
     phase("battery: the 1000-turn session");
     tuiThreadClear(h.handle.get());
     for (std::int64_t i = 1; i <= 1002; ++i) {
-        upsertTurn(h, i, static_cast<int>(i), TuiTurnState_Done, 1);
+        upsertTurn(h, i, TuiTurnState_Done, 1);
         upsertBlock(h, i, "query", std::to_string(i) + "#q", TuiBlockKind_Prose,
                     TuiBlockStatus_None, "user", "q" + std::to_string(i));
     }
@@ -1891,13 +1890,13 @@ void checkBattery() {
     // it was recorded), then the live emitter's next tick re-attaches by turnId.
     setSessions(h, alphaLive);
     tuiThreadClear(h.handle.get());
-    upsertTurn(h, crossLive, static_cast<int>(crossLive), TuiTurnState_Interrupted, 0);
+    upsertTurn(h, crossLive, TuiTurnState_Interrupted, 0);
     upsertBlock(h, crossLive, "query", std::to_string(crossLive) + "#q", TuiBlockKind_Prose,
                 TuiBlockStatus_None, "user", "live across the switch");
     h.idle(2);
     // The re-attach: the same turn id merges in place - one turn, the streamed
     // content block gains text, the turn is Running again.
-    upsertTurn(h, crossLive, static_cast<int>(crossLive), TuiTurnState_Running, 0);
+    upsertTurn(h, crossLive, TuiTurnState_Running, 0);
     updateStream(h, "the live answer before the switch, and more after it");
     h.idle(2);
     const tui::store::TypedTurn* back = h.core->chat.typedTurns.turnById(crossLive);
@@ -2080,7 +2079,7 @@ void checkPerf() {
 
     std::printf("perf: workbench p50 frame %s ms (median of 3), session open %s ms\n",
                 num(workbench.frameMs).c_str(), num(workbench.openMs).c_str());
-    std::printf("perf: recorded  p50 frame %s ms, session open %s ms (typed store, task 5)\n",
+    std::printf("perf: recorded  p50 frame %s ms, session open %s ms\n",
                 num(kRecordedFrameMs).c_str(), num(kRecordedOpenMs).c_str());
     std::printf("perf: budget    p50 frame <= %s ms, session open <= %s ms (recorded + 10%%)\n",
                 num(kRecordedFrameMs * kPerfAllowance).c_str(),

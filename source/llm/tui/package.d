@@ -43,14 +43,13 @@ string toString(String s) {
 
 // Wire turn -> D-owned turn payload.
 UiTurnData toTurnData(TuiTurn t) {
-    return UiTurnData(t.id, t.ordinal, t.state, t.messageCount);
+    return UiTurnData(t.id, t.state, t.messageCount);
 }
 
 // D-owned turn payload -> wire turn (no strings in the struct).
 TuiTurn toTuiTurn(UiTurnData t) {
     TuiTurn r;
     r.id = t.id;
-    r.ordinal = t.ordinal;
     r.state = t.state;
     r.messageCount = t.messageCount;
     return r;
@@ -1255,7 +1254,6 @@ struct UiDropReport {
 // One turn of the typed thread store.
 struct UiTurnData {
     long id; // persisted turnId (0 = unstamped)
-    int ordinal; // 1-based display position, D-assigned
     int state; // TuiTurnState_*
     int messageCount; // informational: LLM messages the turn covers
 }

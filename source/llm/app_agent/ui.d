@@ -675,8 +675,6 @@ package string summarizedCallBody(string name, string arguments) {
 package final class TypedEmitContext {
     /// The turn the emissions attach to (chat's currentTurnId at turn start).
     long turnId;
-    /// The turn's display position (D-assigned, D5): one slot per live turn.
-    int ordinal;
     /// 0-based per-response index within the turn (the batch counter).
     int batchIndex;
     /// Vision block ids: unique across the live turn (two vision entries in

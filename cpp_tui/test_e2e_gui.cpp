@@ -673,11 +673,20 @@ int main(int argc, char** argv) {
             store->typedTurns.turnCount() == tui::store::TypedThreadStore::kMaxTurns) {
             // The run's four turns went in first, and the run's live turn (the
             // failed write's) absorbs the loop's first call - so 1004 more
-            // turns follow, 1008 in all: the cap drops 8, and the first kept
-            // turn is ordinal 9.
-            check(store->typedTurns.turnAt(0).ordinal == 9,
-                  "the cap dropped the oldest turns (the first kept turn is ordinal " +
-                      std::to_string(store->typedTurns.turnAt(0).ordinal) + ")");
+            // turns follow, 1008 in all: the cap drops 8. The run's turns are
+            // the oldest, so no kept turn may still carry one of the run's
+            // calls.
+            bool keptARunCall = false;
+            for (std::size_t k = 0; k < store->typedTurns.turnCount() && !keptARunCall; ++k) {
+                const std::int64_t id = store->typedTurns.turnAt(k).id;
+                const std::size_t blocks = store->typedTurns.blockCount(id);
+                for (std::size_t b = 0; b < blocks; ++b)
+                    if (store->typedTurns.blockAt(id, b).id == "call-1" ||
+                        store->typedTurns.blockAt(id, b).id == "call-2")
+                        keptARunCall = true;
+            }
+            check(!keptARunCall, "the cap dropped the oldest turns (a kept turn still carries "
+                                 "one of the run's calls)");
             check(store->typedTurns.turnAt(store->typedTurns.turnCount() - 1).state ==
                           TuiTurnState_Done &&
                       store->typedTurns

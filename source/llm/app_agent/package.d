@@ -62,8 +62,8 @@ private struct TypedTurns {
 }
 
 // Walk a persisted history once and build the typed turns/blocks. A turn opens at a
-// user query; blocks go to their message's turn;
-// ordinals are 1-based turn positions; batch ids are recomputed
+// user query; blocks go to their message's turn; turn order is the history's
+// sequence (turnId's job); batch ids are recomputed
 // deterministically ("<turnId>#<response index>"). Tool calls and their stored
 // responses merge by call id in one pre-pass, so replay never depends on
 // adjacency. An interrupted turn replays its in-flight calls as Cancelled
@@ -97,7 +97,6 @@ private TypedTurns buildTypedTurns(Chat.MessageT[] history) {
 
     TypedTurns out_;
     int[long] batchIndex; // per turn
-    int nextOrdinal = 1;
     int visionSeq; // vision block ids: unique across the rebuilt snapshot
 
     foreach (ref msg; history) {
@@ -107,8 +106,7 @@ private TypedTurns buildTypedTurns(Chat.MessageT[] history) {
             if (a.role == Role.user) {
                 if (!a.isUserQuery())
                     return; // hidden nudge/system-style entries emit nothing
-                const ordinal = nextOrdinal++;
-                out_.turns ~= UiTurnData(a.turnId, ordinal, TuiTurnState_Done,
+                out_.turns ~= UiTurnData(a.turnId, TuiTurnState_Done,
                     messageCount.get(a.turnId, 0));
                 out_.blocks ~= makeBlockData(a.turnId, "query", queryBatchId(a.turnId),
                     TuiBlockKind_Prose, TuiBlockStatus_None, 0, null, "user", a.content, 0);
@@ -149,15 +147,17 @@ private TypedTurns buildTypedTurns(Chat.MessageT[] history) {
                 string meta;
                 int status = TuiBlockStatus_Cancelled;
                 long callDur;
+                ToolResultPairs pairs;
                 if (auto resp = callId in responseByCallId) {
                     meta = summarizeToolResponse(*resp, 1000);
                     status = resp.success() ? TuiBlockStatus_Ok : TuiBlockStatus_Failed;
                     callDur = durationMsOf(resp.processTime());
+                    pairs = unpackToolResultPairs(*resp);
                 }
                 // idx is 1-based over arr; summarizeToolCalls entries align with arr.
                 const body_ = idx <= calls.length ? calls[idx - 1] : null;
-                out_.blocks ~= makeBlockData(a.turnId, callId, bid, TuiBlockKind_Tool,
-                    status, kToolBlockFlags, name, meta, body_, callDur);
+                out_.blocks ~= withResultPairs(makeBlockData(a.turnId, callId, bid, TuiBlockKind_Tool,
+                    status, kToolBlockFlags, name, meta, body_, callDur), pairs);
             }
             if (a.isFinalAnswer())
                 out_.blocks ~= makeBlockData(a.turnId, "answer", bid, TuiBlockKind_Answer,
@@ -175,6 +175,15 @@ private TypedTurns buildTypedTurns(Chat.MessageT[] history) {
         });
     }
     return out_;
+}
+
+private UiBlockData withResultPairs(UiBlockData block, ToolResultPairs pairs) @safe {
+    block.resultKeys = pairs.keys;
+    block.resultValues = pairs.values;
+    block.resultRaw = pairs.raw;
+    block.resultCount = cast(uint) pairs.keys.length;
+    block.resultMore = pairs.more;
+    return block;
 }
 
 struct AgentApp {
@@ -252,7 +261,6 @@ struct AgentApp {
         }
 
         TypedEmitContext typedCtx_;
-        int typedOrdinalNext_ = 1;
         long[] typedEmittedTurnIds_;
         long noticeSeq_;
     }
@@ -500,6 +508,8 @@ struct AgentApp {
         uiMsg.threadClear();
         uiMsg.pipelineClear();
 
+        // The switch discards the old session's live turn context entirely
+        typedCtx_ = null;
         this.emitReplayTyped();
 
         if (uiMsg.isActive()) {
@@ -998,22 +1008,18 @@ struct AgentApp {
         }
         uiMsg.setTurns(built.turns, built.blocks);
         typedEmittedTurnIds_ = built.turns.map!(t => t.id).array;
-        typedOrdinalNext_ = cast(int) built.turns.length + 1;
         noticeSeq_ = 0;
         typedCtx_ = null;
     }
 
-    /// Live turn start: turn upsert (Running) + the query prose block. The
-    /// ordinal is D-assigned (D5): the next free position, continuing after
-    /// the last replayed/compressed turn.
+    /// Live turn start: turn upsert (Running) + the query prose block.
     package void emitTurnStartTyped(string query) {
         const turnId = agent_.chat.currentTurnId();
         typedCtx_ = new TypedEmitContext;
         typedCtx_.turnId = turnId;
-        typedCtx_.ordinal = typedOrdinalNext_++;
         typedCtx_.messageCount = 0;
         typedEmittedTurnIds_ ~= turnId;
-        uiMsg.turnUpsert(UiTurnData(turnId, typedCtx_.ordinal, TuiTurnState_Running, 0));
+        uiMsg.turnUpsert(UiTurnData(turnId, TuiTurnState_Running, 0));
         uiMsg.blockUpsert(makeBlockData(turnId, "query", queryBatchId(turnId),
                 TuiBlockKind_Prose, TuiBlockStatus_None, 0, null, "user", query, 0));
     }
@@ -1027,7 +1033,6 @@ struct AgentApp {
         if (typedCtx_ is null) {
             typedCtx_ = new TypedEmitContext;
             typedCtx_.turnId = agent_.chat.currentTurnId();
-            typedCtx_.ordinal = typedOrdinalNext_++;
         }
         auto ctx = typedCtx_;
 
@@ -1096,16 +1101,18 @@ struct AgentApp {
                     string meta;
                     int status = TuiBlockStatus_Cancelled;
                     long callDur;
+                    ToolResultPairs pairs;
                     if (auto resp = callId in respById) {
                         meta = summarizeToolResponse(*resp, 1000);
                         status = resp.success() ? TuiBlockStatus_Ok : TuiBlockStatus_Failed;
                         callDur = durationMsOf(resp.processTime());
+                        pairs = unpackToolResultPairs(*resp);
                     }
                     // idx is 1-based over arr; summarizeToolCalls entries align with arr.
                     const body_ = idx <= calls.length ? calls[idx - 1] : null;
-                    uiMsg.blockUpsert(makeBlockData(a.turnId != 0 ? a.turnId : ctx.turnId, callId,
-                        bid, TuiBlockKind_Tool, status, kToolBlockFlags,
-                        name, meta, body_, callDur));
+                    uiMsg.blockUpsert(withResultPairs(makeBlockData(a.turnId != 0 ? a.turnId : ctx.turnId,
+                        callId, bid, TuiBlockKind_Tool, status,
+                        kToolBlockFlags, name, meta, body_, callDur), pairs));
                     ctx.clearLiveCall(callId); // merged: the stream-done flip list shrinks
                 }
                 ctx.messageCount += cast(int) arr.length;
@@ -1125,10 +1132,12 @@ struct AgentApp {
                 // A true orphan (its call streamed in an earlier step): its own
                 // response-only batch, so the next response batch stays separate.
                 const bi = ctx.batchIndex++;
-                uiMsg.blockUpsert(makeBlockData(a.turnId != 0 ? a.turnId
-                    : ctx.turnId, a.toolCallId, responseBatchId(ctx.turnId, bi), TuiBlockKind_Tool, a.success()
-                    ? TuiBlockStatus_Ok : TuiBlockStatus_Failed, kToolBlockFlags, a.toolName,
-                    summarizeToolResponse(a, 1000), null, durationMsOf(a.processTime())));
+                uiMsg.blockUpsert(withResultPairs(makeBlockData(a.turnId != 0
+                    ? a.turnId : ctx.turnId, a.toolCallId, responseBatchId(ctx.turnId, bi),
+                    TuiBlockKind_Tool, a.success() ? TuiBlockStatus_Ok
+                    : TuiBlockStatus_Failed, kToolBlockFlags, a.toolName,
+                    summarizeToolResponse(a, 1000), null, durationMsOf(a.processTime())),
+                    unpackToolResultPairs(a)));
             }, (VisionMessage a) {
                 uiMsg.blockUpsert(makeBlockData(ctx.turnId, "vision#" ~ to!string(++ctx.visionSeq),
                     queryBatchId(ctx.turnId), TuiBlockKind_Prose, TuiBlockStatus_None,
@@ -1139,8 +1148,7 @@ struct AgentApp {
         if (finalAnswerSeen) {
             uiMsg.blockUpsert(makeBlockData(ctx.turnId, "answer", finalAnswerBatchId, TuiBlockKind_Answer,
                     TuiBlockStatus_None, 0, null, null, finalAnswerBody, finalAnswerDurMs));
-            uiMsg.turnUpsert(UiTurnData(ctx.turnId, ctx.ordinal,
-                    TuiTurnState_Done, ctx.messageCount));
+            uiMsg.turnUpsert(UiTurnData(ctx.turnId, TuiTurnState_Done, ctx.messageCount));
         }
     }
 
@@ -1155,8 +1163,7 @@ struct AgentApp {
             uiMsg.blockUpsert(makeBlockData(call.turnId, call.id, call.batchId, TuiBlockKind_Tool,
                     TuiBlockStatus_Cancelled, kToolBlockFlags, call.title, null, call.body, 0));
         ctx.liveCalls = null;
-        uiMsg.turnUpsert(UiTurnData(ctx.turnId, ctx.ordinal,
-                TuiTurnState_Interrupted, ctx.messageCount));
+        uiMsg.turnUpsert(UiTurnData(ctx.turnId, TuiTurnState_Interrupted, ctx.messageCount));
     }
 
     /// A compression progress notice as a Notice block. The body is the exact
@@ -1174,15 +1181,14 @@ struct AgentApp {
                 TuiBlockKind_Notice, TuiBlockStatus_None, 0, null, null, notice, 0));
     }
     /// Compression re-emission: the typed store is rebuilt from the rewritten
-    /// history with ONE setTurns snapshot - removed turns cascade, ordinals are
-    /// recomputed (D5), no stale group survives. Safe at the turn-start
-    /// compression: the live turn's upsert has not happened yet (the query echo
-    /// is sent after doCompress), so a snapshot cannot kill live state.
+    /// history with ONE setTurns snapshot - removed turns cascade, no stale
+    /// group survives. Safe at the turn-start compression: the live turn's
+    /// upsert has not happened yet (the query echo is sent after doCompress),
+    /// so a snapshot cannot kill live state.
     package void emitCompressionTyped() {
         auto built = buildTypedTurns(agent_.chat.getMessages());
         uiMsg.setTurns(built.turns, built.blocks);
         typedEmittedTurnIds_ = built.turns.map!(t => t.id).array;
-        typedOrdinalNext_ = cast(int) built.turns.length + 1;
         noticeSeq_ = 0;
         typedCtx_ = null;
     }
@@ -1193,7 +1199,6 @@ struct AgentApp {
         if (typedCtx_ is null) {
             typedCtx_ = new TypedEmitContext;
             typedCtx_.turnId = agent_.chat.currentTurnId();
-            typedCtx_.ordinal = typedOrdinalNext_++;
         }
         return new TypedStreamMessageUpdater(uiMsg, agent_.modelContextSize,
                 llmConf.activeModelDisplayName, typedCtx_);

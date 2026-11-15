@@ -5,11 +5,11 @@ glyphs: unicode
 depth: truecolor
 text:
    llmfun   Alpha session                  Ctrl+K commands Shift+?   Settings
-   /   ▸ WORK - 0 steps
-        YOU
-   ●    [5] build the project
-   ▸    ANSWER
+   /    YOU
+        build the project
+   ●    ANSWER
    ▸    read, then build
+   ▸
 
 
 
@@ -30,10 +30,10 @@ text:
   ✓ Ready                                                          ctx -  none
 fills:
 0: 1-1=111, 10-10=102, 67-78=23
-1: 0-0=17, 1-5=23, 6-79=17
-2: 0-6=17, 7-7=183, 8-79=17
-3: 0-79=17
-4: 0-6=17, 7-7=111, 8-79=17
+1: 0-0=17, 1-5=23, 6-6=17, 7-7=183, 8-79=17
+2: 0-79=17
+3: 0-6=17, 7-7=111, 8-79=17
+4: 0-79=17
 5: 0-79=17
 6: 0-79=17
 7: 0-79=17

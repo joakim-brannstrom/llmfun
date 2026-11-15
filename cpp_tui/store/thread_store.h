@@ -84,6 +84,14 @@ enum class GroupKind { UserQuery, FinalAnswer, AssistantWork };
 /// map on a session switch and a clear, and a turn's entry dies with the turn.
 enum class GroupOverride { ForceOpen, ForceClosed };
 
+/// The turn-level rows' block index: the query row and the answer row
+/// live outside the group's row list, so every per-block accessor
+/// (`blockAt`, `blockExpanded`, the copy, the body, the `s` toggle) addresses
+/// them through these sentinels. A turn without such a block answers a null
+/// entry (a descriptor with `group == 0`) / false there.
+inline constexpr std::size_t kQueryRow = static_cast<std::size_t>(-1);
+inline constexpr std::size_t kAnswerRow = static_cast<std::size_t>(-2);
+
 /// One group of the thread, as a view sees it.
 ///
 /// `id` is the group's id - the persisted turn id (never reused). `revision` is
@@ -95,8 +103,7 @@ enum class GroupOverride { ForceOpen, ForceClosed };
 ///
 /// `typedTurn` marks a group that projects a typed turn: the minimal
 /// projection folds its work rows behind the header and draws only the turn's
-/// content (D-GROUPID). `ordinal` is that turn's 1-based number - the query row
-/// renders it once, on the row that opened the turn (D11).
+/// content.
 struct GroupView {
     size_t id = 0;
     GroupKind kind = GroupKind::AssistantWork;
@@ -104,7 +111,10 @@ struct GroupView {
     std::string oneLineSummary;
     int lineCountEstimate = 1;
     bool typedTurn = false;
-    int ordinal = 0;
+    /// Whether the turn's Answer row exists (the kAnswerRow sentinel). The
+    /// palette's copy-answer cache stamps this: an answer arriving on the
+    /// sentinel moves no count, so the shape stamp needs the flag itself.
+    bool hasAnswer = false;
 };
 
 /// The only store-aware class the shell touches.
@@ -234,9 +244,10 @@ public:
 
     /// Block `b` of group `k`, described in the renderer's own vocabulary
     /// (`model::BlockDesc`); a default-constructed descriptor out of range. The
-    /// summary is display text: the store's `"[nr] body"` decoration has
-    /// already been resolved into the row's own fields (the ordinal prefix,
-    /// the state).
+    /// summary is display text: the store's decoration has already been
+    /// resolved into the row's own fields (the state). `b` also names the
+    /// turn-level rows through `kQueryRow`/`kAnswerRow` - a turn without
+    /// such a block answers a descriptor with `group == 0`.
     model::BlockDesc blockAt(size_t k, std::size_t b) const;
 
     /// Whether block `b` shows its body. Group and row blocks read the very sets
@@ -386,6 +397,14 @@ private:
         GroupView view;
         bool stream = false;
         std::vector<BlockEntry> blocks;
+        /// The turn-level rows: the query block projects as the turn's
+        /// opening row - drawn above the group header - and the answer as the
+        /// turn-level row after the group; both draw in both modes, the fold
+        /// keeps them. `hasQuery`/`hasAnswer` say the turn carries one.
+        BlockEntry queryRow;
+        bool hasQuery = false;
+        BlockEntry answerRow;
+        bool hasAnswer = false;
     };
 
     /// Rebuild `groups_` if the store changed since the last call.

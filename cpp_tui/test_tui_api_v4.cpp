@@ -1026,7 +1026,7 @@ void casePipelineLaneFields() {
     static_assert(sizeof(PipelineChatMessage::contextUsed) == 8 &&
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
-    static_assert(TUI_API_VERSION == 13,
+    static_assert(TUI_API_VERSION == 14,
                   "the lane contract changed; bump one version per ABI event");
     static_assert(sizeof(SessionItem) == 80, "SessionItem is unaffected by the lane fields");
 
@@ -1156,16 +1156,17 @@ void casePipelineLaneFields() {
 void caseThreadTurnBlockFields() {
     g_where = "case: v5 turn/block layout";
 
-    static_assert(TUI_API_VERSION == 13,
-                  "this case pins the current generation (v13); bump one version per ABI event");
+    static_assert(TUI_API_VERSION == 14,
+                  "this case pins the current generation (v14); bump one version per ABI event");
 
-    // TuiTurn: int64 + 4x int32 = 24 bytes on the 64-bit ABI, no padding.
+    // TuiTurn: int64 + 3x int32 (+ a 4-byte tail pad) = 24 bytes on the 64-bit
+    // ABI. The state and the message count follow the id; the reserved word
+    // closes the struct.
     static_assert(sizeof(TuiTurn) == 24, "TuiTurn is 24 bytes on the 64-bit ABI");
     static_assert(offsetof(TuiTurn, id) == 0, "id sits at offset 0");
-    static_assert(offsetof(TuiTurn, ordinal) == 8, "ordinal sits at offset 8");
-    static_assert(offsetof(TuiTurn, state) == 12, "state sits at offset 12");
-    static_assert(offsetof(TuiTurn, messageCount) == 16, "messageCount sits at offset 16");
-    static_assert(offsetof(TuiTurn, reserved) == 20, "reserved sits at offset 20");
+    static_assert(offsetof(TuiTurn, state) == 8, "state sits at offset 8");
+    static_assert(offsetof(TuiTurn, messageCount) == 12, "messageCount sits at offset 12");
+    static_assert(offsetof(TuiTurn, reserved) == 16, "reserved sits at offset 16");
 
     // TuiBlock: turnId + five 16-byte Strings + three int64 + 4x int32 + the
     // result transport (two pointers + one 16-byte String + three uint32 with a
@@ -1661,8 +1662,8 @@ int main(int argc, char** argv) {
             (void)std::remove("llmfun_ui_log.txt");
     });
 
-    static_assert(TUI_API_VERSION == 13,
-                  "this contract test pins the current API generation (v13)");
+    static_assert(TUI_API_VERSION == 14,
+                  "this contract test pins the current API generation (v14)");
 
     caseNoneStateInert();
     caseLogRecords();

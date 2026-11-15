@@ -49,10 +49,9 @@ void check(bool ok, const std::string& what) {
 
 /// A wire turn. `state`/`messageCount` are informational (the header says so);
 /// the tests pass them only where the field under test is the point.
-TypedTurn turn(std::int64_t id, int ordinal = 1, int state = 1, int messageCount = 0) {
+TypedTurn turn(std::int64_t id, int state = 1, int messageCount = 0) {
     TypedTurn t;
     t.id = id;
-    t.ordinal = ordinal;
     t.state = state;
     t.messageCount = messageCount;
     return t;
@@ -91,7 +90,7 @@ int main(int argc, char** argv) {
     // --- The upsert merge: a first upsert creates the slot, later ones merge ---
     {
         TypedThreadStore store;
-        store.turnUpsert(turn(7, 1, 0, 2));
+        store.turnUpsert(turn(7, 1, 2));
         store.blockUpsert(block(7, "call-1", 2, 1, "grep", "call body")); // Pending
         check(store.turnCount() == 1 && store.blockCount(7) == 1, "first upserts create the slots");
         store.blockUpsert(block(7, "result-1", 2, 3, "grep", "result body")); // Ok
@@ -106,7 +105,7 @@ int main(int argc, char** argv) {
               "the merge did not disturb the insertion order");
         // A turn upsert merges too: the slot (and with it any group id derived
         // from the insertion position) stays.
-        store.turnUpsert(turn(7, 1, 1, 5));
+        store.turnUpsert(turn(7, 1, 5));
         check(store.turnCount() == 1 && store.turnAt(0).messageCount == 5,
               "a turn upsert merges in place");
         check(store.blockCount(7) == 2, "the turn merge left the blocks alone");
@@ -254,12 +253,12 @@ int main(int argc, char** argv) {
         // A result can beat its turn's snapshot onto the wire (§7): the block
         // lands under an implicit empty turn slot, never dropped.
         store.blockUpsert(block(55, "result-x", 2, 3, "grep", "..."));
-        check(store.turnCount() == 1 && store.turnAt(0).id == 55 && store.turnAt(0).ordinal == 0,
+        check(store.turnCount() == 1 && store.turnAt(0).id == 55,
               "a result for an unknown turn is recorded under an implicit empty slot");
         check(store.blockCount(55) == 1, "...and its block is addressable");
         // The real turn's upsert merges into that slot.
-        store.turnUpsert(turn(55, 3, 1, 4));
-        check(store.turnCount() == 1 && store.turnAt(0).ordinal == 3 && store.blockCount(55) == 1,
+        store.turnUpsert(turn(55, 1, 4));
+        check(store.turnCount() == 1 && store.turnAt(0).state == 1 && store.blockCount(55) == 1,
               "the real turn's upsert merges into the implicit slot");
     }
 
@@ -268,7 +267,7 @@ int main(int argc, char** argv) {
         TypedThreadStore store;
         store.turnUpsert(turn(1));
         store.blockUpsert(block(1, "b", 0, 0, "", "x"));
-        std::vector<TypedTurn> turns{turn(1, 1, 1, 2), turn(2, 2, 1, 1)};
+        std::vector<TypedTurn> turns{turn(1, 1, 2), turn(2, 1, 1)};
         std::vector<TypedBlock> blocks{block(1, "b", 0, 0, "", "x"), block(2, "c", 0, 0, "", "y")};
         store.setTurns(std::move(turns), std::move(blocks));
         check(store.turnCount() == 2 && store.blockCount(1) == 1 && store.blockCount(2) == 1,
@@ -287,7 +286,7 @@ int main(int argc, char** argv) {
         tui::TuiState state;
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
-        state.chat.typedTurns.turnUpsert(turn(42, 1, 1, 3));
+        state.chat.typedTurns.turnUpsert(turn(42, 1, 3));
         state.chat.typedTurns.blockUpsert(block(42, "q", 0, 0, "", "what is v5?"));
         state.chat.typedTurns.blockUpsert(block(42, "call-1", 2, 3, "grep", "call body", "", 1500));
         state.chat.typedTurns.blockUpsert(block(42, "hid", 2, 3, "pipeline_output", "secret"));
@@ -302,17 +301,18 @@ int main(int argc, char** argv) {
               "typed: the header announces its step count (the hidden block weighs 0, "
               "the settled tool carries call + result)");
 
-        check(thread.blockCount(0) == 3,
-              "typed: the hidden tool block is stored but not a row (D3)");
+        check(thread.blockCount(0) == 2,
+              "typed: the query projects outside the group, the hidden tool block "
+              "is stored but not a row (D3)");
         const tui::model::BlockDesc header = thread.blockAt(0, 0);
         check(header.label == "WORK" && !header.hasBody && header.steps == 2,
               "typed: the header row announces the steps and has no body of its own");
-        const tui::model::BlockDesc q = thread.blockAt(0, 1);
-        check(q.label == "YOU" && q.kind == tui::model::BlockKind::User,
-              "typed: the turn-opening prose is the query row");
-        check(q.summary == "[1] what is v5?" && q.hasBody,
-              "typed: the query previews its body under the turn's ordinal (D11)");
-        const tui::model::BlockDesc tool = thread.blockAt(0, 2);
+        const tui::model::BlockDesc q = thread.blockAt(0, tui::store::kQueryRow);
+        check(q.group != 0 && q.label == "YOU" && q.kind == tui::model::BlockKind::User,
+              "typed: the turn-opening prose is the query row, addressed turn-level");
+        check(q.summary == "what is v5?" && q.hasBody,
+              "typed: the query previews its body, no number prefix");
+        const tui::model::BlockDesc tool = thread.blockAt(0, 1);
         check(tool.label == "TOOL" && tool.state == tui::model::BlockState::Ok,
               "typed: the merged tool card carries the wire status");
         check(tool.summary == "grep", "typed: the tool card previews its tool name");
@@ -324,13 +324,13 @@ int main(int argc, char** argv) {
         state.chat.typedTurns.blockUpsert(block(42, "call-1", 2, 3, "grep", "call body v2"));
         check(thread.groupAt(0).revision == rev0 + 1,
               "typed: a block merge bumps the group's revision (the hint guard sees it)");
-        check(thread.blockCount(0) == 3, "typed: the merge stayed in its slot");
+        check(thread.blockCount(0) == 2, "typed: the merge stayed in its slot");
 
         // An unknown wire kind draws as a system notice, never as a neighbour's row.
         state.chat.typedTurns.blockUpsert(block(42, "odd", 9, 0, "", "mystery"));
-        check(thread.blockCount(0) == 4, "typed: an unknown kind is still a row");
-        check(thread.blockAt(0, 3).kind == tui::model::BlockKind::System &&
-                  thread.blockAt(0, 3).label == "SYSTEM",
+        check(thread.blockCount(0) == 3, "typed: an unknown kind is still a row");
+        check(thread.blockAt(0, 2).kind == tui::model::BlockKind::System &&
+                  thread.blockAt(0, 2).label == "SYSTEM",
               "typed: an unknown wire kind draws as a system notice");
 
         // Expansion: the header shares the v4 work-group set, keyed by the
@@ -338,12 +338,12 @@ int main(int argc, char** argv) {
         // seeded - task 2's groups are born collapsed, and while the group is
         // folded a row's bit is its own.
         check(!thread.expanded(42), "typed: a group is born collapsed (task 2 seeds no defaults)");
-        check(!thread.blockExpanded(0, 2),
+        check(!thread.blockExpanded(0, 1),
               "typed: a tool row is born collapsed (the group is folded)");
-        check(thread.setBlockExpanded(0, 2, true), "typed: opening a tool row reports open");
-        check(thread.blockExpanded(0, 2), "typed: the row's disclosure took");
-        thread.setBlockExpanded(0, 2, false);
-        check(!thread.blockExpanded(0, 2), "typed: closing it clears the bit");
+        check(thread.setBlockExpanded(0, 1, true), "typed: opening a tool row reports open");
+        check(thread.blockExpanded(0, 1), "typed: the row's disclosure took");
+        thread.setBlockExpanded(0, 1, false);
+        check(!thread.blockExpanded(0, 1), "typed: closing it clears the bit");
 
         // A second adapter bound to the same state answers the same thing where
         // the state is shared: the group header's bit lives in openWorkGroups,
@@ -353,11 +353,11 @@ int main(int argc, char** argv) {
         other.bind(state);
         check(other.groupCount() == 1 && other.groupAt(0).id == 42,
               "typed: a second adapter rebuilds the same groups from the store");
-        check(other.blockAt(0, 2).label == "TOOL" && other.blockAt(0, 2).summary == "grep",
+        check(other.blockAt(0, 1).label == "TOOL" && other.blockAt(0, 1).summary == "grep",
               "typed: ...and the same block view");
         check(other.expanded(42) == thread.expanded(42) && !other.expanded(42),
               "typed: the shared group bit answers through both adapters");
-        check(!other.blockExpanded(0, 2), "typed: a row's disclosure stays per-adapter");
+        check(!other.blockExpanded(0, 1), "typed: a row's disclosure stays per-adapter");
 
         // Opening the group is task 6's minimal rule: every row it owns draws
         // open, and the shared set makes that true through both adapters.
@@ -365,7 +365,7 @@ int main(int argc, char** argv) {
         check(thread.expanded(42) && other.expanded(42), "typed: setExpanded opens the header");
         check(state.chat.openWorkGroups.count(42) == 1,
               "typed: the header's bit lives in the shared work-group set, keyed by the turnId");
-        check(thread.blockExpanded(0, 2) && other.blockExpanded(0, 2),
+        check(thread.blockExpanded(0, 1) && other.blockExpanded(0, 1),
               "typed: an open group draws the rows it owns open");
 
         // The header row toggles through the SAME set `setExpanded()` uses, so
@@ -385,7 +385,7 @@ int main(int argc, char** argv) {
         tui::TuiState state;
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
-        state.chat.typedTurns.turnUpsert(turn(42, 1, 1, 3));
+        state.chat.typedTurns.turnUpsert(turn(42, 1, 3));
         // The pipeline's shape: the streamed assistant content is the FIRST
         // prose, meta carries the agent role, and the tool batches follow.
         auto content = block(42, "content#0", 0, 0, "", "working on it");
@@ -407,8 +407,8 @@ int main(int argc, char** argv) {
         state.chat.typedTurns.blockUpsert(query);
         check(thread.blockAt(0, 1).label == "AGENT",
               "typed main: the streamed assistant prose stays an AGENT row beside the query");
-        check(thread.blockAt(0, 3).label == "YOU" &&
-                  thread.blockAt(0, 3).kind == tui::model::BlockKind::User,
+        check(thread.blockAt(0, tui::store::kQueryRow).label == "YOU" &&
+                  thread.blockAt(0, tui::store::kQueryRow).kind == tui::model::BlockKind::User,
               "typed main: the meta-user prose is the query row wherever it sits");
 
         // A turn with no meta at all keeps the pre-meta shape: the first prose
@@ -416,10 +416,11 @@ int main(int argc, char** argv) {
         tui::TuiState legacy;
         tui::store::ThreadStoreAdapter legacyThread(legacy);
         legacyThread.bind(legacy);
-        legacy.chat.typedTurns.turnUpsert(turn(7, 1, 1, 2));
+        legacy.chat.typedTurns.turnUpsert(turn(7, 1, 2));
         legacy.chat.typedTurns.blockUpsert(block(7, "q", 0, 0, "", "what is v5?"));
-        check(legacyThread.blockAt(0, 1).label == "YOU" &&
-                  legacyThread.blockAt(0, 1).kind == tui::model::BlockKind::User,
+        check(legacyThread.blockAt(0, tui::store::kQueryRow).label == "YOU" &&
+                  legacyThread.blockAt(0, tui::store::kQueryRow).kind ==
+                      tui::model::BlockKind::User,
               "typed legacy: a meta-less first prose is still the query row");
     }
 
@@ -428,7 +429,7 @@ int main(int argc, char** argv) {
         tui::TuiState state;
         tui::store::ThreadStoreAdapter thread(state);
         thread.bind(state);
-        state.chat.typedTurns.turnUpsert(turn(42, 1, 1, 3));
+        state.chat.typedTurns.turnUpsert(turn(42, 1, 3));
         state.chat.typedTurns.blockUpsert(block(42, "q", 0, 0, "", "what is v5?"));
         state.chat.typedTurns.blockUpsert(block(42, "call-1", 2, 3, "grep", "call body", "", 1500));
 
@@ -474,7 +475,7 @@ int main(int argc, char** argv) {
         check(!thread.groupMinimal(42) && thread.blockExpanded(0, 0) && thread.expanded(42),
               "task 8: a ForceOpen pin draws the group maximal-style in minimal mode");
         state.chat.groupOverrides.erase(42);
-        check(thread.blockAt(0, 2).kind == tui::model::BlockKind::ToolStep,
+        check(thread.blockAt(0, 1).kind == tui::model::BlockKind::ToolStep,
               "task 8: the block views are unchanged by the pin work");
 
         // Review F1: a ForceClosed pin written in maximal must not swallow a
@@ -530,7 +531,6 @@ int main(int argc, char** argv) {
         auto wstr = [](const char* s) { return String{s, std::strlen(s)}; };
         TuiTurn wt{};
         wt.id = 77;
-        wt.ordinal = 1;
         wt.state = 1;
         wt.messageCount = 1;
         TuiBlock wb{};
@@ -579,7 +579,6 @@ int main(int argc, char** argv) {
         auto wstr = [](const char* s) { return String{s, std::strlen(s)}; };
         TuiTurn wt{};
         wt.id = 77;
-        wt.ordinal = 1;
         wt.state = 1;
         wt.messageCount = 2;
         wt.reserved = 0;
@@ -629,7 +628,7 @@ int main(int argc, char** argv) {
         // no-re-parse/no-re-scan property is structural - every slot stays a
         // slot (merges never duplicate), the last write wins, and version()
         // bumps exactly once per mutating call - never a timing gate.
-        store.turnUpsert(turn(900, 1, 0, 0));
+        store.turnUpsert(turn(900, 1, 0));
         for (int i = 0; i < 1500; ++i)
             store.blockUpsert(
                 block(900, "content#0", 0, 0, "assistant", "tick " + std::to_string(i)));
@@ -667,7 +666,7 @@ int main(int argc, char** argv) {
               "storm: the call's upsert merges into the result's slot - one step, never two");
         check(store.blockAt(77, 0).status == 3 && store.blockAt(77, 0).body == "the call arguments",
               "storm: the merged step renders Ok with the call's arguments as the body");
-        store.turnUpsert(turn(77, 1, 0, 2));
+        store.turnUpsert(turn(77, 1, 2));
         check(tui::store::stepCount(store, 77) == 2,
               "storm: the merged step weighs 2 (call + result), never a dropped half");
     }
@@ -675,7 +674,7 @@ int main(int argc, char** argv) {
     // --- The v13 result pair transport: the store's merge-by-presence ---
     {
         TypedThreadStore store;
-        store.turnUpsert(turn(50, 1, 0, 1));
+        store.turnUpsert(turn(50, 1, 1));
         TypedBlock withPairs = block(50, "call-1", 2, 3, "grep", "the result text");
         withPairs.resultPairs = {{"path", "a.txt"}, {"status", "ok"}};
         withPairs.resultRaw = "{\"path\":\"a.txt\",\"status\":\"ok\"}";
@@ -721,6 +720,60 @@ int main(int argc, char** argv) {
         store.blockUpsert(block(50, "call-2", 2, 1, "sed", "args"));
         check(store.blockAt(50, 1).resultPairs.empty() && store.blockAt(50, 1).resultRaw.empty(),
               "transport: a pending call starts with an empty transport");
+    }
+
+    // Turn order. Live turns order by the store's insertion order; replayed
+    // turns order by the snapshot's history sequence - never by the ids: the
+    // projection must not re-derive a sort from the turn ids.
+    {
+        tui::TuiState state;
+        tui::store::ThreadStoreAdapter view(state);
+        view.bind(state);
+        TypedThreadStore& store = state.chat.typedTurns;
+
+        // A. Live: three turns upserted in conversation order, ids chosen
+        // NON-ascending - the upsert order is the order, the ids say nothing.
+        store.turnUpsert(turn(40, 0, 1)); // Running: the live turn
+        store.turnUpsert(turn(12, 0, 1));
+        store.turnUpsert(turn(9, 1, 1)); // Done
+        check(view.groupCount() == 3 && view.groupAt(0).id == 40 && view.groupAt(1).id == 12 &&
+                  view.groupAt(2).id == 9,
+              "typed order: live turn order is the upsert order, not the ids'");
+
+        // B. A compression re-emission: the emitter re-upserts the turns it
+        // still owns (a state flip per turn). A merge keeps its slot - no
+        // append, no reorder, no duplicate group.
+        store.turnUpsert(turn(40, 1, 1)); // the live turn settled
+        store.turnUpsert(turn(12, 1, 1));
+        check(view.groupCount() == 3 && view.groupAt(0).id == 40 && view.groupAt(1).id == 12 &&
+                  view.groupAt(2).id == 9,
+              "typed order: a compression re-upsert merges in place - order held");
+
+        // C. An emitter re-attach after a session switch: the whole snapshot
+        // re-emitted through the bulk path, same conversation order. The
+        // snapshot's array order IS the projection order - the store must
+        // not sort it, and each turn's blocks keep the snapshot's order too.
+        std::vector<TypedTurn> snapshotTurns;
+        std::vector<TypedBlock> snapshotBlocks;
+        for (const std::int64_t id : {9, 12, 40}) { // the history's own order
+            snapshotTurns.push_back(turn(id, 1, 1));
+            snapshotBlocks.push_back(block(id, "q", 0, 0, "user", "query " + std::to_string(id)));
+            snapshotBlocks.push_back(block(id, "answer", 3, 0, "", "answer " + std::to_string(id)));
+        }
+        store.threadClear();
+        store.setTurns(std::move(snapshotTurns), std::move(snapshotBlocks));
+        check(view.groupCount() == 3 && view.groupAt(0).id == 9 && view.groupAt(1).id == 12 &&
+                  view.groupAt(2).id == 40,
+              "typed order: the re-attached snapshot keeps the history order");
+        check(view.blockText(0, tui::store::kQueryRow) == "query 9" &&
+                  view.blockText(0, tui::store::kAnswerRow) == "answer 9" &&
+                  view.blockText(2, tui::store::kQueryRow) == "query 40" &&
+                  view.blockText(2, tui::store::kAnswerRow) == "answer 40",
+              "typed order: the snapshot's per-turn block order is the projection's");
+        // The Answer sentinel's presence is the GroupView flag the palette's
+        // copy-answer stamp reads: a turn with an answer block answers true.
+        check(view.groupAt(0).hasAnswer && view.groupAt(2).hasAnswer,
+              "typed order: GroupView.hasAnswer tracks the Answer sentinel");
     }
 
     if (g_failures != 0) {

@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
 
     // The typed store's seeding (the v4 message path is gone): a `User` message
     // opens a turn with its query block, an assistant step hangs a content block
-    // off the newest turn, and a transcript reset starts the ordinals over.
+    // off the newest turn, and a transcript reset restarts the walk's ids at 1.
     typed_seed::Seeder seed{&state, 1};
     int stepSeq = 0; ///< the newest turn's next content-block index
     const auto addUser = [&](const std::string& text) {
@@ -184,11 +184,14 @@ int main(int argc, char** argv) {
     };
 
     // Sixty overfull groups: the bounded window (30 groups in the pixel profile) hides
-    // most of them, so `Load earlier` has work to do and the thread scrolls.
+    // most of them, so `Load earlier` has work to do and the thread scrolls. Every
+    // group carries a work step, so each one draws its header row - the row the
+    // anchor's recording samples; a query-only turn draws no header at all.
     clearThread();
     for (size_t i = 0; i < 60; ++i) {
         const std::string text = "question " + std::to_string(i) + "\nsecond line\nthird line";
         addUser(text);
+        addStep("step body " + std::to_string(i) + "\nsecond line");
     }
 
     phase("follow-on");

@@ -90,7 +90,6 @@ tui::AgentStream coderStream() {
     using llmfun::tui::store::TypedTurn;
     TypedTurn turn;
     turn.id = 1;
-    turn.ordinal = 1;
     turn.state = TuiTurnState_Done;
     turn.messageCount = 2;
     stream.chat.typedTurns.turnUpsert(turn);
@@ -129,7 +128,6 @@ tui::AgentStream coderStream() {
     // The live run: a Running turn whose reasoning and content are still arriving.
     TypedTurn live;
     live.id = 2;
-    live.ordinal = 2;
     live.state = TuiTurnState_Running;
     stream.chat.typedTurns.turnUpsert(live);
     TypedBlock liveQuery;

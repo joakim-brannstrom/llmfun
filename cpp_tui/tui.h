@@ -218,10 +218,8 @@ struct AgentStream {
     /// share a turn id.
     std::int64_t typedTurnId{0};
     bool typedTurnActive{false};
-    /// The run counter folded into the turn id, and the turn's display
-    /// ordinal (one slot per live turn, D5).
+    /// The run counter folded into the turn id.
     std::uint64_t typedTurnSeq{0};
-    int typedOrdinal{0};
     /// Informational LLM-message count the Done upsert carries.
     int typedMessageCount{0};
     /// The in-flight call the next result merges into: the newest call this

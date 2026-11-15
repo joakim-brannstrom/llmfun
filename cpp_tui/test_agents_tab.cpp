@@ -1243,7 +1243,6 @@ void checkDrilldownMount() {
     {
         TypedTurn turn;
         turn.id = 1;
-        turn.ordinal = 1;
         turn.state = TuiTurnState_Done;
         turn.messageCount = 2;
         stream.chat.typedTurns.turnUpsert(turn);
@@ -1272,7 +1271,6 @@ void checkDrilldownMount() {
     {
         TypedTurn turn;
         turn.id = 2;
-        turn.ordinal = 2;
         turn.state = TuiTurnState_Running;
         stream.chat.typedTurns.turnUpsert(turn);
         TypedBlock query;
@@ -1434,7 +1432,6 @@ void checkStructuredToolRows() {
         for (int k = 0; k < 3; ++k) {
             TypedTurn turn;
             turn.id = k + 1;
-            turn.ordinal = k + 1;
             turn.state = TuiTurnState_Done;
             turn.messageCount = 1;
             turns.turnUpsert(turn);

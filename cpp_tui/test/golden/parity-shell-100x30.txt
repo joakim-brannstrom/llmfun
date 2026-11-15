@@ -5,11 +5,11 @@ glyphs: unicode
 depth: truecolor
 text:
    llmfun   Alpha session                                      Ctrl+K commands Shift+?   Settings
-  Search                  ▸ WORK - 0 steps
-                           YOU
- SESSIONS                  [4] build the project
- ▌● Alpha session          ANSWER
-    first user preview     read, then build
+  Search                   YOU
+                           build the project
+ SESSIONS                  ANSWER
+ ▌● Alpha session          read, then build
+    first user preview
   ▸ Beta session
     second user preview
   ▸ Gamma session
@@ -36,10 +36,10 @@ text:
   ✓ Ready                                                                              ctx -  none
 fills:
 0: 1-1=111, 10-10=102, 87-98=23
-1: 0-0=17, 1-24=16, 25-99=17
-2: 0-25=17, 26-26=183, 27-99=17
-3: 0-99=17
-4: 0-25=17, 26-26=111, 27-99=17
+1: 0-0=17, 1-24=16, 25-25=17, 26-26=183, 27-99=17
+2: 0-99=17
+3: 0-25=17, 26-26=111, 27-99=17
+4: 0-99=17
 5: 0-99=17
 6: 0-99=17
 7: 0-99=17

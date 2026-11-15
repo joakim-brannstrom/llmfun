@@ -63,7 +63,6 @@ void phase(const char* what) { g_phase = what; }
 llmfun::tui::store::TypedTurn makeTurn(std::int64_t id) {
     llmfun::tui::store::TypedTurn t;
     t.id = id;
-    t.ordinal = static_cast<int>(id);
     t.state = TuiTurnState_Done;
     t.messageCount = 1;
     return t;
@@ -138,7 +137,7 @@ void scenario3_scrollAndApiVersion() {
     expect(state.autoScroll == true, "auto-scroll on stays on across a clear");
 
     // Documentation-only marker: the clear contract must not bump it.
-    static_assert(TUI_API_VERSION == 13, "TUI_API_VERSION must stay at the current generation");
+    static_assert(TUI_API_VERSION == 14, "TUI_API_VERSION must stay at the current generation");
 }
 
 // Scenario 4: the C-API clear is a no-op on a NULL state.
@@ -163,7 +162,6 @@ void scenario5_cApiSwitchPath() {
     for (int i = 1; i <= 2; ++i) {
         TuiTurn t{};
         t.id = i;
-        t.ordinal = i;
         t.state = TuiTurnState_Done;
         t.messageCount = 1;
         turns.push_back(t);

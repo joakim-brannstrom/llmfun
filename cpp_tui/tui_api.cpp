@@ -108,8 +108,7 @@ inline constexpr int kToolBlockFlags =
     TuiBlockFlag_Collapsible | TuiBlockFlag_DefaultOpen | TuiBlockFlag_Selectable;
 
 /// Open the agent's live typed turn if none is open (design §4): the turn id
-/// folds the agent id with the per-agent run counter, the display ordinal
-/// takes the next slot. Answers the turn id.
+/// folds the agent id with the per-agent run counter. Answers the turn id.
 std::int64_t openTypedTurn(::llmfun::tui::AgentStream& agent) {
     if (agent.typedTurnActive)
         return agent.typedTurnId;
@@ -121,10 +120,8 @@ std::int64_t openTypedTurn(::llmfun::tui::AgentStream& agent) {
     agent.typedTurnActive = true;
     agent.typedMessageCount = 0;
     agent.typedHasCall = false;
-    agent.typedOrdinal++;
     ::llmfun::tui::store::TypedTurn turn;
     turn.id = agent.typedTurnId;
-    turn.ordinal = agent.typedOrdinal;
     turn.state = TuiTurnState_Running;
     turn.messageCount = 0;
     agent.chat.typedTurns.turnUpsert(turn);
@@ -805,7 +802,6 @@ void tuiPipelineAgentDone(TuiState* state, String agentId) {
                 }
                 ::llmfun::tui::store::TypedTurn turn;
                 turn.id = agent.typedTurnId;
-                turn.ordinal = agent.typedOrdinal;
                 turn.state = TuiTurnState_Done;
                 turn.messageCount = agent.typedMessageCount;
                 agent.chat.typedTurns.turnUpsert(turn);
@@ -848,7 +844,6 @@ void tuiSetTurns(TuiState* state, const TuiTurn* turns, size_t turnCount, const 
     for (size_t k = 0; turns && k < turnCount; ++k) {
         ::llmfun::tui::store::TypedTurn t;
         t.id = turns[k].id;
-        t.ordinal = turns[k].ordinal;
         t.state = turns[k].state;
         t.messageCount = turns[k].messageCount;
         typedTurns.push_back(t);
@@ -887,7 +882,6 @@ void tuiTurnUpsert(TuiState* state, const TuiTurn* turn) {
         return;
     ::llmfun::tui::store::TypedTurn t;
     t.id = turn->id;
-    t.ordinal = turn->ordinal;
     t.state = turn->state;
     t.messageCount = turn->messageCount;
     state->inner->chat.typedTurns.turnUpsert(t);

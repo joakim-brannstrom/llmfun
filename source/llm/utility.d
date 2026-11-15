@@ -198,6 +198,102 @@ string summarizeToolCallArguments(JSONValue args, size_t maxLength) @trusted {
     }
 }
 
+// The tool result's display payload: the sorted, capped key/value pair set for
+// a JSON-object result, or the fallback one-line string for anything else. The
+// caps live here - the store and the view take the payload as it arrives.
+struct ToolResultPairs {
+    string[] keys;
+    string[] values;
+    uint more; // pairs past the pair cap, 0 when under
+    string raw; // the one-line fallback string, non-object results only
+}
+
+private enum uint kMaxResultPairs = 100;
+private enum size_t kMaxPairValueCodepoints = 200;
+
+/// Whitespace runs collapse to single spaces, byte-wise: the same shape the
+/// C-side oneLine gives today's dim RESULT line, so a receiver rendering the
+/// fallback is byte-identical to its render of that line.
+private string resultOneLine(string s) @safe {
+    auto buf = appender!string();
+    bool pendingSpace;
+    foreach (char c; s) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') {
+            pendingSpace = buf.data.length != 0;
+            continue;
+        }
+        if (pendingSpace) {
+            buf.put(' ');
+            pendingSpace = false;
+        }
+        buf.put(c);
+    }
+    return buf[];
+}
+
+/// A pair value's text: strings raw, nested containers as compact JSON, other
+/// scalars via their JSON text.
+private string pairValueText(JSONValue value) @safe {
+    if (value.type == JSONType.string)
+        return value.str;
+    return value.toString(JSONOptions.doNotEscapeSlashes);
+}
+
+/// The value cut to the codepoint cap: a multibyte character at the cut stays
+/// whole, so a receiver's strings are never invalid UTF-8.
+private string capPairValue(string value) @safe {
+    size_t count;
+    foreach (size_t i, dchar c; value) {
+        if (count == kMaxPairValueCodepoints)
+            return value[0 .. i];
+        count++;
+    }
+    return value;
+}
+
+/// Unpack a tool result's payload into its display pairs. A JSON object walks
+/// one level (nested objects/arrays stringify as compact JSON, scalars as
+/// text); pairs sort byte-wise by key; duplicate keys keep the last value. A
+/// non-JSON payload, an array, or an object with no pairs keeps the pairs
+/// empty and carries the one-line fallback string instead. A cancelled call
+/// never reaches this - the caller skips it.
+ToolResultPairs unpackToolResultPairs(ToolResponse resp) {
+    ToolResultPairs out_;
+
+    string fallback() {
+        return resultOneLine(summarizeToolResponse(resp, 1000));
+    }
+
+    JSONValue parsed;
+    try {
+        parsed = parseJSON(resp.content);
+    } catch (Exception e) {
+        out_.raw = fallback();
+        return out_;
+    }
+    if (parsed.type != JSONType.object) {
+        out_.raw = fallback();
+        return out_;
+    }
+
+    string[] keys;
+    foreach (key, _; parsed.object)
+        keys ~= key;
+    sort(keys);
+
+    foreach (key; keys) {
+        if (out_.keys.length == kMaxResultPairs)
+            break;
+        out_.keys ~= key;
+        out_.values ~= capPairValue(pairValueText(parsed.object[key]));
+    }
+    out_.more = cast(uint)(parsed.object.length > kMaxResultPairs
+            ? parsed.object.length - kMaxResultPairs : 0);
+    if (out_.keys.empty)
+        out_.raw = fallback();
+    return out_;
+}
+
 void configCatchCtrlC() {
     import core.stdc.signal;
 

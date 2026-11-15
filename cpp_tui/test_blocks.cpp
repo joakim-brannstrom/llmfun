@@ -1062,8 +1062,9 @@ void checkFocusAndCopy() {
     fixture.draw();
 
     // Click the first row: it takes the focus, and the second block does not. The
-    // rows: the group's header, then the query - so the query is row 1.
-    fixture.draw(true, [](ImGuiIO& in) { in.AddMousePosEvent(5.0f, 1.0f); });
+    // rows: the query opens the turn (query-first), so the first turn's query
+    // is row 0.
+    fixture.draw(true, [](ImGuiIO& in) { in.AddMousePosEvent(5.0f, 0.0f); });
     fixture.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, true); });
     fixture.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, false); });
     // The chip is drawn by the frame *after* the one that took the focus: the click is
@@ -1076,7 +1077,7 @@ void checkFocusAndCopy() {
           "a click focuses a block");
     check(grid.contains("Copy"), "the focused block shows its Copy control");
 
-    const std::string body = fixture.state.threadAdapter.blockText(0, 1);
+    const std::string body = fixture.state.threadAdapter.blockText(0, store::kQueryRow);
     check(body == "first question", "the adapter answers the block's body (got '" + body + "')");
 
     // Exactly one block is focused: one row carries the control, however many blocks the
@@ -1086,18 +1087,18 @@ void checkFocusAndCopy() {
     for (int y = 0; y < grid.ny; ++y)
         copyRows += grid.rowText(y).find("Copy") != std::string::npos ? 1 : 0;
     check(copyRows == 1, "exactly one row carries the Copy control (one focused block)");
-    check(grid.rowText(1).find("Copy") != std::string::npos,
+    check(grid.rowText(0).find("Copy") != std::string::npos,
           "the Copy control is drawn on the focused row");
 
     // The mouse path (task 26: "copy works by mouse"): the row's hit box gives up exactly
     // the chip's width, so a click on the chip's own cells copies the block - and does
     // not reach the row underneath it (no toggle, no focus change).
-    const std::size_t chipAt = grid.rowText(1).find("Copy");
+    const std::size_t chipAt = grid.rowText(0).find("Copy");
     const float chipX = static_cast<float>(chipAt) + 2.0f;
-    const bool wasExpanded = fixture.state.threadAdapter.blockExpanded(0, 1);
+    const bool wasExpanded = fixture.state.threadAdapter.blockExpanded(0, store::kQueryRow);
     g_clipboard.clear();
     g_clipboardSet = false;
-    fixture.draw(true, [chipX](ImGuiIO& in) { in.AddMousePosEvent(chipX, 1.0f); });
+    fixture.draw(true, [chipX](ImGuiIO& in) { in.AddMousePosEvent(chipX, 0.0f); });
     fixture.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, true); });
     fixture.draw(true, [](ImGuiIO& in) { in.AddMouseButtonEvent(0, false); });
     check(g_clipboardSet && g_clipboard == "first question",
@@ -1177,7 +1178,7 @@ void checkStreamReasoningDefault() {
     fixture.seed.runStart("stream this");
     fixture.addStream(MsgKind::Assistant, "prose", "reasoning");
     fixture.draw();
-    const size_t bodyRow = 3; // header, query, content, reasoning
+    const size_t bodyRow = 2; // header, content, reasoning
     check(!fixture.state.threadAdapter.blockExpanded(0, bodyRow),
           "a new stream's reasoning starts folded (its preview is the header's)");
 
@@ -1595,7 +1596,7 @@ void checkCopyFeedback() {
     fixture.add(message(1, MsgKind::User, "[1] first question [0.5s]", "first question"));
     fixture.state.ui.view = model::ThreadView::Ready;
     fixture.draw();
-    clickCell(fixture, 5, 1, /*button=*/0); // the query row: the header is row 0
+    clickCell(fixture, 5, 0, /*button=*/0); // the query row: query-first puts it at row 0
     fixture.draw(true);
     check(fixture.state.ui.thread.focus.valid(), "the copy fixture has a focused block");
     check(fixture.state.ui.toasts.empty(), "focusing a block says nothing");
@@ -1622,10 +1623,10 @@ void checkCopyFeedback() {
     // The chip is the same action: acknowledged first, so the count is this press's own.
     model::dismissShownToast(fixture.state.ui);
     const Grid grid = fixture.draw();
-    const std::size_t chipAt = grid.rowText(1).find("Copy");
+    const std::size_t chipAt = grid.rowText(0).find("Copy");
     check(chipAt != std::string::npos, "the focused block's Copy control is on screen");
     if (chipAt != std::string::npos)
-        clickCell(fixture, static_cast<int>(chipAt) + 2, 1, /*button=*/0);
+        clickCell(fixture, static_cast<int>(chipAt) + 2, 0, /*button=*/0);
     check(fixture.state.ui.toasts.size() == 1, "the Copy control adds exactly one item (got " +
                                                    std::to_string(fixture.state.ui.toasts.size()) +
                                                    ")");
@@ -1686,7 +1687,7 @@ void checkBlockMenuOwnership() {
         return;
     const Grid menu = openBlockMenu(fixture, row);
     check(menuCopyRows(menu, row).size() == 1, "the menu drew exactly one Copy item");
-    const model::BlockDesc first = fixture.state.threadAdapter.blockAt(0, 1);
+    const model::BlockDesc first = fixture.state.threadAdapter.blockAt(0, store::kQueryRow);
     check(fixture.state.ui.thread.menuBlockId == first.id(),
           "opening the menu latches its owner by BlockId");
     check(ImGui::IsPopupOpen(static_cast<ImGuiID>(0),
@@ -1731,7 +1732,7 @@ void checkBlockMenuOwnership() {
     recycled.seed = typed_seed::Seeder(&recycled.state, 1); // the transcript starts over
     recycled.add(message(1, MsgKind::User, "[1] new [0.6s]", "NEW-BODY"));
     const Grid fresh = recycled.draw();
-    const model::BlockDesc second = recycled.state.threadAdapter.blockAt(0, 1);
+    const model::BlockDesc second = recycled.state.threadAdapter.blockAt(0, store::kQueryRow);
     check(second.id() == oldId, "premise: the reset recycled the BlockId");
     check(!recycled.state.ui.thread.menuBlockId.valid(),
           "a transcript reset drops the menu's owner");
@@ -1756,19 +1757,24 @@ void checkMenuKeepsTheFocusedBlock() {
     ThreadFixture fixture;
     fixture.add(message(1, MsgKind::User, "[1] first [0.5s]", "FIRST-BODY"));
     fixture.add(message(2, MsgKind::User, "[2] second [0.6s]", "SECOND-BODY"));
+    // A third turn: with query-first the turns' rows stand close together (a
+    // user-only turn is its query row and its body), and the menu's Copy item must
+    // be the *only* Copy in the band around the clicked row - a third turn keeps
+    // the focused row's own chip out of that band.
+    fixture.add(message(3, MsgKind::User, "[3] third [0.7s]", "THIRD-BODY"));
     Grid grid = fixture.draw();
     const int first = findRow(grid, "YOU");
-    const int second = findRow(grid, "YOU", /*fromBottom=*/true);
-    check(first >= 0 && second > first, "both rows are on screen");
-    if (first < 0 || second <= first)
+    const int third = findRow(grid, "YOU", /*fromBottom=*/true);
+    check(first >= 0 && third > first, "both rows are on screen");
+    if (first < 0 || third <= first)
         return;
     clickCell(fixture, 5, first, /*button=*/0);
     grid = fixture.draw(true);
     check(fixture.state.ui.thread.focus ==
               model::BlockId{1, std::hash<std::string>{}("query"), model::BlockKind::User},
           "premise: the first block holds the focus");
-    const Grid menu = openBlockMenu(fixture, second);
-    check(menuCopyRows(menu, second).size() == 1, "the second block's menu is open");
+    const Grid menu = openBlockMenu(fixture, third);
+    check(menuCopyRows(menu, third).size() == 1, "the third block's menu is open");
     check(fixture.state.ui.thread.focus ==
               model::BlockId{1, std::hash<std::string>{}("query"), model::BlockKind::User},
           "opening a menu does not move the focus");
@@ -1777,7 +1783,7 @@ void checkMenuKeepsTheFocusedBlock() {
     fixture.draw(true, [](ImGuiIO& in) { in.AddInputCharacter('y'); });
     check(g_clipboardSet && g_clipboard == "FIRST-BODY",
           "`y` while a menu is open copies the focused block (got '" + g_clipboard + "')");
-    check(menuCopyRows(fixture.draw(true), second).size() == 1,
+    check(menuCopyRows(fixture.draw(true), third).size() == 1,
           "and the menu stays open on the block it belongs to");
 }
 // ---------------------------------------------------------------------------
@@ -1909,9 +1915,9 @@ std::vector<Scene> scenes() {
                         f.seed.tool("task_done", "the answer is 42", TuiBlockStatus_Ok, "42", 3200);
                         f.seed.add(typed_seed::Seeder::Msg::FinalAnswer, "The answer is 42");
                     }});
-    // A replayed multi-turn thread: every group is folded to its header, the
-    // content rows carry the queries, answers and their bodies, and the
-    // ordinal sits next to the header's step count.
+    // A replayed multi-turn thread: the query opens each turn, the work group
+    // carries its tool card behind the header, the answers draw after their
+    // groups - and a turn with no work rows (turn 2) renders headerless.
     list.push_back({"idle", [](ThreadFixture& f) {
                         f.seed.upsertTurn(1, TuiTurnState_Done, 4);
                         f.seed.upsertBlock(1, "q1", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None,
@@ -2004,6 +2010,30 @@ std::vector<Scene> scenes() {
                                       "```\nint main() { return 0; }\n```"));
                     }});
     return list;
+}
+
+// An empty group renders headerless: a turn whose only rows are the query and
+// the answer draws both stand-alone - no WORK header between them, because the
+// header exists to announce rows the group does not have.
+void checkEmptyGroupHeaderless() {
+    ThreadFixture fixture;
+    fixture.add(message(1, MsgKind::User, "[1] just a question [0.5s]", "just a question"));
+    fixture.add(message(2, MsgKind::FinalAnswer, "[1] done [1.0s]", "just the answer"));
+    fixture.state.ui.view = model::ThreadView::Ready;
+    const Grid grid = fixture.draw();
+
+    check(!grid.contains("WORK"), "an empty group draws no WORK header");
+    check(grid.contains("just a question") && grid.contains("just the answer"),
+          "the query and the answer still draw");
+    int queryRow = -1, answerRow = -1;
+    for (int y = 0; y < grid.ny; ++y) {
+        if (queryRow < 0 && grid.rowText(y).find("just a question") != std::string::npos)
+            queryRow = y;
+        if (grid.rowText(y).find("just the answer") != std::string::npos)
+            answerRow = y;
+    }
+    check(queryRow >= 0 && answerRow > queryRow,
+          "the answer draws after the query (the turn's order holds headerless)");
 }
 
 void checkGoldens(bool update) {
@@ -2132,6 +2162,7 @@ int main(int argc, char** argv) {
     checkCtrlCStaysUnbound();
     checkBlockMenuOwnership();
     checkMenuKeepsTheFocusedBlock();
+    checkEmptyGroupHeaderless();
     checkGoldens(update);
 
     ImTui_ImplText_Shutdown();
