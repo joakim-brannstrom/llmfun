@@ -645,14 +645,28 @@ package string reasoningBlockId(int batchIndex) {
     return "reasoning#" ~ text(batchIndex);
 }
 
-// Build a wire-shaped block from D values. The body is cut to the wire cap
-// (truncatedForWire): D is the producer, the C side never sees an unbounded
-// string. The id/batchId/title/meta are exact - truncating the id would break
-// the store's upsert-merge; meta arrives pre-summarized.
+// Build a wire-shaped block from D values. The body crosses uncut: folding
+// bounds what renders, so an unbounded body costs copies, not display. The
+// id/batchId/title are exact - truncating the id would break the store's
+// upsert-merge; meta arrives pre-summarized, tool bodies pre-capped.
 package UiBlockData makeBlockData(long turnId, string id, string batchId, int kind,
         int status, int flags, string title, string meta, string body, long durationMs) {
-    return UiBlockData(turnId, id, batchId, title, meta,
-            truncatedForWire(body), durationMs, 0, 0, kind, status, flags);
+    return UiBlockData(turnId, id, batchId, title, meta, body, durationMs, 0,
+            0, kind, status, flags);
+}
+
+@("makeBlockData crosses an oversized body verbatim, uncut")
+unittest {
+    // The reported bug: a long answer ended in "..." at the wire. Folding
+    // bounds the render, so the body must arrive whole - 1000 was the cap.
+    string long_body;
+    foreach (_; 0 .. 1500)
+        long_body ~= "x";
+    long_body ~= "\nfinal line";
+    const r = makeBlockData(7, "answer", "7#0", TuiBlockKind_Answer,
+            TuiBlockStatus_None, 0, null, null, long_body, 0);
+    assert(r.body == long_body, "body must cross uncut");
+    assert(r.body[$ - "final line".length .. $] == "final line", "a byte cut would mangle the tail");
 }
 
 // The call's arguments summary for a streaming call whose arguments may still
