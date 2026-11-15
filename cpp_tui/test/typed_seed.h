@@ -51,7 +51,9 @@ struct Seeder {
     void upsertBlock(std::int64_t turnId, const std::string& id, const std::string& batchId,
                      int kind, int status, const char* meta, const std::string& body,
                      const char* title = nullptr, std::int64_t durationMs = 0,
-                     std::int64_t tokensIn = 0, std::int64_t tokensOut = 0) {
+                     std::int64_t tokensIn = 0, std::int64_t tokensOut = 0,
+                     const std::vector<std::pair<std::string, std::string>>& resultPairs = {},
+                     const std::string& resultRaw = std::string(), std::uint32_t resultMore = 0) {
         TuiBlock b{};
         b.turnId = turnId;
         b.id = makeStr(id);
@@ -68,6 +70,20 @@ struct Seeder {
         if (title != nullptr)
             b.title = makeStr(title);
         b.body = makeStr(body);
+        // The RESULT pair transport: parallel key/value arrays plus the
+        // packed fallback string, all copied by the upsert during the call -
+        // the locals here never outlive it.
+        std::vector<String> keys;
+        std::vector<String> values;
+        for (const auto& kv : resultPairs) {
+            keys.push_back(makeStr(kv.first));
+            values.push_back(makeStr(kv.second));
+        }
+        b.resultKeys = keys.empty() ? nullptr : keys.data();
+        b.resultValues = values.empty() ? nullptr : values.data();
+        b.resultCount = static_cast<std::uint32_t>(keys.size());
+        b.resultRaw = makeStr(resultRaw);
+        b.resultMore = resultMore;
         tuiBlockUpsert(&handle, &b);
     }
 
@@ -129,16 +145,21 @@ struct Seeder {
     }
 
     /// One live step's merged card (call + result): the tool's name is the
-    /// title, the result summary the meta, and the transcript the body.
+    /// title, the result summary the meta - and the RESULT
+    /// transport: the summary feeds the packed fallback line when the card
+    /// carries no pairs, the pairs ride the per-pair render when they do.
     void tool(const std::string& name, const std::string& body, int status,
-              const std::string& meta = std::string(), std::int64_t durationMs = 0) {
+              const std::string& meta = std::string(), std::int64_t durationMs = 0,
+              const std::vector<std::pair<std::string, std::string>>& resultPairs = {},
+              std::uint32_t resultMore = 0) {
         if (liveTurnId == 0)
             return;
         ++liveBatch; // one merged card per call (F5): a second call never
                      // overwrites the first - the id is the call's identity
         upsertBlock(liveTurnId, "tool#" + std::to_string(liveBatch),
                     std::to_string(liveTurnId) + "#" + std::to_string(liveBatch), TuiBlockKind_Tool,
-                    status, meta.empty() ? nullptr : meta.c_str(), body, name.c_str(), durationMs);
+                    status, meta.empty() ? nullptr : meta.c_str(), body, name.c_str(), durationMs,
+                    0, 0, resultPairs, meta, resultMore);
     }
 };
 

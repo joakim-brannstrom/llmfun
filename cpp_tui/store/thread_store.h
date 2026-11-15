@@ -384,13 +384,14 @@ private:
         /// The batch's tool-card count (F5): filled for a Thinking row by
         /// counting the Tool rows that share its `typedBatchId`.
         int batchTools = 0;
-        /// The tool card's token counters (F5), copied from the typed block -
-        /// each renders only when non-zero.
-        std::int64_t tokensIn = 0;
-        std::int64_t tokensOut = 0;
-        /// The typed block's meta (the tool result's one-line summary, D4):
-        /// the maximal card's embedded Result.
-        std::string typedMeta;
+        /// The merged card's RESULT pair set, copied verbatim from the
+        /// typed block - the renderer draws the store's strings, it never
+        /// re-parses. `resultRaw` is the packed one-line fallback for
+        /// an array, a non-JSON payload or a zero-pair object. `resultMore` is
+        /// the pair count past the sender's cap (the "... K more" tail).
+        std::vector<std::pair<std::string, std::string>> resultPairs;
+        std::string resultRaw;
+        std::uint32_t resultMore = 0;
     };
 
     struct Entry {

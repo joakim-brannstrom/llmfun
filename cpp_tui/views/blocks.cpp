@@ -4,9 +4,9 @@
 ///
 ///  * the role is a *rule* plus a foreground, never a fill (D-BLOCK), so a block
 ///    paints no background at all - the body behind it is the region surface;
-///  * the state is a glyph *and* a word: `blockStateGlyph()` supplies the mark and
-///    the label supplies the meaning, so a 16-colour or ASCII surface loses the
-///    mark and keeps the row (NFR-16);
+///  * the state paints a word, never a glyph: a failed tool card renders
+///    the red FAIL on its header, folded or open, and the live states drive the
+///    thread view's chips line;
 ///  * every length comes from the metrics and every colour from a token - the file
 ///    has no colour literal and never asks which profile is up (`tools/gate_ratchet.txt`
 ///    holds it to that);
@@ -114,6 +114,7 @@ const char* defaultBlockLabel(BlockKind kind) {
         return "AGENT";
     case BlockKind::ToolCall:
     case BlockKind::ToolResult:
+    case BlockKind::ToolStep:
         return "TOOL";
     case BlockKind::Thinking:
         return "Thinking";
@@ -145,24 +146,12 @@ ui::ColorToken blockInk(BlockKind kind) {
     case BlockKind::Thinking:
     case BlockKind::Code:
         return ui::ColorToken::roleAgent;
+    case BlockKind::ToolStep:
+        // The merged card draws neutral ink: the call and its result are one
+        // transcript, and neither side carries a role of its own.
+        return ui::ColorToken::roleSystem;
     }
     return ui::ColorToken::roleSystem;
-}
-
-ui::Icon blockStateGlyph(BlockState state) {
-    switch (state) {
-    case BlockState::None:
-        return ui::Icon::Count; // no mark: the row's word carries the meaning
-    case BlockState::Pending:
-        return ui::Icon::Pending;
-    case BlockState::Running:
-        return ui::Icon::Running;
-    case BlockState::Ok:
-        return ui::Icon::Ok;
-    case BlockState::Failed:
-        return ui::Icon::Error;
-    }
-    return ui::Icon::Count;
 }
 
 bool blockIsCompactRow(BlockKind kind) {
@@ -170,7 +159,10 @@ bool blockIsCompactRow(BlockKind kind) {
 }
 
 bool blockHasDisclosure(BlockKind kind) {
-    return kind == BlockKind::WorkGroup || kind == BlockKind::Thinking;
+    // The tool card is a foldable like the Thinking rows: the same
+    // disclosure shape and the same click behavior.
+    return kind == BlockKind::WorkGroup || kind == BlockKind::Thinking ||
+           kind == BlockKind::ToolStep;
 }
 
 std::string blockTimingLabel(double seconds) {
@@ -204,26 +196,18 @@ std::string blockHeaderText(const BlockView& block, const BlockDraw& draw, bool 
         text += block.batchTools == 1 ? " tool call" : " tool calls";
     }
     if (block.kind == BlockKind::ToolStep) {
-        // The tool card's header (F5): `TOOL <name>` while the card streams,
+        // The tool card's header: `TOOL <name>` while the card streams,
         // `TOOL <name> · <duration>` once the result lands (W7: exactly when
-        // durationMs != 0 - never a placeholder). Each token field renders
-        // only when non-zero.
+        // durationMs != 0 - never a placeholder). The header carries no token
+        // counts - the wire fields stay, this render consumes none of them. A
+        // failure paints its red FAIL word in `renderBlock`, never in the text
+        // this returns - the caller draws it with its own ink.
         if (!block.summary.empty()) {
             text += "  ";
             text += block.summary;
         }
         if (!timing.empty())
             text += separator(textGrid) + timing;
-        if (block.tokensIn > 0) {
-            text += separator(textGrid);
-            text += ui::formatCount(block.tokensIn);
-            text += " in";
-        }
-        if (block.tokensOut > 0) {
-            text += separator(textGrid);
-            text += ui::formatCount(block.tokensOut);
-            text += " out";
-        }
         return text;
     }
     if (!timing.empty())
@@ -337,20 +321,16 @@ BlockResult renderBlock(const BlockView& block, const ui::Rect& rect, const ui::
             ui::rule(m, ui::Rect{pos.x, pos.y, ruleW, headH, m.textGrid}, ink);
         penX = pos.x + ruleW + (m.textGrid ? 0.0f : m.pad1);
     }
-    // A state glyph, if the block has a state: the mark, then one unit of air.
-    const ui::Icon stateIcon = blockStateGlyph(block.state);
-    if (stateIcon != ui::Icon::Count) {
-        const ui::Rect slot{penX, pos.y, m.gu, m.row, m.textGrid};
-        const ui::ColorToken stateInk =
-            block.state == BlockState::Failed
-                ? ui::ColorToken::stateDanger
-                : (block.state == BlockState::Ok ? ui::ColorToken::stateOk
-                                                 : ui::ColorToken::textMid);
-        ui::iconMark(m, slot, stateIcon, stateInk);
-        penX += m.gu + m.pad1;
+    // No state glyph: the status is a word on the card's header -
+    // a failed tool card renders its red FAIL after the header text, folded or
+    // open, and every other state stays silent (success needs no mark).
+    const std::string headerText = blockHeaderText(block, draw, m.textGrid);
+    textAt(m, header, penX, pos.y, headerText, ink);
+    if (block.kind == BlockKind::ToolStep && block.state == BlockState::Failed) {
+        const float textW =
+            static_cast<float>(ui::displayWidth(headerText)) * (m.textGrid ? 1.0f : m.gu);
+        textAt(m, header, penX + textW + m.pad1, pos.y, "FAIL", ui::ColorToken::stateDanger);
     }
-
-    textAt(m, header, penX, pos.y, blockHeaderText(block, draw, m.textGrid), ink);
     if (compact && !draw.expanded) {
         // The compact row's second line: the one-line summary, indented under the label
         // so the glyph column stays a column. It is the row's *rest* state - open, the

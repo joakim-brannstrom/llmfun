@@ -262,7 +262,6 @@ void ThreadStoreAdapter::syncTyped() const {
             row.typedTurnId = turn.id;
             row.typedBlockId = block.id;
             row.typedBatchId = block.batchId;
-            row.typedMeta = block.meta;
             row.typedTitle = block.title;
             row.typedBody = block.body;
             switch (block.kind) {
@@ -280,8 +279,9 @@ void ThreadStoreAdapter::syncTyped() const {
                 break;
             case store::kBlockKindTool: // the merged card (call + result, one row)
                 row.kind = model::BlockKind::ToolStep;
-                row.tokensIn = block.tokensIn; // the card's token fields (F5)
-                row.tokensOut = block.tokensOut;
+                row.resultPairs = block.resultPairs; // the card's RESULT rows
+                row.resultRaw = block.resultRaw;
+                row.resultMore = block.resultMore;
                 break;
             case store::kBlockKindAnswer:
                 row.kind = model::BlockKind::Answer;
@@ -584,8 +584,6 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
     out.timingS = block->timingS;
     out.steps = block->steps;
     out.batchTools = block->batchTools;
-    out.tokensIn = block->tokensIn;
-    out.tokensOut = block->tokensOut;
     out.expandable = block->expandable;
     out.expanded = blockExpanded(k, b);
 
@@ -621,7 +619,12 @@ model::BlockDesc ThreadStoreAdapter::blockAt(size_t k, std::size_t b) const {
     // switch), every other row its body's first line.
     if (block->kind != model::BlockKind::ToolStep)
         out.summary = oneLine(block->typedBody);
-    out.hasBody = !block->typedBody.empty();
+    // A card's body room is the args text OR its RESULT rows: an
+    // empty-args card with a result still opens onto the result lines, so
+    // `hasBody` covers both - a body-less, result-less card (a Cancelled one)
+    // opens nothing.
+    out.hasBody =
+        !block->typedBody.empty() || !block->resultPairs.empty() || !block->resultRaw.empty();
     return out;
 }
 
@@ -720,8 +723,11 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
     // through the markdown wrapper.
     const bool markdown = block->kind != model::BlockKind::ToolStep;
     // A card's Result can exist without arguments (F5): an empty body does not
-    // end the draw - only a body-less, result-less row paints nothing.
-    const bool hasResult = block->kind == model::BlockKind::ToolStep && !block->typedMeta.empty();
+    // end the draw - only a body-less, result-less row paints nothing. A
+    // Cancelled card carries neither (no pairs, no raw), so it draws
+    // header-only.
+    const bool hasResult = block->kind == model::BlockKind::ToolStep &&
+                           (!block->resultPairs.empty() || !block->resultRaw.empty());
     if (body.empty() && !hasResult)
         return;
     // The drawn body: the body's text verbatim. The query row draws open (the
@@ -747,13 +753,24 @@ void ThreadStoreAdapter::renderBlockBody(size_t k, std::size_t b, const ui::Rect
             renderBodyText(drawn, markdown, showTableSource);
         }
     }
-    if (block->kind == model::BlockKind::ToolStep && !block->typedMeta.empty()) {
-        // The embedded Result (F5): the merged card carries the call's outcome
-        // under its arguments, dim, open by default - a body row draws only
-        // when the card is open, so closing the card closes the result with it.
-        // The status is the header's glyph, never repeated here.
+    if (block->kind == model::BlockKind::ToolStep &&
+        (!block->resultPairs.empty() || !block->resultRaw.empty())) {
+        // The embedded RESULT: one dim `RESULT <key> = <value>` line per
+        // pair, the store's strings verbatim, never re-parsed. The packed
+        // fallback line draws for an array, a non-JSON payload or a zero-pair
+        // object (the same byte shape today's dim line rendered). The
+        // "... K more" dim tail draws when the sender capped the pair set. The
+        // card draws this only while it is open, so closing the card closes the
+        // result with it. The status is the header's word, never repeated here.
         ImGui::PushStyleColor(ImGuiCol_Text, ui::color(ui::ColorToken::textMid));
-        renderBodyText("RESULT  " + oneLine(block->typedMeta), false, false);
+        for (const auto& pair : block->resultPairs)
+            renderBodyText("RESULT " + pair.first + " = " + pair.second, false, false);
+        if (block->resultPairs.empty())
+            renderBodyText("RESULT  " + oneLine(block->resultRaw), false, false);
+        if (block->resultMore > 0) {
+            const std::string more = "... " + std::to_string(block->resultMore) + " more";
+            renderBodyText(more, false, false);
+        }
         ImGui::PopStyleColor();
     }
     ImGui::PopTextWrapPos();

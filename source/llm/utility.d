@@ -169,6 +169,66 @@ string[] summarizeToolCalls(JSONValue calls, size_t maxLength) @trusted {
     return rval[];
 }
 
+/// Per-call args-only summaries for the tool card's body.
+string[] summarizeToolCallBodies(JSONValue calls, size_t maxLength) @trusted {
+    string process(JSONValue call) {
+        try {
+            if ("function" !in call)
+                return null;
+            call = call["function"];
+
+            return summarizeToolCallArguments(parseJSON(call["arguments"].str), maxLength);
+        } catch (Exception e) {
+            logger.trace("args summary failed, should not happen: ", e.msg);
+            return null;
+        }
+    }
+
+    auto rval = appender!(string[])();
+    if (calls.type != JSONType.array)
+        return [];
+    foreach (call; calls.array) {
+        rval.put(process(call));
+    }
+
+    return rval[];
+}
+
+@("summarizeToolCallBodies yields the arguments only, one pair per line")
+unittest {
+    import std.json : JSONValue;
+
+    JSONValue[] fns;
+    fns ~= JSONValue([
+        "function": JSONValue([
+            "name": JSONValue("search"),
+            "arguments": JSONValue(`{"limit":5,"query":"d lang"}`)
+        ])
+    ]);
+    auto calls = JSONValue(fns);
+
+    const bodies = summarizeToolCallBodies(calls, 1000);
+    assert(bodies.length == 1);
+    // Pairs sort by length, so the shorter one draws first. The summarizer's
+    // own ",\n" joiner stays. No name prefix, no parentheses - the header
+    // carries the name.
+    assert(bodies[0] == "limit=5,\nquery=\"d lang\"", bodies[0]);
+
+    // Unparseable arguments: an empty body, never a wrapper or a marker.
+    JSONValue[] broken;
+    broken ~= JSONValue([
+        "function": JSONValue([
+            "name": JSONValue("grep"),
+            "arguments": JSONValue(`{"query":`)
+        ])
+    ]);
+    const fallen = summarizeToolCallBodies(JSONValue(broken), 1000);
+    assert(fallen.length == 1 && fallen[0].empty);
+
+    // A non-array payload answers nothing at all.
+    assert(summarizeToolCallBodies(JSONValue("nope"), 1000).empty);
+}
+
 string summarizeToolCallArguments(JSONValue args, size_t maxLength) @trusted {
     try {
         auto buf = appender!string();

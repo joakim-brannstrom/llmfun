@@ -129,7 +129,7 @@ private TypedTurns buildTypedTurns(Chat.MessageT[] history) {
                 return;
             const bi = batchIndex[a.turnId]++;
             const bid = responseBatchId(a.turnId, bi);
-            const calls = summarizeToolCalls(a.toolCalls, 1000);
+            const calls = summarizeToolCallBodies(a.toolCalls, 1000);
             const durMs = durationMsOf(a.processTime());
             if (!a.thinking.empty)
                 out_.blocks ~= makeBlockData(a.turnId, reasoningBlockId(bi), bid, TuiBlockKind_Reasoning,
@@ -154,7 +154,7 @@ private TypedTurns buildTypedTurns(Chat.MessageT[] history) {
                     callDur = durationMsOf(resp.processTime());
                     pairs = unpackToolResultPairs(*resp);
                 }
-                // idx is 1-based over arr; summarizeToolCalls entries align with arr.
+                // idx is 1-based over arr, and the body entries align with arr.
                 const body_ = idx <= calls.length ? calls[idx - 1] : null;
                 out_.blocks ~= withResultPairs(makeBlockData(a.turnId, callId, bid, TuiBlockKind_Tool,
                     status, kToolBlockFlags, name, meta, body_, callDur), pairs);
@@ -1087,7 +1087,7 @@ struct AgentApp {
                     uiMsg.blockUpsert(makeBlockData(ctx.turnId, reasoningBlockId(bi),
                         bid, TuiBlockKind_Reasoning, TuiBlockStatus_None,
                         TuiBlockFlag_Collapsible, null, null, a.thinking, durMs));
-                const calls = summarizeToolCalls(a.toolCalls, 1000);
+                const calls = summarizeToolCallBodies(a.toolCalls, 1000);
                 const arr = a.toolCalls.type == JSONType.array ? a.toolCalls.array : [
                 ];
                 size_t idx;
@@ -1108,7 +1108,7 @@ struct AgentApp {
                         callDur = durationMsOf(resp.processTime());
                         pairs = unpackToolResultPairs(*resp);
                     }
-                    // idx is 1-based over arr; summarizeToolCalls entries align with arr.
+                    // idx is 1-based over arr, and the body entries align with arr.
                     const body_ = idx <= calls.length ? calls[idx - 1] : null;
                     uiMsg.blockUpsert(withResultPairs(makeBlockData(a.turnId != 0 ? a.turnId : ctx.turnId,
                         callId, bid, TuiBlockKind_Tool, status,

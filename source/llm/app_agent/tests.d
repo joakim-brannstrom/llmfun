@@ -3569,13 +3569,13 @@ unittest {
             "the tool message's own thinking is the batch's reasoning block");
     assert(blocks[4].id == "c1" && blocks[4].kind == TuiBlockKind_Tool
             && blocks[4].title == "grep_files" && blocks[4].status == TuiBlockStatus_Ok
-            && blocks[4].meta == "ok-1" && blocks[4].body == `grep_files(pattern="x")` && blocks[4].durationMs == 42,
+            && blocks[4].meta == "ok-1" && blocks[4].body == `pattern="x"` && blocks[4].durationMs == 42,
             "call and response merged, response meta wins: id=" ~ blocks[4].id ~ " title="
             ~ blocks[4].title ~ " status=" ~ blocks[4].status.text ~ " meta="
             ~ blocks[4].meta ~ " body=" ~ blocks[4].body ~ " dur="
             ~ blocks[4].durationMs.text ~ " batch=" ~ blocks[4].batchId);
     assert(blocks[5].id == "c2" && blocks[5].status == TuiBlockStatus_Failed
-            && blocks[5].meta == "bad-2" && blocks[5].body == "write_file()");
+            && blocks[5].meta == "bad-2" && blocks[5].body.empty);
     assert(blocks[6].id == "answer" && blocks[6].kind == TuiBlockKind_Answer
             && blocks[6].body == "The answer is 4." && blocks[6].batchId == "1#1");
 }
@@ -3706,6 +3706,34 @@ unittest {
     assert(sink3.turnUpserts.length == 2 && sink3.turnUpserts[1].state == TuiTurnState_Interrupted);
     assert(sink3.blockUpserts[$ - 1].id == "c1" && sink3.blockUpserts[$ - 1].status == TuiBlockStatus_Cancelled,
             "the interrupted call is Cancelled, never a fabricated Ok");
+}
+
+// the streamed call's body is arguments only - the streaming path builds
+// the same shape the completed path does, no name( wrapper, no repeated prefix.
+@("typed streaming call body: arguments only")
+unittest {
+    import std.datetime : dur;
+    import std.path : buildPath;
+
+    import llm.chat;
+
+    auto tmpDir = testArea("app_agent_typed_stream_body");
+    scope (exit)
+        tmpDir.cleanup;
+    TuiRecordingSink sink;
+    auto app = typedTestApp(new SessionStore(buildPath(tmpDir, "chat").Path), tmpDir, sink);
+
+    app.emitTurnStartTyped("q");
+    auto updater = cast(TypedStreamMessageUpdater) app.makeTypedStreamCallback();
+    updater.messageUpdate(StreamMessage("assistant", "", ""), [
+        StreamToolCall(toolName: "grep_files", arguments: `{"pattern":"x"}`, id: "c1")
+    ], ServerStat.init);
+    assert(sink.blockUpserts.length == 3,
+            "query, content, c1 - no reasoning: the tick carries none");
+    assert(sink.blockUpserts[2].id == "c1" && sink.blockUpserts[2].title == "grep_files");
+    assert(sink.blockUpserts[2].body == `pattern="x"`,
+            "the streamed body is the arguments, never a name( wrapper: "
+            ~ sink.blockUpserts[2].body);
 }
 
 // The RESULT pair payload: a JSON-object result unpacks to the byte-wise sorted,
@@ -3856,18 +3884,18 @@ unittest {
     app.agent_.chat.add(ToolResponse(JSONValue(big).toString, "c0", "t", true));
     // A value at exactly 200 codepoints truncates nothing.
     app.agent_.chat.add(ToolResponse(JSONValue([
-                "exact": JSONValue("x".replicate(200))
+        "exact": JSONValue("x".replicate(200))
     ]).toString, "c1", "t", true));
     // One codepoint over cuts to 200, and a multibyte character at the cut
     // stays whole.
     app.agent_.chat.add(ToolResponse(JSONValue([
-                "over": JSONValue("x".replicate(201))
+        "over": JSONValue("x".replicate(201))
     ]).toString, "c2", "t", true));
     app.agent_.chat.add(ToolResponse(
             JSONValue(["cut": JSONValue("a".replicate(199) ~ "é" ~ "b")]).toString,
             "c3", "t", true));
     app.agent_.chat.add(ToolResponse(JSONValue([
-                "all": JSONValue("é".replicate(201))
+        "all": JSONValue("é".replicate(201))
     ]).toString, "c4", "t", true));
 
     app.emitReplayTyped();

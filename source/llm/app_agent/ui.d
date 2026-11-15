@@ -655,10 +655,9 @@ package UiBlockData makeBlockData(long turnId, string id, string batchId, int ki
             truncatedForWire(body), durationMs, 0, 0, kind, status, flags);
 }
 
-// The call's summarized "name(args)" line for a streaming call whose arguments
-// may still be partial JSON (the same shape summarizeToolCalls produces per
-// call, so the Pending block and the step walk's merged block agree).
-package string summarizedCallBody(string name, string arguments) {
+// The call's arguments summary for a streaming call whose arguments may still
+// be partial JSON.
+package string summarizedCallBody(string arguments) {
     string argsSummary;
     try {
         argsSummary = summarizeToolCallArguments(parseJSON(arguments), 1000);
@@ -666,10 +665,23 @@ package string summarizedCallBody(string name, string arguments) {
         // Partial/streaming arguments: summarize the raw text instead.
         argsSummary = truncatedForWire(arguments);
     }
-    return argsSummary.empty ? name ~ "()" : name ~ "(" ~ argsSummary ~ ")";
+    return argsSummary;
 }
 
-/// Shared per-turn state for the typed live emissions (task 3): the agent's
+@("summarizedCallBody carries the arguments only, one pair per line")
+unittest {
+    // Complete JSON arguments: the summarizer's pairs verbatim (sorted by
+    // length, the ",\n" joiner stays) - no name, no parentheses.
+    assert(summarizedCallBody(`{"limit":5,"query":"d lang"}`) == "limit=5,\nquery=\"d lang\"");
+
+    // Still-partial streaming arguments: the raw text summarized, never a throw.
+    assert(!summarizedCallBody(`{"query":"d`).empty);
+
+    // Empty arguments: an empty body (the header is the whole card then).
+    assert(summarizedCallBody(`{}`).empty);
+}
+
+/// Shared per-turn state for the typed live emissions: the agent's
 /// emitters (llm.app_agent) create one per live turn and hand it to the typed
 /// stream updater, which mutates it per tick. One instance per live turn.
 package final class TypedEmitContext {
@@ -694,7 +706,7 @@ package final class TypedEmitContext {
         string id; // the call id (the tool block's id)
         string batchId;
         string title; // tool name
-        string body; // the call's summarized name-args line
+        string body; // the call's summarized arguments (the header carries the name)
     }
 
     LiveCall[] liveCalls;
@@ -719,12 +731,11 @@ package final class TypedEmitContext {
     }
 }
 
-/// Typed sibling of StreamMessageUpdater (task 3): upserts the current batch's
+/// Typed sibling of StreamMessageUpdater: upserts the current batch's
 /// content/reasoning blocks and the known tool calls as Pending per tick - no
-/// `--- Tool ---` splicing into the content, that dies at the cutover - and
-/// flips the batch's Pending calls to Running on stream-done (the statuses ride
-/// existing events; design appendix "States"). The v4 senders own the run path
-/// until task 5; until then this class is exercised by the recording-sink tests.
+/// `--- Tool ---` splicing into the content - and flips the batch's Pending
+/// calls to Running on stream-done (the statuses ride existing events; design
+/// appendix "States"). The recording-sink tests exercise it too.
 package final class TypedStreamMessageUpdater : IStreamCallback {
     UiMessenger uiMsg;
     long contextSize;
@@ -758,7 +769,7 @@ package final class TypedStreamMessageUpdater : IStreamCallback {
                     TuiBlockFlag_Collapsible, null, null, msg.reasoning, 0));
 
         foreach (tool; tools.filter!(a => !a.id.empty)) {
-            const body_ = summarizedCallBody(tool.toolName, tool.arguments);
+            const body_ = summarizedCallBody(tool.arguments);
             uiMsg.blockUpsert(makeBlockData(ctx.turnId, tool.id, ctx.batchId, TuiBlockKind_Tool,
                     TuiBlockStatus_Pending, kToolBlockFlags, tool.toolName, null, body_, 0));
             ctx.recordLiveCall(tool.id, tool.toolName, body_);
@@ -920,7 +931,7 @@ package final class ConsoleFormatter {
             string[] bodies;
             foreach (t; pendingTools)
                 if (blockDisplayable(t))
-                    bodies ~= t.body;
+                    bodies ~= t.title ~ "(" ~ t.body ~ ")";
             lines ~= "tool call: " ~ bodies.join("\n");
         }
         return lines;

@@ -2,7 +2,7 @@
 ///
 /// The thread draws *blocks* rather than a role row per message: the adapter describes
 /// one block at a time (`store::ThreadStoreAdapter::blockAt`), this module draws its
-/// chrome - the role rule and label, the disclosure mark, the state glyph, the two-line tool
+/// chrome - the role rule and label, the disclosure mark, the two-line tool
 /// row, the focus ring and the copy control - and the adapter draws its body
 /// (`renderBlockBody`), so rich text, tables and code keep the renderer that already
 /// knows how to draw them.
@@ -15,15 +15,16 @@
 ///
 ///   User / Answer / Assistant   [rule][LABEL][ · 1.2 s][  preview], body below
 ///   WorkGroup                   disclosure mark + "WORK · 4 steps", body rows below
-///   ToolCall / ToolResult       two lines: [glyph][TOOL][ · 1.2 s] / [summary]
+///   ToolCall / ToolResult       two lines: [TOOL][ · 1.2 s] / [summary]
 ///   Thinking                    disclosure mark + "Thinking · 3.2 s", dim body below
 ///   System                      [rule][SYSTEM][ · time][  preview], neutral text
 ///   Code                        the Answer/Assistant shape; the body is one fenced
 ///                               code block and the copy path copies its *code*
 ///
-/// Rules the drawing follows, all from D-BLOCK: no background fill (role is a
-/// foreground plus a rule), state is a glyph *and* a word, every colour and distance
-/// is a token, and the row is interactive over its whole width (ImGui's
+/// Rules the drawing follows: no background fill (role is a foreground plus a
+/// rule), the state paints no glyph (a failure renders
+/// the red FAIL word on the card's header), every colour and distance is a
+/// token, and the row is interactive over its whole width (ImGui's
 /// `InvisibleButton` gives it the mouse and Space/Enter while it holds the nav
 /// focus).
 ///
@@ -121,10 +122,6 @@ const char* defaultBlockLabel(BlockKind kind);
 
 /// The role's foreground (D-BLOCK: role via foreground + rule, never a fill).
 ui::ColorToken blockInk(BlockKind kind);
-
-/// The state mark for `state`, or `Icon::Count` when the block carries none - the
-/// caller draws no glyph then, rather than a mark that means nothing.
-ui::Icon blockStateGlyph(BlockState state);
 
 /// True for the two-line compact rows (a tool call and its result).
 bool blockIsCompactRow(BlockKind kind);

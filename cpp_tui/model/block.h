@@ -16,10 +16,10 @@
 ///   Answer        the run's result: same shape, the ANSWER role
 ///   WorkGroup     a quiet disclosure header ("WORK · 4 steps") over body rows
 ///   Assistant     one work-group body row (agent prose)
-///   ToolCall      a compact row: state glyph + TOOL label + one-line summary
+///   ToolCall      a compact row: TOOL label + one-line summary
 ///   ToolResult    the same row with the outcome the store's marker carried
 ///   Thinking      a collapsed "Thinking · 3.2 s" disclosure with a dim body
-///   System        label SYSTEM, neutral text, optional action (Retry, task 45)
+///   System        label SYSTEM, neutral text, optional action (Retry)
 ///   Code          a body that is a single fenced code block: drawn by rich_md's
 ///                 own block, copied as *code* by the block's copy path (S-13)
 ///
@@ -30,7 +30,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <string>
 
 namespace llmfun::tui::model {
@@ -49,10 +48,12 @@ enum class BlockKind {
     ToolStep,
 };
 
-/// The state a block paints beside its label - mirrored from the store, never
-/// invented by the renderer (D-BLOCK: "state via glyph + word"). `None` means the
-/// block carries no state mark at all (a user query has no outcome; a system
-/// notice's severity is the text's, not the row's).
+/// The state a block carries, mirrored from the store, never invented by the
+/// renderer. The state paints no glyph: on a tool card a
+/// failure renders the red FAIL word on the header and the live states drive
+/// the chips line. `None` means the block carries no state mark at all (a
+/// user query has no outcome; a system notice's severity is the text's, not
+/// the row's).
 ///
 /// Where the store has no state (a tool *call* has no outcome of its own - its
 /// result is the next row) the adapter states what the row is: `Pending`, "the
@@ -123,11 +124,6 @@ struct BlockDesc {
     /// tool cards - `Thinking · N tool calls`. 0 = tool-less batch, and the
     /// disclosure carries no count at all.
     int batchTools = 0;
-    /// A tool card's token counters: the call's cost as the result
-    /// reported it. Each renders only when non-zero - an absent field is
-    /// honest, a `0` is noise.
-    std::int64_t tokensIn = 0;
-    std::int64_t tokensOut = 0;
     /// Whether the row offers a disclosure, and whether its body is showing now.
     bool expandable = false;
     bool expanded = true;

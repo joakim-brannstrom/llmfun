@@ -506,6 +506,7 @@ void checkVocabulary() {
         {model::BlockKind::Assistant, "AGENT", ui::ColorToken::roleAgent, false, false},
         {model::BlockKind::ToolCall, "TOOL", ui::ColorToken::roleTool, true, false},
         {model::BlockKind::ToolResult, "TOOL", ui::ColorToken::roleTool, true, false},
+        {model::BlockKind::ToolStep, "TOOL", ui::ColorToken::roleSystem, false, true},
         {model::BlockKind::Thinking, "Thinking", ui::ColorToken::roleAgent, false, true},
         {model::BlockKind::System, "SYSTEM", ui::ColorToken::roleSystem, false, false},
         {model::BlockKind::Code, "AGENT", ui::ColorToken::roleAgent, false, false},
@@ -522,19 +523,18 @@ void checkVocabulary() {
               std::string(row.label) + (row.disclosure ? " is a disclosure" : " is a role rule"));
     }
 
-    check(views::blockStateGlyph(model::BlockState::None) == ui::Icon::Count,
-          "no state means no glyph (the word carries the meaning)");
-    check(views::blockStateGlyph(model::BlockState::Pending) == ui::Icon::Pending,
-          "pending draws the pending mark");
-    check(views::blockStateGlyph(model::BlockState::Running) == ui::Icon::Running,
-          "running draws the run mark");
-    check(views::blockStateGlyph(model::BlockState::Ok) == ui::Icon::Ok, "ok draws the ok mark");
-    check(views::blockStateGlyph(model::BlockState::Failed) == ui::Icon::Error,
-          "failed draws the error mark");
-
     const ui::Metrics m = ui::metricsFor(true, 1.0f, 1.0f);
     const views::BlockDraw open{true, false};
     const views::BlockDraw closed{false, false};
+    // The header carries no state glyph: the disclosure arrow, the
+    // text, and - only on a failure - the red FAIL word renderBlock paints after
+    // the text. Nothing else about a state changes the header, so the card's
+    // height is the same folded or open whatever the state is.
+    const model::BlockDesc card = blockOf(model::BlockKind::ToolStep, "TOOL", "grep");
+    check(views::measureBlockHeader(card, m, closed) == m.row,
+          "a tool card is one row tall folded, state included");
+    check(views::measureBlockHeader(card, m, open) == m.row,
+          "a tool card is one row tall open, state included");
     check(views::measureBlockHeader(blockOf(model::BlockKind::User, "YOU", "q"), m, open) == m.row,
           "a role row is one row tall");
     const model::BlockDesc tool = blockOf(model::BlockKind::ToolResult, "TOOL", "r");
@@ -624,7 +624,7 @@ void checkHeaderText() {
     check(headerText(stream, true) == "AGENT",
           "a streaming row carries no preview: its body is being written under it");
 
-    // Whatever a label says, it is never an emoji (task 26's rule, at the last place
+    // Whatever a label says, it is never an emoji (checked at the last place
     // the text is chosen).
     const model::BlockKind kinds[] = {
         model::BlockKind::User,      model::BlockKind::Answer,   model::BlockKind::WorkGroup,
@@ -779,11 +779,10 @@ void checkAnatomy() {
         const ui::Rect rect = cellRect(0.0f, 0.0f, 40.0f, 2.0f * m.row);
         views::renderBlock(tool, rect, m, views::BlockDraw{false, false});
     });
-    check(grid.span(3, 0, 4) == "TOOL",
-          "the tool label sits after the rule and the glyph (got '" + grid.span(3, 0, 4) + "')");
+    check(grid.span(1, 0, 4) == "TOOL",
+          "the tool label follows the rule (no glyph, got '" + grid.span(1, 0, 4) + "')");
     check(grid.rowText(1).find("writeFile: 42 lines") != std::string::npos,
           "the summary is the row's second line");
-    check(grid.at(1, 0) != 0, "the state glyph paints its slot");
 
     // A disclosure instead of a rule: the work group's mark toggles, so the first cell
     // is the closed mark, and opening it changes that cell.
@@ -984,11 +983,40 @@ void checkStreaming() {
     // an empty prose block draws no row (this is the phase that would have caught
     // an empty AGENT row).
     check(!grid.contains("AGENT"), "a reasoning-only stream draws no empty agent row");
-    check(!grid.contains("Thinking"), "minimal folds the live reasoning behind the header");
+    // The live edge names the streaming reasoning instead: the folded,
+    // count-only Thinking row draws directly under the header - the shape
+    // minimal shows between the query and the answer.
+    check(grid.contains("Thinking"),
+          "the live edge names the streaming reasoning (the folded count-only row)");
     reasoning.openNewestGroup();
     grid = reasoning.draw();
     check(grid.contains("Thinking"), "the opened group draws the thinking row");
     check(grid.contains("REASONING-TEXT-VISIBLE"), "and the reasoning itself (got a blank row?)");
+
+    // The counted variant (the design names it, so it is pinned): once the
+    // streaming response's calls exist - even only Pending - the live edge
+    // names the count, the way the emitter's batch upserts share one batch id.
+    ThreadFixture counted;
+    counted.seed.runStart("stream this");
+    counted.seed.upsertBlock(counted.seed.liveTurnId, "reasoning#0",
+                             std::to_string(counted.seed.liveTurnId) + "#0", TuiBlockKind_Reasoning,
+                             TuiBlockStatus_None, nullptr, "thinking");
+    counted.seed.upsertBlock(counted.seed.liveTurnId, "tool#0",
+                             std::to_string(counted.seed.liveTurnId) + "#0", TuiBlockKind_Tool,
+                             TuiBlockStatus_Pending, nullptr, "{}", "grep");
+    grid = counted.draw();
+    check(grid.contains("Thinking - 1 tool call"),
+          "the live edge names the count once the batch's calls exist (pending calls count)");
+
+    // A finished turn draws no live edge: the replayed answer whose reasoning
+    // and prose both landed keeps its fold bare - the Thinking row is the live
+    // edge, so it dies with the turn (this is the phase that would have
+    // regoldened the replayed thinking scene).
+    ThreadFixture done;
+    done.add(message(1, MsgKind::Assistant, "[1] the answer is 42 [3.2s]", "the answer is 42",
+                     "because the machine said so"));
+    grid = done.draw();
+    check(!grid.contains("Thinking"), "a finished turn draws no live thinking row");
 
     ThreadFixture both;
     both.addStream(MsgKind::Assistant, "STREAM-PROSE", "STREAM-THINKING");
@@ -1304,7 +1332,11 @@ void checkCrossGroupIdentity() {
     check(g_clipboard == "stream-prose",
           "`y` on the streamed body copies the stream (got '" + g_clipboard + "')");
 
-    const int streamThinking = rowOf(afterStreamBody, "Thinking", /*fromBottom=*/true);
+    // The stream's Thinking row: the row above its open body. The live edge's
+    // folded count-only row sits at the group's bottom and says the same
+    // bare word - a 0-call stream draws "Thinking" twice - so the list's row is
+    // addressed by its body, never by the word alone.
+    const int streamThinking = rowOf(afterStreamBody, "stream-reasoning") - 1;
     check(streamThinking >= 0, "the streamed reasoning row is on screen");
     Grid afterStreamThinking = clickRow(streamThinking);
     check(fixture.state.ui.thread.focus == model::BlockId{2,
@@ -1578,7 +1610,11 @@ void checkBodylessBlocks() {
         const Grid grid = fixture.draw();
         check(!grid.contains("AGENT"),
               "an empty stream draws no agent body row (the reasoning carries the turn)");
-        check(!grid.contains("Thinking"), "minimal folds the reasoning behind the header");
+        // The live edge names the streaming reasoning here too: the folded,
+        // count-only Thinking row draws under the header while the group stays
+        // folded.
+        check(grid.contains("Thinking"),
+              "the live edge names the streaming reasoning (the folded count-only row)");
         fixture.openNewestGroup();
         const Grid opened = fixture.draw();
         check(opened.contains("Thinking"), "and the opened group's reasoning row is on screen");
@@ -1892,7 +1928,8 @@ std::vector<Scene> scenes() {
     list.push_back({"livebatch", [](ThreadFixture& f) {
                         f.seed.runStart("sweep the tree");
                         f.seed.upsertBlock(f.seed.liveTurnId, "tool#1", "1#1", TuiBlockKind_Tool,
-                                           TuiBlockStatus_Ok, "42 lines", "ls -R", "bash", 1100);
+                                           TuiBlockStatus_Ok, "42 lines", "ls -R", "bash", 1100, 0,
+                                           0, {}, "42 lines", 0);
                         f.seed.upsertBlock(f.seed.liveTurnId, "tool#2", "1#2", TuiBlockKind_Tool,
                                            TuiBlockStatus_Running, nullptr,
                                            "needle in the haystack", "grep", 0);
@@ -1923,7 +1960,8 @@ std::vector<Scene> scenes() {
                         f.seed.upsertBlock(1, "q1", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None,
                                            "user", "what is v5?");
                         f.seed.upsertBlock(1, "t1", "1#1", TuiBlockKind_Tool, TuiBlockStatus_Ok,
-                                           "42 lines", "listing the tree", "bash", 1100);
+                                           "42 lines", "listing the tree", "bash", 1100, 0, 0, {},
+                                           "42 lines", 0);
                         f.seed.upsertBlock(1, "a1", "1#1", TuiBlockKind_Answer, TuiBlockStatus_None,
                                            nullptr, "the typed store");
                         f.seed.upsertTurn(2, TuiTurnState_Done, 1);
@@ -1946,26 +1984,29 @@ std::vector<Scene> scenes() {
                         f.seed.upsertBlock(1, "c0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
                                            "assistant", "the tree has 3 files");
                         f.seed.upsertBlock(1, "t1", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok,
-                                           "42 lines", "ls -R", "bash", 1100, 1200, 0);
+                                           "42 lines", "ls -R", "bash", 1100, 1200, 0, {},
+                                           "42 lines", 0);
                         f.seed.upsertBlock(1, "t2", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok,
-                                           "3 files", "grep -r needle", "grep", 3200, 0, 450);
+                                           "3 files", "grep -r needle", "grep", 3200, 0, 450,
+                                           {{"files", "3"}, {"needle hits", "7"}}, "", 3);
                     }});
     // The failed step draws red inside the open batch (F5) - and the step count
     // still weighs it like a landed one.
-    list.push_back({"maxfailed", [](ThreadFixture& f) {
-                        f.state.chat.threadMinimalMode = false;
-                        f.seed.upsertTurn(1, TuiTurnState_Done, 5);
-                        f.seed.upsertBlock(1, "q1", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None,
-                                           "user", "read the tree");
-                        f.seed.upsertBlock(1, "r0", "1#0", TuiBlockKind_Reasoning,
-                                           TuiBlockStatus_None, nullptr, "thinking about the tree");
-                        f.seed.upsertBlock(1, "c0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
-                                           "assistant", "the tree has 3 files");
-                        f.seed.upsertBlock(1, "t1", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok,
-                                           "42 lines", "ls -R", "bash", 1100);
-                        f.seed.upsertBlock(1, "t2", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Failed,
-                                           "exit 1", "grep -r needle", "grep", 3200);
-                    }});
+    list.push_back(
+        {"maxfailed", [](ThreadFixture& f) {
+             f.state.chat.threadMinimalMode = false;
+             f.seed.upsertTurn(1, TuiTurnState_Done, 5);
+             f.seed.upsertBlock(1, "q1", "1#q", TuiBlockKind_Prose, TuiBlockStatus_None, "user",
+                                "read the tree");
+             f.seed.upsertBlock(1, "r0", "1#0", TuiBlockKind_Reasoning, TuiBlockStatus_None,
+                                nullptr, "thinking about the tree");
+             f.seed.upsertBlock(1, "c0", "1#0", TuiBlockKind_Prose, TuiBlockStatus_None,
+                                "assistant", "the tree has 3 files");
+             f.seed.upsertBlock(1, "t1", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Ok, "42 lines",
+                                "ls -R", "bash", 1100, 0, 0, {}, "42 lines", 0);
+             f.seed.upsertBlock(1, "t2", "1#0", TuiBlockKind_Tool, TuiBlockStatus_Failed, "exit 1",
+                                "grep -r needle", "grep", 3200, 0, 0, {}, "exit 1", 0);
+         }});
     // A live batch in maximal mode: the still-running card names its tool with
     // no duration (W7), the landed one carries its own - and the zero token
     // fields of both render nothing.
