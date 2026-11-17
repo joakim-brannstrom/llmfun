@@ -4766,7 +4766,8 @@ unittest {
     assert(note.canFind("appears twice"), note);
 }
 
-@("integration: shallow list_directory also skips entries failing the read filter")
+@(
+        "integration: shallow list_directory skips entries failing the read filter and counts only visible entries in total")
 unittest {
     import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
     import std.algorithm : canFind;
@@ -4785,11 +4786,20 @@ unittest {
 
     auto listing = listDirectory(ctx, ListDirectoryParams(path: "d"));
     assert(listing.success, listing.msg);
-    assert(listing.msg.canFind("a.txt"), listing.msg);
+    auto json = parseJSON(listing.msg);
+    // only a.txt is visible: the excluded dir is absent, not counted,
+    // and consumes no page slot
+    assert(json["total"].integer == 1, json.toString);
+    assert(json["startIndex"].integer == 1, json.toString);
+    assert(json["endIndex"].integer == 1, json.toString);
+    auto entries = json["entries"].array;
+    assert(entries.length == 1, json.toString);
+    assert(entries[0]["path"].str == "d/a.txt", json.toString);
+    assert(entries[0]["type"].str == "file", json.toString);
     assert(!listing.msg.canFind("skip"), listing.msg);
 }
 
-@("shallow list_directory refuses a directory with more entries than maxDirEntries and returns all entries at the limit")
+@("over-limit shallow list_directory returns a page of exactly maxDirEntries entries with correct total, startIndex and endIndex; at the limit it returns all entries with endIndex == total")
 unittest {
     import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
     import std.algorithm : canFind;
@@ -4805,25 +4815,36 @@ unittest {
     ToolLimits tl;
     tl.maxDirEntries = 2;
     ctx.setFilesystemFilter(tl);
-    auto refused = listDirectory(ctx, ListDirectoryParams(path: "d"));
-    assert(!refused.success, refused.msg);
-    assert(refused.msg.canFind("has more than 2 entries"), refused.msg);
-    assert(refused.msg.canFind("list a subdirectory"), refused.msg);
+    auto listing = listDirectory(ctx, ListDirectoryParams(path: "d"));
+    assert(listing.success, listing.msg);
+    auto json = parseJSON(listing.msg);
+    assert(json["total"].integer == 3, json.toString);
+    assert(json["startIndex"].integer == 1, json.toString);
+    assert(json["endIndex"].integer == 2, json.toString);
+    auto entries = json["entries"].array;
+    assert(entries.length == 2, json.toString);
+    // item shape: files carry type + size (which file lands on the page is
+    // readdir-order dependent, so check shape, not identity)
+    assert(entries[0]["type"].str == "file", json.toString);
+    assert(entries[0]["size"].integer >= 0, json.toString);
 
     ToolLimits tl2;
     tl2.maxDirEntries = 3;
     ctx.setFilesystemFilter(tl2);
     auto ok = listDirectory(ctx, ListDirectoryParams(path: "d"));
     assert(ok.success, ok.msg);
+    auto json2 = parseJSON(ok.msg);
+    assert(json2["total"].integer == 3, json2.toString);
+    assert(json2["endIndex"].integer == 3, json2.toString);
+    assert(json2["entries"].array.length == 3, json2.toString);
     assert(ok.msg.canFind("a.txt"), ok.msg);
     assert(ok.msg.canFind("b.txt"), ok.msg);
     assert(ok.msg.canFind("c.txt"), ok.msg);
 }
 
-@("recursive list_directory counts subdirectories and files against maxDirEntries")
+@("recursive list_directory counts subdirectories and files against the page and returns page 1 with the exact total for an over-limit tree")
 unittest {
     import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
-    import std.algorithm : canFind;
 
     auto ctx = makeTestContext("listcap_recursive");
     scope (exit)
@@ -4832,21 +4853,244 @@ unittest {
     createTestFile(ctx, "a.txt", "a\n");
     createTestFile(ctx, "sub/c.txt", "c\n");
 
-    // Three entries in depth order: a.txt, sub, sub/c.txt
+    // SpanMode.depth is depth-first POST-order: a subdirectory's contents
+    // come before the subdirectory's own entry (sibling order is readdir
+    // order, so only the sub vs sub/c.txt relation is asserted).
     ToolLimits tl;
     tl.maxDirEntries = 3;
     ctx.setFilesystemFilter(tl);
     auto ok = listDirectory(ctx, ListDirectoryParams(path: ".", recursive: true));
     assert(ok.success, ok.msg);
-    assert(ok.msg.canFind("a.txt"), ok.msg);
-    assert(ok.msg.canFind("c.txt"), ok.msg);
+    auto json = parseJSON(ok.msg);
+    assert(json["total"].integer == 3, json.toString);
+    assert(json["endIndex"].integer == 3, json.toString);
+    auto entries = json["entries"].array;
+    assert(entries.length == 3, json.toString);
+    // post-order: "sub/c.txt" (a sub's content) precedes "sub" (the sub itself)
+    long subPos = -1, subcPos = -1;
+    foreach (i, e; entries) {
+        if (subPos < 0 && e["path"].str == "sub")
+            subPos = i;
+        if (subcPos < 0 && e["path"].str == "sub/c.txt")
+            subcPos = i;
+    }
+    assert(subcPos >= 0 && subPos >= 0, json.toString);
+    assert(subcPos < subPos, json.toString);
 
     ToolLimits tl2;
     tl2.maxDirEntries = 2;
     ctx.setFilesystemFilter(tl2);
-    auto refused = listDirectory(ctx, ListDirectoryParams(path: ".", recursive: true));
-    assert(!refused.success, refused.msg);
-    assert(refused.msg.canFind("has more than 2 entries"), refused.msg);
+    auto listing = listDirectory(ctx, ListDirectoryParams(path: ".", recursive: true));
+    assert(listing.success, listing.msg);
+    auto json2 = parseJSON(listing.msg);
+    assert(json2["total"].integer == 3, json2.toString);
+    assert(json2["startIndex"].integer == 1, json2.toString);
+    assert(json2["endIndex"].integer == 2, json2.toString);
+    assert(json2["entries"].array.length == 2, json2.toString);
+}
+
+@(
+        "page 2 of list_directory continues from endIndex + 1 and reaches endIndex == total on the last page")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+    import std.algorithm : canFind;
+
+    auto ctx = makeTestContext("listpage_p2");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "d/a.txt", "a\n");
+    createTestFile(ctx, "d/b.txt", "b\n");
+    createTestFile(ctx, "d/c.txt", "c\n");
+
+    ToolLimits tl;
+    tl.maxDirEntries = 2;
+    ctx.setFilesystemFilter(tl);
+    auto call1 = listDirectory(ctx, ListDirectoryParams(path: "d"));
+    assert(call1.success, call1.msg);
+    auto json1 = parseJSON(call1.msg);
+    assert(json1["total"].integer == 3, json1.toString);
+    assert(json1["startIndex"].integer == 1, json1.toString);
+    assert(json1["endIndex"].integer == 2, json1.toString);
+    assert(json1["entries"].array.length == 2, json1.toString);
+
+    // page 2 starts where page 1 ended: startIndex = endIndex + 1
+    auto call2 = listDirectory(ctx, ListDirectoryParams(path: "d", startIndex: 3));
+    assert(call2.success, call2.msg);
+    auto json2 = parseJSON(call2.msg);
+    assert(json2["total"].integer == 3, json2.toString);
+    assert(json2["startIndex"].integer == 3, json2.toString);
+    assert(json2["endIndex"].integer == 3, json2.toString); // == total: last page
+    auto entries2 = json2["entries"].array;
+    assert(entries2.length == 1, json2.toString);
+
+    // the two pages are disjoint (page 1 has 2 entries, page 2 has 1, all from d/)
+    // and together cover all three names
+    auto p2 = entries2[0]["path"].str;
+    assert(!call1.msg.canFind(p2), "page 2 entry already on page 1: " ~ p2);
+    auto both = call1.msg ~ call2.msg;
+    assert(both.canFind("a.txt"), both);
+    assert(both.canFind("b.txt"), both);
+    assert(both.canFind("c.txt"), both);
+}
+
+@("list_directory with startIndex beyond total succeeds with empty entries and endIndex 0")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+
+    auto ctx = makeTestContext("listpage_pastend");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "d/a.txt", "a\n");
+    createTestFile(ctx, "d/b.txt", "b\n");
+    createTestFile(ctx, "d/c.txt", "c\n");
+
+    ToolLimits tl;
+    tl.maxDirEntries = 2;
+    ctx.setFilesystemFilter(tl);
+    auto call = listDirectory(ctx, ListDirectoryParams(path: "d", startIndex: 99));
+    assert(call.success, call.msg);
+    auto json = parseJSON(call.msg);
+    assert(json["total"].integer == 3, json.toString); // unchanged by the paging
+    assert(json["startIndex"].integer == 99, json.toString);
+    assert(json["endIndex"].integer == 0, json.toString); // empty page
+    assert(json["entries"].array.length == 0, json.toString);
+}
+
+@("list_directory rejects startIndex 0 with the parameter error")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+
+    auto ctx = makeTestContext("listpage_start0");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "d/a.txt", "a\n");
+    createTestFile(ctx, "d/b.txt", "b\n");
+    createTestFile(ctx, "d/c.txt", "c\n");
+
+    ToolLimits tl;
+    tl.maxDirEntries = 2;
+    ctx.setFilesystemFilter(tl);
+    auto call = listDirectory(ctx, ListDirectoryParams(path: "d", startIndex: 0));
+    assert(!call.success, call.msg);
+    assert(
+            call.msg == "error: parameter 'startIndex' is 0 but must be > 0 (1-based index of the first entry to return)",
+            call.msg);
+}
+
+@(
+        "list_directory rejects a count above the configured limit and returns a short page for a count below it")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+
+    auto ctx = makeTestContext("listpage_count");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "d/a.txt", "a\n");
+    createTestFile(ctx, "d/b.txt", "b\n");
+    createTestFile(ctx, "d/c.txt", "c\n");
+
+    ToolLimits tl;
+    tl.maxDirEntries = 2;
+    ctx.setFilesystemFilter(tl);
+    auto over = listDirectory(ctx, ListDirectoryParams(path: "d", count: 5));
+    assert(!over.success, over.msg);
+    assert(over.msg == "error: tried to access 5 entries but the per-call cap is 2 (parameter 'count'). List in chunks with startIndex, e.g. startIndex=1 count=2, then startIndex=3, and so on.",
+            over.msg);
+
+    auto shortPage = listDirectory(ctx, ListDirectoryParams(path: "d", count: 1));
+    assert(shortPage.success, shortPage.msg);
+    auto json = parseJSON(shortPage.msg);
+    assert(json["total"].integer == 3, json.toString);
+    assert(json["startIndex"].integer == 1, json.toString);
+    assert(json["endIndex"].integer == 1, json.toString); // startIndex + count - 1 < total
+    assert(json["entries"].array.length == 1, json.toString);
+}
+
+@("list_directory on an empty directory succeeds with total 0 and endIndex 0")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+
+    auto ctx = makeTestContext("listpage_empty");
+    scope (exit)
+        ctx.teardown;
+
+    mkdirRecurse((ctx.workArea ~ "empty").AbsolutePath.toString);
+
+    ToolLimits tl;
+    tl.maxDirEntries = 2;
+    ctx.setFilesystemFilter(tl);
+    auto call = listDirectory(ctx, ListDirectoryParams(path: "empty"));
+    assert(call.success, call.msg);
+    auto json = parseJSON(call.msg);
+    assert(json["total"].integer == 0, json.toString);
+    assert(json["startIndex"].integer == 1, json.toString);
+    assert(json["endIndex"].integer == 0, json.toString);
+    assert(json["entries"].array.length == 0, json.toString);
+}
+
+@("list_directory falls back to the default page cap when maxDirEntries is zero or negative")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+
+    auto ctx = makeTestContext("listpage_capfallback");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "d/a.txt", "a\n");
+    createTestFile(ctx, "d/b.txt", "b\n");
+    createTestFile(ctx, "d/c.txt", "c\n");
+
+    // a 0 cap would otherwise hit the count < 1 error: success with all 3
+    // entries is the observable proof of the fallback
+    ToolLimits tl;
+    tl.maxDirEntries = 0;
+    ctx.setFilesystemFilter(tl);
+    auto z = listDirectory(ctx, ListDirectoryParams(path: "d"));
+    assert(z.success, z.msg);
+    auto jsonz = parseJSON(z.msg);
+    assert(jsonz["entries"].array.length == 3, jsonz.toString);
+    assert(jsonz["endIndex"].integer == 3, jsonz.toString);
+
+    ToolLimits tl2;
+    tl2.maxDirEntries = -1;
+    ctx.setFilesystemFilter(tl2);
+    auto n = listDirectory(ctx, ListDirectoryParams(path: "d"));
+    assert(n.success, n.msg);
+    auto jsonn = parseJSON(n.msg);
+    assert(jsonn["entries"].array.length == 3, jsonn.toString);
+    assert(jsonn["endIndex"].integer == 3, jsonn.toString);
+}
+
+@("list_directory treats an omitted or explicit count 0 as the configured limit")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+
+    auto ctx = makeTestContext("listpage_countsentinel");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "d/a.txt", "a\n");
+    createTestFile(ctx, "d/b.txt", "b\n");
+    createTestFile(ctx, "d/c.txt", "c\n");
+
+    ToolLimits tl;
+    tl.maxDirEntries = 2;
+    ctx.setFilesystemFilter(tl);
+    auto omitted = listDirectory(ctx, ListDirectoryParams(path: "d"));
+    assert(omitted.success, omitted.msg);
+    auto json1 = parseJSON(omitted.msg);
+    assert(json1["entries"].array.length == 2, json1.toString);
+    assert(json1["endIndex"].integer == 2, json1.toString);
+
+    auto explicit0 = listDirectory(ctx, ListDirectoryParams(path: "d", count: 0));
+    assert(explicit0.success, explicit0.msg);
+    auto json2 = parseJSON(explicit0.msg);
+    assert(json2["entries"].array.length == 2, json2.toString); // same page size as the omitted call
+    assert(json2["endIndex"].integer == 2, json2.toString);
 }
 
 @(
@@ -4949,6 +5193,7 @@ unittest {
     import llm.tool_call.io.functions : ListDirectoryParams, RemoveFileParams,
         listDirectory, removeFile;
     import std.file : exists;
+    import std.algorithm : canFind;
 
     auto ctx = makeTestContext("fs_filter_list_remove");
     scope (exit)
@@ -4968,7 +5213,14 @@ unittest {
 
     auto listing = listDirectory(ctx, ListDirectoryParams(path: ".", recursive: true));
     assert(listing.success, listing.msg);
-    assert(listing.msg.canFind("keep.txt"), listing.msg);
+    auto json = parseJSON(listing.msg);
+    // the excluded subtree is absent, not counted in total, and consumes
+    // no page slot
+    assert(json["total"].integer == 1, json.toString);
+    assert(json["endIndex"].integer == 1, json.toString);
+    auto entries = json["entries"].array;
+    assert(entries.length == 1, json.toString);
+    assert(entries[0]["path"].str == "keep.txt", json.toString);
     assert(!listing.msg.canFind("skip"), listing.msg);
 
     auto result = removeFile(ctx, RemoveFileParams(path: ".", recursive: true));
