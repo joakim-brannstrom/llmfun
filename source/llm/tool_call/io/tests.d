@@ -4789,6 +4789,66 @@ unittest {
     assert(!listing.msg.canFind("skip"), listing.msg);
 }
 
+@("shallow list_directory refuses a directory with more entries than maxDirEntries and returns all entries at the limit")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+    import std.algorithm : canFind;
+
+    auto ctx = makeTestContext("listcap_shallow");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "d/a.txt", "a\n");
+    createTestFile(ctx, "d/b.txt", "b\n");
+    createTestFile(ctx, "d/c.txt", "c\n");
+
+    ToolLimits tl;
+    tl.maxDirEntries = 2;
+    ctx.setFilesystemFilter(tl);
+    auto refused = listDirectory(ctx, ListDirectoryParams(path: "d"));
+    assert(!refused.success, refused.msg);
+    assert(refused.msg.canFind("has more than 2 entries"), refused.msg);
+    assert(refused.msg.canFind("list a subdirectory"), refused.msg);
+
+    ToolLimits tl2;
+    tl2.maxDirEntries = 3;
+    ctx.setFilesystemFilter(tl2);
+    auto ok = listDirectory(ctx, ListDirectoryParams(path: "d"));
+    assert(ok.success, ok.msg);
+    assert(ok.msg.canFind("a.txt"), ok.msg);
+    assert(ok.msg.canFind("b.txt"), ok.msg);
+    assert(ok.msg.canFind("c.txt"), ok.msg);
+}
+
+@("recursive list_directory counts subdirectories and files against maxDirEntries")
+unittest {
+    import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
+    import std.algorithm : canFind;
+
+    auto ctx = makeTestContext("listcap_recursive");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "a.txt", "a\n");
+    createTestFile(ctx, "sub/c.txt", "c\n");
+
+    // Three entries in depth order: a.txt, sub, sub/c.txt
+    ToolLimits tl;
+    tl.maxDirEntries = 3;
+    ctx.setFilesystemFilter(tl);
+    auto ok = listDirectory(ctx, ListDirectoryParams(path: ".", recursive: true));
+    assert(ok.success, ok.msg);
+    assert(ok.msg.canFind("a.txt"), ok.msg);
+    assert(ok.msg.canFind("c.txt"), ok.msg);
+
+    ToolLimits tl2;
+    tl2.maxDirEntries = 2;
+    ctx.setFilesystemFilter(tl2);
+    auto refused = listDirectory(ctx, ListDirectoryParams(path: ".", recursive: true));
+    assert(!refused.success, refused.msg);
+    assert(refused.msg.canFind("has more than 2 entries"), refused.msg);
+}
+
 @(
         "integration: write_file into an excluded path is rejected by the configured filesystem filter (write)")
 unittest {

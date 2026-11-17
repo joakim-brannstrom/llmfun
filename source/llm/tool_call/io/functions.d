@@ -175,7 +175,8 @@ struct ListDirectoryParams {
     @ParamOptional bool recursive;
 }
 
-@Function("List directory contents") ExecuteFuncResult listDirectory(
+@Function(
+        "List directory contents. Refuses directories over the configured entry limit; list a subdirectory instead") ExecuteFuncResult listDirectory(
         Context baseCtx, ListDirectoryParams params) {
     mixin(baseContextToSpecific!FileContext);
 
@@ -192,9 +193,10 @@ struct ListDirectoryParams {
         foreach (a; dirEntries(path_.toString, params.recursive ? SpanMode.depth : SpanMode.shallow)) {
             if (!flt.allows(PathCategory.read, AbsolutePath(a.name)))
                 continue;
-            if (params.recursive && rval.length > maxDirEntries) {
-                return ExecuteFuncResult(i"error: failed listing directory recursive: more than $(
-                        maxDirEntries) entries in the result".text, success: false);
+            if (rval.length >= maxDirEntries) {
+                return ExecuteFuncResult(i"error: directory '$(params.path)' has more than $(
+                        maxDirEntries) entries; list a subdirectory or a more specific path instead".text,
+                        success: false);
             }
 
             auto e = JSONValue.emptyObject;

@@ -250,8 +250,8 @@ unanchored searches, so:
 recursive calls, so the three recursive walkers narrow per entry:
 
 - `listDirectory` skips entries whose path fails the read filter. The
-  `maxDirEntries` cap counts returned entries only, so skipped entries do not
-  consume the budget.
+  `maxDirEntries` cap applies to shallow and recursive listings alike and
+  counts returned entries only, so skipped entries do not consume the budget.
 - `grepFiles` still SCANS excluded files (the external grep process reads
   them); only result lines from excluded paths are dropped.
 - `removeFile` with `recursive=true` pre-scans the tree and refuses the WHOLE
