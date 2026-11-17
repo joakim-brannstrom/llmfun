@@ -1,7 +1,8 @@
 module llm.tool_call.io.functions;
 
 import logger = std.logger;
-import std.algorithm : map, filter, startsWith, count, joiner, endsWith, splitter, canFind, min;
+import std.algorithm : map, filter, startsWith, count, joiner, endsWith,
+    splitter, canFind, min, max;
 import std.array : empty, appender, array, join;
 import std.conv : to, text;
 import std.exception : enforce;
@@ -28,6 +29,7 @@ import llm.types : IAgent;
 mixin RegisterLlmFunctions!();
 
 immutable MaxLines = 20;
+immutable DefaultPageCap = 50;
 
 struct RemoveFileParams {
     @ParamDescription("Path to the file (relative to workarea)")
@@ -173,41 +175,72 @@ struct ListDirectoryParams {
 
     @ParamDescription("Set to true for recursive scan")
     @ParamOptional bool recursive;
+
+    @ParamDescription("1-based index of the first entry to return")
+    @ParamOptional long startIndex = 1;
+
+    @ParamDescription("Max entries to return in this call; 0 uses the configured limit")
+    @ParamOptional long count = 0;
 }
 
-@Function(
-        "List directory contents. Refuses directories over the configured entry limit; list a subdirectory instead") ExecuteFuncResult listDirectory(
+@Function("List directory contents as paginated entries (files and subdirectories; directories occupy page slots). Returns up to count or the configured limit entries starting at startIndex, plus total, startIndex and endIndex. To get more entries, call again with startIndex = endIndex + 1. endIndex == total means all entries were returned; an empty entries array means there are no more entries - do not re-request page 1. Order is raw filesystem order for shallow scans, depth-first with each subdirectory after its contents for recursive scans; order and indices are stable only while the directory is unchanged. For large recursive trees, use grep_files instead of paging.") ExecuteFuncResult listDirectory(
         Context baseCtx, ListDirectoryParams params) {
     mixin(baseContextToSpecific!FileContext);
-
-    auto maxDirEntries = ctx.getToolLimits().maxDirEntries;
 
     auto path_ = pathToWorkarea(ctx, params.path, PathCategory.read, checkExist: true);
     if (!path_.valid) {
         return ExecuteFuncResult(path_.errorMsg, success: false);
     }
 
+    const limit = () {
+        if (ctx.getToolLimits().maxDirEntries <= 0) {
+            logger.warning("maxDirEntries is ", ctx.getToolLimits()
+                    .maxDirEntries, ", falling back to default ", DefaultPageCap);
+            return DefaultPageCap;
+        }
+        return ctx.getToolLimits().maxDirEntries;
+    }();
+    const effStart = params.startIndex;
+    const effCount = params.count <= 0 ? limit : params.count;
+    if (auto err = validateListRange(effStart, effCount, limit)) {
+        return ExecuteFuncResult(err, success: false);
+    }
+
     try {
-        JSONValue[] rval;
         auto flt = ctx.getToolLimits().filesystemFilterRuntime;
+        struct Entry {
+            string path;
+            bool isDir;
+            bool isFile;
+            long size;
+        }
+
+        Entry[] records;
         foreach (a; dirEntries(path_.toString, params.recursive ? SpanMode.depth : SpanMode.shallow)) {
             if (!flt.allows(PathCategory.read, AbsolutePath(a.name)))
                 continue;
-            if (rval.length >= maxDirEntries) {
-                return ExecuteFuncResult(i"error: directory '$(params.path)' has more than $(
-                        maxDirEntries) entries; list a subdirectory or a more specific path instead".text,
-                        success: false);
-            }
+            records ~= Entry(a.name.relativePath(ctx.workArea.toString), a.isDir, a.isFile, a.size);
+        }
+        const long total = records.length;
+        const lo = effStart - 1;
+        const hi = max(0, min(lo + effCount, total));
+        const page = lo < total ? records[lo .. hi] : null;
 
+        JSONValue[] rval;
+        foreach (r; page) {
             auto e = JSONValue.emptyObject;
-            e["path"] = a.name.relativePath(ctx.workArea.toString).JSONValue;
-            e["type"] = (a.isDir ? "dir" : "file").JSONValue;
-            if (a.isFile)
-                e["size"] = a.size.JSONValue;
+            e["path"] = r.path.JSONValue;
+            e["type"] = (r.isDir ? "dir" : "file").JSONValue;
+            if (r.isFile)
+                e["size"] = r.size.JSONValue;
             rval ~= e;
         }
-        return ExecuteFuncResult(JSONValue(rval)
-                .toString(JSONOptions.doNotEscapeSlashes), success: true);
+        auto json = JSONValue.emptyObject;
+        json["entries"] = JSONValue(rval);
+        json["total"] = total.JSONValue;
+        json["startIndex"] = effStart.JSONValue;
+        json["endIndex"] = (page.length ? hi : 0).JSONValue;
+        return ExecuteFuncResult(json.toString(JSONOptions.doNotEscapeSlashes), success: true);
     } catch (Exception e) {
         return ExecuteFuncResult(i"error: failed listing directory '$(params.path)': $(e.msg)".text,
                 success: false);
@@ -385,4 +418,31 @@ unittest {
     assert(validateLineRange(1, 0,
             20) == "error: parameter 'count' is 0 but must be > 0 (number of lines to read)");
     assert(validateLineRange(1, 20, 20) is null);
+}
+
+string validateListRange(long startIndex, long count, long maxDirEntries) @safe nothrow {
+    try {
+        if (startIndex < 1)
+            return i"error: parameter 'startIndex' is $(startIndex) but must be > 0 (1-based index of the first entry to return)"
+                .text;
+        if (count < 1)
+            return i"error: parameter 'count' is $(count) but must be > 0 (max entries to return)"
+                .text;
+        if (count > maxDirEntries)
+            return i"error: tried to access $(count) entries but the per-call cap is $(
+                    maxDirEntries) (parameter 'count'). List in chunks with startIndex, e.g. startIndex=1 count=$(
+                    maxDirEntries), then startIndex=$(maxDirEntries + 1), and so on.".text;
+    } catch (Exception e) {
+    }
+    return null;
+}
+
+@("validateListRange error messages")
+unittest {
+    assert(validateListRange(1, 25, 20) == "error: tried to access 25 entries but the per-call cap is 20 (parameter 'count'). List in chunks with startIndex, e.g. startIndex=1 count=20, then startIndex=21, and so on.");
+    assert(validateListRange(0, 1,
+            20) == "error: parameter 'startIndex' is 0 but must be > 0 (1-based index of the first entry to return)");
+    assert(validateListRange(1, -1,
+            20) == "error: parameter 'count' is -1 but must be > 0 (max entries to return)");
+    assert(validateListRange(1, 20, 20) is null);
 }
