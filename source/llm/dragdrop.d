@@ -2,17 +2,18 @@
 /// intake to report.
 module llm.dragdrop;
 
-import std.datetime : Clock;
 import core.time : Duration, dur, msecs;
 import logger = std.logger;
-import std.algorithm : startsWith, filter;
+import std.algorithm : startsWith, filter, among, count;
 import std.array : array, appender, empty;
-import std.conv : to;
+import std.conv : to, text;
+import std.datetime : Clock;
 import std.exception : collectException;
 import std.file : DirEntry, SpanMode, copy, dirEntries, exists, isDir,
     mkdirRecurse, remove, rmdirRecurse, write;
 import std.path : baseName, buildPath, dirName, extension, stripExtension;
 import std.process : Pid, kill, spawnProcess, tryWait, wait;
+import std.range : take;
 import std.stdio : File;
 import std.string : toLower;
 
@@ -124,9 +125,11 @@ private struct CopyChip {
     bool settled;
 }
 
-/// The per-drop file cap (v1 constant, N1). A directory drop larger than this
-/// is copied truncated, with the overflow logged.
-enum maxFilesPerDrop = 64;
+// Max number of files that are part of the system prompt.
+enum maxFilesPerDropInPrompt = 64;
+
+// Max number of files copied from a directory.
+enum maxFilesPerDropCopied = 1_000_000;
 
 /// The conversion concurrency cap: at most this many live
 /// converters; further converter jobs queue until a slot frees.
@@ -606,7 +609,7 @@ class DropWorker {
                 long files;
                 if (walkDrop(job.srcPath, job.chipId, root, files))
                     logger.warningf("DropWorker: drop of %s hit the %s file cap; anything past it was skipped",
-                            base, maxFilesPerDrop).collectException;
+                            base, maxFilesPerDropCopied).collectException;
 
                 auto c = job.chipId in chips_;
                 if (c.queued == 0) {
@@ -632,9 +635,8 @@ class DropWorker {
     // `<dir basename>/<subpath>`.
     private bool walkDrop(string dir, long chipId, string rel, ref long files) {
         foreach (DirEntry e; dirEntries(dir, SpanMode.shallow)) {
-            if (files >= maxFilesPerDrop)
+            if (files >= maxFilesPerDropCopied)
                 return true;
-
             if (e.name.baseName.startsWith(".")) {
                 logger.infof("DropWorker: skipping dot entry %s", e.name).collectException;
                 continue;
@@ -804,18 +806,20 @@ struct DropChipSnapshot {
     string path;
 }
 
-/// F1 (verbatim, normative — overview): one line per composing chip, appended
-/// at the END of the query in chip-row order:
-/// `\n[The user attached `<path>`. Read it; it is likely relevant to the question in this message.]\n`
-/// Only Done/FailedRaw compose. Pending/Failed are excluded. A base query with
-/// no composing chips is returned unchanged (never an empty query).
+/// Add the dropped files to the query, up o maxFilesPerDropInPrompt.
 string composeQueryWithMarkers(string baseQuery, const(DropChipSnapshot)[] chips) @safe pure {
     string result = baseQuery;
-    foreach (chip; chips) {
-        if (chip.status != TuiChipStatus_Done && chip.status != TuiChipStatus_FailedRaw)
-            continue;
+    foreach (chip; chips.filter!(a => a.status.among(TuiChipStatus_Done,
+            TuiChipStatus_FailedRaw)).take(maxFilesPerDropInPrompt)) {
         result ~= "\n[The user attached `" ~ chip.path
             ~ "`. Read it; it is likely relevant to the question in this message.]\n";
+    }
+
+    const c = chips.filter!(a => a.status.among(TuiChipStatus_Done,
+            TuiChipStatus_FailedRaw)).count();
+    if (c > maxFilesPerDropInPrompt) {
+        result ~= i"\n[$(c) more dropped attachments are not listed above; list the content of the directory the other files are dropped into to find them]\n"
+            .text;
     }
     return result;
 }
@@ -1178,7 +1182,7 @@ unittest {
 
     const copied = dirEntries(buildPath(area.workArea.toString, "dropped",
             "many"), SpanMode.shallow).array.length;
-    assert(copied == maxFilesPerDrop, copied.to!string);
+    assert(copied == 70, copied.to!string);
 }
 
 @("an unwritable destination fails the chip at dir creation")
