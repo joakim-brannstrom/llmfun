@@ -198,10 +198,11 @@ const char* monoFontFamily();
 /// the size it pushed into `Style.FontSizeBase`, so the style field only answers "the step that is
 /// open" once a scope is on the stack.
 ///
-/// `basePx` is the operator's font size (`LLMFUN_GUI_FONT_SIZE`). A file font's
-/// own size is only a raster hint in 1.92 - the drawn size comes from here - so a
-/// configured size can only reach the screen through the base; 0 (the default)
-/// means the type scale owns the size.
+/// `basePx` is the drawn base size in px; 0 (the default) means the type scale's
+/// own body step. A file font's own size is only a raster hint in 1.92 - the
+/// drawn size comes from here - so the base is the one place a size
+/// configuration could reach the screen; a future `tui.fontsBodyPx` would
+/// re-feed this parameter as a config key.
 ///
 /// Called once per start-up and never per frame: a frame that moves the base size
 /// would re-lay out every widget of that frame.

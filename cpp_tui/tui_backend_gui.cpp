@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -112,24 +111,6 @@ void dropCallbackTrampoline(GLFWwindow* window, int count, const char** paths) {
 // Idle pacing: wait for input or up to one 60 Hz period — never busy-poll.
 constexpr double EventWaitSeconds = 1.0 / 60.0;
 
-/// The operator's font size as a *drawn* size, 0 when it is unset or malformed.
-///
-/// `LLMFUN_GUI_FONT_SIZE` used to move the drawn size because the old code wrote
-/// it into `ImGuiStyle::FontSizeBase` itself; since 1.92 that field is the only
-/// thing that decides how large text draws, so the value has to be handed to
-/// `ui::applyTypeScale()` - the one place that writes the base. Unset, empty,
-/// non-numeric and out-of-range values answer 0 ("the type scale owns the size").
-float configuredFontSize() {
-    const char* env = std::getenv("LLMFUN_GUI_FONT_SIZE");
-    if (env == nullptr || env[0] == '\0')
-        return 0.0f;
-    char* end = nullptr;
-    const float px = std::strtof(env, &end);
-    if (end == env || *end != '\0' || !(px > 0.0f) || px > 512.0f)
-        return 0.0f;
-    return px;
-}
-
 /// The size a font asset is *added* with. It is a raster hint, not the drawn size:
 /// 1.92 bakes glyphs on demand at whatever `ImGuiStyle::FontSizeBase` asks for, and
 /// the base comes from `ui::applyTypeScale()`.
@@ -196,9 +177,12 @@ FloorProbe probeSizeFloor(GLFWwindow* window, int minWidth, int minHeight) {
 // Fonts: the UI chain (task 20), in order, each step reporting what won on stderr
 // so a capture log records the typography it was made with:
 //
-//   1. LLMFUN_GUI_FONT      an operator's own TTF, size LLMFUN_GUI_FONT_SIZE
-//                           (default: the body step). The existing escape hatch.
-//   2. embedded Roboto      rich_md's asset table (IMGUI_RICHMD_EMBED_EXTRA_FILES
+//   1. configured chain      tui.fonts (threaded in through makeGuiBackend):
+//                            fonts[0] is the primary face AND the code face,
+//                            fonts[1..] merge into it in order, and the
+//                            embedded Roboto merges LAST so nothing rendered
+//                            before regresses.
+//   2. embedded Roboto       rich_md's asset table (IMGUI_RICHMD_EMBED_EXTRA_FILES
 //                           in CMakeLists.txt). No asset outside the binary, no
 //                           download, no new licence - Q-06 is settled as "keep
 //                           Roboto for the MVP".
@@ -220,26 +204,32 @@ constexpr const char* kSystemSansPaths[] = {
     "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
 };
 
-/// Steps 1 and 3. A missing or unreadable file is reported and falls through to the
-/// next step instead of asserting (ImFontFlags_NoLoadError). The size is not part
-/// of this line: the *drawn* size is printed once, by `logTypeBase()`.
-bool addFileFont(const char* path, const char* why) {
+/// The configured chain and the system-sans step. A missing or unreadable file
+/// is reported and falls through to the next step instead of asserting
+/// (ImFontFlags_NoLoadError). With `merge` the face merges into the previously
+/// added one, and logs NOTHING: the caller owns the stderr line (one
+/// `ui: font=` line per chain step); the drawn size is printed once, by `logTypeBase()`.
+bool addFileFont(const char* path, const char* why, bool merge = false) {
     ImFontConfig cfg;
     cfg.Flags |= ImFontFlags_NoLoadError;
+    cfg.MergeMode = merge;
     if (ImGui::GetIO().Fonts->AddFontFromFileTTF(path, fontAssetSize(), &cfg) == nullptr)
         return false;
-    std::fprintf(stderr, "ui: font=%s (%s)\n", path, why);
+    if (why != nullptr)
+        std::fprintf(stderr, "ui: font=%s (%s)\n", path, why);
     return true;
 }
 
 /// One family out of rich_md's embedded asset table, or null when this build does
 /// not carry it. The atlas owns the bytes for its whole lifetime and frees them
-/// (FontDataOwnedByAtlas), so it gets its own copy.
-ImFont* addEmbeddedFont(const ui::FontFace& face) {
+/// (FontDataOwnedByAtlas), so it gets its own copy. With `merge` the face merges
+/// into the previously added one instead of becoming a face of its own.
+ImFont* addEmbeddedFont(const ui::FontFace& face, bool merge = false) {
     RichMd::AssetBytes bytes = RichMd::ReadAssetDefault(face.asset);
     if (!bytes || bytes->empty())
         return nullptr;
     ImFontConfig cfg;
+    cfg.MergeMode = merge;
     // The name labels the font in tooling and in this log; it is never a key.
     std::snprintf(cfg.Name, sizeof(cfg.Name), "%s %.0f", face.family, fontAssetSize());
     // The atlas owns the data for its whole lifetime and frees it
@@ -278,18 +268,45 @@ void loadCodeFont() {
     std::fprintf(stderr, "ui: font=%s (embedded code)\n", ui::monoFontFamily());
 }
 
+bool mergeEmbeddedUiFont() {
+    ImFont* font = addEmbeddedFont(ui::uiFontFace(), /*merge=*/true);
+    if (font == nullptr)
+        return false;
+    std::fprintf(stderr, "ui: font=%s (embedded, merged)\n", ui::uiFontFamily());
+    return true;
+}
+
 /// The chain. Runs in `init()` before the first frame: the atlas is unlocked
 /// there, and the frame loop must never add a font (a late add would bake at the
 /// wrong size and re-render every glyph of that frame). It also installs the code
 /// face, which is a second family rather than a step in this chain.
-void configureUiFont() {
-    const char* path = std::getenv("LLMFUN_GUI_FONT");
-    if (path != nullptr && path[0] != '\0') {
-        if (addFileFont(path, "LLMFUN_GUI_FONT")) {
-            loadCodeFont();
+///
+/// With a configured chain, fonts[0] is the primary face AND the code face
+/// (one merged ImFont, so code spans inherit the fallback chain); fonts[1..]
+/// merge into it in order and the embedded Roboto merges LAST. A tail entry
+/// that cannot load is skipped; a primary that cannot load, or an empty
+/// chain, is exactly the builtin chain.
+void configureUiFont(const std::vector<std::string>& fonts) {
+    if (!fonts.empty()) {
+        if (addFileFont(fonts[0].c_str(), "configured primary")) {
+            ImFont* primary =
+                ImGui::GetIO()
+                    .Fonts->Fonts.back();         // the face just registered (merges never append)
+            ImGui::GetIO().FontDefault = primary; // primary face
+            ui::setCodeFont(
+                primary); // the SAME merged instance: code spans inherit the fallback chain
+            for (size_t i = 1; i < fonts.size(); ++i) {
+                if (addFileFont(fonts[i].c_str(), nullptr, /*merge=*/true))
+                    std::fprintf(stderr, "ui: font=%s (merged)\n", fonts[i].c_str());
+                else
+                    std::fprintf(stderr, "ui: font=%s cannot load; skipped\n", fonts[i].c_str());
+            }
+            mergeEmbeddedUiFont(); // Roboto merges LAST
             return;
         }
-        std::fprintf(stderr, "LLMFUN_GUI_FONT: cannot load '%s'; trying the embedded font\n", path);
+        // fonts[0] failed: fall through to the FULL builtin chain. No residue:
+        // the failed add registered no font (NoLoadError) and no merge state
+        // was opened (the tail loop never ran).
     }
     if (addEmbeddedUiFont()) {
         loadCodeFont();
@@ -313,8 +330,7 @@ void configureUiFont() {
 /// `ui::applyTypeScale()` have both run: this is the number a capture log has to
 /// record, not the raster hint a font was added with.
 void logTypeBase() {
-    std::fprintf(stderr, "ui: type=%.0f px base (%s)\n", ImGui::GetStyle().FontSizeBase,
-                 configuredFontSize() > 0.0f ? "LLMFUN_GUI_FONT_SIZE" : "body step");
+    std::fprintf(stderr, "ui: type=%.0f px base (body step)\n", ImGui::GetStyle().FontSizeBase);
 }
 
 // DPI: scale the style and the font by the monitor content scale, once, at
@@ -334,7 +350,8 @@ void applyDpiScale() {
 
 class GuiBackend final : public Backend {
 public:
-    explicit GuiBackend(model::ShellPrefs* settings) : settings(settings) {}
+    explicit GuiBackend(model::ShellPrefs* settings, std::vector<std::string> fontChain)
+        : settings(settings), fontChain(std::move(fontChain)) {}
 
     bool init(std::string& error) override {
         glfwLastError.clear();
@@ -420,10 +437,11 @@ public:
         // metrics and the one-time DPI adaptation of the style, before the first
         // frame. The size and the chrome metrics go in BEFORE ScaleAllSizes() so a
         // 2x monitor scales them too instead of leaving unscaled padding behind.
-        configureUiFont();
-        // The operator's `LLMFUN_GUI_FONT_SIZE` reaches the screen here and nowhere
-        // else: the asset hint it also feeds cannot change the drawn size.
-        ui::applyTypeScale(configuredFontSize());
+        configureUiFont(fontChain);
+        // The drawn size always comes from the type scale: the raster hint a
+        // font asset is added with cannot change it (1.92 bakes glyphs at
+        // whatever FontSizeBase asks for).
+        ui::applyTypeScale();
         logTypeBase();
         applyGuiChromeMetrics();
         applyDpiScale();
@@ -593,6 +611,7 @@ private:
 
     GLFWwindow* window = nullptr;
     model::ShellPrefs* settings = nullptr;
+    std::vector<std::string> fontChain;
     std::string pendingCapturePath;
     int requestedMinWidth = 0;
     int requestedMinHeight = 0;
@@ -606,8 +625,9 @@ private:
 
 } // namespace
 
-std::unique_ptr<Backend> makeGuiBackend(model::ShellPrefs& settings) {
-    return std::make_unique<GuiBackend>(&settings);
+std::unique_ptr<Backend> makeGuiBackend(model::ShellPrefs& settings,
+                                        const std::vector<std::string>& fontChain) {
+    return std::make_unique<GuiBackend>(&settings, fontChain);
 }
 
 } // namespace llmfun::tui

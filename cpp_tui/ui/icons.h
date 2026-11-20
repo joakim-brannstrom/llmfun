@@ -46,8 +46,8 @@
 /// fallback glyph, so a mark the atlas lacks is drawn as "?" (the bitmap font's
 /// fallback) and not as the mark. Measured on this tree (`test_icons` re-measures
 /// it): the shipped GUI font, the embedded ProggyClean bitmap, carries **0 of the
-/// 12** distinct marks, and Roboto-Medium - the design's UI font, reachable through
-/// `LLMFUN_GUI_FONT` - carries **2** (`•`, `…`). So the GUI draws the ASCII column
+/// 12** distinct marks, and Roboto-Medium - the embedded UI font -
+/// carries **2** (`•`, `…`). So the GUI draws the ASCII column
 /// today (`pixelGlyphSet()`), and task 20 (font) flips it once a symbol-capable font
 /// is in the atlas; task 19's GUI golden then has to contain one of each icon, so a
 /// "?" cannot pass as a golden.

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "model/drop_chip.h"
 #include "model/settings.h"
@@ -138,6 +139,7 @@ void setDropRowTarget(model::DropChipRow* row);
 
 std::unique_ptr<Backend> makeNcursesBackend();
 std::unique_ptr<Backend> makeNullBackend();
-std::unique_ptr<Backend> makeGuiBackend(model::ShellPrefs& settings);
+std::unique_ptr<Backend> makeGuiBackend(model::ShellPrefs& settings,
+                                        const std::vector<std::string>& fontChain = {});
 
 } // namespace llmfun::tui

@@ -562,8 +562,8 @@ int countMarksInFont(ImFont* font, float size, const std::vector<uint32_t>& mark
 /// `GlyphSet` is how a surface states what it can draw, and `pixelGlyphSet()` is the
 /// GUI's answer. That answer is only honest if it matches the atlas, so this measures
 /// the atlases the GUI can be running: the embedded bitmap font it ships by default
-/// and, when the vendored copy is reachable, the design's UI font (Roboto-Medium,
-/// reachable as `LLMFUN_GUI_FONT`). ImGui substitutes a codepoint the atlas lacks with
+/// and the UI font (the embedded Roboto-Medium). ImGui substitutes a
+/// codepoint the atlas lacks with
 /// the font's fallback glyph - so a mark the atlas does not carry is *not* drawn as the
 /// mark - which is why the pixel profile may not use the glyph column yet.
 ///

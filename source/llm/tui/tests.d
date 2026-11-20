@@ -190,6 +190,39 @@ unittest {
             "recording listener did not receive uiTerminated within 5s");
 }
 
+@("setFontChain forwards the font chain to TuiState")
+unittest {
+    auto st = tuiCreateState();
+    // ui owns st: its dtor is the one teardown, so no tuiDestroyState here.
+    auto ui = TextUserInterface(st);
+    ui.setFontChain(["@unexpanded/magic.ttf", "fonts/emoji.ttf"]);
+    assert(tuiFontChainCount(st) == 2, "setFontChain did not forward both entries");
+    // An empty list is the builtin chain: it must clear, not no-op.
+    ui.setFontChain([]);
+    assert(tuiFontChainCount(st) == 0, "empty setFontChain must clear the chain");
+}
+
+@("configured tui.fonts reach TuiState through the headless constructor")
+unittest {
+    auto latch = new FiredLatch();
+    auto listener = new RecordingTUIListener(latch);
+    auto dListener = new DrivenActor!RecordingTUIListener(listener);
+    auto st = tuiCreateState();
+    // Headless ctor: same ui.set* wiring as the production ctor. ui owns st
+    // and tears it down on the actor's shutdown, so no tuiDestroyState here.
+    // The magic word arrives unexpanded here: resolvePaths expands the
+    // magic words when the config is applied, before any font loads.
+    auto actor = new TextUserInterfaceActor(TypedAddress!TUIListener(dListener.address.lock),
+            Path.init, 80, st, 0, ["@unexpanded/magic.ttf", "fonts/emoji.ttf"]);
+    // The ctor wired the chain before any tuiInit; read it back through the
+    // tuiFontChainCount hook.
+    assert(tuiFontChainCount(st) == 2,
+            "ctor did not forward the configured font chain before tuiInit");
+    auto dActor = new DrivenActor!TextUserInterfaceActor(actor);
+    dActor.kill();
+    dListener.kill();
+}
+
 /// Builds the manual-drive fixture used by the message-flow tests: a
 /// RecordingTUIListener and a headless TextUserInterfaceActor (real C
 /// state, no backend) on their own shells; the actor shell is

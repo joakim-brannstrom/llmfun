@@ -67,17 +67,9 @@ mutually exclusive.
 `LLMFUN_TUI_BACKEND=auto|gui|tui` selects the backend from the environment when no flag is given
 (precedence: CLI flag > environment > Auto); an unknown value warns and falls back to Auto.
 
-The GUI font can be customized through two environment variables (GUI mode
-only; the terminal UI is unaffected):
-
-- `LLMFUN_GUI_FONT` — path to a TTF font file. Replaces the embedded
-  default font (ProggyClean, 13 px). A path that cannot be loaded prints
-  `LLMFUN_GUI_FONT: cannot load '<path>'; using the embedded font` to
-  stderr and keeps the embedded font.
-- `LLMFUN_GUI_FONT_SIZE` — pixel size of the font set by
-  `LLMFUN_GUI_FONT` (default 16). Unset, empty, non-numeric, or
-  out-of-range values (must be greater than 0 and at most 512) keep the
-  default. Has no effect without `LLMFUN_GUI_FONT`.
+The GUI font chain can be customized with the `tui.fonts` configuration key
+(GUI mode only; the terminal UI is unaffected). See the configuration
+reference.
 
 ```bash
 llmfun agent [options]
@@ -389,6 +381,8 @@ toolLimits:
 
 tui:
   maxWidth: 0 # TUI max width in terminal columns (0 = unlimited, default)
+  # GUI font chain, in fallback order (see "TUI Configuration (`tui`)" below).
+  fonts: [] # empty = the builtin chain
 
 telemetry:
   syslog:
@@ -560,7 +554,48 @@ embedConfig:
 | `toolBroker` | object | disabled | Tool visibility groups and on-demand activation (see below) |
 | `toolLimits` | object | defaults | Tool execution limits (see below) |
 | `agentsMd` | object | auto / 20 KB / ragIndex on | Adaptive AGENTS.md handling (see `doc/agents_md.md`) |
-| `tui` | object | no | TUI options; `maxWidth` caps rendered width in columns (0 = unlimited, default) |
+| `tui` | object | no | TUI options; `maxWidth` caps rendered width in columns (0 = unlimited, default); `fonts` sets the GUI font chain (see TUI Configuration) |
+
+### TUI Configuration (`tui`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `maxWidth` | long | `0` | TUI max width in terminal columns (0 = unlimited; otherwise [40, 10000]) |
+| `fonts` | string[] | `[]` | GUI font chain, in fallback order (see below) |
+
+#### The GUI font chain (`tui.fonts`)
+
+`tui.fonts` customizes the glyph fallback chain of the graphical window (GUI
+mode only; the terminal UI is unaffected). An empty list — the default — keeps
+the builtin chain, which renders exactly as before the key existed.
+
+```yaml
+tui:
+  fonts:
+    - '@{llmfun_workarea}/fonts/Body.ttf' # primary face
+    - '@{llmfun}/fonts/More-Glyphs.ttf'   # merged into the primary, in order
+```
+
+Semantics:
+
+- `fonts[0]` is the primary face: it renders the body text AND the code spans.
+  `fonts[1..]` merge into it, in list order; the embedded Roboto always merges
+  last, so a glyph missing from every configured font still draws.
+- Paths may use the usual magic words (`@{llmfun_workarea}`, `@{llmfun}`).
+- At most 8 entries; more are rejected at configuration time with
+  `tui.fonts must hold at most 8 entries, got N`.
+- Paths are not existence-checked at configuration time. An entry that cannot
+  load is skipped at GUI startup with one line on stderr
+  (`ui: font=<path> cannot load; skipped`); the rest of the chain still applies.
+- If `fonts[0]` itself cannot load, the full builtin chain takes over: the run
+  renders exactly as if `tui.fonts` were not configured.
+- Every chain step reports what won on stderr (`ui: font=...` lines), so a
+  hand-edited list can be checked from the console.
+- There is no per-font size setting: the drawn base font size is the type
+  scale's body step (15 px), multiplied by the `FontScaleMain` slider and the
+  DPI scale, exactly as without `tui.fonts`.
+- A YAML type mismatch under `fonts` (e.g. a scalar instead of a list) warns
+  (`unable to read 'fonts': ...`) and keeps the empty default.
 
 ### Sandbox Configuration (`sandboxConfig`)
 

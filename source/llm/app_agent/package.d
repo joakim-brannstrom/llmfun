@@ -1529,7 +1529,7 @@ class AppAgentActor : DropOwner {
         tui_ = sys.spawnBounded!(Config.detached, TextUserInterfaceActor)(1000,
                 TypedAddress!TUIListener(self_.address().lock()), app.llmConf.uiInitFile, app.llmConf.tui.maxWidth,
                 resolveTuiBackendMode(app.conf_), app.conf_.debugUi,
-                app.llmConf.tui.idleParkMs, dropWorker);
+                app.llmConf.tui.idleParkMs, app.llmConf.tui.fonts, dropWorker);
         app.uiMsg = new UiMessenger(new TuiChannelSink(tui_));
         monitor(self_.address(), tui_);
         app.uiMsg.initHistory(app.agent_.getUserQueries.map!(a => a.content).array);

@@ -6,8 +6,6 @@
 #include "imgui.h"
 #include "tui.h"
 
-#include <cstdlib>
-
 namespace llmfun::tui {
 
 // Text-scale UX constants: the load-acceptance range is the model's
@@ -84,12 +82,6 @@ void renderOptionsWindow(TuiState& state) {
         }
         ImGui::Text("%d px", static_cast<int>(ImGui::GetFontSize()));
         trackExtent();
-        if (const char* envFont = std::getenv("LLMFUN_GUI_FONT");
-            envFont != nullptr && envFont[0] != '\0') {
-            // FONT_SIZE only composes with FONT, hence the single-var hint.
-            ImGui::TextDisabled("Base font from LLMFUN_GUI_FONT / _SIZE; px = base x scale");
-            trackExtent();
-        }
         state.optionsContentSize = contentMax;
     }
     ImGui::End();

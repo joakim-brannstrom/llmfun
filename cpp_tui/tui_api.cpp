@@ -245,7 +245,7 @@ int tuiInit(TuiState* state, TuiBackendMode mode) {
         backend = ::llmfun::tui::makeNcursesBackend();
         initialized = backend->init(error);
     } else if (mode == TuiBackendMode_Gui) {
-        backend = ::llmfun::tui::makeGuiBackend(state->inner->ui.prefs);
+        backend = ::llmfun::tui::makeGuiBackend(state->inner->ui.prefs, state->inner->fontChain);
         initialized = backend->init(error);
         if (initialized)
             ::llmfun::tui::initMarkdownGuiMode(*state->inner);
@@ -256,7 +256,7 @@ int tuiInit(TuiState* state, TuiBackendMode mode) {
         // useless, so there the GUI error is the result.
         // The settings were loaded above, before any backend ran, so a TTY
         // fallback inherits the loaded font scale.
-        backend = ::llmfun::tui::makeGuiBackend(state->inner->ui.prefs);
+        backend = ::llmfun::tui::makeGuiBackend(state->inner->ui.prefs, state->inner->fontChain);
         initialized = backend->init(error);
         if (initialized) {
             ::llmfun::tui::initMarkdownGuiMode(*state->inner);
@@ -440,6 +440,28 @@ void tuiSetMaxWidth(TuiState* state, int maxWidth) {
     if (maxWidth > 0 && maxWidth < 40)
         maxWidth = 40;
     ::llmfun::tui::tuiSetMaxWidth(*state->inner, maxWidth);
+}
+
+void tuiSetFontChain(TuiState* state, const String* paths, size_t count) {
+    if (!state || !state->inner)
+        return;
+    // NULL paths with a nonzero count would dereference nothing readable; the
+    // header contract says a NULL list clears the chain, so treat it as empty.
+    if (!paths)
+        count = 0;
+    std::vector<std::string> chain;
+    chain.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const String& s = paths[i];
+        chain.emplace_back(s.data ? s.data : "", s.data ? s.len : 0);
+    }
+    state->inner->fontChain = std::move(chain);
+}
+
+size_t tuiFontChainCount(TuiState* state) {
+    if (!state || !state->inner)
+        return 0;
+    return state->inner->fontChain.size();
 }
 
 void tuiSetIdlePark(TuiState* state, int parkMs) {

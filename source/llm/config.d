@@ -362,7 +362,15 @@ struct TuiConfig {
     /// 0 or [4, 1000] (~40 fps to ~1 fps idle); e.g. 75 lands a
     /// software-GL box near 10 fps idle.
     long idleParkMs = 100;
+    /// Font files for the GUI profile's glyph fallback chain. fonts[0] is the primary
+    /// face; the rest merge into it in order, the embedded Roboto always merges last,
+    /// absent or empty = the builtin chain. Magic words (@{llmfun}, @{llmfun_workarea})
+    /// expand in resolvePaths; at most maxFontChainEntries entries (validateConfig);
+    /// paths are not existence-checked - a dangling path is a load-time skip (stderr).
+    string[] fonts;
 }
+
+enum maxFontChainEntries = 8;
 
 enum NudgeKind {
     keepReasoning,
@@ -526,6 +534,7 @@ struct LlmConfig {
         } else {
             promptDir = promptDir.map!(a => replaceMagicWord(a, workArea.AbsolutePath).Path).array;
         }
+        tui.fonts = tui.fonts.map!(a => replaceMagicWord(a, workArea.AbsolutePath)).array;
 
         bool skillsFromDataSearch;
         if (skillPathsSystem.empty) {
@@ -2053,6 +2062,9 @@ void validateConfig(LlmConfig conf) {
     if (conf.tui.idleParkMs != 0 && (conf.tui.idleParkMs < 4 || conf.tui.idleParkMs > 1000))
         throw new Exception(i"tui.idleParkMs must be 0 or in [4, 1000], got $(conf.tui.idleParkMs)"
                 .text);
+    if (conf.tui.fonts.length > maxFontChainEntries)
+        throw new Exception(i"tui.fonts must hold at most $(maxFontChainEntries) entries, got $(
+                conf.tui.fonts.length)".text);
 
     if (conf.ragConfig.busyTimeoutMs < 0)
         throw new Exception(i"ragConfig.busyTimeoutMs must be >= 0, got $(
@@ -2920,6 +2932,135 @@ tui:
     }
     assert(threw, "validateConfig must throw for idleParkMs > 1000");
     assert(canFind(msg, "tui.idleParkMs"), "unexpected error message: " ~ msg);
+}
+
+@("tui.fonts parses from YAML into LlmConfig.tui.fonts") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_fonts_parse");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `tui:
+  fonts:
+    - a.ttf
+    - b.ttf
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.fonts == ["a.ttf", "b.ttf"],
+            "expected [a.ttf, b.ttf], got " ~ conf.tui.fonts.to!string);
+}
+
+@("absent tui.fonts keeps the empty default") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_fonts_absent");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `tui:
+  maxWidth: 255
+`;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.fonts.empty, "expected the empty default, got " ~ conf.tui.fonts.to!string);
+}
+
+@("tui.fonts with more than 8 entries is rejected by validateConfig") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_fonts_toomany");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+tui:
+  fonts:
+`;
+    foreach (i; 0 .. 9)
+        yaml ~= i"    - font$(i).ttf\n".text;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.fonts.length == 9,
+            "parse must accept 9 entries, got " ~ conf.tui.fonts.length.to!string);
+    bool threw;
+    string msg;
+    try {
+        validateConfig(conf);
+    } catch (Exception e) {
+        threw = true;
+        msg = e.msg;
+    }
+    assert(threw, "validateConfig must throw for more than 8 tui.fonts entries");
+    assert(canFind(msg, "tui.fonts"), "unexpected error message: " ~ msg);
+}
+
+@("8 tui.fonts entries pass validateConfig") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_fonts_eight_ok");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    string yaml = `codeModels:
+  - modelName: test
+    display: test42
+    server:
+      url: http://localhost:8080
+tui:
+  fonts:
+`;
+    foreach (i; 0 .. 8)
+        yaml ~= i"    - font$(i).ttf\n".text;
+    File(tmpFile, "w").write(yaml);
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.tui.fonts.length == 8,
+            "parse must accept 8 entries, got " ~ conf.tui.fonts.length.to!string);
+    validateConfig(conf);
+}
+
+@("tui.fonts entries expand @{llmfun_workarea} and @{llmfun} in resolvePaths") unittest {
+    import std.algorithm : canFind;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("tui_fonts_magicwords");
+    scope (exit)
+        tmpDir.cleanup;
+
+    LlmConfig conf;
+    conf.workArea = Path(tmpDir.toString);
+    conf.tui.fonts = ["@{llmfun_workarea}/f1.ttf", "@{llmfun}/f2.ttf"];
+    conf.resolvePaths(false);
+    assert(conf.tui.fonts[0] == tmpDir.toString ~ "/f1.ttf",
+            "expected the workarea expansion, got " ~ conf.tui.fonts[0]);
+    assert(!conf.tui.fonts[1].canFind("@{"), "@{llmfun} must be expanded, got " ~ conf.tui.fonts[1]);
+}
+
+@("a relative fonts path passes through resolvePaths unchanged") unittest {
+    LlmConfig conf;
+    conf.tui.fonts = ["fonts/fonts.ttf"];
+    conf.resolvePaths(false);
+    assert(conf.tui.fonts == ["fonts/fonts.ttf"],
+            "a relative path must not be rewritten, got " ~ conf.tui.fonts[0]);
 }
 
 @("toolLimits.filesystem absent, empty block, and empty category block are all allow-all") unittest {

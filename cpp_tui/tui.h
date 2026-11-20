@@ -242,6 +242,11 @@ struct TuiState {
     std::string iniFilename;
     int maxWidth = 0; // 0 = unlimited (current behavior)
 
+    /// The configured GUI font chain (absolute paths, fallback order).
+    /// Set before init via the C API; consumed once by GuiBackend::init().
+    /// Empty = the builtin chain.
+    std::vector<std::string> fontChain;
+
     /// The park timeout: what tuiRenderBlocking waits when nothing happened
     /// in the pass. Only the idle cadence depends on it - with input the
     /// wait wakes early on events, so latency is unaffected. The effective
