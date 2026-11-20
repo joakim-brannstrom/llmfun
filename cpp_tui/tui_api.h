@@ -23,11 +23,7 @@ extern "C" {
  *     tuiBackendNote
  */
 
-/* TUI_API_VERSION - API generation marker. Documentation only: no runtime
- * behavior depends on it. The one exception to "documentation only" is the
- * record of a real ABI event: v16 grew the pipeline payloads (the batch index).
- */
-#define TUI_API_VERSION 16
+#define TUI_API_VERSION 17
 
 /* String — Plain old data struct representing a string slice.
  * Ownership rules:
@@ -457,6 +453,19 @@ void tuiSetLogging(TuiState* state, int onOff);
  * tui.h). Null-safe.
  */
 void tuiSetMaxWidth(TuiState* state, int maxWidth);
+
+/* Set the GUI profile's font fallback chain (absolute paths; the D side expands
+ * magic words); an empty list (count == 0 or NULL paths) = the builtin chain.
+ * Call after tuiCreateState and before tuiInit: consumed once, when the GUI
+ * backend builds the font atlas; per-entry load failures are load-time skips
+ * logged to stderr. Null-safe. Strings are copied; the caller may free its buffers right after.
+ */
+void tuiSetFontChain(TuiState* state, const String* paths, size_t count);
+
+/* Test/observability hook: how many paths the state currently holds.
+ * Mirrors the read-back pattern the contract tests use (tuiBackendNote,
+ * tuiBackendActive). Null-safe: returns 0. */
+size_t tuiFontChainCount(TuiState* state);
 
 /* Set the idle park timeout in milliseconds: what a blocking render pass
  * waits when nothing happened in it. Only the idle cadence depends on it -

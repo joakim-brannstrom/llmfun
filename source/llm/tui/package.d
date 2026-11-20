@@ -466,6 +466,18 @@ struct TextUserInterface {
         tuiSetMaxWidth(tuiState, w);
     }
 
+    // ordered glyph-fallback faces for the GUI profile,
+    void setFontChain(string[] paths) {
+        if (paths.empty) {
+            tuiSetFontChain(tuiState, null, 0);
+            return;
+        }
+        auto arr = new String[paths.length];
+        foreach (i, p; paths)
+            arr[i] = toTuiString(p);
+        tuiSetFontChain(tuiState, arr.ptr, arr.length);
+    }
+
     void setIdlePark(int ms) {
         tuiSetIdlePark(tuiState, ms);
     }
@@ -812,19 +824,13 @@ class TextUserInterfaceActor : TUICommands {
         TypedAddress!DropWorker dropWorkerAddress;
     }
 
-    // Production path: create the C state now (no backend); the backend
-    // attach selected by `mode` is deferred to onSpawn so the window and the
-    // GL context are created on the actor's own thread - GLFW/GL state is
-    // thread-affine and the frame loop below drives it (the actor is spawned
-    // with Config.detached, keeping onSpawn and every frame on one thread).
-    // Auto's GUI->TUI failover is resolved in C++ (a TTY check cannot be
-    // faked from here); a failure records the precise reason, dispatched
-    // from onSpawn. On success the active backend and any fallback note are
-    // logged; the note also seeds the status line. The ui field takes the
-    // state on every path so its dtor tears it down once.
-    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth, TuiBackendMode mode,
-            bool debugUi = false, long idleParkMs = 0,
-            TypedAddress!DropWorker dropWorker = TypedAddress!DropWorker.init) {
+    // create the C state (no backend)
+    // the backend attach selected by `mode` is deferred to onSpawn so the
+    // window and the GL context are created on the actor's own thread -
+    // GLFW/GL state is thread-affine.
+    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth,
+            TuiBackendMode mode, bool debugUi = false, long idleParkMs = 0, string[] fonts = [
+    ], TypedAddress!DropWorker dropWorker = TypedAddress!DropWorker.init) {
         assert(maxWidth >= 0 && maxWidth <= 10_000,
                 "maxWidth out of int-safe range: " ~ maxWidth.to!string);
         this.listenerAddress = listener;
@@ -836,6 +842,7 @@ class TextUserInterfaceActor : TUICommands {
         ui = TextUserInterface(state);
         ui.setMaxWidth(cast(int) maxWidth);
         ui.setIdlePark(cast(int) idleParkMs);
+        ui.setFontChain(fonts);
         ui.setIniFile(iniFile);
     }
 
@@ -844,8 +851,9 @@ class TextUserInterfaceActor : TUICommands {
     // copy's dtor runs at ctor exit, then the field's dtor runs again in
     // onExit). Ownership transfers on successful return only; a throw
     // (assert) leaves the state with the caller.
-    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth, TuiState* state,
-            long idleParkMs = 0, TypedAddress!DropWorker dropWorker = TypedAddress!DropWorker.init) {
+    this(TypedAddress!TUIListener listener, Path iniFile, long maxWidth,
+            TuiState* state, long idleParkMs = 0, string[] fonts = [],
+            TypedAddress!DropWorker dropWorker = TypedAddress!DropWorker.init) {
         assert(maxWidth >= 0 && maxWidth <= 10_000,
                 "maxWidth out of int-safe range: " ~ maxWidth.to!string);
         this.listenerAddress = listener;
@@ -854,6 +862,7 @@ class TextUserInterfaceActor : TUICommands {
         ui = TextUserInterface(state);
         ui.setMaxWidth(cast(int) maxWidth);
         ui.setIdlePark(cast(int) idleParkMs);
+        ui.setFontChain(fonts);
         ui.setUiAsStdLogger;
         ui.setIniFile(iniFile);
     }

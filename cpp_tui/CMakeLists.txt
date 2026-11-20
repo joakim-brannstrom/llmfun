@@ -310,6 +310,28 @@ target_link_libraries(test_tui_maxwidth PRIVATE
     ${CMAKE_DL_LIBS}
 )
 
+# Headless seam test for the GUI font chain C API (tuiSetFontChain +
+# tuiFontChainCount, the v17 ABI event). No backend, no ImGui context: it
+# drives tuiCreateState handles only and reads the chain back through both the
+# observability hook and the white-box inner->fontChain field (the
+# test_tui_maxwidth case-D read-back pattern). Invoke: ./test_tui_fontchain
+add_executable(test_tui_fontchain
+    test_tui_fontchain.cpp
+)
+add_dependencies(test_tui_fontchain llmfun_tui_all_lib)
+# tui_api.h alone needs nothing beyond the C API header, but the target must
+# link the library that defines the C API symbols; the interface-providing
+# targets keep the include paths consistent with the sibling seam tests (their
+# archives are already inside llmfun_tui_all_lib, so they contribute no extra
+# objects).
+target_link_libraries(test_tui_fontchain PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
+)
+
 # Headless rich-markdown text-mode smoke test for the imgui_rich_md
 # migration. Drives a real TuiState through tuiRender on the imtui TEXT
 # backend (no ncurses, no PTY) with the real text-mode markdown profile
@@ -522,6 +544,35 @@ target_link_libraries(test_gui_window PRIVATE
     ncursesw
     glfw
     ${CMAKE_DL_LIBS}
+)
+
+# Font-chain GUI test: tui.fonts crosses makeGuiBackend() -> configureUiFont()
+# on a real backend in a real window; every case asserts by glyph lookup on the
+# live `ImFont`s plus the stderr log, not by pixel diffing. Test fonts are the
+# in-repo TTFs under vendor/imgui/imgui/misc/fonts, passed as a compile definition.
+# Needs a display; runs headless: xvfb-run -s "-screen 0 1280x820x24" ./test_font_chain_gui
+add_executable(test_font_chain_gui
+    test_font_chain_gui.cpp
+)
+add_dependencies(test_font_chain_gui llmfun_tui_all_lib)
+# tui.h (the C++ header) needs the imtui include paths and the
+# IMGUI_USE_WCHAR32 definition; link the interface-providing targets for exactly
+# that (their archives are already inside llmfun_tui_all_lib, so they contribute
+# no extra objects) - the same shape as test_gui_window above.
+target_link_libraries(test_font_chain_gui PRIVATE
+    llmfun_tui_all_lib
+    imtui-ncurses
+    ncursesw
+    glfw
+    ${CMAKE_DL_LIBS}
+)
+target_include_directories(test_font_chain_gui PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/imgui_rich_md
+    ${CMAKE_CURRENT_SOURCE_DIR}/../vendor/imgui/imgui
+)
+target_compile_definitions(test_font_chain_gui PRIVATE
+    TEST_FONT_CHAIN_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../vendor/imgui/imgui/misc/fonts"
 )
 
 # Palette overlay (task 10, §4.12): Ctrl+K opens it, Esc closes it, the overlay

@@ -84,22 +84,13 @@ constexpr float kBorderSize = 1.0f;        // the hairline
 /// A framed widget keeps no border: its `inset` fill against the surface is the
 /// edge, and a border would draw the same boundary twice in two greys.
 constexpr float kFrameBorderSize = 0.0f;
-/// The base size this run must draw at: the type scale's body step, or the
-/// operator's `LLMFUN_GUI_FONT_SIZE` when it is set and sane (the backend applies
-/// the same rule through `ui::scaledTypeSize`). Reading it here rather than
-/// hard-coding 15 keeps the harness usable for the escape hatch - running it with
-/// the variable set proves the configured size reaches the style, which is the one
-/// thing an `AddFont*` size cannot do in 1.92.
+/// The base size this run must draw at: the type scale's body step (15 px).
+/// It always comes from the type scale - this stays a call to `ui::scaledTypeSize`
+/// rather than a hard-coded 15 so it keeps feeding the same knob the backend
+/// does, and a future size configuration (`tui.fontsBodyPx`) only has to change
+/// what the backend feeds it.
 float expectedFontSizeBase() {
-    const char* env = std::getenv("LLMFUN_GUI_FONT_SIZE");
-    float configured = 0.0f;
-    if (env != nullptr && env[0] != '\0') {
-        char* end = nullptr;
-        const float px = std::strtof(env, &end);
-        if (end != env && *end == '\0' && px > 0.0f && px <= 512.0f)
-            configured = px;
-    }
-    return llmfun::tui::ui::scaledTypeSize(llmfun::tui::ui::TypeStep::body, configured);
+    return llmfun::tui::ui::scaledTypeSize(llmfun::tui::ui::TypeStep::body, 0.0f);
 }
 
 int g_failures = 0;

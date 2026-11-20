@@ -64,6 +64,14 @@
 #   # blank: ncurses clears the screen on first refresh / uses the alternate
 #   # screen).
 #   maxWidth: 255
+#   # GUI font chain (GUI mode only; the terminal UI is unaffected). Empty or
+#   # absent = the builtin chain. fonts[0] is the primary face (body text AND
+#   # code spans), the rest merge into it in order, the embedded Roboto always
+#   # merges last. At most 8 entries. Paths are not existence-checked: a path
+#   # that fails to load is skipped at GUI startup (one stderr line per step).
+#   fonts:
+#     - '@{llmfun_workarea}/fonts/Body.ttf'
+#     - '@{llmfun}/fonts/More-Glyphs.ttf'
 
 # telemetry:
 #   syslog:

@@ -1029,7 +1029,7 @@ void casePipelineLaneFields() {
     static_assert(sizeof(PipelineChatMessage::contextUsed) == 8 &&
                       sizeof(PipelineChatMessage::contextMax) == 8,
                   "the context numbers are 64-bit");
-    static_assert(TUI_API_VERSION == 16,
+    static_assert(TUI_API_VERSION == 17,
                   "the lane contract changed; bump one version per ABI event");
     static_assert(llmfun::tui::store::kBlockFlagHidden == TuiBlockFlag_Hidden,
                   "the store's flag mirror must track the wire flag it mirrors");
@@ -1172,8 +1172,8 @@ void casePipelineLaneFields() {
 void caseThreadTurnBlockFields() {
     g_where = "case: turn/block layout";
 
-    static_assert(TUI_API_VERSION == 16,
-                  "this case pins the current generation (v16); bump one version per ABI event");
+    static_assert(TUI_API_VERSION == 17,
+                  "this case pins the current generation (v17); bump one version per ABI event");
 
     // TuiTurn: int64 + 3x int32 (+ a 4-byte tail pad) = 24 bytes on the 64-bit
     // ABI. The state and the message count follow the id; the reserved word
@@ -1678,8 +1678,8 @@ int main(int argc, char** argv) {
             (void)std::remove("llmfun_ui_log.txt");
     });
 
-    static_assert(TUI_API_VERSION == 16,
-                  "this contract test pins the current API generation (v16)");
+    static_assert(TUI_API_VERSION == 17,
+                  "this contract test pins the current API generation (v17)");
 
     caseNoneStateInert();
     caseLogRecords();

@@ -144,8 +144,8 @@ GlyphSet textGlyphSet() { return useAscii() ? GlyphSet::Ascii : GlyphSet::Glyphs
 GlyphSet pixelGlyphSet() {
     // The GUI draws through the ImGui font atlas, and the shipped atlas cannot show
     // the marks: the embedded ProggyClean bitmap carries none of the 12 distinct
-    // marks, and Roboto-Medium (reachable as LLMFUN_GUI_FONT, the design's UI font)
-    // carries two. A codepoint the atlas lacks is not drawn as the mark there - ImGui
+    // marks, and Roboto-Medium (the design's embedded UI font) carries two. A
+    // codepoint the atlas lacks is not drawn as the mark there - ImGui
     // substitutes the font's fallback - so a GUI view using the glyph column would
     // paint a row of "?".
     //

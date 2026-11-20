@@ -139,7 +139,7 @@ void scenario3_scrollAndApiVersion() {
     // Documentation-only marker: the clear contract must not bump it. (v16
     // bumped it anyway - the pipeline payloads grew a batch index - which is a
     // wire change behind this test's back, not a change to the clear contract.)
-    static_assert(TUI_API_VERSION == 16, "TUI_API_VERSION must stay at the current generation");
+    static_assert(TUI_API_VERSION == 17, "TUI_API_VERSION must stay at the current generation");
 }
 
 // Scenario 4: the C-API clear is a no-op on a NULL state.

@@ -92,8 +92,9 @@ void finishMarkdownTextMode(TuiState& state) {
 }
 
 // The GUI's UI font is the pixel backend's business, not markdown's: the backend's
-// `configureUiFont()` (tui_backend_gui.cpp) walks the family chain and installs the
-// embedded Roboto as io.FontDefault before the first frame, so markdown neither
+// `configureUiFont()` walks the font chain and installs the
+// primary face - a configured font, or the embedded Roboto otherwise - as
+// io.FontDefault before the first frame, so markdown neither
 // picks nor replaces the family the rest of the UI draws with.
 void initMarkdownGuiMode(TuiState& state) {
     RichMd::MarkdownOptions options;

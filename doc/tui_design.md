@@ -314,23 +314,21 @@ runtime-gated with `tuiIsTextGrid()` (which reports
 
 ### Fonts & DPI
 
-The GUI renders with imgui's embedded bitmap font (ProggyClean, 13 px base)
-by default — no asset is needed, and the font is pinned explicitly instead of
-left to `AddFontDefault()`'s size heuristic. Two optional environment
-variables (GUI only; the terminal backend's imtui font path is untouched):
+The GUI renders through a font chain (GUI only; the terminal backend's imtui
+font path is untouched), each step reporting what won on stderr: a configured
+chain (`tui.fonts`) first — fonts[0] as the primary face, the remaining entries
+merged into it in order, the embedded Roboto merged last — then the embedded
+Roboto-Medium by itself, then the first readable system sans, then imgui's
+embedded bitmap font (ProggyClean, 13 px base — no asset needed, and pinned
+explicitly instead of left to `AddFontDefault()`'s size heuristic), so the
+chain cannot end without a font. A configured entry that cannot load is
+skipped with one line on stderr; a failed configured primary falls through to
+the builtin chain in full.
 
-- `LLMFUN_GUI_FONT` — path to a TTF font, replacing the embedded default
-  (`io.Fonts->AddFontFromFileTTF`).
-- `LLMFUN_GUI_FONT_SIZE` — its pixel size (default 16; unset, empty,
-  non-numeric, or out-of-range values keep the default). Without
-  `LLMFUN_GUI_FONT` the variable has no effect.
-
-A path that cannot be loaded prints
-`LLMFUN_GUI_FONT: cannot load '<path>'; using the embedded font` to stderr
-and keeps the default. The 1.92 atlas rasterizes glyphs on demand, so no
-glyph ranges are passed (they only matter to legacy backends); a glyph the
-font lacks renders as its fallback (`?`) glyph. Without configuration the
-rendering is exactly as before on a 1.0-scale monitor.
+The 1.92 atlas rasterizes glyphs on demand, so no glyph ranges are passed
+(they only matter to legacy backends); a glyph the font lacks renders as its
+fallback (`?`) glyph. Without configuration the rendering is exactly as
+before on a 1.0-scale monitor.
 
 The GUI persists its settings in `ui.conf`, a sibling of the imgui settings
 file `imgui2.ini`. The file starts with a `Version=2` line followed by one
@@ -343,12 +341,11 @@ current value - normally the default - is kept), so a hand-edited or
 truncated file cannot break the GUI. There is no migration: a file missing
 newer keys loads with those keys at their defaults.
 
-Precedence is: environment variables, then `ui.conf`, then built-in
-defaults. `LLMFUN_GUI_FONT` / `LLMFUN_GUI_FONT_SIZE` pick the BASE font and
-its pixel size; the saved `FontScaleMain` multiplies on top of whichever
-base the environment chose - the two knobs compose
+Precedence is: `ui.conf`, then built-in defaults. The drawn BASE font size
+always comes from the type scale's body step (15 px); the saved
+`FontScaleMain` multiplies on top of it
 (ImGui::GetFontSize() == FontSizeBase * FontScaleMain * FontScaleDpi), e.g.
-a 16 px base with a saved 1.25 scale renders 20 px. `FontScaleMain` is
+a 15 px base with a saved 1.25 scale renders 19 px. `FontScaleMain` is
 changed in the GUI under View -> Options.
 
 The text grid instead runs markdown at 1-cell fonts (see Markdown Support),
