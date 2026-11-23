@@ -49,7 +49,7 @@ import std.sumtype : SumType, has, match;
 import std.typecons : Tuple, tuple;
 import std.utf : byUTF, toUTF8, validate, UTFException;
 
-import llm.common.config : ApproxTokenSize;
+import llm.common.config : ApproxTokenSize, ApproxImageTokens;
 import llm.utility : getValue, summarizeToolCalls, summarizeToolResponse;
 
 struct Chat {
@@ -425,7 +425,8 @@ long approxMessageSize(T)(T msg) @safe nothrow {
         }, (ToolResponse a) {
             return a.content.length / ApproxTokenSize;
         }, (VisionMessage a) {
-            return (a.content.length + a.imageDataUrl.length) / ApproxTokenSize;
+            // the vision encoder emits a bounded token count per image
+            return a.content.length / ApproxTokenSize + ApproxImageTokens;
         });
         // dfmt on
     } catch (Exception e) {
@@ -1242,6 +1243,22 @@ unittest {
     auto v = VisionMessage("look", "data:image/png;base64,abc");
     v.turnId = 5;
     assert(turnIdOf(Chat.MessageT(v)) == 5);
+}
+
+@("approxMessageSize estimates a vision message from its text")
+unittest {
+    import std.array : replicate;
+    import llm.common.config : ApproxImageTokens;
+
+    auto hugePayload = "A".replicate(1_800_000); // a realistic base64 image body
+    auto v = Chat.MessageT(VisionMessage("describe this screenshot", hugePayload));
+    auto expected = "describe this screenshot".length / ApproxTokenSize + ApproxImageTokens;
+    assert(approxMessageSize(v) == expected, i"the base64 body must not be counted as tokens".text);
+
+    auto chat = Chat();
+    chat.add(VisionMessage("describe this screenshot", hugePayload));
+    assert(chat.approxContextSize == expected,
+            "approxContextSize must not blow up on image payloads");
 }
 
 @("turnRangeOf returns (min, max) over a slice")

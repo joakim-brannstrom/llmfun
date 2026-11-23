@@ -9,6 +9,10 @@ import my.path : Path;
 /// Approximate number of characters per token. Used for estimating token counts from string lengths.
 immutable ApproxTokenSize = 2;
 
+/// Approximate token cost of one image. A vision encoder emits a bounded
+/// number of tokens per image, a few hundred to ~1500 depending on resolution.
+immutable ApproxImageTokens = 1500;
+
 enum EndpointType {
     unknown,
     openAiv1,
