@@ -276,6 +276,10 @@ dragDrop:
       command: ["pandoc", "-f", "docx", "-t", "gfm", "@{llmfun_src}", "-o", "@{llmfun_dst}"]
     - extensions: [".pdf"]
       command: ["pdftotext", "@{llmfun_src}", "@{llmfun_dst}"]
+  # ragSync:                 # background RAG indexing of dropped files
+    # enabled: true          # feature gate (default on)
+    # maxFileKb: 10240       # per-file size cap (~10 MB); bigger files skipped
+    # batchFiles: 256        # max files indexed per sweep tick
 
 # Per-model override (inside a codeModels: entry) REPLACES the whole policy
 # for that model (wholesale): restate every field the model should differ

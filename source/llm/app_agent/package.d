@@ -5,10 +5,11 @@ import logger = std.logger;
 import std.algorithm;
 import std.array : empty, array, appender;
 import std.conv : to, text;
-import std.exception : collectException;
 import std.datetime : Clock, SysTime, DateTime, UTC, Duration, dur;
+import std.exception : collectException;
 import std.format : format;
 import std.json : JSONType, JSONValue;
+import std.path : buildPath;
 import std.string : strip, startsWith, join;
 import std.sumtype : match;
 
@@ -19,6 +20,7 @@ import llm.app_agent.ui;
 import llm.app_config : UserConfig, userToLlmConfig, createRag;
 import llm.chat;
 import llm.common.config : LocalEmbedConfig, RemoteEmbedConfig;
+import llm.common.embedder : Embedder, createEmbedder;
 import llm.config : RagConfig;
 import llm.config;
 import llm.dragdrop : DropOwner, DropReport, DropWorker, makeDropWorkerConfig;
@@ -27,6 +29,7 @@ import llm.query;
 import llm.rag.auto_optimize : AutoOptimizeActor;
 import llm.rag.dialogue_index : DialogueIndex;
 import llm.rag.dialogue_worker : CompletionGate, DiDrained, ReasoningDrainBudget;
+import llm.rag.drop_rag : DropRagActor;
 import llm.rag.reasoning_index : ReasoningIndex, loadReasoningPrompt;
 import llm.rag.rag : RAG;
 import llm.session : SessionId, SessionMeta, SessionFile, SessionStore, isValidId;
@@ -1407,6 +1410,7 @@ class AppAgentActor : DropOwner {
         System* sys;
         WeakAddress supervisor;
         TypedAddress!TextUserInterfaceActor tui_;
+        TypedAddress!DropRagActor dropRag_;
 
         // two-phase exit state (startExit -> diDrained/drainTimeout ->
         // finishExit); exiting_ latches forever: one exit per actor.
@@ -1435,6 +1439,13 @@ class AppAgentActor : DropOwner {
     // thread through the messenger (the worker never touches the sink).
     void onDropReport(DropReport r) {
         app.onDropReport(r);
+        if (!dropRag_.empty) {
+            try {
+                Channel!DropRagActor(dropRag_, self_).onDropReport(r);
+            } catch (Exception e) {
+                logger.errorf("DropRagSync relay failed: %s", e.msg).collectException;
+            }
+        }
     }
 
     void start() {
@@ -1517,6 +1528,30 @@ class AppAgentActor : DropOwner {
                     app.llmConf.ragConfig.autoOptimizeThreshold,
                     app.llmConf.ragConfig.autoOptimizeCheckIntervalMin, embedModel,
                     app.llmConf.embedDimensions, app.llmConf.ragConfig.busyTimeout);
+        }
+
+        { // DropRagSync: background RAG indexing of the drop destination.
+            if (app.llmConf.dragDrop.ragSync.enabled) {
+                Embedder embed;
+                string embedError;
+                try {
+                    embed = createEmbedder(app.llmConf.embedConfig);
+                } catch (Exception e) {
+                    embedError = e.msg;
+                }
+                if (embedError.length)
+                    logger.warningf("DropRagSync disabled: creating the embedder failed: %s",
+                            embedError);
+                else if (embed is null)
+                    logger.warningf("DropRagSync disabled: no embedder from the config");
+                else
+                    dropRag_ = sys.spawn!DropRagActor(buildPath(app.llmConf.workArea.toString,
+                            app.llmConf.dragDrop.destination).AbsolutePath,
+                            app.llmConf.dragDrop.destination.Path, embed,
+                            app.llmConf.ragPrimary.path.AbsolutePath,
+                            app.llmConf.dragDrop.ragSync.maxFileKb * 1024, app.llmConf.ragConfig,
+                            cast(uint) app.llmConf.dragDrop.ragSync.batchFiles);
+            }
         }
 
         auto dropWorker = sys.spawn!DropWorker(makeDropWorkerConfig(app.llmConf.workArea.AbsolutePath,

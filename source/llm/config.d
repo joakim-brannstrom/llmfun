@@ -467,9 +467,19 @@ struct DragDropConverter {
     string[] command;
 }
 
+struct DragDropRagSyncConfig {
+    /// Feature gate for the background drop->RAG indexing actor.
+    bool enabled = true;
+    /// Per-file size cap in KiB; larger files are skipped (and logged).
+    long maxFileKb = 10240;
+    /// Max files indexed per sweep tick
+    long batchFiles = 256;
+}
+
 struct DragDropConfig {
     string destination = "dropped";
     string conversionTimeout = "10 minutes";
+    DragDropRagSyncConfig ragSync;
     DragDropConverter[] converters;
 }
 
@@ -2140,9 +2150,11 @@ private string[] validateFilesystemCategory(string category, FilesystemLimits.Ca
 }
 
 // The `dragDrop` table's rules.
-// Throws on a destination that is not a workarea-relative path, on a
-// conversionTimeout that my.parseDuration would reject, and on a converter
-// rule without extensions or without a command.
+// Throws on a destination that is not a workarea-relative path (empty,
+// absolute, containing a '..' segment, or the workarea root '.'), on a
+// conversionTimeout that my.parseDuration would reject, on a converter
+// rule without extensions or without a command, and on a non-positive
+// ragSync.maxFileKb or ragSync.batchFiles.
 private string[] validateDragDropConfig(DragDropConfig dd) {
     import std.algorithm.searching : canFind;
     import std.array : split;
@@ -2158,6 +2170,8 @@ private string[] validateDragDropConfig(DragDropConfig dd) {
         if (seg == "..")
             throw new Exception(i"dragDrop.destination must not contain a '..' segment, got '$(
                     dd.destination)'".text);
+    if (dd.destination == ".")
+        throw new Exception("dragDrop.destination must not be the workarea root '.'");
 
     if (dd.conversionTimeout.empty)
         throw new Exception("dragDrop.conversionTimeout must not be empty");
@@ -2183,6 +2197,11 @@ private string[] validateDragDropConfig(DragDropConfig dd) {
                 if (later.extensions.canFind(ext))
                     warnings ~= format!"dragDrop.converters: extension '%s' is listed by both converters[%s] and converters[%s]; the first match wins"(
                             ext, i, i + 1 + j);
+
+    if (dd.ragSync.maxFileKb <= 0)
+        throw new Exception("dragDrop.ragSync.maxFileKb must be positive");
+    if (dd.ragSync.batchFiles <= 0)
+        throw new Exception("dragDrop.ragSync.batchFiles must be positive");
     return warnings;
 }
 
@@ -5147,7 +5166,7 @@ private string dragDropTestYaml(string table) {
 
     import llm.test_util : testArea;
 
-    foreach (destination; ["/tmp/dropped", "dropped/../escape"]) {
+    foreach (destination; ["/tmp/dropped", "dropped/../escape", "."]) {
         auto tmpDir = testArea("dragdrop_destination");
         scope (exit)
             tmpDir.cleanup;
@@ -5270,4 +5289,81 @@ private string dragDropTestYaml(string table) {
     assert(warnings[0].canFind("'.docx'") && warnings[0].canFind("converters[0]")
             && warnings[0].canFind("converters[1]"), "unexpected warning: " ~ warnings[0]);
     validateConfig(conf); // must not throw
+}
+
+@("absent dragDrop.ragSync keeps the defaults") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("dragsync_absent");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    File(tmpFile, "w").write(dragDropTestYaml(""));
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(conf.dragDrop.ragSync.enabled, "ragSync must be enabled by default");
+    assert(conf.dragDrop.ragSync.maxFileKb == 10240,
+            "expected default 10240 maxFileKb, got " ~ conf.dragDrop.ragSync.maxFileKb.to!string);
+    assert(conf.dragDrop.ragSync.batchFiles == 256,
+            "expected default 256 batchFiles, got " ~ conf.dragDrop.ragSync.batchFiles.to!string);
+    validateConfig(conf); // the defaults validate
+}
+
+@("the dragDrop.ragSync table parses with overrides") unittest {
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    auto tmpDir = testArea("dragsync_parse");
+    scope (exit)
+        tmpDir.cleanup;
+    auto tmpFile = buildPath(tmpDir, "test.yaml");
+    File(tmpFile, "w").write(dragDropTestYaml(`dragDrop:
+  ragSync:
+    enabled: false
+    maxFileKb: 512
+    batchFiles: 8
+`));
+    auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+    assert(!conf.dragDrop.ragSync.enabled, "the explicit enabled must override");
+    assert(conf.dragDrop.ragSync.maxFileKb == 512,
+            "expected 512 maxFileKb, got " ~ conf.dragDrop.ragSync.maxFileKb.to!string);
+    assert(conf.dragDrop.ragSync.batchFiles == 8,
+            "expected 8 batchFiles, got " ~ conf.dragDrop.ragSync.batchFiles.to!string);
+    validateConfig(conf); // and the parsed table validates
+}
+
+@("validateConfig rejects non-positive dragDrop.ragSync values") unittest {
+    import std.algorithm : canFind;
+    import std.path : buildPath;
+    import std.stdio : File;
+
+    import llm.test_util : testArea;
+
+    foreach (line; [
+        "maxFileKb: 0", "maxFileKb: -5", "batchFiles: 0", "batchFiles: -1"
+    ]) {
+        import std.array : split;
+
+        const key = line.split(":")[0];
+        auto tmpDir = testArea("dragsync_bad_" ~ key);
+        scope (exit)
+            tmpDir.cleanup;
+        auto tmpFile = buildPath(tmpDir, "test.yaml");
+        File(tmpFile, "w").write(dragDropTestYaml("dragDrop:\n  ragSync:\n    " ~ line ~ "\n"));
+        auto conf = applyLlmConfig(LlmConfig.init, loadYamlValue(Path(tmpFile)));
+        bool threw;
+        string msg;
+        try {
+            validateConfig(conf);
+        } catch (Exception e) {
+            threw = true;
+            msg = e.msg;
+        }
+        assert(threw, "validateConfig must reject ragSync '" ~ line ~ "'");
+        assert(msg.canFind("dragDrop.ragSync." ~ key), "unexpected error message: " ~ msg);
+    }
 }

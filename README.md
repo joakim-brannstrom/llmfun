@@ -146,6 +146,37 @@ the config file - and the run is logged with its wall-clock duration.
   database (see `doc/rag_design2.md`, "Index Integrity & Migration
   Invariants").
 
+#### Dropped files are indexed automatically
+
+A background actor keeps the primary RAG database in step with the
+drag-and-drop destination directory (`dragDrop.destination`, default
+`dropped`). Every file the drag-and-drop worker copies into the destination
+is indexed, including files a directory drop does not show in the agent's
+prompt (that view is capped at 64 entries); files deleted or changed in the
+destination are removed from or updated in the index again by a periodic
+sweep. The feature is configured under `dragDrop.ragSync` (see
+`config/example.yaml`):
+
+- `enabled` (default `true`) turns background indexing on or off.
+- `maxFileKb` (default `10240`) caps the per-file size; bigger files are
+  skipped and logged.
+- `batchFiles` (default `256`) bounds how many files one sweep tick indexes.
+
+Two timing characteristics are worth knowing:
+
+- Indexing starts as soon as the drop is copied, so semantic search follows
+  the copies; for a very large drop the results arrive incrementally.
+  Full-text search updates once per drop burst, 5 s after the last applied
+  change, so during a very large drop text search can lag by the drop's
+  duration.
+- Sweeps back off from 1 to 10 minutes while the destination stays unchanged
+  (about 55 minutes after the last change) and then stop until the next drop
+  event. A file added to the destination manually during that quiet tail is
+  picked up at the next drop event or at restart.
+
+Identical content under different paths collapses into one RAG source (the
+same content-hash dedup the manual `rag --add` path applies).
+
 ### `tool_metrics`
 
 Print metrics about tool call performance from a monitoring data file.
