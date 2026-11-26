@@ -23,6 +23,7 @@
     An observation also has to be made if the requestCompression mean that the context run out of space. Then rewined more messages from the stack and trigger the same message. Hmm could probably be that easy. Do this loop up to three times, or something like that. If it still fails then do an automatic compression. A "modern LLM" should never fail on this task but "stupid models" maybe could. Should also be a configuration option per model.
 - agent.md summary must be executed async in case it is "severly slowed down"
 - a /c must also remove all nudges from latest message and up to hmm ten messages back in the history. This is because sometimes a nudge has been added because of a network failure and if the network then comes back online the model/agent becomes confused.
+- loadFileToRag should be done async in the DropRagActor. DropRagActor should probably be generic and called RagActor
 
 # ui
 - add UI where an agent can query the user for input.
