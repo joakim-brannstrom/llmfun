@@ -170,7 +170,7 @@ dub build --config=llmfun_util                    # Manual test utility (runs no
 - A tool is a function taking a `Context` and a params struct, marked with the `@Function("description")` UDA and collected by the `RegisterLlmFunctions!()` mixin in `tool_call/package.d`.
 - Group membership is configuration, not code: `toolBroker.groups` maps a group name to `{description, tools}`, `hiddenTags` lists groups that start hidden, `alwaysOn` forces tools or whole groups visible, `neverHideTools` (default: the task-completion tool; config-file values use D-axis registry names, see `config/example.yaml`) bypasses the tool filter, `enabled` is the kill switch.
 - A tool in no group is always on. Hidden group members become visible when the model activates the group via `list_tool_tags`; activation is sticky and pruned at compression points. `tool_search` discovers tools by keyword.
-- `tool_call/io/` is the file-tool package (`read_file`, `write_file`, `edit_file`, `apply_diff`, `grep_files`, ...). Docs: `doc/tool_broker.md`.
+- `tool_call/io/` is the file-tool package (`read_file`, `write_file`, `edit_file`, `grep_files`, ...). Docs: `doc/tool_broker.md`.
 
 ### Memory tiers
 

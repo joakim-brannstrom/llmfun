@@ -5,9 +5,6 @@
 ### Using write_file on existing files
 `write_file` replaces the entire file. If you only need to change a few lines, use `edit_file` instead. Accidental `write_file` on an existing file destroys all content not included in the new content.
 
-### Skipping read_file before apply_diff
-Context lines in a diff must match the file (fuzzy by default). If the file has changed since you last read it, your diff will fail. **Always read first.**
-
 ### Forgetting to verify after edit
 An edit may look correct in your diff but fail at the tool level. Always verify:
 - Executable files: run them
@@ -87,23 +84,6 @@ When the composed result is element-wise identical to the input lines, the resul
 
 ### Insert modes keep the anchor — watch for anchorDuplicate
 Insert modes (`append`/its alias `insert_after`, and `insert_before`) KEEP the targeted block and insert the content adjacent to it — do not repeat the targeted text in content. When the content's boundary line duplicates the kept anchor line/block, the result includes `anchorDuplicate=true` and a note telling you which boundary line to drop. The tool warns, never mutates: the anchor is not auto-stripped. Anchoring is at the FIRST occurrence when the block repeats.
-
-## apply_diff Behavior
-
-### Hunk header counts are advisory
-The `@@ -oldStart,oldCount +newStart,newCount @@` counts are advisory. The tool counts actual body lines and uses those. Mismatches produce warnings (not errors) in the `warnings` array.
-
-### Fuzzy context matching by default
-Context lines (starting with ` `) use trimmed equality by default. Leading/trailing whitespace differences are tolerated. Set `fuzzy=false` for exact matching.
-
-### Fuzzy matching does NOT change what's written
-Only the matching is fuzzy — the file content written is always the `+` lines from the diff exactly as provided.
-
-### Multi-hunk diffs preserve content between hunks
-When applying multiple hunks, lines between hunks are preserved. Each hunk is applied independently.
-
-### apply_diff no longer has strictCounts parameter
-Hunk counts are always advisory; use `fuzzy` to control context matching strictness.
 
 ## Mode-Specific Gotchas
 

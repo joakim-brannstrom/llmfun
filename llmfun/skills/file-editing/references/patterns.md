@@ -46,10 +46,6 @@ edit_file(path="file.txt", mode="append", startLine=5,
 
 edit_file(path="file.txt", mode="remove", startLine=10, count=3, content="")
 
-## Apply a unified diff
-
-apply_diff(path="file.txt", diff="--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n old\n-new\n+changed\n context")
-
 ## Successive edits (preferred: use byMarker)
 
 edit_file(path="file.txt", mode="replace", marker="void setTimer", content="...")

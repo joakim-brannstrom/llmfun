@@ -148,14 +148,8 @@ string classifyEditError(string msg) @safe {
         return "search_not_found";
     if (msg.canFind("matchIndex="))
         return "match_index_oob";
-    if (msg.canFind("Context mismatch"))
-        return "context_mismatch";
     if (msg.canFind("exceeds file length"))
         return "range_oob";
-    if (msg.canFind("Invalid hunk") || msg.canFind("hunk header")
-            || msg.canFind("Hunk tries to go backward")
-            || msg.canFind("Unexpected end of file") || msg.canFind("must start with"))
-        return "invalid_diff";
     if (msg.canFind("must be") || msg.canFind("may NOT")
             || msg.canFind("cannot be used") || msg.canFind("cannot be combined")
             || msg.canFind("not supported")

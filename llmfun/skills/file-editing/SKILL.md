@@ -4,10 +4,10 @@ description: >-
   Guide for editing files correctly using the universal editing workflow.
   Ensures edits are applied safely with proper tool selection and verification.
   Use when modifying any file, applying changes, or writing new files.
-  Triggers on: file editing, edit file, modify file, file change, apply diff,
-  write file, file modification, code change, update file, replace file content,
+  Triggers on: file editing, edit file, modify file, file change, write file,
+  file modification, code change, update file, replace file content,
   file-editing, edit-file.
-version: 3.4.0
+version: 3.5.0
 ---
 
 # File Editing
@@ -18,7 +18,6 @@ Structured protocol for editing files safely and correctly.
 
 - Modifying an existing file (any type)
 - Writing a new file
-- Applying multi-line changes with diffs
 
 ## Core Principle
 
@@ -30,9 +29,8 @@ Structured protocol for editing files safely and correctly.
 2. **Choose the right tool** (see Tool Selection below):
    - `write_file` — new files or complete rewrites
    - `edit_file` — targeted edits (line numbers, markers, or code blocks)
-   - `apply_diff` — multi-line changes via unified diff
 3. **Optional: Dry-run** — use `dryRun=true` to preview before applying.
-   Available for: `edit_file`, `apply_diff`. (`write_file` has no dry-run option.)
+   Available for `edit_file` only. (`write_file` has no dry-run option.)
 4. **Apply** the edit.
 5. **Verify immediately**: run executables, re-read others. If wrong, go to step 1.
 
@@ -53,10 +51,6 @@ Know the exact code block?
 Know exact line numbers?
   → YES: edit_file(startLine, count)
          ⚠ Re-read the file between successive byLine edits — line numbers shift!
-  → NO: Continue...
-
-Have a pre-computed unified diff?
-  → YES: apply_diff
   → NO: Re-read file, find a marker or code block, try again.
 
 ## Quick Tool Reference
@@ -69,13 +63,6 @@ Have a pre-computed unified diff?
 - **Auto-count**: byMarker+replace auto-derives count from content lines. Set `count` explicitly to override. Multi-line markers use marker line count instead.
 - **byContent**: trimmed equality; empty lines skipped in both search and file; full-line match (not substring).
 - **Returns**: JSON with `ok`, `matchedAt`, `matchedLines`, `linesChanged`, `operations`, `lineShift`, `autoCountUsed`/`note` (when auto-count active). On failure: `error` + `diagnostic`.
-- **Full details**: `references/tool-reference.md`
-
-### apply_diff — Unified diff patch
-
-- **Parameters**: `path`, `diff` (unified diff), `dryRun` (default false), `fuzzy` (default true).
-- Hunk header counts are advisory. Fuzzy matching uses trimmed equality.
-- **Returns**: JSON with `ok`, `hunksApplied`, `linesChanged`, `warnings`.
 - **Full details**: `references/tool-reference.md`
 
 ### write_file — Write or create files
