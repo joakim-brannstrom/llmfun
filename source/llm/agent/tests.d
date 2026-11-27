@@ -2234,3 +2234,93 @@ unittest {
     cold.parse(coldEndChunk);
     assert(cold.stat.context == 0, "a cold response ends with no context count to draw");
 }
+
+@("raw and SSE OpenAI error responses both preserve the context_length_exceeded code")
+unittest {
+    const raw = `{"error":{"message":"maximum context length exceeded","type":"invalid_request_error","code":"context_length_exceeded"}}`;
+
+    auto plain = StreamResponse(ServerStat.init);
+    plain.parse(raw);
+    assert(plain.hasError && plain.error.code == "context_length_exceeded");
+
+    auto streamed = StreamResponse(ServerStat.init);
+    streamed.parse("data: " ~ raw);
+    assert(streamed.hasError, "the SSE payload is recognized as an error");
+    assert(streamed.error.type == "invalid_request_error");
+    assert(streamed.error.code == "context_length_exceeded",
+            "the SSE branch must parse the same error object as the raw-response branch");
+}
+
+@("an HTTP 400 OpenAI context_length_exceeded response requests compression")
+unittest {
+    import core.thread : Thread;
+    import std.conv : text, to;
+    import std.file : write;
+    import std.socket : InternetAddress, TcpSocket;
+    import std.string : indexOf, strip;
+
+    auto listener = new TcpSocket;
+    listener.bind(new InternetAddress("127.0.0.1", 0));
+    listener.listen(1);
+    scope (exit)
+        listener.close;
+    const port = (cast(InternetAddress) listener.localAddress).port;
+
+    auto server = new Thread({
+        auto conn = listener.accept;
+        scope (exit)
+            conn.close;
+        char[8192] chunk;
+        char[] request;
+        size_t expectedLength = size_t.max;
+        while (expectedLength == size_t.max || request.length < expectedLength) {
+            const received = conn.receive(chunk);
+            if (received <= 0)
+                break;
+            request ~= chunk[0 .. received];
+            if (expectedLength == size_t.max) {
+                auto requestText = cast(string) request;
+                const headerEnd = requestText.indexOf("\r\n\r\n");
+                if (headerEnd < 0)
+                    continue;
+                const lengthMarker = "Content-Length:";
+                const lengthStart = requestText.indexOf(lengthMarker);
+                assert(lengthStart >= 0, "the model request has an explicit body length");
+                const lengthEnd = requestText.indexOf("\r\n", lengthStart);
+                const bodyLength = requestText[lengthStart + lengthMarker.length .. lengthEnd]
+                    .strip.to!size_t;
+                expectedLength = headerEnd + 4 + bodyLength;
+            }
+        }
+
+        const 
+        body = `{"error":{"message":"maximum context length exceeded","type":"invalid_request_error","code":"context_length_exceeded"}}`;
+        auto response = i"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: $(
+            body.length)\r\nConnection: close\r\n\r\n$(body)".text;
+        for (size_t sent; sent < response.length;) {
+            const n = conn.send(response[sent .. $]);
+            assert(n > 0, "the error response must reach the client");
+            sent += n;
+        }
+    });
+    server.start;
+
+    auto tmpDir = testArea("agent_context_overflow_http");
+    scope (exit)
+        tmpDir.cleanup;
+    write(tmpDir ~ "SUMMARY.md", "Summarize text.");
+    writeDefaultNudgeFiles(tmpDir);
+    auto llmConf = makeAgentTestConfig(tmpDir);
+    llmConf.codeModels[0].server.url = i"http://127.0.0.1:$(port)".text;
+    llmConf.codeModels[0].server.type = "openAiv1";
+    llmConf.codeModels[0].server.timeoutSeconds = 5;
+    llmConf.codeModels[0].server.warnIfNoApiKey = false;
+
+    auto agent = new Agent("context-overflow", llmConf, null, null);
+    agent.addUserQuery("question");
+    const result = agent.process(null);
+    server.join;
+
+    assert(result.status == ProcessResult.Status.needCompression, i"the provider's context overflow must not be masked by generic HTTP 400 handling; got $(
+            result.status)".text);
+}
