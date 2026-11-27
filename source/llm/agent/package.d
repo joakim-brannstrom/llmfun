@@ -403,30 +403,27 @@ class Agent : IBasicAgent {
                 httpRetryOnError = canRetry(e);
             });
 
-            if (hasHttpError && httpRetryOnError) {
+            // Non-2xx responses carry provider errors too, so classify the payload before the transport error.
+            const hasContextOverflow = sp.hasError && ((sp.error.codeNr == 400
+                    && sp.error.type == "exceed_context_size_error")
+                    || (sp.error.type == "invalid_request_error"
+                        && sp.error.code == "context_length_exceeded"));
+            if (hasContextOverflow) {
+                logger.trace("Context overflow detected: ", sp.error);
+                rval.status = ProcessResult.Status.needCompression;
+            } else if (hasHttpError && httpRetryOnError) {
                 // soft http failures that can be retried
                 rval.status = ProcessResult.Status.retryLater;
             } else if (hasHttpError) {
                 // hard failures
                 rval.status = ProcessResult.Status.unknownFailure;
             } else if (sp.hasError) {
-                if (sp.error.codeNr == 400 && sp.error.type == "exceed_context_size_error") {
-                    // llama.cpp
-                    logger.trace("Context overflow detected: ", sp.error);
-                    rval.status = ProcessResult.Status.needCompression;
-                } else if (sp.error.type == "invalid_request_error"
-                        && sp.error.code == "context_length_exceeded") {
-                    // openai
-                    logger.trace("Context overflow detected: ", sp.error);
-                    rval.status = ProcessResult.Status.needCompression;
-                } else {
-                    logger.trace("unhandled error: ", sp.error);
-                    rval.status = ProcessResult.Status.unknownFailure;
+                logger.trace("unhandled error: ", sp.error);
+                rval.status = ProcessResult.Status.unknownFailure;
 
-                    // Recovery: the server rejected the request. The history may contain invalid UTF-8 (typically binary command output). Sanitize it in place (messages preserved).
-                    if (chat.sanitizeHistory > 0) {
-                        logger.warning("Sanitized chat history (invalid UTF-8)");
-                    }
+                // Recovery: the server rejected the request. The history may contain invalid UTF-8 (typically binary command output). Sanitize it in place (messages preserved).
+                if (chat.sanitizeHistory > 0) {
+                    logger.warning("Sanitized chat history (invalid UTF-8)");
                 }
             } else {
                 rval.stat = useOrApproxStatistic(sp.stat);
@@ -1053,8 +1050,8 @@ struct StreamResponse {
         try {
             auto rootj = parseJSON(response);
 
-            if (auto e = "error" in rootj) {
-                parseOpenAiError(*e);
+            if ("error" in rootj) {
+                parseOpenAiError(rootj);
                 return;
             }
 
