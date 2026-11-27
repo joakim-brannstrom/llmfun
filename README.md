@@ -1201,7 +1201,7 @@ The agent has access to the following tools:
 | `applyDiff` | Apply a unified diff patch to a file |
 | `replaceAll` | Replace all occurrences of a string in text |
 | `listDirectory` | List files in a directory as JSON array |
-| `grepFiles` | Search for a pattern in files |
+| `grepFiles` | Native complete-line `std.regex` search with glob selection, optional recursion, and one global result cap |
 | `countLinesInFile` | Count lines in a file |
 | `md5HashFile` | Calculate the MD5 hash of a file |
 | `loadImageApi` | Load an image for OpenAI API vision context |

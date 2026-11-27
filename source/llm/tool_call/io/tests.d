@@ -14,6 +14,10 @@ version (unittest) {
 
     import llm.config : VisionModelConfig, ToolLimits, PathCategory,
         FilesystemLimits, buildFilesystemFilterRuntime;
+    import llm.test_util : TestArea, testArea;
+    import std.regex : Regex;
+    import llm.tool_call.io.grep : NativeGrepOps, NativeGrepRequest, NativeGrepRequestPlan,
+        compileNativeGrepRequest, defaultNativeGrepOps, runNativeGrep, runNativeGrepWithOps;
     import llm.tool_call.io.diff;
     import llm.tool_call.io.search;
     import llm.tool_call.io.diagnostic;
@@ -25,13 +29,12 @@ version (unittest) {
 
     // Mock FileContext for integration tests
     class TestFileContext : FileContext {
-        AbsolutePath workAreaDir;
+        TestArea area;
         ToolLimits limits_;
 
-        this(string dir) {
-            workAreaDir = dir.AbsolutePath;
+        this(TestArea area) {
+            this.area = area;
             limits_ = ToolLimits();
-            mkdirRecurse(workAreaDir.toString);
         }
 
         /// Install a configured ToolLimits. Callers that set
@@ -43,23 +46,17 @@ version (unittest) {
         }
 
         void teardown() {
-            import std.file : rmdirRecurse;
-
-            try {
-                rmdirRecurse(workAreaDir.toString);
-            } catch (Exception) {
-                // Silently ignore cleanup failures during test teardown
-            }
+            area.cleanup();
         }
 
         override bool isPathInsideWorkArea(AbsolutePath path) {
             auto p = path.toString;
-            auto w = workAreaDir.toString;
+            auto w = area.workArea.toString;
             return p.startsWith(w) && (p.length == w.length || p[w.length] == '/');
         }
 
         override AbsolutePath workArea() {
-            return workAreaDir;
+            return area.workArea;
         }
 
         override ToolLimits getToolLimits() {
@@ -82,10 +79,54 @@ version (unittest) {
         return readText(fullPath.toString);
     }
 
-    TestFileContext makeTestContext(string testName) {
-        import std.datetime : Clock;
+    TestFileContext makeTestContext(string testName, string file = __FILE__, uint line = __LINE__) {
+        return new TestFileContext(testArea(testName, file, line));
+    }
 
-        return new TestFileContext("./llmfun_test/" ~ testName ~ "_" ~ Clock.currTime.toString);
+    /// Build a valid facade-test plan while keeping display roots caller-relative.
+    private NativeGrepRequestPlan nativeGrepFacadePlan(string pattern, long maxResults,
+            bool recursive = true, string glob = "*", string requestedPath = ".") {
+        NativeGrepRequest request;
+        request.path = requestedPath;
+        request.pattern = pattern;
+        request.maxResults = maxResults;
+        request.recursive = recursive;
+        request.glob = glob;
+        auto compiled = compileNativeGrepRequest(request);
+        assert(compiled.valid, compiled.error);
+        return compiled.plan;
+    }
+
+    /// Count default native grep operations for facade tests.
+    /// Individual delegates can be replaced to inject failures.
+    private struct NativeGrepFacadeSpies {
+        NativeGrepOps defaults;
+        NativeGrepOps spy;
+        string[] enumerated;
+        string[] opened;
+        size_t readCalls;
+        size_t matcherCalls;
+        size_t closes;
+    }
+
+    private void buildNativeGrepFacadeSpies(ref NativeGrepFacadeSpies s) {
+        import std.regex : Regex;
+
+        s.defaults = defaultNativeGrepOps();
+        s.spy.enumerate = (string p) {
+            s.enumerated ~= p;
+            return s.defaults.enumerate(p);
+        };
+        s.spy.open = (string p) { s.opened ~= p; return s.defaults.open(p); };
+        s.spy.read = (ref File f, ubyte[] b) {
+            ++s.readCalls;
+            return s.defaults.read(f, b);
+        };
+        s.spy.close = (ref File f) { ++s.closes; s.defaults.close(f); };
+        s.spy.matches = (string line, ref Regex!char pattern) {
+            ++s.matcherCalls;
+            return s.defaults.matches(line, pattern);
+        };
     }
 }
 
@@ -5065,7 +5106,7 @@ unittest {
     assert(jsonn["endIndex"].integer == 3, jsonn.toString);
 }
 
-@("list_directory treats an omitted or explicit count 0 as the configured limit")
+@("list_directory treats omitted, zero, and negative counts as the configured limit")
 unittest {
     import llm.tool_call.io.functions : ListDirectoryParams, listDirectory;
 
@@ -5091,6 +5132,68 @@ unittest {
     auto json2 = parseJSON(explicit0.msg);
     assert(json2["entries"].array.length == 2, json2.toString); // same page size as the omitted call
     assert(json2["endIndex"].integer == 2, json2.toString);
+
+    auto negative = listDirectory(ctx, ListDirectoryParams(path: "d", count: -1));
+    assert(negative.success, negative.msg);
+    auto json3 = parseJSON(negative.msg);
+    assert(json3["entries"].array.length == 2, json3.toString);
+    assert(json3["endIndex"].integer == 2, json3.toString);
+}
+
+@("list_directory generated schema describes directory and pagination parameters")
+unittest {
+    import std.algorithm : canFind;
+    import std.traits : hasUDA;
+
+    import llm.tool_call : ParamOptional, toParams;
+    import llm.tool_call.io.functions : ListDirectoryParams;
+
+    const schema = toParams!ListDirectoryParams;
+    assert(schema.length == 4, schema.length.to!string);
+    assert(schema[0].name == "path" && schema[0].required, schema[0].name);
+    assert(schema[1].name == "recursive" && !schema[1].required, schema[1].name);
+    assert(schema[2].name == "startIndex" && !schema[2].required, schema[2].name);
+    assert(schema[3].name == "count" && !schema[3].required, schema[3].name);
+    assert(schema[0].desc.canFind("Path to the directory"), schema[0].desc);
+    assert(schema[1].desc.canFind("includes descendants"), schema[1].desc);
+    assert(schema[1].desc.canFind("immediate entries only"), schema[1].desc);
+    assert(schema[2].desc.canFind("1-based index of the first entry"), schema[2].desc);
+    assert(schema[3].desc.canFind("Page size"), schema[3].desc);
+    assert(schema[3].desc.canFind("non-positive values use the configured maximum"), schema[3].desc);
+    assert(schema[3].desc.canFind("values above it are rejected"), schema[3].desc);
+    foreach (param; schema)
+        assert(!param.desc.empty, param.name ~ " needs a schema description");
+
+    const defaults = ListDirectoryParams.init;
+    assert(defaults.path is null && !defaults.recursive
+            && defaults.startIndex == 1 && defaults.count == 0);
+    assert(!hasUDA!(__traits(getMember, ListDirectoryParams, "path"), ParamOptional));
+    assert(hasUDA!(__traits(getMember, ListDirectoryParams, "recursive"), ParamOptional));
+    assert(hasUDA!(__traits(getMember, ListDirectoryParams, "startIndex"), ParamOptional));
+    assert(hasUDA!(__traits(getMember, ListDirectoryParams, "count"), ParamOptional));
+}
+
+@("list_directory description covers output and pagination semantics")
+unittest {
+    import std.algorithm : canFind;
+
+    import llm.tool_call : Function;
+    import llm.tool_call.io.functions : listDirectory;
+
+    string desc;
+    foreach (a; __traits(getAttributes, listDirectory))
+        static if (is(typeof(a) == Function))
+            desc = a.desc;
+    assert(!desc.empty, "listDirectory must carry a @Function description");
+
+    assert(desc.canFind("paginated path/type records"), desc);
+    assert(desc.canFind("size for files"), desc);
+    assert(desc.canFind("up to count entries starting at startIndex"), desc);
+    assert(desc.canFind("total, startIndex and endIndex"), desc);
+    assert(desc.canFind("startIndex = endIndex + 1"), desc);
+    assert(desc.canFind("endIndex == total or entries is empty"), desc);
+    assert(!desc.canFind("native"), desc);
+    assert(!desc.canFind("grep_files"), desc);
 }
 
 @(
@@ -5233,10 +5336,458 @@ unittest {
             "the excluded subtree still exists");
 }
 
+// Native grep_files facade (runNativeGrep / runNativeGrepWithOps)
+
+@("native_grep facade renders the full mixed-tree search exactly")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_full");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "a/0.d", "hit-zero\n");
+    createTestFile(ctx, "a.d", "hit-a\n");
+    createTestFile(ctx, "b.d", "hit-b\n");
+    createTestFile(ctx, "z/c.d", "hit-c\n");
+    createTestFile(ctx, "z0.d", "hit-z0\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 20);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(result.success, result.msg);
+    assert(result.msg == "./a/0.d:1:hit-zero\n./a.d:1:hit-a\n./b.d:1:hit-b"
+            ~ "\n./z/c.d:1:hit-c\n./z0.d:1:hit-z0", result.msg);
+    assert(spies.enumerated == [
+        ctx.workArea.toString, ctx.workArea.toString ~ "/a",
+        ctx.workArea.toString ~ "/z"
+    ], spies.enumerated.join(","));
+    assert(spies.opened == [
+        ctx.workArea.toString ~ "/a/0.d", ctx.workArea.toString ~ "/a.d",
+        ctx.workArea.toString ~ "/b.d", ctx.workArea.toString ~ "/z/c.d",
+        ctx.workArea.toString ~ "/z0.d"
+    ], spies.opened.join(","));
+    assert(spies.matcherCalls == 5, spies.matcherCalls.to!string);
+    assert(spies.closes == 5, spies.closes.to!string);
+}
+
+@("native_grep facade cap 1 keeps the payload and stops all later operations")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_cap1");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "a/0.d", "hit-zero\nmore hit\n");
+    createTestFile(ctx, "a.d", "hit-a\n");
+    createTestFile(ctx, "b.d", "hit-b\n");
+    createTestFile(ctx, "z/c.d", "hit-c\n");
+    createTestFile(ctx, "z0.d", "hit-z0\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 1);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(result.success, result.msg);
+    assert(result.msg == "./a/0.d:1:hit-zero", result.msg);
+    // The cap stop permits only the already-acquired shallow batches.
+    // No later enumeration, open, read, or matcher call may occur.
+    assert(spies.enumerated == [
+        ctx.workArea.toString, ctx.workArea.toString ~ "/a"
+    ], spies.enumerated.join(","));
+    assert(spies.opened == [ctx.workArea.toString ~ "/a/0.d"], spies.opened.join(","));
+    assert(spies.matcherCalls == 1, spies.matcherCalls.to!string);
+    assert(spies.readCalls == 2, spies.readCalls.to!string);
+    assert(spies.closes == 1, spies.closes.to!string);
+}
+
+@(
+        "native_grep facade intermediate cap keeps the payload and ignores later malformed and throwing entries")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_cap3");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "a/0.d", "hit-zero\n");
+    createTestFile(ctx, "a.d", "hit-a\n");
+    createTestFile(ctx, "b.d", "hit-b\n");
+    // Reaching the third match at b.d must leave these later entries untouched.
+    createTestFile(ctx, "z/c.d", "\xFF\xFE malformed\n");
+    createTestFile(ctx, "z0.d", "hit-z0\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 3);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+    bool openedZ0;
+    spies.spy.open = (string p) {
+        if (p.canFind("z0.d")) {
+            openedZ0 = true;
+            throw new Exception("late open boom secret");
+        }
+        spies.opened ~= p;
+        return spies.defaults.open(p);
+    };
+    bool readZ;
+    spies.spy.read = (ref File f, ubyte[] b) {
+        ++spies.readCalls;
+        if (f.name.canFind("z/c.d")) {
+            readZ = true;
+            throw new Exception("late read boom secret");
+        }
+        return spies.defaults.read(f, b);
+    };
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(result.success, result.msg);
+    assert(result.msg == "./a/0.d:1:hit-zero\n./a.d:1:hit-a\n./b.d:1:hit-b", result.msg);
+    assert(!openedZ0 && !readZ, "reaching the cap must prevent every later open and read");
+    assert(spies.enumerated == [
+        ctx.workArea.toString, ctx.workArea.toString ~ "/a"
+    ], spies.enumerated.join(","));
+    assert(spies.matcherCalls == 3, spies.matcherCalls.to!string);
+    assert(spies.readCalls == 6, spies.readCalls.to!string);
+    assert(spies.closes == 3, spies.closes.to!string);
+}
+
+@(
+        "native_grep facade empty tree, glob-only, filter-only, and binary-only searches return exact empty success")
+unittest {
+    auto emptyCtx = makeTestContext("native_grep_facade_empty_tree");
+    scope (exit)
+        emptyCtx.teardown;
+    {
+        auto plan = nativeGrepFacadePlan("hit", 20);
+        FileContext baseCtx = emptyCtx;
+        const result = runNativeGrep(baseCtx, emptyCtx.workArea, plan);
+        assert(result.success, result.msg);
+        assert(result.msg.empty, result.msg);
+    }
+
+    auto globCtx = makeTestContext("native_grep_facade_glob_only");
+    scope (exit)
+        globCtx.teardown;
+    createTestFile(globCtx, "a.d", "hit\n");
+    createTestFile(globCtx, "b.txt", "hit\n");
+    {
+        auto plan = nativeGrepFacadePlan("hit", 20, true, "*.md");
+        FileContext baseCtx = globCtx;
+        const result = runNativeGrep(baseCtx, globCtx.workArea, plan);
+        assert(result.success, result.msg);
+        assert(result.msg.empty, result.msg);
+    }
+
+    auto filterCtx = makeTestContext("native_grep_facade_filter_only");
+    scope (exit)
+        filterCtx.teardown;
+    createTestFile(filterCtx, "a.d", "hit\n");
+    createTestFile(filterCtx, "b.d", "hit\n");
+    {
+        ToolLimits tl;
+        tl.filesystem.read = FilesystemLimits.CategoryFilter([], ["/"]);
+        tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+        filterCtx.setFilesystemFilter(tl);
+        auto plan = nativeGrepFacadePlan("hit", 20);
+        FileContext baseCtx = filterCtx;
+        const result = runNativeGrep(baseCtx, filterCtx.workArea, plan);
+        assert(result.success, result.msg);
+        assert(result.msg.empty, result.msg);
+    }
+
+    auto binaryCtx = makeTestContext("native_grep_facade_binary_only");
+    scope (exit)
+        binaryCtx.teardown;
+    createTestFile(binaryCtx, "blob.d", "\x00hit\n");
+    {
+        NativeGrepFacadeSpies spies;
+        buildNativeGrepFacadeSpies(spies);
+        auto plan = nativeGrepFacadePlan("hit", 20);
+        FileContext baseCtx = binaryCtx;
+        const result = runNativeGrepWithOps(baseCtx, binaryCtx.workArea, plan, spies.spy);
+        assert(result.success, result.msg);
+        assert(result.msg.empty, result.msg);
+        assert(spies.matcherCalls == 0, spies.matcherCalls.to!string);
+        assert(spies.closes == 1, spies.closes.to!string);
+    }
+}
+
+@("native_grep facade direct-file root renders the normalized display root exactly")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_direct_file");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "note.txt", "hit one\nhit two\nfiller\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 20, true, "*", "./note.txt");
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+    const root = (ctx.workArea ~ "note.txt").AbsolutePath;
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, root, plan, spies.spy);
+    assert(result.success, result.msg);
+    assert(result.msg == "note.txt:1:hit one\nnote.txt:2:hit two", result.msg);
+    assert(spies.opened == [root.toString], spies.opened.join(","));
+    assert(spies.matcherCalls == 3, spies.matcherCalls.to!string);
+
+    // Denying the direct-file root returns empty success without another open.
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], ["/note\\.txt$"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+    const denied = runNativeGrepWithOps(baseCtx, root, plan, spies.spy);
+    assert(denied.success, denied.msg);
+    assert(denied.msg.empty, denied.msg);
+    assert(spies.opened == [root.toString], spies.opened.join(","));
+}
+
+@("native_grep facade unsupported and missing roots report sanitized display-root errors")
+unittest {
+    version (Posix) {
+        auto ctx = makeTestContext("native_grep_facade_unsupported_root");
+        scope (exit)
+            ctx.teardown;
+        createTestFile(ctx, "real.txt", "hit\n");
+        createTestFile(ctx, "real-dir/inside.txt", "hit\n");
+
+        import core.sys.posix.sys.stat : mkfifo, S_IFIFO;
+        import std.file : symlink;
+        import std.string : toStringz;
+
+        const fifoPath = (ctx.workArea ~ "pipe").AbsolutePath.toString;
+        assert(mkfifo(toStringz(fifoPath), cast(uint)(S_IFIFO | 384)) == 0);
+        symlink("real.txt", (ctx.workArea ~ "file-link").AbsolutePath.toString);
+        symlink("real-dir", (ctx.workArea ~ "dir-link").AbsolutePath.toString);
+
+        FileContext baseCtx = ctx;
+        void assertUnsupported(string name) {
+            auto plan = nativeGrepFacadePlan("hit", 20, true, "*", "./" ~ name);
+            const result = runNativeGrep(baseCtx, (ctx.workArea ~ name).AbsolutePath, plan);
+            assert(!result.success, result.msg);
+            assert(result.msg == "error: path '" ~ name ~ "': regular file or directory required",
+                    result.msg);
+        }
+
+        assertUnsupported("pipe");
+        assertUnsupported("file-link");
+        assertUnsupported("dir-link");
+        assertUnsupported("missing");
+    }
+}
+
+@("native_grep facade non-recursive plans open immediate children only")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_nonrecursive");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "top.d", "hit\n");
+    createTestFile(ctx, "sub/inner.d", "hit\n");
+    createTestFile(ctx, "sub/deep/deeper.d", "hit\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 20, false);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(result.success, result.msg);
+    assert(result.msg == "./top.d:1:hit", result.msg);
+    assert(spies.enumerated == [ctx.workArea.toString], spies.enumerated.join(","));
+    assert(spies.opened == [ctx.workArea.toString ~ "/top.d"], spies.opened.join(","));
+    assert(spies.matcherCalls == 1, spies.matcherCalls.to!string);
+}
+
+@("native_grep facade late enumeration failure discards earlier matches")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_enum_fail");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "a/0.d", "hit-a\n");
+    createTestFile(ctx, "boom/keep.txt", "unreachable\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 20);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+    spies.spy.enumerate = (string p) {
+        spies.enumerated ~= p;
+        if (p.canFind("/boom")) {
+            throw new Exception("enumerate boom /abs secret");
+        }
+        return spies.defaults.enumerate(p);
+    };
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(!result.success, result.msg);
+    assert(result.msg == "error: directory enumeration failed for './boom'", result.msg);
+    assert(!result.msg.canFind("hit-a") && !result.msg.canFind("secret"), result.msg);
+}
+
+@("native_grep facade late open failure discards earlier matches")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_open_fail");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "a.d", "hit-a\n");
+    createTestFile(ctx, "b.d", "hit-b\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 20);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+    spies.spy.open = (string p) {
+        if (p.canFind("/b.d")) {
+            throw new Exception("open boom /abs secret");
+        }
+        spies.opened ~= p;
+        return spies.defaults.open(p);
+    };
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(!result.success, result.msg);
+    assert(result.msg == "error: file open failed for './b.d'", result.msg);
+    assert(!result.msg.canFind("hit-a") && !result.msg.canFind("secret"), result.msg);
+    // Only a.d completed a scan. A failed open does not reach the guarded close.
+    assert(spies.closes == 1, spies.closes.to!string);
+}
+
+@("native_grep facade late read failure discards earlier matches")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_read_fail");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "a.d", "hit-a\n");
+    createTestFile(ctx, "b.d", "hit-b\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 20);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+    spies.spy.read = (ref File f, ubyte[] b) {
+        ++spies.readCalls;
+        if (f.name.canFind("/b.d")) {
+            throw new Exception("read boom /abs secret");
+        }
+        return spies.defaults.read(f, b);
+    };
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(!result.success, result.msg);
+    assert(result.msg == "error: file read failed for './b.d'", result.msg);
+    assert(!result.msg.canFind("hit-a") && !result.msg.canFind("secret"), result.msg);
+    assert(spies.readCalls == 3, spies.readCalls.to!string);
+    assert(spies.closes == 2, spies.closes.to!string);
+}
+
+@("native_grep facade late decode failure discards earlier matches")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_decode_fail");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "a.d", "hit-a\n");
+    createTestFile(ctx, "b.d", "good\nhit-b\xFF\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 20);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(!result.success, result.msg);
+    assert(result.msg == "error: invalid UTF-8 in './b.d' at line 2", result.msg);
+    assert(!result.msg.canFind("hit-a") && !result.msg.canFind("hit-b"), result.msg);
+    assert(spies.closes == 2, spies.closes.to!string);
+}
+
+@("native_grep facade late regex failure discards earlier matches")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_regex_fail");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "a.d", "hit-a\n");
+    createTestFile(ctx, "b.d", "hit-b\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 20);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+    spies.spy.matches = (string line, ref Regex!char pattern) {
+        ++spies.matcherCalls;
+        if (line.canFind("hit-b")) {
+            throw new Exception("regex boom /abs secret");
+        }
+        return spies.defaults.matches(line, pattern);
+    };
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(!result.success, result.msg);
+    assert(result.msg == "error: regex evaluation failed in './b.d' at line 1", result.msg);
+    assert(!result.msg.canFind("hit-a") && !result.msg.canFind("secret"), result.msg);
+    assert(spies.closes == 2, spies.closes.to!string);
+}
+
+@("native_grep facade cap stop keeps its match when guarded close throws")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_cap_close");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "x.d", "hit\n");
+    createTestFile(ctx, "y.d", "hit\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 1);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+    spies.spy.close = (ref File f) {
+        ++spies.closes;
+        throw new Exception("close boom /abs secret");
+    };
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(result.success, result.msg);
+    assert(result.msg == "./x.d:1:hit", result.msg);
+    assert(spies.closes == 1, spies.closes.to!string);
+}
+
+@("native_grep facade rejects a non-positive plan cap before touching the filesystem")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_zero_cap");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "hit.d", "hit\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 0);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+
+    FileContext baseCtx = ctx;
+    bool threw;
+    try {
+        runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+    } catch (Error e) {
+        threw = true;
+        assert(e.msg == "grep_files plan requires maxResults >= 1", e.msg);
+    }
+    assert(threw, "a non-positive plan cap must fail before filesystem access");
+    assert(spies.enumerated.empty && spies.opened.empty && spies.matcherCalls == 0
+            && spies.closes == 0, "no filesystem operation may run for a non-positive cap");
+}
+
 @("integration: grep_files returns no result lines from files failing the read filter")
 unittest {
     import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
-    import std.algorithm : canFind;
 
     auto ctx = makeTestContext("fs_filter_grep");
     scope (exit)
@@ -5250,17 +5801,645 @@ unittest {
     tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
     ctx.setFilesystemFilter(tl);
 
-    // Mixed: the kept line survives with its relative path rendering; the
-    // excluded file's line is dropped entirely.
+    // Only the allowed file contributes a match with a normalized caller-relative path.
     auto mixed = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "needle"));
     assert(mixed.success, mixed.msg);
-    assert(mixed.msg.canFind("a.txt"), mixed.msg);
-    assert(!mixed.msg.canFind("secret"), mixed.msg);
+    assert(mixed.msg == "./a.txt:1:needle here", mixed.msg);
 
-    // Only-in-excluded match: nothing left to return.
+    // A match only in an excluded file returns empty success.
     auto only = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "hidden"));
-    assert(!only.success, only.msg);
-    assert(only.msg.canFind("no matches found"), only.msg);
+    assert(only.success, only.msg);
+    assert(only.msg == "", only.msg);
+}
+
+@("native_grep generated schema exposes the native grep_files contract")
+unittest {
+    import std.algorithm : canFind;
+    import std.traits : hasUDA;
+
+    import llm.tool_call : ParamOptional, toParams;
+
+    const schema = toParams!GrepFilesParams;
+    assert(schema.length == 6, schema.length.to!string);
+    assert(schema[0].name == "path" && schema[0].required, schema[0].name);
+    assert(schema[1].name == "pattern" && schema[1].required, schema[1].name);
+    assert(schema[2].name == "maxResults" && !schema[2].required, schema[2].name);
+    assert(schema[3].name == "glob" && !schema[3].required, schema[3].name);
+    assert(schema[4].name == "recursive" && !schema[4].required, schema[4].name);
+    assert(schema[5].name == "ignoreCase" && !schema[5].required, schema[5].name);
+    assert(schema[0].desc.canFind("File or directory to search"), schema[0].desc);
+    assert(schema[1].desc == "Regular expression to match against each complete line",
+            schema[1].desc);
+    assert(schema[2].desc.canFind("combined number of matching lines"), schema[2].desc);
+    assert(schema[2].desc.canFind("across all files"), schema[2].desc);
+    assert(schema[2].desc.canFind("minimum 1 and capped by the configured maximum"), schema[2].desc);
+    assert(schema[3].desc.canFind("Root-relative glob"), schema[3].desc);
+    assert(schema[3].desc.canFind("Wildcards match '/' and '.'"), schema[3].desc);
+    assert(schema[3].desc.canFind("empty selects nothing"), schema[3].desc);
+    assert(schema[3].desc.canFind("case-sensitive"), schema[3].desc);
+    assert(schema[4].desc.canFind("non-symlink subdirectories"), schema[4].desc);
+    assert(schema[4].desc.canFind("immediate regular-file children only when false"),
+            schema[4].desc);
+    assert(schema[5].desc.canFind("Case-insensitive regular-expression matching"), schema[5].desc);
+    assert(schema[5].desc.canFind("does not change glob case sensitivity"), schema[5].desc);
+    foreach (param; schema)
+        assert(!param.desc.empty, param.name ~ " needs a schema description");
+
+    // Field defaults and optionality behind the generated schema.
+    const defaults = GrepFilesParams.init;
+    assert(defaults.glob == "*" && defaults.recursive && !defaults.ignoreCase
+            && defaults.maxResults == 20);
+    assert(hasUDA!(__traits(getMember, GrepFilesParams, "glob"), ParamOptional));
+    assert(hasUDA!(__traits(getMember, GrepFilesParams, "recursive"), ParamOptional));
+    assert(hasUDA!(__traits(getMember, GrepFilesParams, "ignoreCase"), ParamOptional));
+    assert(hasUDA!(__traits(getMember, GrepFilesParams, "maxResults"), ParamOptional));
+    assert(!hasUDA!(__traits(getMember, GrepFilesParams, "path"), ParamOptional));
+    assert(!hasUDA!(__traits(getMember, GrepFilesParams, "pattern"), ParamOptional));
+}
+
+@("native_grep description covers matching and output semantics")
+unittest {
+    import std.algorithm : canFind;
+
+    import llm.tool_call : Function;
+
+    string desc;
+    foreach (a; __traits(getAttributes, grepFiles))
+        static if (is(typeof(a) == Function))
+            desc = a.desc;
+    assert(!desc.empty, "grepFiles must carry a @Function description");
+
+    assert(desc.canFind("regular files"), desc);
+    assert(desc.canFind("selected by path and glob"), desc);
+    assert(desc.canFind("path:line:text"), desc);
+    assert(desc.canFind("1-based line numbers"), desc);
+    assert(desc.canFind("deterministic traversal order"), desc);
+    assert(desc.canFind("empty message"), desc);
+}
+
+@("native_grep public scalar limits stay exact and precede request compilation")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_limits");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "a.d", "hit\n");
+
+    auto over = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "hit", maxResults: 1001));
+    assert(!over.success, over.msg);
+    assert(over.msg == "error: requested maxResults 1001 exceeds limit 1000", over.msg);
+
+    auto zero = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "hit", maxResults: 0));
+    assert(!zero.success, zero.msg);
+    assert(zero.msg == "error: maxResults must be >= 1", zero.msg);
+
+    // An over-limit cap wins over a malformed glob because scalar checks precede compilation.
+    auto scalarWins = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "hit",
+            glob: "src/[", maxResults: 1001));
+    assert(!scalarWins.success, scalarWins.msg);
+    assert(scalarWins.msg == "error: requested maxResults 1001 exceeds limit 1000", scalarWins.msg);
+}
+
+@("native_grep public adapter validates glob before regex and both before the root")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_precedence");
+    scope (exit)
+        ctx.teardown;
+
+    // Invalid globs fail before root validation, so no filesystem operation can run.
+    auto globFirst = grepFiles(ctx, GrepFilesParams(path: "missing-dir",
+            pattern: "hit", glob: "src/[abc.d"));
+    assert(!globFirst.success, globFirst.msg);
+    assert(globFirst.msg == "error: invalid glob 'src/[abc.d': unmatched '['", globFirst.msg);
+
+    // An invalid regex also fails before validation of the missing root.
+    auto regexNext = grepFiles(ctx, GrepFilesParams(path: "missing-dir", pattern: "(unclosed"));
+    assert(!regexNext.success, regexNext.msg);
+    assert(regexNext.msg.startsWith("error: invalid regex '(unclosed': "), regexNext.msg);
+
+    // When both are invalid, the glob error wins.
+    auto globBeforeRegex = grepFiles(ctx, GrepFilesParams(path: "missing-dir",
+            pattern: "(unclosed", glob: "src/{d,di"));
+    assert(!globBeforeRegex.success, globBeforeRegex.msg);
+    assert(globBeforeRegex.msg == "error: invalid glob 'src/{d,di': unmatched '{'",
+            globBeforeRegex.msg);
+}
+
+@("native_grep public adapter preserves root-validation errors verbatim")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_roots");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "inside.d", "hit\n");
+
+    auto absolute = grepFiles(ctx, GrepFilesParams(path: "/etc", pattern: "hit"));
+    assert(!absolute.success, absolute.msg);
+    assert(absolute.msg == "error: path '/etc' is an absolute path. Only relative paths are allowed",
+            absolute.msg);
+
+    auto outside = grepFiles(ctx, GrepFilesParams(path: "../escape.d", pattern: "hit"));
+    assert(!outside.success, outside.msg);
+    assert(outside.msg == "error: path '../escape.d' must be inside the allowed workarea",
+            outside.msg);
+
+    auto missing = grepFiles(ctx, GrepFilesParams(path: "no-such-dir", pattern: "hit"));
+    assert(!missing.success, missing.msg);
+    assert(missing.msg == "error: path 'no-such-dir' do not exist", missing.msg);
+}
+
+@("native_grep public adapter reports exact empty success without external failure modes")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_empty");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "a.txt", "nothing here\n");
+    createTestFile(ctx, "blob.bin", "needle\0rest\n");
+
+    // An ordinary no-match search returns empty success.
+    auto noMatch = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "absent"));
+    assert(noMatch.success, noMatch.msg);
+    assert(noMatch.msg == "", noMatch.msg);
+
+    // Binary-only candidates also return empty success.
+    auto allBinary = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "needle"));
+    assert(allBinary.success, allBinary.msg);
+    assert(allBinary.msg == "", allBinary.msg);
+
+    // An empty glob is valid and selects nothing.
+    auto emptyGlob = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "nothing", glob: ""));
+    assert(emptyGlob.success, emptyGlob.msg);
+    assert(emptyGlob.msg == "", emptyGlob.msg);
+}
+
+@("native_grep public adapter renders native output and caps globally")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_basic");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "src/a.d", "needle top\n");
+    createTestFile(ctx, "src/nested/leaf.d", "needle one\nno hit\nneedle two\n");
+    createTestFile(ctx, "src/z/inner.d", "needle deep\n");
+
+    // Cap 2 returns the first two records in traversal order.
+    // The later match in z/inner.d stays omitted.
+    const result = grepFiles(ctx, GrepFilesParams(path: "src", pattern: "needle", maxResults: 2));
+    assert(result.success, result.msg);
+    assert(result.msg == "src/a.d:1:needle top\nsrc/nested/leaf.d:1:needle one", result.msg);
+    // Output uses caller-relative paths without absolute workarea or external-command artifacts.
+    assert(!result.msg.canFind(ctx.workArea.toString), result.msg);
+}
+
+// Public grep_files output must match native traversal and rendering.
+
+@("native_grep public glob patterns select exact path sets")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_glob_goldens");
+    scope (exit)
+        ctx.teardown;
+
+    createTestFile(ctx, "parser.d", "g\n");
+    createTestFile(ctx, "src/types.d", "g\n");
+    createTestFile(ctx, "src/nested/leaf.d", "g\n");
+    createTestFile(ctx, ".hidden.d", "g\n");
+    createTestFile(ctx, ".config/ignored.d", "g\n");
+    createTestFile(ctx, "src/UPPER.D", "g\n");
+    createTestFile(ctx, "src/other.di", "g\n");
+
+    void assertGlob(string glob, string expected) {
+        const r = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "g", glob: glob));
+        assert(r.success, glob ~ ": " ~ r.msg);
+        assert(r.msg == expected, glob ~ ": " ~ r.msg);
+    }
+
+    // `*` includes dot-prefixed paths at every depth.
+    // Nonmatching directories are still descended.
+    assertGlob("*", "./.config/ignored.d:1:g\n./.hidden.d:1:g\n./parser.d:1:g"
+            ~ "\n./src/UPPER.D:1:g\n./src/nested/leaf.d:1:g\n./src/other.di:1:g"
+            ~ "\n./src/types.d:1:g");
+    assertGlob("*.d", "./.config/ignored.d:1:g\n./.hidden.d:1:g\n./parser.d:1:g"
+            ~ "\n./src/nested/leaf.d:1:g\n./src/types.d:1:g");
+    // src/*.d is scoped to src descendants only.
+    assertGlob("src/*.d", "./src/nested/leaf.d:1:g\n./src/types.d:1:g");
+    // ** requires at least one '/' before the basename.
+    assertGlob("**/*.d", "./.config/ignored.d:1:g\n./src/nested/leaf.d:1:g\n./src/types.d:1:g");
+    assertGlob("src/*.{d,di}", "./src/nested/leaf.d:1:g\n./src/other.di:1:g\n./src/types.d:1:g");
+    // A backslash is a separator exactly like '/'.
+    assertGlob("src\\*.d", "./src/nested/leaf.d:1:g\n./src/types.d:1:g");
+}
+
+@("native_grep public glob case sensitivity stays fixed while ignoreCase drives the regex")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_glob_case");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "src/UPPER.D", "Case Mix\n");
+
+    // ignoreCase affects only the regex, so the case-sensitive glob still misses .D.
+    const noGlobMatch = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "case mix",
+            glob: "*.d", ignoreCase: true));
+    assert(noGlobMatch.success, noGlobMatch.msg);
+    assert(noGlobMatch.msg == "", noGlobMatch.msg);
+
+    const globMatch = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "case mix",
+            glob: "*.D", ignoreCase: true));
+    assert(globMatch.success, globMatch.msg);
+    assert(globMatch.msg == "./src/UPPER.D:1:Case Mix", globMatch.msg);
+
+    // Without ignoreCase the same case-variant regex matches nothing.
+    const exactOnly = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "CASE MIX", glob: "*.D"));
+    assert(exactOnly.success, exactOnly.msg);
+    assert(exactOnly.msg == "", exactOnly.msg);
+}
+
+@("native_grep public malformed absolute and parent globs fail before filesystem access")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_glob_errors");
+    scope (exit)
+        ctx.teardown;
+
+    void assertGlobError(string glob, string expected) {
+        const r = grepFiles(ctx, GrepFilesParams(path: "missing-dir", pattern: "hit", glob: glob));
+        assert(!r.success, glob ~ ": " ~ r.msg);
+        assert(r.msg == expected, glob ~ ": " ~ r.msg);
+    }
+
+    assertGlobError("src/[abc.d", "error: invalid glob 'src/[abc.d': unmatched '['");
+    assertGlobError("src/{d,di", "error: invalid glob 'src/{d,di': unmatched '{'");
+    assertGlobError("src]/*.d", "error: invalid glob 'src]/*.d': unmatched ']'");
+
+    const absolute = grepFiles(ctx, GrepFilesParams(path: "missing-dir",
+            pattern: "hit", glob: "/src/*.d"));
+    assert(!absolute.success, absolute.msg);
+    assert(absolute.msg == "error: invalid glob '/src/*.d': must be root-relative", absolute.msg);
+
+    const parent = grepFiles(ctx, GrepFilesParams(path: "missing-dir", pattern: "hit",
+            glob: "src/.."));
+    assert(!parent.success, parent.msg);
+    assert(parent.msg == "error: invalid glob 'src/..': '..' segments are not allowed", parent.msg);
+}
+
+@("native_grep public direct-file root matches base-name globs only")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_direct_root");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "src/types.d", "g\n");
+
+    // The base-name style glob selects the direct file.
+    const base = grepFiles(ctx, GrepFilesParams(path: "src/types.d", pattern: "g"));
+    assert(base.success, base.msg);
+    assert(base.msg == "src/types.d:1:g", base.msg);
+
+    const baseName = grepFiles(ctx, GrepFilesParams(path: "src/types.d",
+            pattern: "g", glob: "types.d"));
+    assert(baseName.success, baseName.msg);
+    assert(baseName.msg == "src/types.d:1:g", baseName.msg);
+
+    // Path-scoped and recursive globs cannot match a base name.
+    const dirScoped = grepFiles(ctx, GrepFilesParams(path: "src/types.d",
+            pattern: "g", glob: "src/*.d"));
+    assert(dirScoped.success, dirScoped.msg);
+    assert(dirScoped.msg == "", dirScoped.msg);
+
+    const recursive = grepFiles(ctx, GrepFilesParams(path: "src/types.d",
+            pattern: "g", glob: "**/*.d"));
+    assert(recursive.success, recursive.msg);
+    assert(recursive.msg == "", recursive.msg);
+}
+
+@("native_grep facade direct-file glob mismatch performs no content operation")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_direct_glob_mismatch");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "src/types.d", "hit\n");
+
+    auto plan = nativeGrepFacadePlan("hit", 20, true, "src/*.d", "src/types.d");
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, (ctx.workArea ~ "src/types.d")
+            .AbsolutePath, plan, spies.spy);
+
+    assert(result.success, result.msg);
+    assert(result.msg.empty, result.msg);
+    assert(spies.enumerated.empty, spies.enumerated.join(","));
+    assert(spies.opened.empty, spies.opened.join(","));
+    assert(spies.readCalls == 0, spies.readCalls.to!string);
+    assert(spies.matcherCalls == 0, spies.matcherCalls.to!string);
+    assert(spies.closes == 0, spies.closes.to!string);
+}
+
+@(
+        "native_grep public recursion flag selects immediate children and still descends nonmatching directories")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_recursion");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "top.d", "g\n");
+    createTestFile(ctx, "sub/inner.d", "g\n");
+    createTestFile(ctx, "sub/deep/deeper.d", "g\n");
+
+    const flat = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "g", recursive: false));
+    assert(flat.success, flat.msg);
+    assert(flat.msg == "./top.d:1:g", flat.msg);
+
+    const deep = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "g"));
+    assert(deep.success, deep.msg);
+    assert(deep.msg == "./sub/deep/deeper.d:1:g\n./sub/inner.d:1:g\n./top.d:1:g", deep.msg);
+}
+
+@("native_grep public filter policy denies files independently of their parent directory")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_filter_tree");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "denied/blocked.d", "g denied\n");
+    createTestFile(ctx, "denied/allowed.d", "g allowed\n");
+    createTestFile(ctx, "top.d", "g top\n");
+
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], [
+        "/denied$", "/blocked\\.d$"
+    ]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    const r = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "g"));
+    assert(r.success, r.msg);
+    assert(r.msg == "./denied/allowed.d:1:g allowed\n./top.d:1:g top", r.msg);
+}
+
+@(
+        "native_grep facade denied malformed files are never opened while an allowed malformed sibling fails")
+unittest {
+    // A denied malformed file returns empty success without content operations.
+    auto deniedCtx = makeTestContext("native_grep_facade_denied_malformed");
+    scope (exit)
+        deniedCtx.teardown;
+    createTestFile(deniedCtx, "denied/bad.d", "\xFF\xFE malformed\n");
+
+    ToolLimits denied;
+    denied.filesystem.read = FilesystemLimits.CategoryFilter([], ["/denied/"]);
+    denied.filesystemFilterRuntime = buildFilesystemFilterRuntime(denied);
+    deniedCtx.setFilesystemFilter(denied);
+
+    auto deniedPlan = nativeGrepFacadePlan("needle", 20);
+    NativeGrepFacadeSpies deniedSpies;
+    buildNativeGrepFacadeSpies(deniedSpies);
+
+    FileContext deniedBase = deniedCtx;
+    const deniedResult = runNativeGrepWithOps(deniedBase, deniedCtx.workArea,
+            deniedPlan, deniedSpies.spy);
+    assert(deniedResult.success, deniedResult.msg);
+    assert(deniedResult.msg.empty, deniedResult.msg);
+    assert(deniedSpies.opened.empty, deniedSpies.opened.join(","));
+    assert(deniedSpies.matcherCalls == 0, deniedSpies.matcherCalls.to!string);
+
+    // The allowed malformed sibling causes a failure while the denied file remains unopened.
+    auto siblingCtx = makeTestContext("native_grep_facade_allowed_malformed");
+    scope (exit)
+        siblingCtx.teardown;
+    createTestFile(siblingCtx, "denied/bad.d", "\xFF\xFE malformed\n");
+    createTestFile(siblingCtx, "sibling.d", "needle\n\xFF trailing\n");
+
+    ToolLimits allowed;
+    allowed.filesystem.read = FilesystemLimits.CategoryFilter([], ["/denied/"]);
+    allowed.filesystemFilterRuntime = buildFilesystemFilterRuntime(allowed);
+    siblingCtx.setFilesystemFilter(allowed);
+
+    auto siblingPlan = nativeGrepFacadePlan("needle", 20);
+    NativeGrepFacadeSpies siblingSpies;
+    buildNativeGrepFacadeSpies(siblingSpies);
+
+    FileContext siblingBase = siblingCtx;
+    const failed = runNativeGrepWithOps(siblingBase, siblingCtx.workArea,
+            siblingPlan, siblingSpies.spy);
+    assert(!failed.success, failed.msg);
+    assert(failed.msg == "error: invalid UTF-8 in './sibling.d' at line 2", failed.msg);
+    assert(siblingSpies.opened == [siblingCtx.workArea.toString ~ "/sibling.d"],
+            siblingSpies.opened.join(","));
+}
+
+@("native_grep facade enumeration failure of a filter-denied directory remains fatal")
+unittest {
+    auto ctx = makeTestContext("native_grep_facade_denied_enum_fail");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "boom/keep.d", "hit\n");
+
+    // Filter denial does not suppress an enumeration failure during descent.
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], ["/boom$"]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    auto plan = nativeGrepFacadePlan("hit", 20);
+    NativeGrepFacadeSpies spies;
+    buildNativeGrepFacadeSpies(spies);
+    spies.spy.enumerate = (string p) {
+        if (p.canFind("/boom"))
+            throw new Exception("enumeration boom secret");
+        spies.enumerated ~= p;
+        return spies.defaults.enumerate(p);
+    };
+
+    FileContext baseCtx = ctx;
+    const result = runNativeGrepWithOps(baseCtx, ctx.workArea, plan, spies.spy);
+
+    assert(!result.success, result.msg);
+    assert(result.msg == "error: directory enumeration failed for './boom'", result.msg);
+}
+
+@("native_grep public display paths normalize every caller root spelling")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_display_roots");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "a.d", "g\n");
+    createTestFile(ctx, "src/a.d", "g\n");
+
+    const dot = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "g"));
+    assert(dot.success, dot.msg);
+    assert(dot.msg == "./a.d:1:g\n./src/a.d:1:g", dot.msg);
+
+    foreach (root; ["src", "src/", "src//", "./src", "src/nested/.."]) {
+        const r = grepFiles(ctx, GrepFilesParams(path: root, pattern: "g"));
+        assert(r.success, root ~ ": " ~ r.msg);
+        assert(r.msg == "src/a.d:1:g", root ~ ": " ~ r.msg);
+    }
+
+    const direct = grepFiles(ctx, GrepFilesParams(path: "src//a.d", pattern: "g"));
+    assert(direct.success, direct.msg);
+    assert(direct.msg == "src/a.d:1:g", direct.msg);
+}
+
+@("native_grep public output keeps colons literal and filters on absolute paths")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_colons");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "weird:name.d", "key:value with g\n");
+
+    const literal = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "g"));
+    assert(literal.success, literal.msg);
+    assert(literal.msg == "./weird:name.d:1:key:value with g", literal.msg);
+
+    // Excludes use absolute candidate paths rather than rendered paths, including paths containing colons.
+    createTestFile(ctx, "co:lon.d", "g colon\n");
+    createTestFile(ctx, "plain.d", "g plain\n");
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], [
+        "^\\./weird", "/co:lon\\.d$"
+    ]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    const filtered = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "g"));
+    assert(filtered.success, filtered.msg);
+    assert(filtered.msg == "./plain.d:1:g plain\n./weird:name.d:1:key:value with g", filtered.msg);
+}
+
+@("native_grep public line semantics preserve complete physical line records")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_lines");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "cr.d", "needle\r");
+    createTestFile(ctx, "lines.d", "needle\n  needle  \nneedle two needle\n");
+
+    const r = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "needle"));
+    assert(r.success, r.msg);
+    assert(r.msg == "./cr.d:1:needle\r\n./lines.d:1:needle\n./lines.d:2:  needle  "
+            ~ "\n./lines.d:3:needle two needle", r.msg);
+}
+
+@("native_grep public empty matching lines and final unterminated lines render exact records")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_empty_line");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "e.d", "\nneedle\n");
+    createTestFile(ctx, "final.d", "filler\nneedle end");
+
+    // An empty matching line renders an empty text field.
+    const emptyLine = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "^$"));
+    assert(emptyLine.success, emptyLine.msg);
+    assert(emptyLine.msg == "./e.d:1:", emptyLine.msg);
+
+    // A final unterminated line is still a searchable 1-based line.
+    const finalLine = grepFiles(ctx, GrepFilesParams(path: "final.d", pattern: "needle"));
+    assert(finalLine.success, finalLine.msg);
+    assert(finalLine.msg == "final.d:2:needle end", finalLine.msg);
+}
+
+@("native_grep public cap keeps all records at the total and truncates below it")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_total_cap");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "c.d", "g one\ng two\ng three\n");
+
+    const exact = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "g", maxResults: 3));
+    assert(exact.success, exact.msg);
+    assert(exact.msg == "./c.d:1:g one\n./c.d:2:g two\n./c.d:3:g three", exact.msg);
+
+    const capped = grepFiles(ctx, GrepFilesParams(path: ".", pattern: "g", maxResults: 2));
+    assert(capped.success, capped.msg);
+    assert(capped.msg == "./c.d:1:g one\n./c.d:2:g two", capped.msg);
+}
+
+@("native_grep public adapter preserves root-filter denials verbatim")
+unittest {
+    import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+    auto ctx = makeTestContext("native_grep_public_root_filter");
+    scope (exit)
+        ctx.teardown;
+    createTestFile(ctx, "secret/inside.d", "g\n");
+    createTestFile(ctx, "locked.txt", "g\n");
+
+    ToolLimits tl;
+    tl.filesystem.read = FilesystemLimits.CategoryFilter([], [
+        "/secret$", "/locked\\.txt$"
+    ]);
+    tl.filesystemFilterRuntime = buildFilesystemFilterRuntime(tl);
+    ctx.setFilesystemFilter(tl);
+
+    const dirRoot = grepFiles(ctx, GrepFilesParams(path: "secret", pattern: "g"));
+    assert(!dirRoot.success, dirRoot.msg);
+    assert(dirRoot.msg == "error: path '" ~ (ctx.workArea ~ "secret")
+            .AbsolutePath.toString ~ "' is rejected by the configured filesystem filter (read)",
+            dirRoot.msg);
+
+    const fileRoot = grepFiles(ctx, GrepFilesParams(path: "locked.txt", pattern: "g"));
+    assert(!fileRoot.success, fileRoot.msg);
+    assert(fileRoot.msg == "error: path '" ~ (ctx.workArea ~ "locked.txt")
+            .AbsolutePath.toString ~ "' is rejected by the configured filesystem filter (read)",
+            fileRoot.msg);
+}
+
+@("native_grep public adapter preserves root symlink and symlinked-parent errors verbatim")
+unittest {
+    version (Posix) {
+        import std.file : symlink;
+
+        import llm.tool_call.io.functions : GrepFilesParams, grepFiles;
+
+        auto ctx = makeTestContext("native_grep_public_root_symlinks");
+        scope (exit)
+            ctx.teardown;
+        createTestFile(ctx, "real-dir/inside.d", "g\n");
+        createTestFile(ctx, "real.txt", "g\n");
+
+        symlink("real.txt", (ctx.workArea ~ "file-link").AbsolutePath.toString);
+        symlink("real-dir", (ctx.workArea ~ "link").AbsolutePath.toString);
+
+        const rootLink = grepFiles(ctx, GrepFilesParams(path: "file-link", pattern: "g"));
+        assert(!rootLink.success, rootLink.msg);
+        assert(rootLink.msg == "error: path 'file-link' is a symlink. Symlinks are not allowed" ~ " to be read/write.",
+                rootLink.msg);
+
+        const parentLink = grepFiles(ctx, GrepFilesParams(path: "link/inside.d", pattern: "g"));
+        assert(!parentLink.success, parentLink.msg);
+        assert(parentLink.msg == "error: path '" ~ (ctx.workArea ~ "link")
+                .AbsolutePath.toString ~ "' is a symlink. Read/write is not allowed from inside a symlink.",
+                parentLink.msg);
+    }
 }
 
 @("pathToWorkarea filter denial: valid=false, deniedByFilter=true, exact filter message")

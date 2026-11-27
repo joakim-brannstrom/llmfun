@@ -182,10 +182,12 @@ stated below and in `doc/threat_model.md`.
 
 **Opt-in and entry-point agnostic.** When the `filesystem` block is absent no
 regex pattern is compiled (the runtime holder is built disabled) and every
-check is a no-op: behavior is identical to a
-build without the feature. Enforcement lives inside the tool layer
-(`pathToWorkarea`), so every entry point - direct calls, MCP (`mcp --stdio`),
-AgentPool - is covered automatically with no per-entry-point code.
+filter check is a no-op: behavior is identical to a build without the feature.
+Enforcement lives inside the tool layer: `pathToWorkarea` validates each tool's
+argument or root path, and recursive tools add entry-specific checks. Native
+`grepFiles` also checks each regular-file candidate before opening its content.
+Direct calls, MCP (`mcp --stdio`), and AgentPool therefore share the same checks
+with no per-entry-point implementation.
 
 **Configuration.**
 
@@ -226,9 +228,12 @@ site:
 - **read**: `readFile`, `listDirectory`, `grepFiles`,
   `countLinesInFile`, `md5HashFile`, `loadImageApi`, `loadFileToRAG`.
 
-**Tool-facing error strings.** A denied path returns
-`error: path '<abs>' is rejected by the configured filesystem filter (read|write)`
-with the absolute post-transform path. A refused recursive remove returns
+**Tool-facing error strings.** An argument/root denial from `pathToWorkarea`
+returns `error: path '<abs>' is rejected by the configured filesystem filter (read|write)`
+with the absolute post-transform path. Root containment, symlink, and filter
+errors remain verbatim. They are not rewritten as native candidate errors. A
+nested native `grepFiles` candidate denied by the read filter is silently
+skipped instead. A refused recursive remove returns
 `error: recursive remove refused: '<abs>' is rejected by the configured filesystem filter (write); nothing was deleted`,
 naming the first offending descendant in depth order.
 
@@ -252,12 +257,78 @@ recursive calls, so the three recursive walkers narrow per entry:
 - `listDirectory` skips entries whose path fails the read filter. The
   `maxDirEntries` cap applies to shallow and recursive listings alike and
   counts returned entries only, so skipped entries do not consume the budget.
-- `grepFiles` still SCANS excluded files (the external grep process reads
-  them); only result lines from excluded paths are dropped.
+- `grepFiles` applies the read filter to each nested non-symlink regular-file
+  candidate before its glob check or content open. A denied candidate is
+  skipped. Directory filter verdicts do not prune descent. Enumeration and
+  other operational failures follow the native behavior described below.
 - `removeFile` with `recursive=true` pre-scans the tree and refuses the WHOLE
   call when any descendant fails the write filter: nothing is deleted.
   The argument-path check alone cannot protect a recursive delete, since the
   offending path is a descendant, not the argument.
+
+**Native `grepFiles` behavior.** The synchronous native D implementation accepts
+a regular-file or directory root and does not invoke external grep.
+
+- **Inputs and defaults.** `pattern` is a `std.regex` regular expression, not a
+  POSIX grep ERE. The defaults are `glob="*"`, `recursive=true`,
+  `ignoreCase=false`, and `maxResults=20`. The configured
+  `toolLimits.grepMaxResults` is the ceiling. `maxResults` is one global cap
+  across all files, and traversal stops immediately after the Nth accepted
+  record. `ignoreCase` changes regex matching only, never glob matching.
+- **Glob selection.** Both slash types normalize to `/` in this root-relative,
+  case-sensitive D-style glob. `*` and `?` match separators and dots. `**` has
+  no special globstar meaning, while character classes and brace alternatives
+  are supported. Thus `*` reaches every depth and dotfile, and `*.d` selects
+  lowercase `.d` files at every depth, including dot paths. `src/*.d` includes
+  `src/types.d` and `src/nested/leaf.d` but not `parser.d`. `**/*.d` requires at
+  least one `/` and therefore excludes a root-level `parser.d`. For a direct
+  file root `src/types.d`, only its base name is matched: `*.d` matches, while
+  `src/*.d` and `**/*.d` do not. An empty glob selects no files.
+- **Traversal order.** Each selected directory contributes one shallow batch.
+  Files and directories are sorted together by case-sensitive ordinal order of
+  their root-relative `/` paths, then a directory is descended immediately at
+  its sorted position. This is merged shallow-batch depth-first order, not a
+  files-first or whole-tree sort. For example, the order is `a/0.d`, `a.d`,
+  `b.d`, `z/c.d`, `z0.d`. With `recursive=false`, only immediate regular-file
+  children are searched. With recursion enabled, neither the file glob nor a
+  directory's own filter verdict prunes descent.
+- **Filtering and errors.** The root goes through `pathToWorkarea` existence,
+  containment, symlink, and read-filter checks. Those errors are returned
+  verbatim and can contain absolute paths. Each nested non-symlink regular-file
+  candidate must also be contained and pass the read filter on its absolute
+  path before the glob check or content open. Denied files and nested
+  symlink/special entries are skipped. An independently allowed child below a
+  denied directory can still be found, but failure to enumerate any selected
+  directory is fatal even when that directory's own path is filter-denied.
+  Enumeration/open/read/UTF-8/regex operational errors use fixed sanitized
+  categories with normalized caller-relative display paths, not low-level
+  exception text. For example, exact errors include
+  `error: directory enumeration failed for './boom'` and
+  `error: invalid UTF-8 in './sibling.d' at line 2`. An operational failure
+  after earlier matches discards all partial match payload. Reaching the cap is
+  a successful stop and retains the accepted records.
+- **Single-handle streaming.** After all candidate gates pass, a file is opened
+  once. At most its first 8192 bytes are inspected for NUL: a NUL at offsets
+  `0..8191` silently skips the whole file, while offset 8192 is outside this
+  prefix heuristic. The prefix is replayed and remaining bytes are read on the
+  same handle, which is closed on every exit. This is only a prefix heuristic,
+  not general binary-file detection.
+- **Lines and output.** Complete physical lines are framed across reads and
+  validated as UTF-8 before one regex evaluation per line. Malformed UTF-8 is
+  fatal at that 1-based line. A nonempty unterminated final line is evaluated,
+  while an empty file or terminal LF adds no phantom line. CR is stripped only
+  before a consumed LF, and a final lone CR is preserved. Repeated matches on
+  one line still produce one `path:line:text` record, with literal text and
+  1-based line numbers. Display paths normalize the caller's root spelling:
+  roots `.` and `./` produce `./a.d`, and `src//`, `./src`, or `src/nested/..`
+  produce `src/a.d`. A direct `src//a.d` root produces `src/a.d`. Records are
+  joined by LF with no trailing LF. Finding no matches is successful and
+  returns an exactly empty message (`""`).
+- **Plain-output and resource limits.** Newline-bearing pathnames remain
+  unescaped, so one pathname can make a record appear as multiple physical
+  output lines. There is no total work budget. A no-match request may scan the
+  whole tree, and a wide directory is processed as one shallow batch.
+  `maxResults` limits accepted output records.
 
 **Layered merge (system config + overlay).** Nested structs merge
 field-by-field and `string[]` lists are replaced wholesale. An overlay
