@@ -1198,7 +1198,6 @@ The agent has access to the following tools:
 | `writeFile` | Write content to a file, creating parent directories if needed |
 | `readFile` | Read file contents with optional line numbering and range selection |
 | `editFile` | Edit a file by replacing, removing, or appending lines |
-| `applyDiff` | Apply a unified diff patch to a file |
 | `replaceAll` | Replace all occurrences of a string in text |
 | `listDirectory` | List files in a directory as JSON array |
 | `grepFiles` | Native complete-line `std.regex` search with glob selection, optional recursion, and one global result cap |

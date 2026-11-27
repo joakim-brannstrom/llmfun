@@ -87,32 +87,6 @@ When `dryRun=true`, also includes `"preview"` (the full modified file content).
 - The diagnostic includes closest-match details when a marker or code block is not found.
 - Read the `diagnostic` field to understand why the search failed and adjust your search.
 
-## apply_diff — Unified diff patch application
-
-Apply a pre-computed unified diff patch to a file.
-
-**Parameters**:
-- `path` — file path (relative to workarea)
-- `diff` — unified diff text (with `--- a/path` and `+++ b/path` headers, then hunks)
-- `dryRun` — preview without writing (default: false)
-- `fuzzy` — fuzzy context matching (default: true, ignores leading/trailing whitespace)
-
-**Auto-count**: Hunk header counts (`@@ -oldStart,oldCount +newStart,newCount @@`) are **advisory**. The tool counts actual body lines and uses those. Mismatches produce warnings, not errors.
-
-**Fuzzy matching**: By default, context lines use trimmed equality (`line.strip`). Set `fuzzy=false` for exact character-by-character matching.
-
-**Return format** (JSON):
-```json
-{
-  "ok": true,
-  "hunksApplied": 1,
-  "linesChanged": 3,
-  "warnings": []
-}
-```
-Warnings list count mismatches (e.g., `"Hunk 1: declared 7 old lines, body has 8"`).
-When `dryRun=true`, also includes `"preview"`.
-
 ## write_file — Write or create files
 
 - Creates the file (including parent directories) if it doesn't exist.

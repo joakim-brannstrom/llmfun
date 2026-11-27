@@ -223,8 +223,8 @@ workarea path (e.g. `^/workarea/llmfun/plan/`), which keeps them unambiguous.
 **Categories.** Every path-taking file tool declares one category at its call
 site:
 
-- **write**: `writeFile`, `editFile`, `applyDiff`, `removeFile`, and the
-  `loadSkill` destination directory.
+- **write**: `writeFile`, `editFile`, `removeFile`, and the `loadSkill`
+  destination directory.
 - **read**: `readFile`, `listDirectory`, `grepFiles`,
   `countLinesInFile`, `md5HashFile`, `loadImageApi`, `loadFileToRAG`.
 
