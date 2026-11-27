@@ -121,37 +121,56 @@ defaultOptions:
 
 **Mitigation**: Subprocess timeout (`timeoutSeconds`) limits execution time.
 
-### 7. Workarea File-Tool Filter Gap (Filesystem Limits)
+### 7. Workarea File-Tool Filter and Native Grep Boundaries
 
 **Description**: The optional `toolLimits.filesystem` filter restricts which
-workarea paths the file tools may read or write. Assessing this control means
-being explicit about what it does not cover.
+workarea paths the file tools may read or write. It is an accident guard layered
+on workarea containment and root symlink validation, which remain the security
+boundary. Assessing this control means being explicit about what it does not
+cover.
 
 **Covers**: the path arguments of the workarea file tools (`pathToWorkarea`,
-read and write categories) plus per-entry narrowing in `listDirectory`,
-`grepFiles`, and recursive `removeFile`. Enforcement lives inside the tool
-layer, so every entry point (direct calls, MCP stdio, AgentPool) is covered.
+read and write categories), per-entry narrowing in `listDirectory` and
+recursive `removeFile`, and native `grepFiles` regular-file candidate checks.
+Enforcement lives inside the tool layer, so every entry point (direct calls,
+MCP stdio, AgentPool) is covered.
 
 **Accepted boundaries**:
 
 - **`execute_command` is NOT covered.** Bash in the container can touch any
-  mounted path regardless of this filter. The filter is an accident guard,
-  NOT sandboxing: workarea containment still comes from the container mounts
-  (vectors 1-3 above), not from the filter.
-- **`grepFiles` still scans excluded files.** The external grep process reads
-  them; only result lines from excluded paths are dropped.
+  mounted path regardless of this filter. The filter is NOT sandboxing:
+  workarea containment still comes from `pathToWorkarea` and the container
+  mounts (vectors 1-3 above), not from the filter.
+- **Native grep enumeration is intentionally non-pruning.** A directory's own
+  filter verdict does not stop descent, so grep can enumerate a directory whose
+  path would be denied, and an independently allowed child can still be found.
+  Failure to enumerate a selected directory is fatal even if that directory is
+  filter-denied. However, every non-symlink regular-file candidate must pass
+  containment and the read filter before its content is opened. Grep never
+  intentionally opens a denied regular-file candidate. Nested symlink and
+  special-file entries are skipped.
+- **Native grep has no total work budget.** A no-match request can scan the whole tree, and a wide directory requires a shallow batch. `maxResults` limits accepted output records.
 - **Existence probing of filtered paths is possible.** The filter runs after
   the existence check, so for existence-checking tools a rejected path yields
   a filter denial only when it exists, while a nonexistent one yields a
   "does not exist" error. Comparing the two outcomes can reveal whether a
   filtered-out path exists. Accepted by design.
+- **Metadata/check/open races remain.** Candidate type, containment, and filter
+  results do not atomically bind a pathname to the object later opened. Another
+  process can change filesystem entries between those operations. Reusing one
+  open handle for the NUL-prefix check, prefix replay, and subsequent scan
+  avoids adding a second content-open race, but it is not atomic filesystem
+  validation and does not eliminate the earlier metadata/check/open races.
+- **Error and output sanitization has deliberate boundaries.** Root validation errors remain verbatim and can contain absolute post-transform paths. Native operational errors use fixed sanitized categories and normalized caller-relative paths. A late failure discards earlier match payload. Plain match output does not escape newline-bearing pathnames, so such a name can make one record appear as multiple output lines.
 - **`loadSkill` degrades by design** when the destination is filter-denied:
   the skill body is read from the skill source directory, which is outside the
   filter's reach by definition (the tool reads it itself).
 
 **Mitigation**:
-- The filter can only narrow: it runs last, after absolute-path rejection,
-  workarea containment, and both symlink checks, so it never widens access.
+- The filter can only narrow, never widen, access. For native grep, nested
+  non-symlink regular-file candidates receive containment and read-filter
+  checks before content open, while workarea containment and root symlink
+  validation remain mandatory independently of the optional filter.
 
 ## Mitigations Summary
 

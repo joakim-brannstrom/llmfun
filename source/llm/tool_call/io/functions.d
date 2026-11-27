@@ -1,27 +1,25 @@
 module llm.tool_call.io.functions;
 
 import logger = std.logger;
-import std.algorithm : map, filter, startsWith, count, joiner, endsWith,
-    splitter, canFind, min, max;
-import std.array : empty, appender, array, join;
+import std.algorithm : map, filter, count, joiner, endsWith, canFind, min, max;
+import std.array : empty, appender, array;
 import std.conv : to, text;
 import std.exception : enforce;
 import std.file : readText, exists, mkdirRecurse, getSize, remove, isDir,
     rmdirRecurse, dirEntries, SpanMode;
 import std.json : JSONValue, parseJSON, JSONOptions, JSONType;
 import std.path : relativePath;
-import std.process : execute;
 import std.range : enumerate;
-import std.regex : Regex, regex;
 import std.stdio : File;
-import std.string : indexOf, strip, split, replace, toLower, chomp;
+import std.string : split, toLower, chomp;
 import std.sumtype : match;
 
 import my.path : AbsolutePath;
 
-import llm.config : FilesystemFilterRuntime, ToolLimits, PathCategory;
+import llm.config : PathCategory;
 import llm.tool_call.io : classifyEditError, FileContext, sanitizeLogPath,
     fileEndsWithNewline, writeLines;
+import llm.tool_call.io.grep : NativeGrepRequest, compileNativeGrepRequest, runNativeGrep;
 import llm.tool_call.utility;
 import llm.tool_call;
 import llm.types : IAgent;
@@ -173,17 +171,18 @@ struct ListDirectoryParams {
     @ParamDescription("Path to the directory")
     string path;
 
-    @ParamDescription("Set to true for recursive scan")
+    @ParamDescription("True includes descendants, and false returns immediate entries only")
     @ParamOptional bool recursive;
 
     @ParamDescription("1-based index of the first entry to return")
     @ParamOptional long startIndex = 1;
 
-    @ParamDescription("Max entries to return in this call; 0 uses the configured limit")
+    @ParamDescription(
+            "Page size: non-positive values use the configured maximum, and values above it are rejected")
     @ParamOptional long count = 0;
 }
 
-@Function("List directory contents as paginated entries (files and subdirectories; directories occupy page slots). Returns up to count or the configured limit entries starting at startIndex, plus total, startIndex and endIndex. To get more entries, call again with startIndex = endIndex + 1. endIndex == total means all entries were returned; an empty entries array means there are no more entries - do not re-request page 1. Order is raw filesystem order for shallow scans, depth-first with each subdirectory after its contents for recursive scans; order and indices are stable only while the directory is unchanged. For large recursive trees, use grep_files instead of paging.") ExecuteFuncResult listDirectory(
+@Function("List directory entries as paginated path/type records, with size for files. Return up to count entries starting at startIndex, plus total, startIndex and endIndex. Continue with startIndex = endIndex + 1 until endIndex == total or entries is empty.") ExecuteFuncResult listDirectory(
         Context baseCtx, ListDirectoryParams params) {
     mixin(baseContextToSpecific!FileContext);
 
@@ -248,18 +247,28 @@ struct ListDirectoryParams {
 }
 
 struct GrepFilesParams {
-    @ParamDescription("Path to search in")
+    @ParamDescription("File or directory to search")
     string path;
 
-    @ParamDescription("Pattern to search for")
+    @ParamDescription("Regular expression to match against each complete line")
     string pattern;
 
-    @ParamDescription("Maximum number of results to return")
+    @ParamDescription("Maximum combined number of matching lines returned across all files, minimum 1 and capped by the configured maximum")
     @ParamOptional long maxResults = 20;
+
+    @ParamDescription("Root-relative glob selecting which files to search, e.g. '*.d'. Wildcards match '/' and '.' (empty selects nothing). '/' and '\\' are separators, and matching is case-sensitive")
+    @ParamOptional string glob = "*";
+
+    @ParamDescription(
+            "Descend into non-symlink subdirectories when true, or return immediate regular-file children only when false")
+    @ParamOptional bool recursive = true;
+
+    @ParamDescription(
+            "Case-insensitive regular-expression matching that does not change glob case sensitivity")
+    @ParamOptional bool ignoreCase;
 }
 
-@Function(
-        "Search for a pattern in files at path. Returns up to maxResults matching lines with file and line number") ExecuteFuncResult grepFiles(
+@Function("Search regular files selected by path and glob. Return matching lines as 'path:line:text' records with 1-based line numbers in deterministic traversal order. A search with no matches succeeds and returns an empty message.") ExecuteFuncResult grepFiles(
         Context baseCtx, GrepFilesParams params) {
     mixin(baseContextToSpecific!FileContext);
 
@@ -273,78 +282,15 @@ struct GrepFilesParams {
         return ExecuteFuncResult("error: maxResults must be >= 1", success: false);
     }
 
+    auto compiled = compileNativeGrepRequest(NativeGrepRequest(path: params.path, pattern: params.pattern,
+            glob: params.glob, recursive: params.recursive, ignoreCase: params.ignoreCase,
+            maxResults: params.maxResults));
+    if (!compiled.valid)
+        return ExecuteFuncResult(compiled.error, success: false);
     auto path_ = pathToWorkarea(ctx, params.path, PathCategory.read, checkExist: true);
-    if (!path_.valid) {
+    if (!path_.valid)
         return ExecuteFuncResult(path_.errorMsg, success: false);
-    }
-
-    auto cmd = [
-        "grep", "-rn", "-m", params.maxResults.to!string, "-E", params.pattern,
-        path_.toString
-    ];
-    auto result = execute(cmd);
-    if (result.status == 0) {
-        string rval = filterGrepResultLines(result.output, path_,
-                ctx.getToolLimits().filesystemFilterRuntime).strip.replace(path_.toString,
-                params.path);
-        const results = rval.splitter('\n').count;
-        if (results > grepMaxResults) {
-            return ExecuteFuncResult(i"error: $(results) results exceeds max allowed $(
-                    grepMaxResults)".text, success: false);
-        }
-        if (rval.empty) {
-            return ExecuteFuncResult(i"error: no matches found searching in path '$(params.path)' with pattern '$(
-                    params.pattern)'".text, success: false);
-        }
-        return ExecuteFuncResult(rval, success: true);
-    }
-    return ExecuteFuncResult(i"error: failed to execute '$((cmd[0 .. $ - 1] ~ params.path).join(
-            " "))': $(result.output.strip)".text, success: false);
-}
-
-// Assumption: the workarea path and the file names under it contain no ':'. A
-// ':' inside a path would truncate the recovered prefix and could mis-route
-// the filter decision. Lines that do not parse as `<rootPrefix-prefixed
-// path>:<...>` are kept unchanged - defensive: nothing under the root is ever
-// silently discarded without a filter verdict.
-package(llm.tool_call.io) string filterGrepResultLines(string output,
-        AbsolutePath rootPrefix, FilesystemFilterRuntime flt) @safe {
-    const prefix = rootPrefix.toString;
-    string kept;
-    foreach (line; output.splitter('\n').filter!(a => !a.empty)) {
-        if (line.startsWith(prefix)) {
-            const colonIdx = line.indexOf(':', prefix.length);
-            if (colonIdx != -1 && !flt.allows(PathCategory.read, AbsolutePath(line[0 .. colonIdx])))
-                continue;
-        }
-        if (!kept.empty)
-            kept ~= '\n';
-        kept ~= line;
-    }
-    return kept;
-}
-
-@("filterGrepResultLines drops excluded-file lines, keeps allowed and unparseable lines")
-unittest {
-    import llm.config : FilesystemLimits, buildFilesystemFilterRuntime;
-
-    ToolLimits tl;
-    tl.filesystem.read = FilesystemLimits.CategoryFilter([], ["/skip/"]);
-    auto flt = buildFilesystemFilterRuntime(tl);
-    assert(flt.enabled);
-
-    const root = AbsolutePath("/wa/root");
-    const output = "/wa/root/a.txt:1:needle here\n"
-        ~ "/wa/root/skip/secret.txt:3:needle hidden\n" ~ "Binary file /wa/root/blob matches\n";
-    const kept = filterGrepResultLines(output, root, flt);
-    assert(kept == "/wa/root/a.txt:1:needle here\nBinary file /wa/root/blob matches", kept);
-}
-
-@("filterGrepResultLines with a disabled filter is an exact passthrough")
-unittest {
-    FilesystemFilterRuntime flt; // enabled == false
-    const output = "/wa/root/a.txt:1:needle\njunk without prefix\n";
-    assert(filterGrepResultLines(output, AbsolutePath("/wa/root"), flt) == output.strip, output);
+    return runNativeGrep(ctx, path_.path, compiled.plan);
 }
 
 struct CountLinesInFileParams {
